@@ -1,0 +1,49 @@
+[workspace]
+members = ["crates/pi_core", "crates/pi_desktop", "crates/pi_jj", "crates/pi_editor", "crates/pi_lsp_bridge", "crates/pi_settings", "crates/pi_terminal"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-or-later"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-channel = "2.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+gpui = { path = "../zed/crates/gpui", default-features = false, features = ["x11", "wayland"] }
+gpui_platform = { path = "../zed/crates/gpui_platform", features = ["font-kit", "x11", "wayland"] }
+grammars = { path = "../zed/crates/grammars", features = ["load-grammars"] }
+fuzzy = { path = "../zed/crates/fuzzy" }
+zed_path = { path = "../zed/crates/path", package = "path" }
+language = { path = "../zed/crates/language" }
+markdown = { path = "../zed/crates/markdown" }
+menu = { path = "../zed/crates/menu" }
+settings = { path = "../zed/crates/settings" }
+theme_settings = { path = "../zed/crates/theme_settings" }
+ui = { path = "../zed/crates/ui" }
+# Embed Zed's settings/theme assets in debug builds too, instead of reading them
+# from the Zed checkout at runtime.
+util = { path = "../zed/crates/util", features = ["debug-embed"] }
+# Renamed: pi-desktop has its own `theme` module.
+zed_theme = { path = "../zed/crates/theme", package = "theme" }
+
+# Mirrors Zed's workspace patches for the crates this app links. Zed code relies on
+# them: grammar crates must share the git tree-sitter's `LanguageFn`, and `util`
+# calls `Child::adopt_raw_pid`, which exists only in Zed's async-process fork.
+[patch.crates-io]
+tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18" }
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
+calloop = { git = "https://github.com/zed-industries/calloop" }
+notify = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
+notify-types = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
+
+# Keep incremental native UI builds small enough for development containers.
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

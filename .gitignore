@@ -1,0 +1,18 @@
+/target/
+/artifacts/
+/dist/
+/packages/pi-desktop-backend/dist/
+/.jj/
+.DS_Store
+__pycache__/
+node_modules/
+*.log
+*.tmp
+*.temp
+*.bak
+*~
+# Generated design previews; SVG studies and generators remain source-controlled.
+/design/*-study*.png
+# Local scratch helpers, not project sources.
+/git-radar.sh
+/test.txt

@@ -1,0 +1,30 @@
+[package]
+name = "pi_editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+language.workspace = true
+settings.workspace = true
+zed_theme.workspace = true
+editor = { path = "../../../zed/crates/editor" }
+diagnostics = { path = "../../../zed/crates/diagnostics" }
+project = { path = "../../../zed/crates/project" }
+lsp = { path = "../../../zed/crates/lsp" }
+fs = { path = "../../../zed/crates/fs" }
+client = { path = "../../../zed/crates/client" }
+languages = { path = "../../../zed/crates/languages", features = ["load-grammars"] }
+node_runtime = { path = "../../../zed/crates/node_runtime" }
+release_channel = { path = "../../../zed/crates/release_channel" }
+reqwest_client = { path = "../../../zed/crates/reqwest_client" }
+gpui_tokio = { path = "../../../zed/crates/gpui_tokio" }
+db = { path = "../../../zed/crates/db" }
+zed_actions = { path = "../../../zed/crates/zed_actions" }
+dirs = "6"
+watch = { path = "../../../zed/crates/watch" }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

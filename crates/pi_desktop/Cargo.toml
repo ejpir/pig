@@ -1,0 +1,64 @@
+[package]
+name = "pi-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Compile Metal shaders with macOS's runtime; no standalone `xcrun metal` required.
+default = ["runtime-shaders"]
+runtime-shaders = ["gpui_platform/runtime_shaders"]
+# Embeds the standalone backend that PI_DESKTOP_BACKEND_ARCHIVE names (from
+# packages/pi-desktop-backend/scripts/build-binary.mjs). Release packaging turns it on.
+bundled-backend = []
+
+[dependencies]
+anyhow.workspace = true
+async-channel.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+grammars.workspace = true
+fuzzy.workspace = true
+zed_path.workspace = true
+language.workspace = true
+markdown.workspace = true
+menu.workspace = true
+pi_core = { path = "../pi_core" }
+pi_jj = { path = "../pi_jj" }
+pi_editor = { path = "../pi_editor" }
+pi_lsp_bridge = { path = "../pi_lsp_bridge" }
+pi_settings = { path = "../pi_settings" }
+pi_terminal = { path = "../pi_terminal" }
+serde_json.workspace = true
+base64 = "0.22"
+dirs = "6"
+settings.workspace = true
+theme_settings.workspace = true
+ui.workspace = true
+zed_theme.workspace = true
+unicode-segmentation = "1.12"
+util.workspace = true
+log = "0.4"
+env_logger = "0.11"
+# Unpacking the bundled backend.
+tar = { version = "0.4.46", default-features = false }
+zstd = "0.13"
+
+# The Dock icon for unbundled runs; the same bindings gpui_macos uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData"] }
+
+# The X11 window icon; gpui takes it as an `image::RgbaImage`.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+# The executable's icon resource, as Zed embeds its own.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.6"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+markdown = { workspace = true, features = ["test-support"] }
+tempfile = "3.23"

@@ -1,0 +1,17 @@
+[package]
+name = "pi_settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/pi_settings.rs"
+
+[dependencies]
+anyhow.workspace = true
+dirs = "6"
+# Settings files keep their key order.
+serde_json = { workspace = true, features = ["preserve_order"] }
+
+[dev-dependencies]
+tempfile = "3.23"

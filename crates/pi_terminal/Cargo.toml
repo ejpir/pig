@@ -1,0 +1,22 @@
+[package]
+name = "pi_terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/pi_terminal.rs"
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+settings.workspace = true
+ui.workspace = true
+util.workspace = true
+zed_theme.workspace = true
+itertools = "0.14"
+terminal = { path = "../../../zed/crates/terminal" }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+theme_settings.workspace = true

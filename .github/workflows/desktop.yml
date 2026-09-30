@@ -1,0 +1,226 @@
+name: Desktop
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: '2'
+  CARGO_INCREMENTAL: '0'
+  CARGO_TARGET_DIR: target
+  ZED_REVISION: 5becf8b5910fd538ccc5489e8edd3fde32917fad
+
+jobs:
+  checks:
+    name: Tests and lints (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: pi-desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pi-desktop
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-industries/zed
+          ref: ${{ env.ZED_REVISION }}
+          path: zed
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: clippy, rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+          cache-dependency-path: pi-desktop/packages/pi-desktop-backend/npm-shrinkwrap.json
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang lld libclang-dev libasound2-dev libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libssl-dev mesa-vulkan-drivers xvfb xauth xdotool xclip imagemagick tesseract-ocr fonts-dejavu-extra
+          echo 'RUSTFLAGS=-C link-arg=-fuse-ld=lld' >> "$GITHUB_ENV"
+          python -m pip install Pillow==12.1.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pi-desktop
+          key: checks
+      # Do not traverse/format the sibling Zed checkout.
+      - name: Format
+        run: cargo fmt -p pi_core -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
+      - name: Rust tests
+        run: cargo test --locked --workspace
+      # These test-support features must not join the workspace build.
+      - name: Language-server bridge tests
+        run: cargo test --locked -p pi_lsp_bridge --features fake-lsp
+      - name: Lints
+        run: |
+          cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p pi_lsp_bridge --features fake-lsp --all-targets --no-deps -- -D warnings
+      - name: Backend contracts (no provider calls)
+        run: |
+          npm ci --prefix packages/pi-desktop-backend
+          npm run check --prefix packages/pi-desktop-backend
+          npm test --prefix packages/pi-desktop-backend
+      # The standalone build that release builds embed: the same suite against
+      # the compiled executable, and the desktop with it embedded.
+      - name: Built-in backend
+        run: |
+          backend="$RUNNER_TEMP/backend"
+          node packages/pi-desktop-backend/scripts/build-binary.mjs --platform linux-x64 --out "$backend"
+          PI_DESKTOP_BACKEND_BINARY="$backend/linux-x64/pi-desktop-backend" npm test --prefix packages/pi-desktop-backend
+          PI_DESKTOP_BACKEND_ARCHIVE="$backend/pi-desktop-backend-linux-x64.tar.zst" \
+            cargo clippy --locked -p pi-desktop --features bundled-backend --all-targets --no-deps -- -D warnings
+      - name: Packaging and release-policy tests
+        run: python -m unittest discover -s scripts -p 'test_packaging.py' -v
+      - name: Debug build for native UI checks
+        run: cargo build --locked -p pi-desktop
+      - name: Xvfb screen validation
+        run: |
+          xvfb-run -a -s '-screen 0 1440x900x24' bash scripts/capture-first-screen.sh
+          python scripts/validate-screens.py
+          python scripts/compare-thread-study.py
+          xvfb-run -a -s '-screen 0 1440x900x24' bash scripts/capture-tool-selection.sh
+          xvfb-run -a -s '-screen 0 1440x900x24' bash scripts/capture-process-scrollbar.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-validation
+          path: pi-desktop/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  native:
+    name: Package / ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64, os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, binary: pi-desktop, backend: linux-x64 }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, binary: pi-desktop, backend: linux-arm64 }
+          - { name: macos-arm64, os: macos-14, target: aarch64-apple-darwin, binary: pi-desktop, backend: darwin-arm64 }
+          - { name: windows-amd64, os: windows-2022, target: x86_64-pc-windows-msvc, binary: pi-desktop.exe, backend: windows-x64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: pi-desktop
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pi-desktop
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-industries/zed
+          ref: ${{ env.ZED_REVISION }}
+          path: zed
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+          cache-dependency-path: pi-desktop/packages/pi-desktop-backend/npm-shrinkwrap.json
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Validate version tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/release_desktop.py --tag "$RELEASE_TAG"
+        shell: bash
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang lld libclang-dev libasound2-dev libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libssl-dev
+          echo 'RUSTFLAGS=-C link-arg=-fuse-ld=lld' >> "$GITHUB_ENV"
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - name: Windows libclang
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $clang = 'C:\Program Files\LLVM\bin'
+          if (!(Test-Path "$clang/libclang.dll")) { throw 'Hosted runner is missing LLVM/libclang' }
+          "LIBCLANG_PATH=$clang" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pi-desktop
+          key: release-${{ matrix.target }}
+      # Built into the executable (the bundled-backend feature): see docs/architecture.md.
+      - name: Built-in backend
+        shell: bash
+        run: |
+          npm ci --prefix packages/pi-desktop-backend
+          node packages/pi-desktop-backend/scripts/build-binary.mjs --platform ${{ matrix.backend }} --out "$RUNNER_TEMP/backend"
+      - name: Native release build
+        env:
+          PI_DESKTOP_BACKEND_ARCHIVE: ${{ runner.temp }}/backend/pi-desktop-backend-${{ matrix.backend }}.tar.zst
+        run: cargo build --locked --release -p pi-desktop --target ${{ matrix.target }} --features bundled-backend
+      - name: Package only distributable files
+        run: python scripts/package_desktop.py --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.binary }} --notices ${{ runner.temp }}/backend/pi-desktop-backend-notices.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-desktop-${{ matrix.name }}
+          path: pi-desktop/dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish / ${{ github.ref_name }}
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [checks, native]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pi-desktop-*
+          path: ${{ runner.temp }}/release
+          merge-multiple: true
+      - name: Verify all four packages and checksum them
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/release_desktop.py --tag "$RELEASE_TAG" --directory "$RUNNER_TEMP/release"
+      # No --clobber: an existing asset is immutable; collisions fail visibly.
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/release/* --repo "$REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" "$RUNNER_TEMP"/release/* \
+              --repo "$REPOSITORY" --title "$RELEASE_TAG" --generate-notes
+          fi

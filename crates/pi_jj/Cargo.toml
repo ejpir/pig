@@ -1,0 +1,24 @@
+[package]
+name = "pi_jj"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/pi_jj.rs"
+
+[dependencies]
+anyhow.workspace = true
+# Pinned exactly: jj-lib's API changes every release. The helpers below match
+# the versions jj-lib 0.45.1 itself uses, so they add no second copy.
+jj-lib = "=0.45.1"
+bstr = "1.12"
+etcetera = "0.11.0"
+futures = "0.3"
+gix = { version = "0.87.1", default-features = false }
+pollster = "1.0.1"
+rand_chacha = "0.10.0"
+whoami = "2.1.2"
+
+[dev-dependencies]
+tempfile = "3.23"

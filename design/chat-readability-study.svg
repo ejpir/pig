@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1128" viewBox="0 0 1600 1128">
+<title>Pi chat readability — visual proposal, not implemented</title>
+<rect x="0" y="0" width="1600" height="1128" rx="0" fill="#ebe7e4"/>
+<text x="32" y="30" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">VISUAL PROPOSAL / NOT IMPLEMENTED</text>
+<text x="32" y="69" font-family="IBM Plex Sans" font-size="30" font-weight="600" fill="#252f3d">Let the answers lead.</text>
+<text x="32" y="94" font-family="IBM Plex Sans" font-size="15" font-weight="400" fill="#77716a">Your screenshot’s content, with quieter activity and a comfortable reading width.</text>
+<rect x="32" y="118" width="1008" height="976" rx="10" fill="#faf9f7" stroke="#cbc3bb"/>
+<text x="58" y="150" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#252f3d">THREAD</text>
+<text x="151" y="150" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">CHANGES</text>
+<text x="250" y="150" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">TREE</text>
+<text x="315" y="150" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">CONTEXT</text>
+<text x="814" y="150" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">andromeda-sdk</text>
+<rect x="32" y="170" width="1008" height="1" rx="0" fill="#e3ddd7"/>
+<rect x="58" y="168" width="57" height="2" rx="0" fill="#4b607c"/>
+<text x="180" y="204" font-family="IBM Plex Sans" font-size="18" font-weight="400" fill="#77716a">›</text>
+<text x="203" y="204" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">Tool activity · complete</text>
+<text x="866" y="204" font-family="IBM Plex Sans" font-size="14" font-weight="400" fill="#2e8a55">✓</text>
+<text x="176" y="240" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">Added an </text>
+<text x="248.078125" y="240" font-family="IBM Plex Sans" font-size="16" font-weight="600" fill="#252f3d">API Server Storage Size</text>
+<text x="427.78125" y="240" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">time-series panel to the</text>
+<text x="176" y="265" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">Andromeda Grafana dashboard.</text>
+<text x="188" y="303" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">•  Queries</text>
+<rect x="270" y="290" width="243.2" height="21" rx="3" fill="#eef0f2"/>
+<text x="274" y="303" font-family="CommitMonoV143" font-size="14" font-weight="400" fill="#426581">apiserver_storage_size_bytes</text>
+<text x="188" y="332" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">•  Displays values in bytes, grouped by API server instance</text>
+<text x="188" y="361" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">•  Added an </text>
+<text x="273.984375" y="361" font-family="IBM Plex Sans" font-size="16" font-weight="600" fill="#252f3d">API Server</text>
+<text x="357.890625" y="361" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">dashboard section</text>
+<text x="188" y="390" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">•  Incremented dashboard version to 9</text>
+<text x="188" y="419" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">•  Updated snapshot</text>
+<text x="176" y="450" font-family="IBM Plex Sans" font-size="15" font-weight="400" fill="#252f3d">Validation: all 7 snapshot tests pass.</text>
+<rect x="176" y="488" width="720" height="52" rx="7" fill="#ffffff" stroke="#d3ccc5"/>
+<text x="192" y="520" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">bytes seems a little too big, maybe we should use gigs?</text>
+<text x="180" y="574" font-family="IBM Plex Sans" font-size="18" font-weight="400" fill="#77716a">›</text>
+<text x="203" y="574" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">4 tool calls · complete</text>
+<text x="866" y="574" font-family="IBM Plex Sans" font-size="14" font-weight="400" fill="#2e8a55">✓</text>
+<text x="176" y="614" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">Updated the panel to display GiB:</text>
+<text x="188" y="652" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">•  Query:</text>
+<rect x="260" y="639" width="318.8" height="21" rx="3" fill="#eef0f2"/>
+<text x="264" y="652" font-family="CommitMonoV143" font-size="14" font-weight="400" fill="#426581">apiserver_storage_size_bytes / 1024^3</text>
+<text x="188" y="681" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">•  Grafana unit:</text>
+<rect x="304" y="668" width="58.4" height="21" rx="3" fill="#eef0f2"/>
+<text x="308" y="681" font-family="CommitMonoV143" font-size="14" font-weight="400" fill="#426581">gbytes</text>
+<text x="188" y="710" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">•  Snapshot updated</text>
+<text x="188" y="739" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">•  All 7 snapshot tests pass.</text>
+<rect x="176" y="777" width="720" height="52" rx="7" fill="#ffffff" stroke="#d3ccc5"/>
+<text x="192" y="809" font-family="IBM Plex Sans" font-size="16" font-weight="400" fill="#252f3d">create a PR for this</text>
+<text x="180" y="861" font-family="IBM Plex Sans" font-size="18" font-weight="400" fill="#77716a">›</text>
+<text x="203" y="861" font-family="CommitMonoV143" font-size="13" font-weight="400" fill="#77716a">Read  and-pr/SKILL.md</text>
+<text x="176" y="891" font-family="IBM Plex Sans" font-size="14" font-weight="400" fill="#4b607c">Thinking…</text>
+<rect x="176" y="930" width="720" height="126" rx="9" fill="#ffffff" stroke="#aebac9"/>
+<text x="192" y="961" font-family="IBM Plex Sans" font-size="15" font-weight="400" fill="#77716a">Ask pi to work on this project…</text>
+<text x="192" y="1033" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">＋    /     gpt-5.6-sol  ▾     ● high  ▾</text>
+<rect x="807" y="1014" width="72" height="27" rx="5" fill="#4b607c"/>
+<text x="821" y="1033" font-family="IBM Plex Sans" font-size="12" font-weight="600" fill="#ffffff">Send ↵</text>
+<text x="176" y="1080" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">ONE LIVE STATUS WHILE WORKING · NO REPEATED THINKING ROWS</text>
+<text x="1080" y="140" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">ON DEMAND / EXPANDED ACTIVITY</text>
+<rect x="1080" y="164" width="488" height="379" rx="8" fill="#faf9f7" stroke="#cbc3bb"/>
+<text x="1100" y="194" font-family="IBM Plex Sans" font-size="14" font-weight="400" fill="#77716a">⌄  4 tool calls · complete</text>
+<rect x="1100" y="211" width="448" height="1" rx="0" fill="#e3ddd7"/>
+<text x="1100" y="240" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">Edit</text>
+<text x="1160" y="240" font-family="CommitMonoV143" font-size="11" font-weight="400" fill="#252f3d">…/andromeda-operator-dashboard.json</text>
+<text x="1490" y="264" font-family="CommitMonoV143" font-size="11" font-weight="400" fill="#2e8a55">+2 −2</text>
+<text x="1100" y="298" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">⌄ Bash</text>
+<text x="1160" y="298" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#252f3d">npm run test:snapshot …</text>
+<text x="1531" y="298" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#2e8a55">✓</text>
+<rect x="1100" y="314" width="448" height="70" rx="4" fill="#eef0f2"/>
+<text x="1112" y="339" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#252f3d">npm run test:snapshot -- -u --runInBand</text>
+<text x="1112" y="361" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#252f3d">&amp;&amp; npm run test:snapshot -- --runInBand</text>
+<text x="1100" y="416" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">Bash</text>
+<text x="1160" y="416" font-family="CommitMonoV143" font-size="11" font-weight="400" fill="#252f3d">git diff --check &amp;&amp; git status --short</text>
+<text x="1531" y="416" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#2e8a55">✓</text>
+<text x="1100" y="451" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">Bash</text>
+<text x="1160" y="451" font-family="CommitMonoV143" font-size="11" font-weight="400" fill="#252f3d">rg … dashboard.json tests/snapshot/…</text>
+<text x="1531" y="451" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#2e8a55">✓</text>
+<rect x="1100" y="473" width="448" height="1" rx="0" fill="#e3ddd7"/>
+<text x="1100" y="503" font-family="IBM Plex Sans" font-size="12" font-weight="400" fill="#77716a">Original calls and output remain selectable and copyable.</text>
+<text x="1100" y="523" font-family="IBM Plex Sans" font-size="12" font-weight="400" fill="#77716a">Thinking disclosures live here, not between every call.</text>
+<text x="1080" y="594" font-family="IBM Plex Sans" font-size="21" font-weight="600" fill="#252f3d">Why this is easier to scan</text>
+<text x="1080" y="639" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">01</text>
+<text x="1120" y="639" font-family="IBM Plex Sans" font-size="16" font-weight="600" fill="#252f3d">A bounded reading column</text>
+<text x="1120" y="665" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">The window can be wide; the prose does not have to be.</text>
+<text x="1120" y="687" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">Keep text, tools and composer on the same 720px lane.</text>
+<text x="1080" y="746" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">02</text>
+<text x="1120" y="746" font-family="IBM Plex Sans" font-size="16" font-weight="600" fill="#252f3d">Answers outweigh machinery</text>
+<text x="1120" y="772" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">Completed activity becomes one quiet disclosure.</text>
+<text x="1120" y="794" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">Keep live progress visible; do not hide errors.</text>
+<text x="1080" y="853" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">03</text>
+<text x="1120" y="853" font-family="IBM Plex Sans" font-size="16" font-weight="600" fill="#252f3d">Space creates a turn boundary</text>
+<text x="1120" y="879" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">More breathing room before each new user message.</text>
+<text x="1120" y="901" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">No assistant cards, badges or extra visual containers.</text>
+<rect x="1080" y="962" width="488" height="1" rx="0" fill="#e3ddd7"/>
+<text x="1080" y="992" font-family="IBM Plex Sans" font-size="15" font-weight="600" fill="#252f3d">No AI rewriting or inferred summaries.</text>
+<text x="1080" y="1018" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">Preserve message text and chronology. Group only adjacent</text>
+<text x="1080" y="1040" font-family="IBM Plex Sans" font-size="13" font-weight="400" fill="#77716a">tool/thinking events; intermediate explanations stay visible.</text>
+<text x="32" y="1114" font-family="CommitMonoV143" font-size="12" font-weight="400" fill="#77716a">LAYOUT STUDY ONLY · CONTENT FROM YOUR SCREENSHOT · ACTIVE STATE IS ILLUSTRATIVE</text>
+</svg>

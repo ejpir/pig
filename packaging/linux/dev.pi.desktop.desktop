@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Pi Desktop
+Comment=Desktop app for the pi coding agent
+Exec=pi-desktop
+Icon=dev.pi.desktop
+Categories=Development;
+StartupWMClass=dev.pi.desktop

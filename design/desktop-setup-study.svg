@@ -1,0 +1,902 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="2848" height="4780" viewBox="0 0 2848 4780">
+<title>pi desktop — setup on first launch, visual proposal, not implemented</title><desc>Nothing is bundled: every launch checks Node.js and pi, and setup installs what is missing by running the commands in a terminal inside the window. Each screen in Evening (dark) and Moonstone (light). Versions, paths and output are sample data.</desc>
+<defs>
+<filter id="shadow" x="-15%" y="-20%" width="130%" height="150%"><feGaussianBlur stdDeviation="16"/></filter>
+<filter id="popShadow" x="-20%" y="-20%" width="140%" height="160%"><feGaussianBlur stdDeviation="12"/></filter>
+<clipPath id="windowClip"><rect x="48" y="130" width="1344" height="740" rx="12"/></clipPath>
+<pattern id="grid" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="0.8" fill="#d8d0c9"/></pattern>
+<linearGradient id="ctxFill-dark" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4b607c"/><stop offset="1" stop-color="#6a9fcc"/></linearGradient>
+<linearGradient id="ctxFill-light" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4b607c"/><stop offset="1" stop-color="#2f7fa8"/></linearGradient>
+<g id="pimark"><path fill="#F09082" d="M0 0H352.07V234.71H234.71V117.36H0Z"/><path fill="#4D9ABF" d="M0 117.36H117.36V234.71H234.71V352.07H117.36V469.43H0Z"/><path fill="#F1BE58" d="M352.07 234.71H469.43V469.43H352.07Z"/></g>
+<g id="message"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/></g>
+<g id="folder"><path d="M2 7V5a2 2 0 0 1 2-2h5l3 4h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2Z"/></g>
+<g id="plus"><path d="M12 4v16M4 12h16"/></g>
+<g id="search"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></g>
+<g id="more"><circle cx="4" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="20" cy="12" r="1"/></g>
+<g id="chevron"><path d="m7 9 5 5 5-5"/></g>
+<g id="chevronR"><path d="m9 6 6 6-6 6"/></g>
+<g id="chevronU"><path d="m7 15 5-5 5 5"/></g>
+<g id="branch"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></g>
+<g id="compact"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></g>
+<g id="inspector"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M15 3v18"/></g>
+<g id="file"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></g>
+<g id="edit"><path d="m4 16-1 5 5-1L21 7l-4-4ZM14 6l4 4"/></g>
+<g id="terminal"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m6 10 3 2-3 2M12 15h6"/></g>
+<g id="check"><path d="m5 12 4 4L19 6"/></g>
+<g id="sparkle"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z"/><path d="M19 17v4M17 19h4"/></g>
+<g id="clip"><path d="m21 12-8.5 8.5a5 5 0 0 1-7-7L14 5a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 8"/></g>
+<g id="slash"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M15 7 9 17"/></g>
+<g id="queue"><path d="M4 4v7a4 4 0 0 0 4 4h12"/><path d="m15 10 5 5-5 5"/></g>
+<g id="x"><path d="M6 6l12 12M18 6 6 18"/></g>
+<g id="copy"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></g>
+<g id="key"><circle cx="8" cy="8" r="5"/><path d="m12 12 9 9m-4-4 3-3m-7-1 3-3"/></g>
+<g id="arrowUp"><path d="M12 19V5M5 12l7-7 7 7"/></g>
+<g id="stop"><rect x="6" y="6" width="12" height="12" rx="2"/></g>
+<g id="settings"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></g>
+<g id="list"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></g>
+<g id="package"><path d="m12 2 9 5v10l-9 5-9-5V7Z"/><path d="m3 7 9 5 9-5M12 12v10M7.5 4.5l9 5"/></g>
+<g id="image"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></g>
+<g id="type"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></g>
+<g id="shield"><path d="M12 2 21 6v6c0 5-5 9-9 10-4-1-9-5-9-10V6Z"/></g>
+<g id="info"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></g>
+<g id="warning"><path d="m12 3 10 18H2Z M12 9v5M12 17h.1"/></g>
+<g id="trash"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></g>
+<g id="download"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></g>
+<g id="share"><path d="M4 12v8h16v-8M16 6l-4-4-4 4M12 2v13"/></g>
+<g id="tag"><path d="M20 12 12 20l-9-9V3h8Z"/><circle cx="7.5" cy="7.5" r="1.5"/></g>
+<g id="star"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3 6.4 20.2l1.1-6.2L3 9.6l6.2-.9Z"/></g>
+<g id="refresh"><path d="M20 10a8 8 0 1 0-1 7M20 3v7h-7"/></g>
+<g id="open"><path d="M14 3h7v7M21 3l-9 9M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/></g>
+<g id="bell"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10 21h4"/></g>
+<g id="clock"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></g>
+<g id="gauge"><path d="M12 14l4-4"/><path d="M3.3 19a10 10 0 1 1 17.4 0"/></g>
+<g id="layers"><path d="m12 2 10 5-10 5L2 7ZM2 12l10 5 10-5M2 17l10 5 10-5"/></g>
+<g id="widget"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></g>
+<g id="tree"><path d="M6 3v6M6 9h6a3 3 0 0 1 3 3v2M6 9v12"/><circle cx="15" cy="17" r="3"/></g>
+<g id="cpu"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/></g>
+</defs>
+<rect x="0" y="0" width="2848" height="4780" rx="0" fill="#ebe7e4"/>
+<rect x="0" y="0" width="2848" height="4780" rx="0" fill="url(#grid)"/>
+<text x="48" y="42" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11" font-weight="500" text-anchor="start" letter-spacing="1.2">PI  /  DESIGN STUDY  07</text>
+<text x="48" y="96" fill="#252f3d" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="40" font-style="italic">Set up once, <tspan fill="#6a9fcc">checked every launch</tspan>.</text>
+<text x="48" y="128" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="400" text-anchor="start">No bundled runtime: pi-desktop finds Node.js and pi, and installs what is missing with the commands you would run yourself, in plain view.</text>
+<text x="2800" y="92" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11" font-weight="500" text-anchor="end" letter-spacing="1.2">VISUAL PROPOSAL · SAMPLE DATA · FOLLOWS STUDY 06</text>
+<circle cx="61" cy="195" r="13" fill="#dacbc2"/>
+<text x="61" y="199" fill="#252f3d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="600" text-anchor="middle">01</text>
+<text x="84" y="200" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="16" text-anchor="start"><tspan fill="#252f3d" font-weight="600">The launch check</tspan><tspan fill="#5c5752">  —  nothing bundled, nothing assumed</tspan></text>
+<text x="48" y="224" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="start">Every launch checks Node.js and pi before any session starts. When one is missing or does not fit, setup opens and says what it found; existing pi settings are reused.</text>
+<text x="48" y="244" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" text-anchor="start"><tspan fill="#2e8a55" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-weight="600">DECIDED  </tspan><tspan fill="#252f3d">check on every launch; no bundle; missing or unfit Node.js or pi opens setup instead of sessions.</tspan></text>
+<text x="48" y="268" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="500" text-anchor="start" letter-spacing="1.2">EVENING  ·  DARK</text>
+<g transform="translate(0 150)">
+<rect x="58" y="150" width="1324" height="732" rx="13" fill="#1b1612" filter="url(#shadow)" opacity="0.28"/>
+<g clip-path="url(#windowClip)">
+<rect x="48" y="130" width="1344" height="740" rx="0" fill="#161d27"/>
+<rect x="48" y="130" width="1344" height="52" rx="0" fill="#1f2630"/>
+<rect x="48" y="182" width="288" height="664" rx="0" fill="#1a212b"/>
+<rect x="48" y="846" width="1344" height="24" rx="0" fill="#131922"/>
+<path d="M48 181.5L1392 181.5" stroke="#0d1116" stroke-width="1"/>
+<path d="M336.5 182L336.5 846" stroke="#0d1116" stroke-width="1"/>
+<path d="M48 846.5L1392 846.5" stroke="#0d1116" stroke-width="1"/>
+<circle cx="70" cy="156" r="6" fill="#ff6058"/>
+<circle cx="90" cy="156" r="6" fill="#febc2e"/>
+<circle cx="110" cy="156" r="6" fill="#29c841"/>
+<g transform="translate(141 147) scale(0.03834)"><use xlink:href="#pimark"/></g>
+<text x="168" y="161" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">pi</text>
+<g transform="translate(359 147) scale(0.7500)" fill="none" stroke="#9fa4ab" stroke-width="1.73" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#package"/></g>
+<text x="386" y="161" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">Set up pi-desktop</text>
+<text x="72" y="232" fill="#ebe7e4" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="24" font-weight="400" text-anchor="start" font-style="italic">Welcome to pi</text>
+<text x="72" y="256" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">A few things before your first session.</text>
+<path d="M84.5 315L84.5 348" stroke="#2f3640" stroke-width="1.4"/>
+<circle cx="84" cy="303" r="10" fill="#1a212b" stroke="#424954" stroke-width="1.4"/>
+<text x="84" y="307" fill="#737981" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">1</text>
+<text x="108" y="303" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Node.js</text>
+<text x="108" y="321" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">20.11.1 is too old</text>
+<path d="M84.5 381L84.5 414" stroke="#2f3640" stroke-width="1.4"/>
+<circle cx="84" cy="369" r="10" fill="#1a212b" stroke="#424954" stroke-width="1.4"/>
+<text x="84" y="373" fill="#737981" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">2</text>
+<text x="108" y="369" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">pi</text>
+<text x="108" y="387" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">not installed</text>
+<circle cx="84" cy="435" r="10" fill="#1a212b" stroke="#424954" stroke-width="1.4"/>
+<text x="84" y="439" fill="#737981" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">3</text>
+<text x="108" y="435" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Open a project</text>
+<text x="108" y="453" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">a folder to work in</text>
+<g transform="translate(72 787) scale(0.5417)" fill="none" stroke="#737981" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="92" y="798" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">Checked on every launch. Setup only</text>
+<text x="92" y="814" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">opens when something is missing.</text>
+<circle cx="65" cy="858" r="2.5" fill="#f1be58"/>
+<text x="75" y="862" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">setup</text>
+<text x="1374" y="862" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="end">Node.js too old · pi missing · sessions not started</text>
+<text x="376" y="240" fill="#ebe7e4" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="26" font-weight="400" text-anchor="start" font-style="italic">pi-desktop needs Node.js and pi</text>
+<text x="376" y="270" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Sessions run on this Mac with Node.js and the pi version this app is built for. Two are missing,</text>
+<text x="376" y="290" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">so setup installs them. Nothing is changed until you start it.</text>
+<rect x="376" y="318" width="980" height="64" rx="8" fill="#1a212b" stroke="#2a323e"/>
+<circle cx="402" cy="350.0" r="10" fill="#302b32" stroke="#835654" stroke-width="1.4"/>
+<g transform="translate(396 344.0) scale(0.5000)" fill="none" stroke="#f09082" stroke-width="2.60" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#x"/></g>
+<text x="426" y="345" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">Node.js 22.19 or newer</text>
+<text x="426" y="365" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Found Node 20.11.1 at /usr/local/bin/node, which is too old for pi.</text>
+<rect x="1284.0" y="341.0" width="54.0" height="18" rx="4" fill="#343430" stroke="#70603d"/>
+<text x="1290.0" y="353.6" fill="#f1be58" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">install</text>
+<rect x="376" y="394" width="980" height="64" rx="8" fill="#1a212b" stroke="#2a323e"/>
+<circle cx="402" cy="426.0" r="10" fill="#302b32" stroke="#835654" stroke-width="1.4"/>
+<g transform="translate(396 420.0) scale(0.5000)" fill="none" stroke="#f09082" stroke-width="2.60" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#x"/></g>
+<text x="426" y="421" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">pi 0.87.1 for pi-desktop</text>
+<text x="426" y="441" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Not installed yet. Your own pi 0.86.0 on PATH is left as it is.</text>
+<rect x="1284.0" y="417.0" width="54.0" height="18" rx="4" fill="#343430" stroke="#70603d"/>
+<text x="1290.0" y="429.6" fill="#f1be58" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">install</text>
+<rect x="376" y="470" width="980" height="64" rx="8" fill="#1a212b" stroke="#2a323e"/>
+<circle cx="402" cy="502.0" r="10" fill="#1f3031" stroke="#3a6a50" stroke-width="1.4"/>
+<g transform="translate(396 496.0) scale(0.5000)" fill="none" stroke="#5db87a" stroke-width="2.60" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="426" y="497" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">Your pi settings</text>
+<text x="426" y="517" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">~/.pi/agent · signed in to Anthropic and OpenAI · 24 sessions</text>
+<rect x="1296.0" y="493.0" width="42.0" height="18" rx="4" fill="#223334" stroke="#355d4b"/>
+<text x="1302.0" y="505.6" fill="#5db87a" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">found</text>
+<rect x="376" y="566" width="120" height="32" rx="5" fill="#6a9fcc"/>
+<text x="436.0" y="586.5" fill="#0d1116" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">Set up</text>
+<rect x="506" y="566" width="120" height="32" rx="5" fill="#29313c" stroke="#3a434f"/>
+<g transform="translate(515 575.0) scale(0.5833)" fill="none" stroke="#d5d8db" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#refresh"/></g>
+<text x="575.0" y="586.5" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Check again</text>
+<text x="376" y="632" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">The check runs node --version and a handshake with pi (get_backend_info), in about a tenth of a</text>
+<text x="376" y="650" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">second. Until it passes, no session starts.</text>
+</g>
+<rect x="48" y="130" width="1344" height="740" rx="12" fill="none" stroke="#3a414c"/>
+</g>
+<text x="1456" y="268" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="500" text-anchor="start" letter-spacing="1.2">MOONSTONE  ·  LIGHT</text>
+<g transform="translate(1408 150)">
+<rect x="58" y="150" width="1324" height="732" rx="13" fill="#1b1612" filter="url(#shadow)" opacity="0.16"/>
+<g clip-path="url(#windowClip)">
+<rect x="48" y="130" width="1344" height="740" rx="0" fill="#faf9f7"/>
+<rect x="48" y="130" width="1344" height="52" rx="0" fill="#ebe7e4"/>
+<rect x="48" y="182" width="288" height="664" rx="0" fill="#f2efeb"/>
+<rect x="48" y="846" width="1344" height="24" rx="0" fill="#e6e1dc"/>
+<path d="M48 181.5L1392 181.5" stroke="#cbc3bb" stroke-width="1"/>
+<path d="M336.5 182L336.5 846" stroke="#cbc3bb" stroke-width="1"/>
+<path d="M48 846.5L1392 846.5" stroke="#cbc3bb" stroke-width="1"/>
+<circle cx="70" cy="156" r="6" fill="#ff6058"/>
+<circle cx="90" cy="156" r="6" fill="#febc2e"/>
+<circle cx="110" cy="156" r="6" fill="#29c841"/>
+<g transform="translate(141 147) scale(0.03834)"><use xlink:href="#pimark"/></g>
+<text x="168" y="161" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">pi</text>
+<g transform="translate(359 147) scale(0.7500)" fill="none" stroke="#5c5752" stroke-width="1.73" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#package"/></g>
+<text x="386" y="161" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">Set up pi-desktop</text>
+<text x="72" y="232" fill="#252f3d" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="24" font-weight="400" text-anchor="start" font-style="italic">Welcome to pi</text>
+<text x="72" y="256" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">A few things before your first session.</text>
+<path d="M84.5 315L84.5 348" stroke="#e3ddd7" stroke-width="1.4"/>
+<circle cx="84" cy="303" r="10" fill="#f2efeb" stroke="#cbc3bb" stroke-width="1.4"/>
+<text x="84" y="307" fill="#8b847d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">1</text>
+<text x="108" y="303" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Node.js</text>
+<text x="108" y="321" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">20.11.1 is too old</text>
+<path d="M84.5 381L84.5 414" stroke="#e3ddd7" stroke-width="1.4"/>
+<circle cx="84" cy="369" r="10" fill="#f2efeb" stroke="#cbc3bb" stroke-width="1.4"/>
+<text x="84" y="373" fill="#8b847d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">2</text>
+<text x="108" y="369" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">pi</text>
+<text x="108" y="387" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">not installed</text>
+<circle cx="84" cy="435" r="10" fill="#f2efeb" stroke="#cbc3bb" stroke-width="1.4"/>
+<text x="84" y="439" fill="#8b847d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">3</text>
+<text x="108" y="435" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Open a project</text>
+<text x="108" y="453" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">a folder to work in</text>
+<g transform="translate(72 787) scale(0.5417)" fill="none" stroke="#8b847d" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="92" y="798" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">Checked on every launch. Setup only</text>
+<text x="92" y="814" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">opens when something is missing.</text>
+<circle cx="65" cy="858" r="2.5" fill="#b97a14"/>
+<text x="75" y="862" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">setup</text>
+<text x="1374" y="862" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="end">Node.js too old · pi missing · sessions not started</text>
+<text x="376" y="240" fill="#252f3d" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="26" font-weight="400" text-anchor="start" font-style="italic">pi-desktop needs Node.js and pi</text>
+<text x="376" y="270" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Sessions run on this Mac with Node.js and the pi version this app is built for. Two are missing,</text>
+<text x="376" y="290" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">so setup installs them. Nothing is changed until you start it.</text>
+<rect x="376" y="318" width="980" height="64" rx="8" fill="#f2efeb" stroke="#e0d9d2"/>
+<circle cx="402" cy="350.0" r="10" fill="#f3e6e2" stroke="#ddaa9e" stroke-width="1.4"/>
+<g transform="translate(396 344.0) scale(0.5000)" fill="none" stroke="#c05a45" stroke-width="2.60" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#x"/></g>
+<text x="426" y="345" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">Node.js 22.19 or newer</text>
+<text x="426" y="365" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Found Node 20.11.1 at /usr/local/bin/node, which is too old for pi.</text>
+<rect x="1284.0" y="341.0" width="54.0" height="18" rx="4" fill="#ebe1d1" stroke="#dbc095"/>
+<text x="1290.0" y="353.6" fill="#b97a14" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">install</text>
+<rect x="376" y="394" width="980" height="64" rx="8" fill="#f2efeb" stroke="#e0d9d2"/>
+<circle cx="402" cy="426.0" r="10" fill="#f3e6e2" stroke="#ddaa9e" stroke-width="1.4"/>
+<g transform="translate(396 420.0) scale(0.5000)" fill="none" stroke="#c05a45" stroke-width="2.60" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#x"/></g>
+<text x="426" y="421" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">pi 0.87.1 for pi-desktop</text>
+<text x="426" y="441" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Not installed yet. Your own pi 0.86.0 on PATH is left as it is.</text>
+<rect x="1284.0" y="417.0" width="54.0" height="18" rx="4" fill="#ebe1d1" stroke="#dbc095"/>
+<text x="1290.0" y="429.6" fill="#b97a14" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">install</text>
+<rect x="376" y="470" width="980" height="64" rx="8" fill="#f2efeb" stroke="#e0d9d2"/>
+<circle cx="402" cy="502.0" r="10" fill="#e2ece4" stroke="#94c2a6" stroke-width="1.4"/>
+<g transform="translate(396 496.0) scale(0.5000)" fill="none" stroke="#2e8a55" stroke-width="2.60" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="426" y="497" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">Your pi settings</text>
+<text x="426" y="517" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">~/.pi/agent · signed in to Anthropic and OpenAI · 24 sessions</text>
+<rect x="1296.0" y="493.0" width="42.0" height="18" rx="4" fill="#dae3d9" stroke="#a4c7af"/>
+<text x="1302.0" y="505.6" fill="#2e8a55" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">found</text>
+<rect x="376" y="566" width="120" height="32" rx="5" fill="#4b607c"/>
+<text x="436.0" y="586.5" fill="#ffffff" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">Set up</text>
+<rect x="506" y="566" width="120" height="32" rx="5" fill="#ffffff" stroke="#d3ccc5"/>
+<g transform="translate(515 575.0) scale(0.5833)" fill="none" stroke="#3a4453" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#refresh"/></g>
+<text x="575.0" y="586.5" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Check again</text>
+<text x="376" y="632" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">The check runs node --version and a handshake with pi (get_backend_info), in about a tenth of a</text>
+<text x="376" y="650" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">second. Until it passes, no session starts.</text>
+</g>
+<rect x="48" y="130" width="1344" height="740" rx="12" fill="none" stroke="#c9c1ba"/>
+</g>
+<circle cx="61" cy="1105" r="13" fill="#dacbc2"/>
+<text x="61" y="1109" fill="#252f3d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="600" text-anchor="middle">02</text>
+<text x="84" y="1110" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="16" text-anchor="start"><tspan fill="#252f3d" font-weight="600">Installing Node.js</tspan><tspan fill="#5c5752">  —  the app runs the command, you see it</tspan></text>
+<text x="48" y="1134" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="start">Setup offers the package manager it finds (Homebrew here, winget on Windows, apt or dnf on Linux when their Node is 22.19+) and a checked download from nodejs.org. Afterwards the app looks in the install folders, not the old PATH.</text>
+<text x="48" y="1154" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" text-anchor="start"><tspan fill="#2e8a55" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-weight="600">DECIDED  </tspan><tspan fill="#252f3d">both: the package manager and a nodejs.org download.</tspan></text>
+<text x="48" y="1178" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="500" text-anchor="start" letter-spacing="1.2">EVENING  ·  DARK</text>
+<g transform="translate(0 1060)">
+<rect x="58" y="150" width="1324" height="732" rx="13" fill="#1b1612" filter="url(#shadow)" opacity="0.28"/>
+<g clip-path="url(#windowClip)">
+<rect x="48" y="130" width="1344" height="740" rx="0" fill="#161d27"/>
+<rect x="48" y="130" width="1344" height="52" rx="0" fill="#1f2630"/>
+<rect x="48" y="182" width="288" height="664" rx="0" fill="#1a212b"/>
+<rect x="48" y="846" width="1344" height="24" rx="0" fill="#131922"/>
+<path d="M48 181.5L1392 181.5" stroke="#0d1116" stroke-width="1"/>
+<path d="M336.5 182L336.5 846" stroke="#0d1116" stroke-width="1"/>
+<path d="M48 846.5L1392 846.5" stroke="#0d1116" stroke-width="1"/>
+<circle cx="70" cy="156" r="6" fill="#ff6058"/>
+<circle cx="90" cy="156" r="6" fill="#febc2e"/>
+<circle cx="110" cy="156" r="6" fill="#29c841"/>
+<g transform="translate(141 147) scale(0.03834)"><use xlink:href="#pimark"/></g>
+<text x="168" y="161" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">pi</text>
+<g transform="translate(359 147) scale(0.7500)" fill="none" stroke="#9fa4ab" stroke-width="1.73" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#package"/></g>
+<text x="386" y="161" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">Set up pi-desktop</text>
+<text x="72" y="232" fill="#ebe7e4" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="24" font-weight="400" text-anchor="start" font-style="italic">Welcome to pi</text>
+<text x="72" y="256" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">A few things before your first session.</text>
+<rect x="60" y="282" width="264" height="54" rx="6" fill="#273748"/>
+<rect x="60" y="288" width="2" height="42" rx="1" fill="#6a9fcc"/>
+<path d="M84.5 315L84.5 348" stroke="#2f3640" stroke-width="1.4"/>
+<circle cx="84" cy="303" r="9" fill="none" stroke="#424954" stroke-width="1.6"/>
+<path d="M84 294A9 9 0 0 1 93 303" fill="none" stroke="#6a9fcc" stroke-width="1.8" stroke-linecap="round"/>
+<text x="108" y="303" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">Node.js</text>
+<text x="108" y="321" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">installing with Homebrew…</text>
+<path d="M84.5 381L84.5 414" stroke="#2f3640" stroke-width="1.4"/>
+<circle cx="84" cy="369" r="10" fill="#1a212b" stroke="#424954" stroke-width="1.4"/>
+<text x="84" y="373" fill="#737981" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">2</text>
+<text x="108" y="369" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">pi</text>
+<text x="108" y="387" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">waits for Node.js</text>
+<circle cx="84" cy="435" r="10" fill="#1a212b" stroke="#424954" stroke-width="1.4"/>
+<text x="84" y="439" fill="#737981" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">3</text>
+<text x="108" y="435" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Open a project</text>
+<text x="108" y="453" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">a folder to work in</text>
+<g transform="translate(72 787) scale(0.5417)" fill="none" stroke="#737981" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="92" y="798" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">Checked on every launch. Setup only</text>
+<text x="92" y="814" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">opens when something is missing.</text>
+<circle cx="65" cy="858" r="2.5" fill="#f1be58"/>
+<text x="75" y="862" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">setup</text>
+<text x="1374" y="862" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="end">installing Node.js · brew install node</text>
+<text x="376" y="240" fill="#ebe7e4" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="26" font-weight="400" text-anchor="start" font-style="italic">Install Node.js</text>
+<text x="376" y="270" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">pi runs on Node.js 22.19 or newer. Pick how to install it. The command runs below, where you can</text>
+<text x="376" y="290" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">answer any prompt, such as your password.</text>
+<rect x="376" y="318" width="980" height="58" rx="7" fill="#273748" stroke="#3a5068"/>
+<circle cx="398" cy="338" r="6.5" fill="#161d27" stroke="#6a9fcc" stroke-width="1.4"/>
+<circle cx="398" cy="338" r="3.5" fill="#6a9fcc"/>
+<text x="418" y="342" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">With Homebrew</text>
+<text x="418" y="361" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">Homebrew 4.6.2 is installed; brew upgrade keeps Node current.</text>
+<rect x="1203.8" y="334" width="136.2" height="26" rx="5" fill="#0d1116" stroke="#2f3640"/>
+<text x="1215.8" y="351" fill="#b9bec5" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start">brew install node</text>
+<rect x="376" y="384" width="980" height="58" rx="7" fill="none" stroke="#2f3640"/>
+<circle cx="398" cy="404" r="6.5" fill="#161d27" stroke="#424954" stroke-width="1.4"/>
+<text x="418" y="408" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Download from nodejs.org</text>
+<text x="418" y="427" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">Node 22.19.0 for pi-desktop only, checked against nodejs.org's SHA-256 list. No password.</text>
+<rect x="1250.0" y="400" width="90.0" height="26" rx="5" fill="#0d1116" stroke="#2f3640"/>
+<text x="1262.0" y="417" fill="#b9bec5" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start">nodejs.org</text>
+<rect x="376" y="450" width="980" height="58" rx="7" fill="none" stroke="#2f3640"/>
+<circle cx="398" cy="470" r="6.5" fill="#161d27" stroke="#424954" stroke-width="1.4"/>
+<text x="418" y="474" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">I'll install it myself</text>
+<text x="418" y="493" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">Any Node 22.19+ on PATH works. Press Check again when it's there.</text>
+<rect x="376" y="526" width="980" height="250" rx="8" fill="#0d1116" stroke="#2f3640"/>
+<path d="M376 534a8 8 0 0 1 8-8H1348a8 8 0 0 1 8 8V558H376Z" fill="#1a212b"/>
+<path d="M376 558.5L1356 558.5" stroke="#2f3640" stroke-width="1"/>
+<g transform="translate(390 535) scale(0.5833)" fill="none" stroke="#9fa4ab" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#terminal"/></g>
+<text x="412" y="547" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="9.5" font-weight="500" text-anchor="start" letter-spacing="1.2">TERMINAL</text>
+<text x="488" y="547" fill="#d5d8db" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">brew install node</text>
+<rect x="1297.0" y="531" width="45.0" height="22" rx="5" fill="#2b2a32" stroke="#654849"/>
+<text x="1319.5" y="545.78" fill="#f09082" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="10.5" font-weight="400" text-anchor="middle">Stop</text>
+<text x="1285.0" y="546" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="400" text-anchor="end">running · 38s</text>
+<circle cx="1193.1" cy="542" r="5" fill="none" stroke="#424954" stroke-width="1.6"/>
+<path d="M1193.1 537A5 5 0 0 1 1198.1 542" fill="none" stroke="#6a9fcc" stroke-width="1.8" stroke-linecap="round"/>
+<text x="392" y="582" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#9fa4ab">$ </tspan><tspan fill="#b9bec5">brew install node</tspan></text>
+<text x="392" y="601" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#6a9fcc">==&gt; </tspan><tspan fill="#b9bec5">Fetching downloads for: </tspan><tspan fill="#737981">node</tspan></text>
+<text x="392" y="620" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#6a9fcc">==&gt; </tspan><tspan fill="#b9bec5">Installing dependencies for node: </tspan><tspan fill="#737981">brotli, c-ares, icu4c@77, libnghttp2, libuv, llhttp</tspan></text>
+<text x="392" y="639" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#6a9fcc">==&gt; </tspan><tspan fill="#b9bec5">Pouring </tspan><tspan fill="#737981">icu4c@77--77.1.arm64_sequoia.bottle.tar.gz</tspan></text>
+<text x="392" y="658" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#6a9fcc">==&gt; </tspan><tspan fill="#b9bec5">Pouring </tspan><tspan fill="#737981">libuv--1.51.0.arm64_sequoia.bottle.tar.gz</tspan></text>
+<text x="392" y="677" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#6a9fcc">==&gt; </tspan><tspan fill="#b9bec5">Pouring </tspan><tspan fill="#737981">node--24.9.0.arm64_sequoia.bottle.tar.gz</tspan></text>
+<text x="392" y="696" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#b9bec5">   </tspan><tspan fill="#737981">linking /opt/homebrew/bin/node</tspan></text>
+<rect x="392" y="704" width="7" height="14" rx="1" fill="#6a9fcc"/>
+<rect x="1236" y="796" width="120" height="32" rx="5" fill="#222a35" stroke="#2f3640"/>
+<text x="1296.0" y="816.5" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Continue</text>
+<rect x="376" y="796" width="90" height="32" rx="5" fill="#29313c" stroke="#3a434f"/>
+<text x="421.0" y="816.5" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Back</text>
+</g>
+<rect x="48" y="130" width="1344" height="740" rx="12" fill="none" stroke="#3a414c"/>
+</g>
+<text x="1456" y="1178" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="500" text-anchor="start" letter-spacing="1.2">MOONSTONE  ·  LIGHT</text>
+<g transform="translate(1408 1060)">
+<rect x="58" y="150" width="1324" height="732" rx="13" fill="#1b1612" filter="url(#shadow)" opacity="0.16"/>
+<g clip-path="url(#windowClip)">
+<rect x="48" y="130" width="1344" height="740" rx="0" fill="#faf9f7"/>
+<rect x="48" y="130" width="1344" height="52" rx="0" fill="#ebe7e4"/>
+<rect x="48" y="182" width="288" height="664" rx="0" fill="#f2efeb"/>
+<rect x="48" y="846" width="1344" height="24" rx="0" fill="#e6e1dc"/>
+<path d="M48 181.5L1392 181.5" stroke="#cbc3bb" stroke-width="1"/>
+<path d="M336.5 182L336.5 846" stroke="#cbc3bb" stroke-width="1"/>
+<path d="M48 846.5L1392 846.5" stroke="#cbc3bb" stroke-width="1"/>
+<circle cx="70" cy="156" r="6" fill="#ff6058"/>
+<circle cx="90" cy="156" r="6" fill="#febc2e"/>
+<circle cx="110" cy="156" r="6" fill="#29c841"/>
+<g transform="translate(141 147) scale(0.03834)"><use xlink:href="#pimark"/></g>
+<text x="168" y="161" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">pi</text>
+<g transform="translate(359 147) scale(0.7500)" fill="none" stroke="#5c5752" stroke-width="1.73" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#package"/></g>
+<text x="386" y="161" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">Set up pi-desktop</text>
+<text x="72" y="232" fill="#252f3d" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="24" font-weight="400" text-anchor="start" font-style="italic">Welcome to pi</text>
+<text x="72" y="256" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">A few things before your first session.</text>
+<rect x="60" y="282" width="264" height="54" rx="6" fill="#e7e8e9"/>
+<rect x="60" y="288" width="2" height="42" rx="1" fill="#4b607c"/>
+<path d="M84.5 315L84.5 348" stroke="#e3ddd7" stroke-width="1.4"/>
+<circle cx="84" cy="303" r="9" fill="none" stroke="#cbc3bb" stroke-width="1.6"/>
+<path d="M84 294A9 9 0 0 1 93 303" fill="none" stroke="#4b607c" stroke-width="1.8" stroke-linecap="round"/>
+<text x="108" y="303" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">Node.js</text>
+<text x="108" y="321" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">installing with Homebrew…</text>
+<path d="M84.5 381L84.5 414" stroke="#e3ddd7" stroke-width="1.4"/>
+<circle cx="84" cy="369" r="10" fill="#f2efeb" stroke="#cbc3bb" stroke-width="1.4"/>
+<text x="84" y="373" fill="#8b847d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">2</text>
+<text x="108" y="369" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">pi</text>
+<text x="108" y="387" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">waits for Node.js</text>
+<circle cx="84" cy="435" r="10" fill="#f2efeb" stroke="#cbc3bb" stroke-width="1.4"/>
+<text x="84" y="439" fill="#8b847d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">3</text>
+<text x="108" y="435" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Open a project</text>
+<text x="108" y="453" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">a folder to work in</text>
+<g transform="translate(72 787) scale(0.5417)" fill="none" stroke="#8b847d" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="92" y="798" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">Checked on every launch. Setup only</text>
+<text x="92" y="814" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">opens when something is missing.</text>
+<circle cx="65" cy="858" r="2.5" fill="#b97a14"/>
+<text x="75" y="862" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">setup</text>
+<text x="1374" y="862" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="end">installing Node.js · brew install node</text>
+<text x="376" y="240" fill="#252f3d" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="26" font-weight="400" text-anchor="start" font-style="italic">Install Node.js</text>
+<text x="376" y="270" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">pi runs on Node.js 22.19 or newer. Pick how to install it. The command runs below, where you can</text>
+<text x="376" y="290" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">answer any prompt, such as your password.</text>
+<rect x="376" y="318" width="980" height="58" rx="7" fill="#e7e8e9" stroke="#b4bcc6"/>
+<circle cx="398" cy="338" r="6.5" fill="#faf9f7" stroke="#4b607c" stroke-width="1.4"/>
+<circle cx="398" cy="338" r="3.5" fill="#4b607c"/>
+<text x="418" y="342" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">With Homebrew</text>
+<text x="418" y="361" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">Homebrew 4.6.2 is installed; brew upgrade keeps Node current.</text>
+<rect x="1203.8" y="334" width="136.2" height="26" rx="5" fill="#eef0f2" stroke="#e3ddd7"/>
+<text x="1215.8" y="351" fill="#3f4854" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start">brew install node</text>
+<rect x="376" y="384" width="980" height="58" rx="7" fill="none" stroke="#e3ddd7"/>
+<circle cx="398" cy="404" r="6.5" fill="#faf9f7" stroke="#cbc3bb" stroke-width="1.4"/>
+<text x="418" y="408" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Download from nodejs.org</text>
+<text x="418" y="427" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">Node 22.19.0 for pi-desktop only, checked against nodejs.org's SHA-256 list. No password.</text>
+<rect x="1250.0" y="400" width="90.0" height="26" rx="5" fill="#eef0f2" stroke="#e3ddd7"/>
+<text x="1262.0" y="417" fill="#3f4854" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start">nodejs.org</text>
+<rect x="376" y="450" width="980" height="58" rx="7" fill="none" stroke="#e3ddd7"/>
+<circle cx="398" cy="470" r="6.5" fill="#faf9f7" stroke="#cbc3bb" stroke-width="1.4"/>
+<text x="418" y="474" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">I'll install it myself</text>
+<text x="418" y="493" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">Any Node 22.19+ on PATH works. Press Check again when it's there.</text>
+<rect x="376" y="526" width="980" height="250" rx="8" fill="#eef0f2" stroke="#e3ddd7"/>
+<path d="M376 534a8 8 0 0 1 8-8H1348a8 8 0 0 1 8 8V558H376Z" fill="#f2efeb"/>
+<path d="M376 558.5L1356 558.5" stroke="#e3ddd7" stroke-width="1"/>
+<g transform="translate(390 535) scale(0.5833)" fill="none" stroke="#5c5752" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#terminal"/></g>
+<text x="412" y="547" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="9.5" font-weight="500" text-anchor="start" letter-spacing="1.2">TERMINAL</text>
+<text x="488" y="547" fill="#3a4453" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">brew install node</text>
+<rect x="1297.0" y="531" width="45.0" height="22" rx="5" fill="#eee3de" stroke="#e0bbb1"/>
+<text x="1319.5" y="545.78" fill="#c05a45" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="10.5" font-weight="400" text-anchor="middle">Stop</text>
+<text x="1285.0" y="546" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="400" text-anchor="end">running · 38s</text>
+<circle cx="1193.1" cy="542" r="5" fill="none" stroke="#cbc3bb" stroke-width="1.6"/>
+<path d="M1193.1 537A5 5 0 0 1 1198.1 542" fill="none" stroke="#4b607c" stroke-width="1.8" stroke-linecap="round"/>
+<text x="392" y="582" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#5c5752">$ </tspan><tspan fill="#3f4854">brew install node</tspan></text>
+<text x="392" y="601" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#4b607c">==&gt; </tspan><tspan fill="#3f4854">Fetching downloads for: </tspan><tspan fill="#8b847d">node</tspan></text>
+<text x="392" y="620" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#4b607c">==&gt; </tspan><tspan fill="#3f4854">Installing dependencies for node: </tspan><tspan fill="#8b847d">brotli, c-ares, icu4c@77, libnghttp2, libuv, llhttp</tspan></text>
+<text x="392" y="639" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#4b607c">==&gt; </tspan><tspan fill="#3f4854">Pouring </tspan><tspan fill="#8b847d">icu4c@77--77.1.arm64_sequoia.bottle.tar.gz</tspan></text>
+<text x="392" y="658" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#4b607c">==&gt; </tspan><tspan fill="#3f4854">Pouring </tspan><tspan fill="#8b847d">libuv--1.51.0.arm64_sequoia.bottle.tar.gz</tspan></text>
+<text x="392" y="677" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#4b607c">==&gt; </tspan><tspan fill="#3f4854">Pouring </tspan><tspan fill="#8b847d">node--24.9.0.arm64_sequoia.bottle.tar.gz</tspan></text>
+<text x="392" y="696" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#3f4854">   </tspan><tspan fill="#8b847d">linking /opt/homebrew/bin/node</tspan></text>
+<rect x="392" y="704" width="7" height="14" rx="1" fill="#4b607c"/>
+<rect x="1236" y="796" width="120" height="32" rx="5" fill="#e8e3de" stroke="#e3ddd7"/>
+<text x="1296.0" y="816.5" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Continue</text>
+<rect x="376" y="796" width="90" height="32" rx="5" fill="#ffffff" stroke="#d3ccc5"/>
+<text x="421.0" y="816.5" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Back</text>
+</g>
+<rect x="48" y="130" width="1344" height="740" rx="12" fill="none" stroke="#c9c1ba"/>
+</g>
+<circle cx="61" cy="2015" r="13" fill="#dacbc2"/>
+<text x="61" y="2019" fill="#252f3d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="600" text-anchor="middle">03</text>
+<text x="84" y="2020" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="16" text-anchor="start"><tspan fill="#252f3d" font-weight="600">Installing pi</tspan><tspan fill="#5c5752">  —  the version the app is built for</tspan></text>
+<text x="48" y="2044" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="start">npm installs pi 0.87.1 and the backend into the app's folder from the lock file the app ships with. A pi you installed yourself is not touched; the handshake confirms the result.</text>
+<text x="48" y="2064" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" text-anchor="start"><tspan fill="#2e8a55" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-weight="600">DECIDED  </tspan><tspan fill="#252f3d">for the app only; a global npm install -g can need root.</tspan></text>
+<text x="48" y="2088" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="500" text-anchor="start" letter-spacing="1.2">EVENING  ·  DARK</text>
+<g transform="translate(0 1970)">
+<rect x="58" y="150" width="1324" height="732" rx="13" fill="#1b1612" filter="url(#shadow)" opacity="0.28"/>
+<g clip-path="url(#windowClip)">
+<rect x="48" y="130" width="1344" height="740" rx="0" fill="#161d27"/>
+<rect x="48" y="130" width="1344" height="52" rx="0" fill="#1f2630"/>
+<rect x="48" y="182" width="288" height="664" rx="0" fill="#1a212b"/>
+<rect x="48" y="846" width="1344" height="24" rx="0" fill="#131922"/>
+<path d="M48 181.5L1392 181.5" stroke="#0d1116" stroke-width="1"/>
+<path d="M336.5 182L336.5 846" stroke="#0d1116" stroke-width="1"/>
+<path d="M48 846.5L1392 846.5" stroke="#0d1116" stroke-width="1"/>
+<circle cx="70" cy="156" r="6" fill="#ff6058"/>
+<circle cx="90" cy="156" r="6" fill="#febc2e"/>
+<circle cx="110" cy="156" r="6" fill="#29c841"/>
+<g transform="translate(141 147) scale(0.03834)"><use xlink:href="#pimark"/></g>
+<text x="168" y="161" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">pi</text>
+<g transform="translate(359 147) scale(0.7500)" fill="none" stroke="#9fa4ab" stroke-width="1.73" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#package"/></g>
+<text x="386" y="161" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">Set up pi-desktop</text>
+<text x="72" y="232" fill="#ebe7e4" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="24" font-weight="400" text-anchor="start" font-style="italic">Welcome to pi</text>
+<text x="72" y="256" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">A few things before your first session.</text>
+<path d="M84.5 315L84.5 348" stroke="#2f3640" stroke-width="1.4"/>
+<circle cx="84" cy="303" r="11" fill="#5db87a"/>
+<g transform="translate(77 296) scale(0.5833)" fill="none" stroke="#0d1116" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="303" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Node.js</text>
+<text x="108" y="321" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">24.9.0 · Homebrew</text>
+<rect x="60" y="348" width="264" height="54" rx="6" fill="#273748"/>
+<rect x="60" y="354" width="2" height="42" rx="1" fill="#6a9fcc"/>
+<path d="M84.5 381L84.5 414" stroke="#2f3640" stroke-width="1.4"/>
+<circle cx="84" cy="369" r="11" fill="#5db87a"/>
+<g transform="translate(77 362) scale(0.5833)" fill="none" stroke="#0d1116" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="369" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">pi</text>
+<text x="108" y="387" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">0.87.1 · ready</text>
+<circle cx="84" cy="435" r="10" fill="#1a212b" stroke="#424954" stroke-width="1.4"/>
+<text x="84" y="439" fill="#737981" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">3</text>
+<text x="108" y="435" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Open a project</text>
+<text x="108" y="453" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">a folder to work in</text>
+<g transform="translate(72 787) scale(0.5417)" fill="none" stroke="#737981" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="92" y="798" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">Checked on every launch. Setup only</text>
+<text x="92" y="814" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">opens when something is missing.</text>
+<circle cx="65" cy="858" r="2.5" fill="#5db87a"/>
+<text x="75" y="862" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">setup · ready</text>
+<text x="1374" y="862" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="end">pi 0.87.1 · protocol 1 · node 24.9.0</text>
+<text x="376" y="240" fill="#ebe7e4" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="26" font-weight="400" text-anchor="start" font-style="italic">Install pi 0.87.1</text>
+<text x="376" y="270" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">pi-desktop is built for pi 0.87.1. npm installs it into the app's own folder, with the exact packages</text>
+<text x="376" y="290" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">and checksums of the lock file the app ships with.</text>
+<rect x="376" y="318" width="980" height="100" rx="8" fill="#1a212b" stroke="#2a323e"/>
+<text x="394" y="344" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Command</text>
+<text x="506" y="344" fill="#d5d8db" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">npm ci --omit=dev</text>
+<text x="394" y="370" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Folder</text>
+<text x="506" y="370" fill="#d5d8db" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">~/Library/Application Support/pi-desktop/backend</text>
+<text x="394" y="396" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Your own pi</text>
+<text x="506" y="396" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">0.86.0 at /opt/homebrew/bin/pi, left as it is</text>
+<rect x="376" y="434" width="980" height="176" rx="8" fill="#0d1116" stroke="#2f3640"/>
+<path d="M376 442a8 8 0 0 1 8-8H1348a8 8 0 0 1 8 8V466H376Z" fill="#1a212b"/>
+<path d="M376 466.5L1356 466.5" stroke="#2f3640" stroke-width="1"/>
+<g transform="translate(390 443) scale(0.5833)" fill="none" stroke="#9fa4ab" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#terminal"/></g>
+<text x="412" y="455" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="9.5" font-weight="500" text-anchor="start" letter-spacing="1.2">TERMINAL</text>
+<text x="488" y="455" fill="#d5d8db" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">npm ci --omit=dev</text>
+<g transform="translate(1246.4 443) scale(0.5417)" fill="none" stroke="#5db87a" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="1342" y="454" fill="#5db87a" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="400" text-anchor="end">exit 0 · 14s</text>
+<text x="392" y="490" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#9fa4ab">$ </tspan><tspan fill="#b9bec5">npm ci --omit=dev</tspan></text>
+<text x="392" y="509" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#b9bec5">added 212 packages, and audited 213 packages in 14s</tspan></text>
+<text x="392" y="528" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#b9bec5">found </tspan><tspan fill="#5db87a">0</tspan><tspan fill="#b9bec5"> vulnerabilities</tspan></text>
+<rect x="376" y="626" width="980" height="44" rx="8" fill="#1c292e" stroke="#2f5344"/>
+<g transform="translate(392 640) scale(0.6250)" fill="none" stroke="#5db87a" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="416" y="653" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="600" text-anchor="start">pi is ready</text>
+<text x="506" y="653" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">pi-desktop-backend 0.1.0 · pi 0.87.1 · protocol 1 · Node 24.9.0</text>
+<rect x="1236" y="796" width="120" height="32" rx="5" fill="#6a9fcc"/>
+<text x="1296.0" y="816.5" fill="#0d1116" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">Continue</text>
+<rect x="376" y="796" width="90" height="32" rx="5" fill="#29313c" stroke="#3a434f"/>
+<text x="421.0" y="816.5" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Back</text>
+</g>
+<rect x="48" y="130" width="1344" height="740" rx="12" fill="none" stroke="#3a414c"/>
+</g>
+<text x="1456" y="2088" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="500" text-anchor="start" letter-spacing="1.2">MOONSTONE  ·  LIGHT</text>
+<g transform="translate(1408 1970)">
+<rect x="58" y="150" width="1324" height="732" rx="13" fill="#1b1612" filter="url(#shadow)" opacity="0.16"/>
+<g clip-path="url(#windowClip)">
+<rect x="48" y="130" width="1344" height="740" rx="0" fill="#faf9f7"/>
+<rect x="48" y="130" width="1344" height="52" rx="0" fill="#ebe7e4"/>
+<rect x="48" y="182" width="288" height="664" rx="0" fill="#f2efeb"/>
+<rect x="48" y="846" width="1344" height="24" rx="0" fill="#e6e1dc"/>
+<path d="M48 181.5L1392 181.5" stroke="#cbc3bb" stroke-width="1"/>
+<path d="M336.5 182L336.5 846" stroke="#cbc3bb" stroke-width="1"/>
+<path d="M48 846.5L1392 846.5" stroke="#cbc3bb" stroke-width="1"/>
+<circle cx="70" cy="156" r="6" fill="#ff6058"/>
+<circle cx="90" cy="156" r="6" fill="#febc2e"/>
+<circle cx="110" cy="156" r="6" fill="#29c841"/>
+<g transform="translate(141 147) scale(0.03834)"><use xlink:href="#pimark"/></g>
+<text x="168" y="161" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">pi</text>
+<g transform="translate(359 147) scale(0.7500)" fill="none" stroke="#5c5752" stroke-width="1.73" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#package"/></g>
+<text x="386" y="161" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">Set up pi-desktop</text>
+<text x="72" y="232" fill="#252f3d" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="24" font-weight="400" text-anchor="start" font-style="italic">Welcome to pi</text>
+<text x="72" y="256" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">A few things before your first session.</text>
+<path d="M84.5 315L84.5 348" stroke="#e3ddd7" stroke-width="1.4"/>
+<circle cx="84" cy="303" r="11" fill="#2e8a55"/>
+<g transform="translate(77 296) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="303" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Node.js</text>
+<text x="108" y="321" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">24.9.0 · Homebrew</text>
+<rect x="60" y="348" width="264" height="54" rx="6" fill="#e7e8e9"/>
+<rect x="60" y="354" width="2" height="42" rx="1" fill="#4b607c"/>
+<path d="M84.5 381L84.5 414" stroke="#e3ddd7" stroke-width="1.4"/>
+<circle cx="84" cy="369" r="11" fill="#2e8a55"/>
+<g transform="translate(77 362) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="369" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">pi</text>
+<text x="108" y="387" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">0.87.1 · ready</text>
+<circle cx="84" cy="435" r="10" fill="#f2efeb" stroke="#cbc3bb" stroke-width="1.4"/>
+<text x="84" y="439" fill="#8b847d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">3</text>
+<text x="108" y="435" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Open a project</text>
+<text x="108" y="453" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">a folder to work in</text>
+<g transform="translate(72 787) scale(0.5417)" fill="none" stroke="#8b847d" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="92" y="798" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">Checked on every launch. Setup only</text>
+<text x="92" y="814" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">opens when something is missing.</text>
+<circle cx="65" cy="858" r="2.5" fill="#2e8a55"/>
+<text x="75" y="862" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">setup · ready</text>
+<text x="1374" y="862" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="end">pi 0.87.1 · protocol 1 · node 24.9.0</text>
+<text x="376" y="240" fill="#252f3d" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="26" font-weight="400" text-anchor="start" font-style="italic">Install pi 0.87.1</text>
+<text x="376" y="270" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">pi-desktop is built for pi 0.87.1. npm installs it into the app's own folder, with the exact packages</text>
+<text x="376" y="290" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">and checksums of the lock file the app ships with.</text>
+<rect x="376" y="318" width="980" height="100" rx="8" fill="#f2efeb" stroke="#e0d9d2"/>
+<text x="394" y="344" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Command</text>
+<text x="506" y="344" fill="#3a4453" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">npm ci --omit=dev</text>
+<text x="394" y="370" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Folder</text>
+<text x="506" y="370" fill="#3a4453" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">~/Library/Application Support/pi-desktop/backend</text>
+<text x="394" y="396" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Your own pi</text>
+<text x="506" y="396" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">0.86.0 at /opt/homebrew/bin/pi, left as it is</text>
+<rect x="376" y="434" width="980" height="176" rx="8" fill="#eef0f2" stroke="#e3ddd7"/>
+<path d="M376 442a8 8 0 0 1 8-8H1348a8 8 0 0 1 8 8V466H376Z" fill="#f2efeb"/>
+<path d="M376 466.5L1356 466.5" stroke="#e3ddd7" stroke-width="1"/>
+<g transform="translate(390 443) scale(0.5833)" fill="none" stroke="#5c5752" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#terminal"/></g>
+<text x="412" y="455" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="9.5" font-weight="500" text-anchor="start" letter-spacing="1.2">TERMINAL</text>
+<text x="488" y="455" fill="#3a4453" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">npm ci --omit=dev</text>
+<g transform="translate(1246.4 443) scale(0.5417)" fill="none" stroke="#2e8a55" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="1342" y="454" fill="#2e8a55" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="400" text-anchor="end">exit 0 · 14s</text>
+<text x="392" y="490" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#5c5752">$ </tspan><tspan fill="#3f4854">npm ci --omit=dev</tspan></text>
+<text x="392" y="509" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#3f4854">added 212 packages, and audited 213 packages in 14s</tspan></text>
+<text x="392" y="528" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#3f4854">found </tspan><tspan fill="#2e8a55">0</tspan><tspan fill="#3f4854"> vulnerabilities</tspan></text>
+<rect x="376" y="626" width="980" height="44" rx="8" fill="#eaf0ea" stroke="#b3d2be"/>
+<g transform="translate(392 640) scale(0.6250)" fill="none" stroke="#2e8a55" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="416" y="653" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="600" text-anchor="start">pi is ready</text>
+<text x="506" y="653" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">pi-desktop-backend 0.1.0 · pi 0.87.1 · protocol 1 · Node 24.9.0</text>
+<rect x="1236" y="796" width="120" height="32" rx="5" fill="#4b607c"/>
+<text x="1296.0" y="816.5" fill="#ffffff" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">Continue</text>
+<rect x="376" y="796" width="90" height="32" rx="5" fill="#ffffff" stroke="#d3ccc5"/>
+<text x="421.0" y="816.5" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Back</text>
+</g>
+<rect x="48" y="130" width="1344" height="740" rx="12" fill="none" stroke="#c9c1ba"/>
+</g>
+<circle cx="61" cy="2925" r="13" fill="#dacbc2"/>
+<text x="61" y="2929" fill="#252f3d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="600" text-anchor="middle">04</text>
+<text x="84" y="2930" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="16" text-anchor="start"><tspan fill="#252f3d" font-weight="600">Sign in</tspan><tspan fill="#5c5752">  —  reuse what pi already knows</tspan></text>
+<text x="48" y="2954" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="start">Sign-ins come from ~/.pi/agent, shared with pi in the terminal. A provider without one signs in through pi's /login in the setup terminal.</text>
+<text x="48" y="2974" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" text-anchor="start"><tspan fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-weight="600">DROPPED  </tspan><tspan fill="#252f3d">left to the first session; Resources already signs in with pi in a terminal.</tspan></text>
+<text x="48" y="2998" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="500" text-anchor="start" letter-spacing="1.2">EVENING  ·  DARK</text>
+<g transform="translate(0 2880)" opacity="0.45">
+<rect x="58" y="150" width="1324" height="732" rx="13" fill="#1b1612" filter="url(#shadow)" opacity="0.28"/>
+<g clip-path="url(#windowClip)">
+<rect x="48" y="130" width="1344" height="740" rx="0" fill="#161d27"/>
+<rect x="48" y="130" width="1344" height="52" rx="0" fill="#1f2630"/>
+<rect x="48" y="182" width="288" height="664" rx="0" fill="#1a212b"/>
+<rect x="48" y="846" width="1344" height="24" rx="0" fill="#131922"/>
+<path d="M48 181.5L1392 181.5" stroke="#0d1116" stroke-width="1"/>
+<path d="M336.5 182L336.5 846" stroke="#0d1116" stroke-width="1"/>
+<path d="M48 846.5L1392 846.5" stroke="#0d1116" stroke-width="1"/>
+<circle cx="70" cy="156" r="6" fill="#ff6058"/>
+<circle cx="90" cy="156" r="6" fill="#febc2e"/>
+<circle cx="110" cy="156" r="6" fill="#29c841"/>
+<g transform="translate(141 147) scale(0.03834)"><use xlink:href="#pimark"/></g>
+<text x="168" y="161" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">pi</text>
+<g transform="translate(359 147) scale(0.7500)" fill="none" stroke="#9fa4ab" stroke-width="1.73" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#package"/></g>
+<text x="386" y="161" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">Set up pi-desktop</text>
+<text x="72" y="232" fill="#ebe7e4" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="24" font-weight="400" text-anchor="start" font-style="italic">Welcome to pi</text>
+<text x="72" y="256" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">A few things before your first session.</text>
+<path d="M84.5 315L84.5 348" stroke="#2f3640" stroke-width="1.4"/>
+<circle cx="84" cy="303" r="11" fill="#5db87a"/>
+<g transform="translate(77 296) scale(0.5833)" fill="none" stroke="#0d1116" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="303" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Node.js</text>
+<text x="108" y="321" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">24.9.0 · Homebrew</text>
+<path d="M84.5 381L84.5 414" stroke="#2f3640" stroke-width="1.4"/>
+<circle cx="84" cy="369" r="11" fill="#5db87a"/>
+<g transform="translate(77 362) scale(0.5833)" fill="none" stroke="#0d1116" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="369" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">pi</text>
+<text x="108" y="387" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">0.87.1 · ready</text>
+<rect x="60" y="414" width="264" height="54" rx="6" fill="#273748"/>
+<rect x="60" y="420" width="2" height="42" rx="1" fill="#6a9fcc"/>
+<path d="M84.5 447L84.5 480" stroke="#2f3640" stroke-width="1.4"/>
+<circle cx="84" cy="435" r="11" fill="#5db87a"/>
+<g transform="translate(77 428) scale(0.5833)" fill="none" stroke="#0d1116" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="435" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">Sign in</text>
+<text x="108" y="453" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">2 providers</text>
+<circle cx="84" cy="501" r="10" fill="#1a212b" stroke="#424954" stroke-width="1.4"/>
+<text x="84" y="505" fill="#737981" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">4</text>
+<text x="108" y="501" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Open a project</text>
+<text x="108" y="519" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">a folder to work in</text>
+<g transform="translate(72 787) scale(0.5417)" fill="none" stroke="#737981" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="92" y="798" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">Checked on every launch. Setup only</text>
+<text x="92" y="814" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">opens when something is missing.</text>
+<circle cx="65" cy="858" r="2.5" fill="#5db87a"/>
+<text x="75" y="862" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">setup · ready</text>
+<text x="1374" y="862" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="end">pi 0.87.1 · 2 providers signed in</text>
+<text x="376" y="240" fill="#ebe7e4" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="26" font-weight="400" text-anchor="start" font-style="italic">Sign in to a model provider</text>
+<text x="376" y="270" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Found your pi settings in ~/.pi/agent. pi-desktop uses the same sign-ins as pi in your terminal.</text>
+<rect x="376" y="312" width="980" height="220" rx="8" fill="#1a212b" stroke="#2a323e"/>
+<g transform="translate(394 326) scale(0.6250)" fill="none" stroke="#5db87a" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="422" y="339" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start">Anthropic</text>
+<text x="566" y="339" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Claude subscription</text>
+<g transform="translate(1261.075 327) scale(0.5417)" fill="none" stroke="#5db87a" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="1338" y="339" fill="#5db87a" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="end">signed in</text>
+<path d="M392 356.5L1340 356.5" stroke="#2f3640" stroke-width="1"/>
+<g transform="translate(394 370) scale(0.6250)" fill="none" stroke="#5db87a" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="422" y="383" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start">OpenAI</text>
+<text x="566" y="383" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">API key</text>
+<g transform="translate(1261.075 371) scale(0.5417)" fill="none" stroke="#5db87a" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="1338" y="383" fill="#5db87a" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="end">signed in</text>
+<path d="M392 400.5L1340 400.5" stroke="#2f3640" stroke-width="1"/>
+<g transform="translate(394 414) scale(0.6250)" fill="none" stroke="#737981" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="422" y="427" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start">Google</text>
+<text x="566" y="427" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Gemini</text>
+<rect x="1279.5" y="410" width="62.5" height="24" rx="5" fill="#29313c" stroke="#3a434f"/>
+<text x="1310.75" y="425.96" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Sign in</text>
+<path d="M392 444.5L1340 444.5" stroke="#2f3640" stroke-width="1"/>
+<g transform="translate(394 458) scale(0.6250)" fill="none" stroke="#737981" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="422" y="471" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start">OpenRouter</text>
+<text x="566" y="471" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">API key</text>
+<rect x="1279.5" y="454" width="62.5" height="24" rx="5" fill="#29313c" stroke="#3a434f"/>
+<text x="1310.75" y="469.96" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Sign in</text>
+<path d="M392 488.5L1340 488.5" stroke="#2f3640" stroke-width="1"/>
+<g transform="translate(394 502) scale(0.6250)" fill="none" stroke="#737981" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="422" y="515" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start">GitHub Copilot</text>
+<text x="566" y="515" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">subscription</text>
+<rect x="1279.5" y="498" width="62.5" height="24" rx="5" fill="#29313c" stroke="#3a434f"/>
+<text x="1310.75" y="513.96" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Sign in</text>
+<text x="376" y="562" fill="#6a9fcc" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">More providers…</text>
+<g transform="translate(376 584) scale(0.5417)" fill="none" stroke="#737981" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="396" y="595" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">Sign in runs pi's /login in the setup terminal, since the backend cannot sign in on its own yet.</text>
+<rect x="1236" y="796" width="120" height="32" rx="5" fill="#6a9fcc"/>
+<text x="1296.0" y="816.5" fill="#0d1116" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">Continue</text>
+<rect x="1106" y="796" width="120" height="32" rx="5" fill="#29313c" stroke="#3a434f"/>
+<text x="1166.0" y="816.5" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Skip for now</text>
+<rect x="376" y="796" width="90" height="32" rx="5" fill="#29313c" stroke="#3a434f"/>
+<text x="421.0" y="816.5" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Back</text>
+</g>
+<rect x="48" y="130" width="1344" height="740" rx="12" fill="none" stroke="#3a414c"/>
+</g>
+<text x="1456" y="2998" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="500" text-anchor="start" letter-spacing="1.2">MOONSTONE  ·  LIGHT</text>
+<g transform="translate(1408 2880)" opacity="0.45">
+<rect x="58" y="150" width="1324" height="732" rx="13" fill="#1b1612" filter="url(#shadow)" opacity="0.16"/>
+<g clip-path="url(#windowClip)">
+<rect x="48" y="130" width="1344" height="740" rx="0" fill="#faf9f7"/>
+<rect x="48" y="130" width="1344" height="52" rx="0" fill="#ebe7e4"/>
+<rect x="48" y="182" width="288" height="664" rx="0" fill="#f2efeb"/>
+<rect x="48" y="846" width="1344" height="24" rx="0" fill="#e6e1dc"/>
+<path d="M48 181.5L1392 181.5" stroke="#cbc3bb" stroke-width="1"/>
+<path d="M336.5 182L336.5 846" stroke="#cbc3bb" stroke-width="1"/>
+<path d="M48 846.5L1392 846.5" stroke="#cbc3bb" stroke-width="1"/>
+<circle cx="70" cy="156" r="6" fill="#ff6058"/>
+<circle cx="90" cy="156" r="6" fill="#febc2e"/>
+<circle cx="110" cy="156" r="6" fill="#29c841"/>
+<g transform="translate(141 147) scale(0.03834)"><use xlink:href="#pimark"/></g>
+<text x="168" y="161" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">pi</text>
+<g transform="translate(359 147) scale(0.7500)" fill="none" stroke="#5c5752" stroke-width="1.73" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#package"/></g>
+<text x="386" y="161" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">Set up pi-desktop</text>
+<text x="72" y="232" fill="#252f3d" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="24" font-weight="400" text-anchor="start" font-style="italic">Welcome to pi</text>
+<text x="72" y="256" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">A few things before your first session.</text>
+<path d="M84.5 315L84.5 348" stroke="#e3ddd7" stroke-width="1.4"/>
+<circle cx="84" cy="303" r="11" fill="#2e8a55"/>
+<g transform="translate(77 296) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="303" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Node.js</text>
+<text x="108" y="321" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">24.9.0 · Homebrew</text>
+<path d="M84.5 381L84.5 414" stroke="#e3ddd7" stroke-width="1.4"/>
+<circle cx="84" cy="369" r="11" fill="#2e8a55"/>
+<g transform="translate(77 362) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="369" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">pi</text>
+<text x="108" y="387" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">0.87.1 · ready</text>
+<rect x="60" y="414" width="264" height="54" rx="6" fill="#e7e8e9"/>
+<rect x="60" y="420" width="2" height="42" rx="1" fill="#4b607c"/>
+<path d="M84.5 447L84.5 480" stroke="#e3ddd7" stroke-width="1.4"/>
+<circle cx="84" cy="435" r="11" fill="#2e8a55"/>
+<g transform="translate(77 428) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="435" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">Sign in</text>
+<text x="108" y="453" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">2 providers</text>
+<circle cx="84" cy="501" r="10" fill="#f2efeb" stroke="#cbc3bb" stroke-width="1.4"/>
+<text x="84" y="505" fill="#8b847d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">4</text>
+<text x="108" y="501" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Open a project</text>
+<text x="108" y="519" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">a folder to work in</text>
+<g transform="translate(72 787) scale(0.5417)" fill="none" stroke="#8b847d" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="92" y="798" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">Checked on every launch. Setup only</text>
+<text x="92" y="814" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">opens when something is missing.</text>
+<circle cx="65" cy="858" r="2.5" fill="#2e8a55"/>
+<text x="75" y="862" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">setup · ready</text>
+<text x="1374" y="862" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="end">pi 0.87.1 · 2 providers signed in</text>
+<text x="376" y="240" fill="#252f3d" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="26" font-weight="400" text-anchor="start" font-style="italic">Sign in to a model provider</text>
+<text x="376" y="270" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Found your pi settings in ~/.pi/agent. pi-desktop uses the same sign-ins as pi in your terminal.</text>
+<rect x="376" y="312" width="980" height="220" rx="8" fill="#f2efeb" stroke="#e0d9d2"/>
+<g transform="translate(394 326) scale(0.6250)" fill="none" stroke="#2e8a55" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="422" y="339" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start">Anthropic</text>
+<text x="566" y="339" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Claude subscription</text>
+<g transform="translate(1261.075 327) scale(0.5417)" fill="none" stroke="#2e8a55" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="1338" y="339" fill="#2e8a55" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="end">signed in</text>
+<path d="M392 356.5L1340 356.5" stroke="#e3ddd7" stroke-width="1"/>
+<g transform="translate(394 370) scale(0.6250)" fill="none" stroke="#2e8a55" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="422" y="383" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start">OpenAI</text>
+<text x="566" y="383" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">API key</text>
+<g transform="translate(1261.075 371) scale(0.5417)" fill="none" stroke="#2e8a55" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="1338" y="383" fill="#2e8a55" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="end">signed in</text>
+<path d="M392 400.5L1340 400.5" stroke="#e3ddd7" stroke-width="1"/>
+<g transform="translate(394 414) scale(0.6250)" fill="none" stroke="#8b847d" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="422" y="427" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start">Google</text>
+<text x="566" y="427" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">Gemini</text>
+<rect x="1279.5" y="410" width="62.5" height="24" rx="5" fill="#ffffff" stroke="#d3ccc5"/>
+<text x="1310.75" y="425.96" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Sign in</text>
+<path d="M392 444.5L1340 444.5" stroke="#e3ddd7" stroke-width="1"/>
+<g transform="translate(394 458) scale(0.6250)" fill="none" stroke="#8b847d" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="422" y="471" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start">OpenRouter</text>
+<text x="566" y="471" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">API key</text>
+<rect x="1279.5" y="454" width="62.5" height="24" rx="5" fill="#ffffff" stroke="#d3ccc5"/>
+<text x="1310.75" y="469.96" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Sign in</text>
+<path d="M392 488.5L1340 488.5" stroke="#e3ddd7" stroke-width="1"/>
+<g transform="translate(394 502) scale(0.6250)" fill="none" stroke="#8b847d" stroke-width="2.08" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="422" y="515" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start">GitHub Copilot</text>
+<text x="566" y="515" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">subscription</text>
+<rect x="1279.5" y="498" width="62.5" height="24" rx="5" fill="#ffffff" stroke="#d3ccc5"/>
+<text x="1310.75" y="513.96" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Sign in</text>
+<text x="376" y="562" fill="#4b607c" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">More providers…</text>
+<g transform="translate(376 584) scale(0.5417)" fill="none" stroke="#8b847d" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="396" y="595" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">Sign in runs pi's /login in the setup terminal, since the backend cannot sign in on its own yet.</text>
+<rect x="1236" y="796" width="120" height="32" rx="5" fill="#4b607c"/>
+<text x="1296.0" y="816.5" fill="#ffffff" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">Continue</text>
+<rect x="1106" y="796" width="120" height="32" rx="5" fill="#ffffff" stroke="#d3ccc5"/>
+<text x="1166.0" y="816.5" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Skip for now</text>
+<rect x="376" y="796" width="90" height="32" rx="5" fill="#ffffff" stroke="#d3ccc5"/>
+<text x="421.0" y="816.5" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Back</text>
+</g>
+<rect x="48" y="130" width="1344" height="740" rx="12" fill="none" stroke="#c9c1ba"/>
+</g>
+<circle cx="61" cy="3835" r="13" fill="#dacbc2"/>
+<text x="61" y="3839" fill="#252f3d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="600" text-anchor="middle">05</text>
+<text x="84" y="3840" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="16" text-anchor="start"><tspan fill="#252f3d" font-weight="600">When a command fails</tspan><tspan fill="#5c5752">  —  say what broke, keep what worked</tspan></text>
+<text x="48" y="3864" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="start">The step turns red, the terminal keeps the output, and the banner names the likely cause. Try again, copy the command, or run it in the system Terminal.</text>
+<text x="48" y="3884" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" text-anchor="start"><tspan fill="#2e8a55" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-weight="600">DECIDED  </tspan><tspan fill="#252f3d">the setup terminal: the drawer's terminal, on macOS, Linux and Windows (ConPTY).</tspan></text>
+<text x="48" y="3908" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="500" text-anchor="start" letter-spacing="1.2">EVENING  ·  DARK</text>
+<g transform="translate(0 3790)">
+<rect x="58" y="150" width="1324" height="732" rx="13" fill="#1b1612" filter="url(#shadow)" opacity="0.28"/>
+<g clip-path="url(#windowClip)">
+<rect x="48" y="130" width="1344" height="740" rx="0" fill="#161d27"/>
+<rect x="48" y="130" width="1344" height="52" rx="0" fill="#1f2630"/>
+<rect x="48" y="182" width="288" height="664" rx="0" fill="#1a212b"/>
+<rect x="48" y="846" width="1344" height="24" rx="0" fill="#131922"/>
+<path d="M48 181.5L1392 181.5" stroke="#0d1116" stroke-width="1"/>
+<path d="M336.5 182L336.5 846" stroke="#0d1116" stroke-width="1"/>
+<path d="M48 846.5L1392 846.5" stroke="#0d1116" stroke-width="1"/>
+<circle cx="70" cy="156" r="6" fill="#ff6058"/>
+<circle cx="90" cy="156" r="6" fill="#febc2e"/>
+<circle cx="110" cy="156" r="6" fill="#29c841"/>
+<g transform="translate(141 147) scale(0.03834)"><use xlink:href="#pimark"/></g>
+<text x="168" y="161" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">pi</text>
+<g transform="translate(359 147) scale(0.7500)" fill="none" stroke="#9fa4ab" stroke-width="1.73" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#package"/></g>
+<text x="386" y="161" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">Set up pi-desktop</text>
+<text x="72" y="232" fill="#ebe7e4" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="24" font-weight="400" text-anchor="start" font-style="italic">Welcome to pi</text>
+<text x="72" y="256" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">A few things before your first session.</text>
+<path d="M84.5 315L84.5 348" stroke="#2f3640" stroke-width="1.4"/>
+<circle cx="84" cy="303" r="11" fill="#5db87a"/>
+<g transform="translate(77 296) scale(0.5833)" fill="none" stroke="#0d1116" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="303" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Node.js</text>
+<text x="108" y="321" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">24.9.0 · Homebrew</text>
+<rect x="60" y="348" width="264" height="54" rx="6" fill="#273748"/>
+<rect x="60" y="354" width="2" height="42" rx="1" fill="#6a9fcc"/>
+<path d="M84.5 381L84.5 414" stroke="#2f3640" stroke-width="1.4"/>
+<circle cx="84" cy="369" r="11" fill="#f09082"/>
+<g transform="translate(78 363) scale(0.5000)" fill="none" stroke="#0d1116" stroke-width="2.60" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#x"/></g>
+<text x="108" y="369" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">pi</text>
+<text x="108" y="387" fill="#f09082" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">npm could not download</text>
+<circle cx="84" cy="435" r="10" fill="#1a212b" stroke="#424954" stroke-width="1.4"/>
+<text x="84" y="439" fill="#737981" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">3</text>
+<text x="108" y="435" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Open a project</text>
+<text x="108" y="453" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">a folder to work in</text>
+<g transform="translate(72 787) scale(0.5417)" fill="none" stroke="#737981" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="92" y="798" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">Checked on every launch. Setup only</text>
+<text x="92" y="814" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">opens when something is missing.</text>
+<circle cx="65" cy="858" r="2.5" fill="#f1be58"/>
+<text x="75" y="862" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">setup</text>
+<text x="1374" y="862" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="end">pi missing · sessions not started</text>
+<text x="376" y="240" fill="#ebe7e4" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="26" font-weight="400" text-anchor="start" font-style="italic">pi could not be installed</text>
+<text x="376" y="270" fill="#9fa4ab" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">npm stopped before anything changed. Fix what it names, then try again.</text>
+<rect x="376" y="300" width="980" height="58" rx="8" fill="#27262e" stroke="#6d4b4b"/>
+<g transform="translate(392 313) scale(0.6667)" fill="none" stroke="#f09082" stroke-width="1.95" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#warning"/></g>
+<text x="418" y="324" fill="#ebe7e4" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">registry.npmjs.org refused the download (403 Forbidden)</text>
+<text x="418" y="344" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">A proxy or firewall is blocking npm. Nothing was installed, so nothing is left half done.</text>
+<rect x="376" y="374" width="980" height="196" rx="8" fill="#0d1116" stroke="#2f3640"/>
+<path d="M376 382a8 8 0 0 1 8-8H1348a8 8 0 0 1 8 8V406H376Z" fill="#1a212b"/>
+<path d="M376 406.5L1356 406.5" stroke="#2f3640" stroke-width="1"/>
+<g transform="translate(390 383) scale(0.5833)" fill="none" stroke="#9fa4ab" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#terminal"/></g>
+<text x="412" y="395" fill="#9fa4ab" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="9.5" font-weight="500" text-anchor="start" letter-spacing="1.2">TERMINAL</text>
+<text x="488" y="395" fill="#d5d8db" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">npm ci --omit=dev</text>
+<g transform="translate(1252.7 383) scale(0.5417)" fill="none" stroke="#f09082" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#x"/></g>
+<text x="1342" y="394" fill="#f09082" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="400" text-anchor="end">exit 1 · 3s</text>
+<text x="392" y="430" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#9fa4ab">$ </tspan><tspan fill="#b9bec5">npm ci --omit=dev</tspan></text>
+<text x="392" y="449" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#f09082">npm error </tspan><tspan fill="#b9bec5">code E403</tspan></text>
+<text x="392" y="468" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#f09082">npm error </tspan><tspan fill="#b9bec5">403 Forbidden - GET https://registry.npmjs.org/@earendil-works%2fpi-coding-agent</tspan></text>
+<text x="392" y="487" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#f09082">npm error </tspan><tspan fill="#b9bec5">A complete log of this run can be found in:</tspan></text>
+<text x="392" y="506" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#f09082">npm error </tspan><tspan fill="#737981">    ~/.npm/_logs/2026-09-30T10_14_02_411Z-debug-0.log</tspan></text>
+<rect x="376" y="586" width="116" height="32" rx="5" fill="#6a9fcc"/>
+<g transform="translate(385 595.0) scale(0.5833)" fill="none" stroke="#0d1116" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#refresh"/></g>
+<text x="443.0" y="606.5" fill="#0d1116" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">Try again</text>
+<rect x="502" y="586" width="146" height="32" rx="5" fill="#29313c" stroke="#3a434f"/>
+<g transform="translate(511 595.0) scale(0.5833)" fill="none" stroke="#d5d8db" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#copy"/></g>
+<text x="584.0" y="606.5" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Copy command</text>
+<rect x="658" y="586" width="164" height="32" rx="5" fill="#29313c" stroke="#3a434f"/>
+<g transform="translate(667 595.0) scale(0.5833)" fill="none" stroke="#d5d8db" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#terminal"/></g>
+<text x="749.0" y="606.5" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Open in Terminal</text>
+<rect x="832" y="586" width="108" height="32" rx="5" fill="#29313c" stroke="#3a434f"/>
+<g transform="translate(841 595.0) scale(0.5833)" fill="none" stroke="#d5d8db" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#file"/></g>
+<text x="895.0" y="606.5" fill="#d5d8db" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Show log</text>
+<g transform="translate(376 648) scale(0.5417)" fill="none" stroke="#737981" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="396" y="659" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">If Node.js or pi stop fitting later, for example after Node is removed, pi-desktop opens here at that step</text>
+<text x="396" y="677" fill="#737981" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">instead of starting sessions.</text>
+</g>
+<rect x="48" y="130" width="1344" height="740" rx="12" fill="none" stroke="#3a414c"/>
+</g>
+<text x="1456" y="3908" fill="#7a736d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="500" text-anchor="start" letter-spacing="1.2">MOONSTONE  ·  LIGHT</text>
+<g transform="translate(1408 3790)">
+<rect x="58" y="150" width="1324" height="732" rx="13" fill="#1b1612" filter="url(#shadow)" opacity="0.16"/>
+<g clip-path="url(#windowClip)">
+<rect x="48" y="130" width="1344" height="740" rx="0" fill="#faf9f7"/>
+<rect x="48" y="130" width="1344" height="52" rx="0" fill="#ebe7e4"/>
+<rect x="48" y="182" width="288" height="664" rx="0" fill="#f2efeb"/>
+<rect x="48" y="846" width="1344" height="24" rx="0" fill="#e6e1dc"/>
+<path d="M48 181.5L1392 181.5" stroke="#cbc3bb" stroke-width="1"/>
+<path d="M336.5 182L336.5 846" stroke="#cbc3bb" stroke-width="1"/>
+<path d="M48 846.5L1392 846.5" stroke="#cbc3bb" stroke-width="1"/>
+<circle cx="70" cy="156" r="6" fill="#ff6058"/>
+<circle cx="90" cy="156" r="6" fill="#febc2e"/>
+<circle cx="110" cy="156" r="6" fill="#29c841"/>
+<g transform="translate(141 147) scale(0.03834)"><use xlink:href="#pimark"/></g>
+<text x="168" y="161" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">pi</text>
+<g transform="translate(359 147) scale(0.7500)" fill="none" stroke="#5c5752" stroke-width="1.73" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#package"/></g>
+<text x="386" y="161" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start">Set up pi-desktop</text>
+<text x="72" y="232" fill="#252f3d" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="24" font-weight="400" text-anchor="start" font-style="italic">Welcome to pi</text>
+<text x="72" y="256" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">A few things before your first session.</text>
+<path d="M84.5 315L84.5 348" stroke="#e3ddd7" stroke-width="1.4"/>
+<circle cx="84" cy="303" r="11" fill="#2e8a55"/>
+<g transform="translate(77 296) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="108" y="303" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Node.js</text>
+<text x="108" y="321" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">24.9.0 · Homebrew</text>
+<rect x="60" y="348" width="264" height="54" rx="6" fill="#e7e8e9"/>
+<rect x="60" y="354" width="2" height="42" rx="1" fill="#4b607c"/>
+<path d="M84.5 381L84.5 414" stroke="#e3ddd7" stroke-width="1.4"/>
+<circle cx="84" cy="369" r="11" fill="#c05a45"/>
+<g transform="translate(78 363) scale(0.5000)" fill="none" stroke="#ffffff" stroke-width="2.60" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#x"/></g>
+<text x="108" y="369" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">pi</text>
+<text x="108" y="387" fill="#c05a45" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">npm could not download</text>
+<circle cx="84" cy="435" r="10" fill="#f2efeb" stroke="#cbc3bb" stroke-width="1.4"/>
+<text x="84" y="439" fill="#8b847d" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="600" text-anchor="middle">3</text>
+<text x="108" y="435" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">Open a project</text>
+<text x="108" y="453" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">a folder to work in</text>
+<g transform="translate(72 787) scale(0.5417)" fill="none" stroke="#8b847d" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="92" y="798" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">Checked on every launch. Setup only</text>
+<text x="92" y="814" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">opens when something is missing.</text>
+<circle cx="65" cy="858" r="2.5" fill="#b97a14"/>
+<text x="75" y="862" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start">setup</text>
+<text x="1374" y="862" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="end">pi missing · sessions not started</text>
+<text x="376" y="240" fill="#252f3d" font-family="Plantin MT Pro, Georgia, DejaVu Serif, serif" font-size="26" font-weight="400" text-anchor="start" font-style="italic">pi could not be installed</text>
+<text x="376" y="270" fill="#5c5752" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start">npm stopped before anything changed. Fix what it names, then try again.</text>
+<rect x="376" y="300" width="980" height="58" rx="8" fill="#f5ece9" stroke="#e3b9b0"/>
+<g transform="translate(392 313) scale(0.6667)" fill="none" stroke="#c05a45" stroke-width="1.95" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#warning"/></g>
+<text x="418" y="324" fill="#252f3d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start">registry.npmjs.org refused the download (403 Forbidden)</text>
+<text x="418" y="344" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start">A proxy or firewall is blocking npm. Nothing was installed, so nothing is left half done.</text>
+<rect x="376" y="374" width="980" height="196" rx="8" fill="#eef0f2" stroke="#e3ddd7"/>
+<path d="M376 382a8 8 0 0 1 8-8H1348a8 8 0 0 1 8 8V406H376Z" fill="#f2efeb"/>
+<path d="M376 406.5L1356 406.5" stroke="#e3ddd7" stroke-width="1"/>
+<g transform="translate(390 383) scale(0.5833)" fill="none" stroke="#5c5752" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#terminal"/></g>
+<text x="412" y="395" fill="#5c5752" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="9.5" font-weight="500" text-anchor="start" letter-spacing="1.2">TERMINAL</text>
+<text x="488" y="395" fill="#3a4453" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" font-weight="400" text-anchor="start">npm ci --omit=dev</text>
+<g transform="translate(1252.7 383) scale(0.5417)" fill="none" stroke="#c05a45" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#x"/></g>
+<text x="1342" y="394" fill="#c05a45" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="10.5" font-weight="400" text-anchor="end">exit 1 · 3s</text>
+<text x="392" y="430" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#5c5752">$ </tspan><tspan fill="#3f4854">npm ci --omit=dev</tspan></text>
+<text x="392" y="449" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#c05a45">npm error </tspan><tspan fill="#3f4854">code E403</tspan></text>
+<text x="392" y="468" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#c05a45">npm error </tspan><tspan fill="#3f4854">403 Forbidden - GET https://registry.npmjs.org/@earendil-works%2fpi-coding-agent</tspan></text>
+<text x="392" y="487" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#c05a45">npm error </tspan><tspan fill="#3f4854">A complete log of this run can be found in:</tspan></text>
+<text x="392" y="506" font-family="Commit Mono, Zed Plex Mono, SF Mono, Menlo, DejaVu Sans Mono, monospace" font-size="11.5" text-anchor="start" xml:space="preserve" style="white-space:pre"><tspan fill="#c05a45">npm error </tspan><tspan fill="#8b847d">    ~/.npm/_logs/2026-09-30T10_14_02_411Z-debug-0.log</tspan></text>
+<rect x="376" y="586" width="116" height="32" rx="5" fill="#4b607c"/>
+<g transform="translate(385 595.0) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#refresh"/></g>
+<text x="443.0" y="606.5" fill="#ffffff" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">Try again</text>
+<rect x="502" y="586" width="146" height="32" rx="5" fill="#ffffff" stroke="#d3ccc5"/>
+<g transform="translate(511 595.0) scale(0.5833)" fill="none" stroke="#3a4453" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#copy"/></g>
+<text x="584.0" y="606.5" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Copy command</text>
+<rect x="658" y="586" width="164" height="32" rx="5" fill="#ffffff" stroke="#d3ccc5"/>
+<g transform="translate(667 595.0) scale(0.5833)" fill="none" stroke="#3a4453" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#terminal"/></g>
+<text x="749.0" y="606.5" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Open in Terminal</text>
+<rect x="832" y="586" width="108" height="32" rx="5" fill="#ffffff" stroke="#d3ccc5"/>
+<g transform="translate(841 595.0) scale(0.5833)" fill="none" stroke="#3a4453" stroke-width="2.23" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#file"/></g>
+<text x="895.0" y="606.5" fill="#3a4453" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">Show log</text>
+<g transform="translate(376 648) scale(0.5417)" fill="none" stroke="#8b847d" stroke-width="2.40" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#info"/></g>
+<text x="396" y="659" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">If Node.js or pi stop fitting later, for example after Node is removed, pi-desktop opens here at that step</text>
+<text x="396" y="677" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">instead of starting sessions.</text>
+</g>
+<rect x="48" y="130" width="1344" height="740" rx="12" fill="none" stroke="#c9c1ba"/>
+</g>
+<text x="48" y="4760" fill="#8b847d" font-family="IBM Plex Sans, Zed Plex Sans, Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start">LAYOUT STUDY ONLY — follows studies 01–06 and their colour profile. Versions, paths, command output and providers are sample data.</text>
+</svg>

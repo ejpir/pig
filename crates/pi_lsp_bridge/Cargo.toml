@@ -1,0 +1,44 @@
+[package]
+name = "pi_lsp_bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/pi_lsp_bridge.rs"
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+language.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs = "6"
+rand = "0.9"
+smol = "2"
+tempfile = "3.23"
+lsp = { path = "../../../zed/crates/lsp" }
+project = { path = "../../../zed/crates/project" }
+# Only for `fake-lsp`.
+fs = { path = "../../../zed/crates/fs", optional = true }
+settings = { workspace = true, optional = true }
+# Embeds the default settings SettingsStore::test reads; `path!` for Windows paths.
+util = { workspace = true, optional = true }
+
+# Zed's fake language server and FakeFs for `fake_lsp_tests`. Run on its own
+# (`cargo test -p pi_lsp_bridge --features fake-lsp`): unified into the whole
+# workspace's test build, these test-support features break `workspace`.
+[features]
+fake-lsp = [
+    "fs/test-support",
+    "language/test-support",
+    "lsp/test-support",
+    "project/test-support",
+    "settings/test-support",
+    "util/test-support",
+]
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+futures = "0.3"
+release_channel = { path = "../../../zed/crates/release_channel" }
