@@ -77,6 +77,30 @@ fn program(env: impl Fn(&str) -> Option<OsString>, backend: &Backend) -> (OsStri
     }
 }
 
+/// What the backend gets on top of the desktop's own environment.
+fn environment(env: impl Fn(&str) -> Option<OsString>) -> Vec<(OsString, OsString)> {
+    let mut vars = Vec::new();
+    if cfg!(target_os = "macos") {
+        // Finder does not inherit a terminal's PATH. Include standard native package-manager bins.
+        let mut paths = vec![
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ];
+        paths.extend(std::env::split_paths(&env("PATH").unwrap_or_default()));
+        if let Ok(path) = std::env::join_paths(paths) {
+            vars.push(("PATH".into(), path));
+        }
+    }
+    // Trust the certificates the system trusts, as native apps do. Bun and Node
+    // otherwise trust only their own list, so behind a proxy that re-signs HTTPS
+    // (common on company networks) every model request fails with "Connection
+    // error." Node.js 22.19+ reads this too. An explicit value wins.
+    if env("NODE_USE_SYSTEM_CA").is_none() {
+        vars.push(("NODE_USE_SYSTEM_CA".into(), "1".into()));
+    }
+    vars
+}
+
 impl Launch {
     pub fn pi(cwd: PathBuf, session: Option<&str>) -> Self {
         Self::pi_with(cwd, session, &Backend::default())
@@ -88,26 +112,11 @@ impl Launch {
         if let Some(path) = session {
             args.extend(["--session".into(), path.into()]);
         }
-        let env = if cfg!(target_os = "macos") {
-            // Finder does not inherit a terminal's PATH. Include standard native package-manager bins.
-            let mut paths = vec![
-                PathBuf::from("/opt/homebrew/bin"),
-                PathBuf::from("/usr/local/bin"),
-            ];
-            paths.extend(std::env::split_paths(
-                &std::env::var_os("PATH").unwrap_or_default(),
-            ));
-            std::env::join_paths(paths)
-                .map(|path| vec![("PATH".into(), path)])
-                .unwrap_or_default()
-        } else {
-            vec![]
-        };
         Self {
             program,
             args,
             cwd,
-            env,
+            env: environment(|name| std::env::var_os(name)),
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -502,5 +511,17 @@ mod tests {
             program(env, &executable),
             ("/opt/node/bin/node".into(), vec!["/dev/cli.js".into()])
         );
+    }
+
+    #[test]
+    fn the_backend_trusts_the_system_certificates_unless_told_otherwise() {
+        let system_ca = |vars: Vec<(OsString, OsString)>| {
+            vars.into_iter()
+                .find(|(name, _)| name == "NODE_USE_SYSTEM_CA")
+                .map(|(_, value)| value)
+        };
+        assert_eq!(system_ca(environment(|_| None)), Some("1".into()));
+        let explicit = |name: &str| (name == "NODE_USE_SYSTEM_CA").then(|| OsString::from("0"));
+        assert_eq!(system_ca(environment(explicit)), None, "inherited as set");
     }
 }

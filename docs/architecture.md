@@ -87,6 +87,8 @@ Backend selection follows this precedence:
 
 JavaScript backend paths use Node; executables run directly. `PI_DESKTOP_NODE` overrides the configured Node program. The embedded backend needs neither Node nor Pi for agent execution, but terminal login, npm packages and Node-based language servers still require their respective external tools. Native Node add-ons may be incompatible with Bun.
 
+Every backend starts with `NODE_USE_SYSTEM_CA=1` unless the environment sets it, so Bun and Node trust the system's certificates as native apps do. Without it, a company proxy that re-signs HTTPS makes every model request fail with "Connection error." (seen on macOS with the built-in backend).
+
 Packages include application, Pi, Bun and dependency notices. Current macOS packages are ad-hoc signed, not Developer ID signed or notarized; Windows packages are unsigned. Native release targets are Linux amd64/arm64, macOS arm64 and Windows amd64.
 
 ## Editor, files and language services
