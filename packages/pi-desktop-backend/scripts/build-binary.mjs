@@ -16,7 +16,7 @@
 // it the executable keeps the ad-hoc signature Bun gives it.
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { constants, zstdCompressSync } from 'node:zlib';
@@ -78,7 +78,8 @@ copy(join(root, 'PI-LICENSE'), join(folder, 'PI-LICENSE'));
 const tar = join(out, `pi-desktop-backend-${platform}.tar`);
 const archive = `${tar}.zst`;
 rmSync(tar, { force: true });
-execFileSync('tar', ['-cf', tar, '-C', folder, '.'], { stdio: 'inherit' });
+// Relative names only: Git for Windows' GNU tar reads `D:\…` as a remote host.
+execFileSync('tar', ['-cf', basename(tar), '-C', platform, '.'], { cwd: out, stdio: 'inherit' });
 writeFileSync(archive, zstdCompressSync(readFileSync(tar), { params: { [constants.ZSTD_c_compressionLevel]: 19 } }));
 rmSync(tar);
 
