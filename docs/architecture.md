@@ -101,7 +101,7 @@ Language servers require explicit editor-project trust. They may execute project
 
 The LSP extension sends successful edit/write and run-end checks to a per-session bridge. Unix uses a private socket directory; Windows uses loopback TCP with a random session token. Answers include bounded primary errors, excluding unsaved buffers and already-reported diagnostics. Checks wait at most four seconds per file and twenty seconds at run end; slow servers can report later.
 
-Terminals are session-owned PTY shells, independent of Pi context. Hiding the drawer does not stop them; closing the session does. “Open in terminal” stages a historical command without executing it.
+Terminals are session-owned PTY shells, independent of Pi context. Terminal and code text use the embedded Commit Mono, whose name table was fixed for Windows: its stray subfamily name `400 Regular` let DirectWrite's text layout miss the family `CommitMonoV143` and draw a proportional fallback font on the terminal's fixed grid, so letters bunched up and words drifted apart. The font now names its family explicitly (name IDs 21 and 22). Hiding the drawer does not stop them; closing the session does. “Open in terminal” stages a historical command without executing it.
 
 ## Conversation and file history
 

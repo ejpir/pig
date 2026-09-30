@@ -23,7 +23,7 @@ Copied, unmodified, from Zed's `assets/fonts/`:
 - IBM Plex Sans Regular, SemiBold, Italic: SIL Open Font License, `licenses/IBM-PLEX-OFL.txt`.
 - Lilex Regular: SIL Open Font License, `licenses/LILEX-OFL.txt` (retained reference asset, no longer loaded).
 
-Commit Mono 400 Regular is embedded for code/labels, matching the study's named font. Unmodified source: `eigilnikolajsen/commit-mono`, revision `d407cd2bf8e01ca1db70544052fbbb9606406c3b`, `src/fonts/fontlab/CommitMonoV143-400Regular.otf`. SIL Open Font License: `licenses/COMMIT-MONO-OFL.txt`.
+Commit Mono 400 Regular is embedded for code/labels, matching the study's named font. Source: `eigilnikolajsen/commit-mono`, revision `d407cd2bf8e01ca1db70544052fbbb9606406c3b`, `src/fonts/fontlab/CommitMonoV143-400Regular.otf`. Modified in its name table only: the subfamily name `400 Regular` (ID 17) is removed and the family is named explicitly for Windows (IDs 21 and 22: `CommitMonoV143`, `Regular`), and the empty `DSIG` table is dropped. Glyphs and metrics are unchanged. SIL Open Font License: `licenses/COMMIT-MONO-OFL.txt`.
 
 Fonts are embedded in the executable, so launch does not depend on locally installed UI/code fonts. Georgia (macOS/Windows) and DejaVu Serif (Linux) are system title-font fallbacks; no proprietary Plantin font is distributed.
 
