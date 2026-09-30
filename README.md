@@ -2,6 +2,8 @@
 
 A native desktop app for the [pi](https://github.com/earendil-works/pi) coding agent, built with Zed's GPUI (no webview). Each session runs its own pi process in its project folder.
 
+![A tour of Pi Desktop: thread, commands, mentions, changes, tree, context, files, terminal, sessions, models, resources, settings and the dark theme](docs/pi-desktop-showcase.gif)
+
 - **Sessions and projects:** a sidebar of open and saved sessions per project, with search, forks, worktrees and **All Sessions**.
 - **Thread:** Markdown messages, collapsible tool calls, a `/` command menu, `@` mentions, attachments, and model and thinking pickers.
 - **jj turns:** each run that changes files becomes a jj change you can undo, redo or restore file by file (opt-in per project).

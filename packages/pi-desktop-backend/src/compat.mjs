@@ -4,7 +4,7 @@
 // literal so the standalone build (scripts/build-binary.mjs) can bundle it.
 import manifest from '../node_modules/@earendil-works/pi-coding-agent/package.json' with { type: 'json' };
 
-export const PI_VERSION = '0.87.1';
+export const PI_VERSION = '0.99.1';
 if (manifest.version !== PI_VERSION) {
   throw new Error(`pi-desktop-backend requires Pi ${PI_VERSION}; found ${manifest.version}. Run npm ci in the backend package.`);
 }
@@ -47,54 +47,4 @@ export async function loadPi() {
     if (typeof api[name] !== 'function') throw new Error(`Unsupported Pi ${PI_VERSION} API: ${name}`);
   }
   return api;
-}
-
-// Released 0.87.1 reports boolean preflight results rather than dispositions.
-// Observe its actual agent-entry boundary, not prompts/filenames or completion.
-// The shim is session-local, restored on preflight or failure, and never mutates
-// messages, queues, events, or run lifecycle. Only one prompt preflight at a time.
-export function promptWithDisposition(session, command, accepted, failed) {
-  if (typeof session._runAgentPrompt !== 'function') {
-    throw new Error('Unsupported Pi prompt implementation: missing agent-entry boundary');
-  }
-  const original = session._runAgentPrompt;
-  let started = false;
-  let preflightPassed = false;
-  let acknowledged = false;
-  let queued = false;
-  const unsubscribe = session.subscribe(event => {
-    if (event.type === 'queue_update' && (event.steering.length || event.followUp.length)) queued = true;
-  });
-  const restore = () => {
-    if (session._runAgentPrompt === observe) session._runAgentPrompt = original;
-    unsubscribe();
-  };
-  function observe(...args) {
-    // Extension handlers may run their own model work before consuming the
-    // input. That is not a run started by this prompt's completed preflight.
-    if (preflightPassed) started = true;
-    return original.apply(this, args);
-  }
-  session._runAgentPrompt = observe;
-  const acknowledge = disposition => {
-    if (acknowledged) return;
-    acknowledged = true;
-    restore();
-    accepted(disposition);
-  };
-  void session.prompt(command.message, {
-    images: command.images,
-    streamingBehavior: command.streamingBehavior,
-    source: 'rpc',
-    preflightResult: value => {
-      if (typeof value === 'string') acknowledge(value);
-      else if (value === true) {
-        preflightPassed = true;
-        queueMicrotask(() => acknowledge(started ? 'started' : queued ? 'queued' : 'handled'));
-      }
-    },
-  }).catch(error => {
-    restore();
-    if (!acknowledged) failed(error);
-  });
 }

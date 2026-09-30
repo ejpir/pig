@@ -304,6 +304,31 @@ fn pickers_filter_select_and_dismiss_without_submitting(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn thinking_picker_takes_composer_focus_and_escape_does_not_stop_the_run(cx: &mut TestAppContext) {
+    let (desktop, mut cx) = setup(cx);
+    let a = tab(&desktop, 0, &cx);
+    let before = draft(&a, &cx);
+    let search = desktop.read_with(&cx, |desktop, cx| desktop.sidebar.read(cx).search.clone());
+    search.update_in(&mut cx, |input, window, cx| {
+        input.focus_handle(cx).focus(window, cx)
+    });
+    a.composer.update_in(&mut cx, |composer, window, cx| {
+        composer.toggle_picker(menus::Picker::Thinking, window, cx)
+    });
+    cx.simulate_keystrokes("down");
+    a.composer.read_with(&cx, |composer, _| {
+        assert!(composer.picker == Some(menus::Picker::Thinking));
+        assert_eq!(composer.picker_index, 1);
+    });
+    cx.simulate_keystrokes("escape");
+    a.composer
+        .read_with(&cx, |composer, _| assert!(composer.picker.is_none()));
+    a.controller
+        .read_with(&cx, |controller, _| assert!(controller.model().busy()));
+    assert_eq!(draft(&a, &cx), before);
+}
+
+#[gpui::test]
 fn full_catalog_is_virtualized_and_row_height_matches_filtered_results(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
     let a = tab(&desktop, 0, &cx);

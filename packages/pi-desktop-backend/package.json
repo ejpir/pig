@@ -14,8 +14,8 @@
   },
   "engines": { "node": ">=22.19.0" },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.87.1",
-    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.99.1",
+    "@earendil-works/pi-ai": "0.99.1",
     "undici": "8.10.2"
   }
 }

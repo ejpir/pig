@@ -2,6 +2,7 @@
 """Assert native Xvfb captures contain the expected surfaces, text, and UI transitions."""
 from pathlib import Path
 from functools import lru_cache
+from io import BytesIO
 import json
 import subprocess
 
@@ -20,12 +21,19 @@ def load(name, size):
 
 @lru_cache(maxsize=None)
 def text(name):
+    # Small native text is font/rasterizer-dependent; upscale only the OCR input.
+    # Palette and geometry checks still use the original screenshot pixels.
+    image = Image.open(ARTIFACTS / f"thread-{name}.png").convert("RGB")
+    image = image.resize((image.width * 2, image.height * 2))
+    encoded = BytesIO()
+    image.save(encoded, format="PNG")
     result = subprocess.run(
-        ["tesseract", str(ARTIFACTS / f"thread-{name}.png"), "stdout", "--psm", "11"],
-        check=True, capture_output=True, text=True,
+        ["tesseract", "stdin", "stdout", "--psm", "11"],
+        input=encoded.getvalue(), check=True, capture_output=True,
     )
-    (ARTIFACTS / f"thread-{name}.txt").write_text(result.stdout)
-    return " ".join(result.stdout.lower().split())
+    content = result.stdout.decode("utf-8")
+    (ARTIFACTS / f"thread-{name}.txt").write_text(content)
+    return " ".join(content.lower().split())
 
 
 def color(image, position, expected):
@@ -54,7 +62,8 @@ def main():
     assert "ready" in text("stopped")
     assert "signatures" in text("compact")  # OCR sometimes reads the small Q as O.
     assert "62.4k" not in text("compact")  # inspector hidden at the compact breakpoint
-    assert "a quiet place to work" in text("new")
+    assert "start with a prompt" in text("new")
+    assert "create session" not in text("new")  # Chooser completed, not just opened.
     assert "newsession" in text("new").replace(" ", "")
     assert sum(ImageStat.Stat(ImageChops.difference(queued, stopped)).mean) > 1
     for name, expected in (("model-picker", ["anthropic", "openai", "sonnet"]),
@@ -64,7 +73,8 @@ def main():
         for word in expected:
             assert word in text(name), (name, word, text(name))
         assert "running" in text(name)  # Dismissing a popup must not abort the run.
-    assert "git-guard" in text("moonstone")  # Inspector fits without clipping.
+    assert "not reported" in text("moonstone")  # Demo has no active-tool inventory.
+    assert "cache hits (tokens)" in text("moonstone")  # Usage inspector remains visible.
     assert "throw" not in text("moonstone")  # Diff details start collapsed.
     assert "checked 1,284" not in text("moonstone")  # Bash output starts collapsed.
     load("edit-details", (1344, 740))

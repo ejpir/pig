@@ -69,7 +69,7 @@ function peer(t, env, args = ['--no-session']) {
 
 test('published Pi SDK bootstrap, metadata, protocol identity and clean EOF shutdown', async t => {
   const env = await environment(t); const client = peer(t, env, ['--no-session', '--no-extensions', '--no-skills', '--no-context-files']);
-  const info = await client.ok('get_backend_info'); assert.equal(info.piVersion, '0.87.1'); assert.equal(info.protocolVersion, 1); assert.equal(info.nodeVersion, binary ? info.nodeVersion : process.versions.node); assert.equal(typeof info.bunVersion, binary ? 'string' : 'undefined'); assert.deepEqual(info.features, ['fork_cwd']);
+  const info = await client.ok('get_backend_info'); assert.equal(info.piVersion, '0.99.1'); assert.equal(info.protocolVersion, 1); assert.equal(info.nodeVersion, binary ? info.nodeVersion : process.versions.node); assert.equal(typeof info.bunVersion, binary ? 'string' : 'undefined'); assert.deepEqual(info.features, ['fork_cwd']);
   assert.ok(info.commands.includes('list_packages')); assert.ok(info.commands.includes('share'));
   const state = await client.ok('get_state'); assert.equal(state.isStreaming, false); assert.ok(state.sessionId);
   assert.equal(state.sessionFile, undefined);
@@ -120,6 +120,15 @@ test('models, settings, exact scope, handled preflight, reload and extension UI 
   const saved = JSON.parse(await readFile(join(env.root, 'agent', 'settings.json'), 'utf8'));
   assert.deepEqual(saved.enabledModels, ['offline-desktop-fixture/small']);
   assert.equal(saved.modelThinkingLevels['offline-desktop-fixture/small'], 'low');
+});
+
+test('a prompt that reaches the model reports started; the fixture model then fails offline', async t => {
+  const env = await environment(t); const client = peer(t, env, ['--no-session', '-e', extension]);
+  await client.ok('set_model', { provider: 'offline-desktop-fixture', modelId: 'small', persist: false });
+  assert.equal((await client.ok('prompt', { message: 'Run the fixture model' })).disposition, 'started');
+  await client.waitEvent(record => record.type === 'agent_end');
+  assert.equal((await client.ok('get_state')).isStreaming, false);
+  await client.quit();
 });
 
 test('active tool metadata reflects builtins, extensions, loadout changes and explicit no-tools', async t => {

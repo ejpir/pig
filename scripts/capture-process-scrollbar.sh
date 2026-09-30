@@ -2,26 +2,28 @@
 # Native overflow/drag/track geometry only: explicitly labelled demo, no Pi subprocesses.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-binary="$(realpath "${PI_DESKTOP_BINARY:-target/linux/debug/pi-desktop}")"
+binary="$(realpath "${PI_DESKTOP_BINARY:-${CARGO_TARGET_DIR:-target}/debug/pi-desktop}")"
 tmp="$(mktemp -d /tmp/pi-process-scroll.XXXXXX)"; app=""
 trap 'if [[ -n "$app" ]]; then kill "$app" 2>/dev/null || true; wait "$app" 2>/dev/null || true; fi; rm -rf "$tmp"' EXIT
 export HOME="$tmp/home" XDG_DATA_HOME="$tmp/data" XDG_CONFIG_HOME="$tmp/config" XDG_CACHE_HOME="$tmp/cache" XDG_RUNTIME_DIR="$tmp/runtime"
-mkdir -p "$HOME" "$XDG_RUNTIME_DIR" artifacts; chmod 700 "$XDG_RUNTIME_DIR"
+export PI_DESKTOP_CONFIG_DIR="$tmp/desktop" PI_CODING_AGENT_DIR="$tmp/agent"
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$tmp/project" artifacts; chmod 700 "$XDG_RUNTIME_DIR"
 unset WAYLAND_DISPLAY PI_DESKTOP_DEMO_WORKSPACE PI_DESKTOP_DEMO_READABILITY
 export LIBGL_ALWAYS_SOFTWARE=1 WGPU_BACKEND=vulkan
 for driver in /usr/share/vulkan/icd.d/lvp*.json; do
   if [[ -f "$driver" ]]; then export VK_DRIVER_FILES="$driver" VK_ICD_FILENAMES="$driver"; break; fi
 done
-"$binary" --demo --light > artifacts/process-scrollbar-app.log 2>&1 & app=$!
+"$binary" --demo --light --project "$tmp/project" > artifacts/process-scrollbar-app.log 2>&1 & app=$!
 window=""
 for _ in $(seq 1 100); do
   window=$(xdotool search --onlyvisible --name '^pi desktop$' 2>/dev/null | head -1 || true)
   [[ -n "$window" ]] && break; sleep .1
 done
-[[ -n "$window" ]]; xdotool windowfocus --sync "$window"; sleep .4
-xdotool key ctrl+n; sleep .3
-import -window "$window" artifacts/process-scrollbar-create.png
-python3 - <<'PY' > "$tmp/create"
+[[ -n "$window" ]]; xdotool windowfocus --sync "$window"
+# Wait for a painted chooser and its completion, not a cold runner's frame time.
+find_create() {
+  import -window "$window" artifacts/process-scrollbar-create.png
+  python3 - <<'PY' > "$tmp/create" 2>/dev/null
 from PIL import Image
 im=Image.open('artifacts/process-scrollbar-create.png').convert('RGB')
 rows=[]
@@ -32,12 +34,26 @@ count,xs,y=max(rows,key=lambda row:row[0])
 assert count>70, 'No accent-colored Create button'
 print((min(xs)+max(xs))//2,y)
 PY
-read -r x y < "$tmp/create"
-xdotool mousemove --window "$window" "$x" "$y" click 1; sleep .15
-for _ in $(seq 1 19); do
-  xdotool key ctrl+n; sleep .12
-  xdotool mousemove --window "$window" "$x" "$y" click 1; sleep .12
-done
+}
+create_session() {
+  local ready=false closed=false x y
+  for _ in $(seq 1 50); do
+    # A key can arrive before the first frame's action context is mounted.
+    # An already-open chooser ignores repeated New Session requests.
+    xdotool key ctrl+n
+    sleep .1
+    if find_create; then ready=true; break; fi
+  done
+  "$ready" || { echo 'New-session chooser did not become ready' >&2; return 1; }
+  read -r x y < "$tmp/create"
+  xdotool mousemove --window "$window" "$x" "$y" click 1
+  for _ in $(seq 1 50); do
+    sleep .1
+    if ! find_create; then closed=true; break; fi
+  done
+  "$closed" || { echo 'New-session chooser did not close after Create' >&2; return 1; }
+}
+for _ in $(seq 1 20); do create_session; done
 xdotool mousemove --window "$window" 145 727 click 1; sleep .5
 xdotool mousemove --window "$window" 10 52; sleep .6
 import -window "$window" artifacts/process-scrollbar-top.png

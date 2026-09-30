@@ -91,8 +91,12 @@ const notices = ['Licenses of the npm packages bundled into pi-desktop-backend.\
 for (const [path, entry] of Object.entries(lock.packages)) {
   if (!path || entry.dev || !existsSync(join(root, path))) continue;
   const manifest = JSON.parse(readFileSync(join(root, path, 'package.json'), 'utf8'));
-  const file = readdirSync(join(root, path)).find(name => /^(licen[cs]e|copying|notice)/i.test(name));
-  const text = file ? readFileSync(join(root, path, file), 'utf8').trim()
+  // A license file, or a folder of them (pi-mcp's LICENSES/ for code it vendors).
+  const files = readdirSync(join(root, path)).filter(name => /^(licen[cs]es?|copying|notice)/i.test(name))
+    .flatMap(name => statSync(join(root, path, name)).isDirectory()
+      ? readdirSync(join(root, path, name)).map(file => join(root, path, name, file))
+      : [join(root, path, name)]);
+  const text = files.length ? files.map(file => readFileSync(file, 'utf8').trim()).join('\n\n')
     : `License: ${manifest.license ?? entry.license ?? 'not stated'}${manifest.author ? `\nAuthor: ${JSON.stringify(manifest.author)}` : ''}`;
   notices.push(`\n== ${manifest.name}@${manifest.version} ==\n\n${text}\n`);
 }

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { open, realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
-import { promptWithDisposition, PI_VERSION } from './compat.mjs';
+import { PI_VERSION } from './compat.mjs';
 import { shareSession } from './share.mjs';
 
 export const COMMANDS = [
@@ -111,9 +111,16 @@ export function createCommands(pi, host, output, options = {}) {
       throw new Error('Wait for the current run and queued work to finish');
     }
     if (type === 'prompt') {
-      // The server keeps the preflight gate until the correlated acknowledgement.
-      return new Promise((resolve, reject) => promptWithDisposition(session, command,
-        disposition => resolve({ disposition }), reject));
+      // The server keeps the preflight gate until the correlated acknowledgement:
+      // pi reports whether the prompt started, was queued or was handled, as its
+      // own RPC mode does. A failure after that belongs to the run, not the request.
+      return new Promise((resolve, reject) => {
+        let acknowledged = false;
+        void session.prompt(command.message, {
+          images: command.images, streamingBehavior: command.streamingBehavior, source: 'rpc',
+          preflightResult: disposition => { acknowledged = true; resolve({ disposition }); },
+        }).catch(error => { if (!acknowledged) reject(error); });
+      });
     }
     switch (type) {
       case 'get_backend_info': return { backend: 'pi-desktop-backend', version: '0.1.0',
@@ -123,15 +130,8 @@ export function createCommands(pi, host, output, options = {}) {
         // Optional parameters the desktop checks for before using them.
         features: ['fork_cwd'],
         limitations: ['native auth mutations use terminal handoff', 'delete_session requires a working trash executable'] };
-      case 'steer': case 'follow_up': {
-        let queued = false;
-        const unsubscribe = session.subscribe(event => { if (event.type === 'queue_update') queued = true; });
-        try {
-          const disposition = await (type === 'steer' ? session.steer(command.message, command.images, { source: 'rpc' })
-            : session.followUp(command.message, command.images, { source: 'rpc' }));
-          return { disposition: disposition ?? (queued ? 'queued' : 'handled') };
-        } finally { unsubscribe(); }
-      }
+      case 'steer': return { disposition: await session.steer(command.message, command.images, { source: 'rpc' }) };
+      case 'follow_up': return { disposition: await session.followUp(command.message, command.images, { source: 'rpc' }) };
       case 'abort': activeShare?.abort(); session.abortBash(); await session.abort(); return;
       case 'abort_bash': session.abortBash(); return;
       case 'bash': {

@@ -1,6 +1,6 @@
 # Pi Desktop backend (trial)
 
-A local Node subprocess that speaks Pi Desktop's JSONL protocol and uses the **published, unpatched Pi 0.87.1 SDK**. It is not a server, a second agent, or a Pi extension. Each desktop session still owns one backend and one Pi session runtime.
+A local Node subprocess that speaks Pi Desktop's JSONL protocol and uses the **published, unpatched Pi 0.99.1 SDK**. It is not a server, a second agent, or a Pi extension. Each desktop session still owns one backend and one Pi session runtime.
 
 ## Try it
 
@@ -45,7 +45,7 @@ This does not require `../pi`, its source resolver, or a globally installed `pi`
 
 `src/compat.mjs` is the only module that resolves Pi's internal module paths. It uses Pi's own project-trust resolver, model-scope resolver, streaming serializer, stdout guard, HTTP setup, built-in extension factories and share exporter. The SDK package version is checked at startup, and `npm-shrinkwrap.json` locks the dependency graph and tarball integrity. Updating Pi is an explicit compatibility/test task.
 
-Released 0.87.1 supplies boolean prompt preflight results. A small, session-local shim observes the real agent-entry boundary to report `started`/`queued`/`handled`, restoring the original method on acknowledgement or failure. Extension-owned work before preflight is not mistaken for a run started by the submitted prompt. `agent_settled`, not `agent_end` or an acknowledgement, remains the completion boundary.
+`prompt` acknowledges with the disposition pi reports from its preflight (`started`, `queued` or `handled`), as pi's own RPC mode does; `steer` and `follow_up` return pi's disposition. `agent_settled`, not `agent_end` or an acknowledgement, remains the completion boundary.
 
 ### Sharing
 

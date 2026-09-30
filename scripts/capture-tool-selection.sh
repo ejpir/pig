@@ -9,11 +9,14 @@ export LIBGL_ALWAYS_SOFTWARE=1 WGPU_BACKEND=vulkan
 for driver in /usr/share/vulkan/icd.d/lvp*.json; do
     if [[ -f "$driver" ]]; then export VK_DRIVER_FILES="$driver" VK_ICD_FILENAMES="$driver"; break; fi
 done
-export XDG_RUNTIME_DIR="$(mktemp -d /tmp/pi-selection-runtime.XXXXXX)"
+binary="$(realpath "${PI_DESKTOP_BINARY:-${CARGO_TARGET_DIR:-target}/debug/pi-desktop}")"
+tmp="$(mktemp -d /tmp/pi-selection.XXXXXX)"; app=""
+trap 'if [[ -n "$app" ]]; then kill "$app" 2>/dev/null || true; wait "$app" 2>/dev/null || true; fi; rm -rf "$tmp"' EXIT
+export HOME="$tmp/home" XDG_CONFIG_HOME="$tmp/config" XDG_DATA_HOME="$tmp/data" XDG_CACHE_HOME="$tmp/cache"
+export XDG_RUNTIME_DIR="$tmp/runtime" PI_DESKTOP_CONFIG_DIR="$tmp/desktop" PI_CODING_AGENT_DIR="$tmp/agent"
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$tmp/project"; chmod 700 "$XDG_RUNTIME_DIR"
 unset WAYLAND_DISPLAY PI_DESKTOP_DEMO_WORKSPACE PI_DESKTOP_DEMO_READABILITY
-binary="${PI_DESKTOP_BINARY:-${CARGO_TARGET_DIR:-target}/debug/pi-desktop}"
-"$binary" --demo --light > artifacts/tool-selection-app.log 2>&1 & app=$!
-trap 'kill "$app" 2>/dev/null || true; wait "$app" 2>/dev/null || true; rm -rf "$XDG_RUNTIME_DIR"' EXIT
+"$binary" --demo --light --project "$tmp/project" > artifacts/tool-selection-app.log 2>&1 & app=$!
 window=""
 for _ in $(seq 1 100); do
     kill -0 "$app" 2>/dev/null || exit 1

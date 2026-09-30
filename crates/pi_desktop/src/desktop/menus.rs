@@ -48,6 +48,10 @@ impl ComposerView {
             .update(cx, |input, cx| input.set_content("", cx));
         if picker != Picker::Thinking {
             self.picker_filter.focus_handle(cx).focus(window, cx);
+        } else {
+            // Unlike the model picker, this menu has no filter to take focus.
+            // Keep its keyboard actions in Composer even when opened elsewhere.
+            self.focus(window, cx);
         }
         self.refresh_choices(cx);
         self.picker_pending = self.command(

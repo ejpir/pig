@@ -5,7 +5,6 @@ import test from 'node:test';
 import { JsonlReader, createOutput, serve } from '../src/protocol.mjs';
 import { createUi } from '../src/ui.mjs';
 import { validate } from '../src/commands.mjs';
-import { promptWithDisposition } from '../src/compat.mjs';
 
 test('JSONL frames bytes only on LF, preserves split UTF-8/U+2028/U+2029 and CRLF', () => {
   const lines = [];
@@ -72,29 +71,3 @@ test('dialog cancellation, timeout and abort resolve defaults', async () => {
   const editor = interaction.ui.editor('Fixture', 'original'); interaction.cancel();
   assert.equal(await editor, undefined);
 });
-
-function sessionFor(outcome) {
-  const subscribers = new Set();
-  return {
-    subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn); },
-    _runAgentPrompt() { return outcome === 'nested' ? Promise.resolve() : new Promise(() => {}); },
-    async prompt(text, options) {
-      assert.equal(options.source, 'rpc');
-      if (outcome === 'nested') await this._runAgentPrompt([]);
-      if (outcome === 'error') { options.preflightResult(false); throw new Error('preflight failed'); }
-      if (outcome === 'queued') for (const fn of subscribers) fn({ type: 'queue_update', steering: [text], followUp: [] });
-      options.preflightResult(true);
-      if (outcome === 'started') await this._runAgentPrompt([]);
-    },
-  };
-}
-for (const outcome of ['started', 'handled', 'queued', 'nested', 'error']) {
-  test(`released SDK boolean preflight becomes truthful ${outcome} disposition`, async () => {
-    const session = sessionFor(outcome); const original = session._runAgentPrompt;
-    const result = new Promise((resolve, reject) => promptWithDisposition(session,
-      { message: 'fixture', streamingBehavior: 'steer' }, resolve, reject));
-    if (outcome === 'error') await assert.rejects(result, /preflight failed/);
-    else assert.equal(await result, outcome === 'nested' ? 'handled' : outcome);
-    assert.equal(session._runAgentPrompt, original);
-  });
-}
