@@ -42,25 +42,38 @@ print(92+(int(r['top'])+int(r['height'])//2)//2)
 PY
 }
 # Locate a real rendered line, rather than pinning a font-dependent baseline.
+# Keep each drag on one X connection: separate xdotool processes can be observed
+# out of order by Xvfb under load. Polling also gives GPUI time to own CLIPBOARD.
 # The sentinel and one-line assertion prevent stale/full-document copy successes.
 select_line() {
-    local kind="$1" marker="$2" first="$3" last="$4" y x=260
+    local kind="$1" marker="$2" first="$3" last="$4" y copied x=260
+    local output="artifacts/tool-$kind-copy.txt"
     [[ "$kind" != bash ]] || x=253
     for y in $(seq "$first" 4 "$last"); do
         printf sentinel | "$clipboard" -selection clipboard >/dev/null 2>&1
-        xdotool mousemove --window "$window" "$x" "$y"
-        xdotool mousedown 1
-        sleep 0.05
-        xdotool mousemove --window "$window" 970 "$y"
-        sleep 0.05
-        xdotool mouseup 1
-        sleep 0.08
-        xdotool key --clearmodifiers ctrl+c
-        sleep 0.08
-        timeout 5 "$clipboard" -selection clipboard -o > "artifacts/tool-$kind-copy.txt"
-        if grep -q "$marker" "artifacts/tool-$kind-copy.txt" && [[ $(wc -l < "artifacts/tool-$kind-copy.txt") -le 1 ]]; then echo "$y"; return 0; fi
+        xdotool mousemove --window "$window" "$x" "$y" \
+            mousedown 1 sleep 0.1 \
+            mousemove --window "$window" "$(((x + 970) / 2))" "$y" sleep 0.1 \
+            mousemove --window "$window" 970 "$y" sleep 0.1 \
+            mouseup 1 sleep 0.2 \
+            key --clearmodifiers ctrl+c
+        for _ in 1 2 3 4 5; do
+            sleep 0.1
+            if timeout 2 "$clipboard" -selection clipboard -o > "$output" 2>/dev/null; then
+                if grep -Fq -- "$marker" "$output" && [[ $(wc -l < "$output") -le 1 ]]; then
+                    echo "$y"
+                    return 0
+                fi
+                copied="$(<"$output")"
+                # Copy completed, but this is not the target line. Move the
+                # pointer instead of waiting out every poll at this baseline.
+                [[ "$copied" == sentinel ]] || break
+            fi
+            xdotool key --clearmodifiers ctrl+c
+        done
     done
-    echo "Could not select $marker" >&2; return 1
+    echo "Could not select $marker" >&2
+    return 1
 }
 edit_y="$(find_header Edit)"
 click 500 "$edit_y"
@@ -77,9 +90,12 @@ printf sentinel | "$clipboard" -selection clipboard
 click 340 "$y" 3
 sleep 0.4
 xdotool key Home Return
-sleep 0.4
-timeout 5 "$clipboard" -selection clipboard -o > artifacts/tool-context-copy.txt
-grep -q 'Checked 1,284' artifacts/tool-context-copy.txt
+for _ in $(seq 1 20); do
+    sleep 0.1
+    timeout 2 "$clipboard" -selection clipboard -o > artifacts/tool-context-copy.txt 2>/dev/null || continue
+    grep -Fq 'Checked 1,284' artifacts/tool-context-copy.txt && break
+done
+grep -Fq 'Checked 1,284' artifacts/tool-context-copy.txt
 xdotool key ctrl+q
 for _ in $(seq 1 50); do
     if ! kill -0 "$app" 2>/dev/null; then wait "$app"; echo 'PASS: native edit/bash drag selection, keyboard clipboard copy, context-menu copy, clean exit.'; exit 0; fi
