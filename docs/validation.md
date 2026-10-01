@@ -7,7 +7,7 @@ Validation is performed on Linux aarch64 using isolated projects and configurati
 | Area | Evidence | Scope |
 | --- | --- | --- |
 | Rust | Workspace regression tests; separate fake-LSP tests; warnings-denied Clippy | Session lifecycle, transport, rendering isolation, input, editor and jj behavior |
-| Desktop extension | Channel unit tests; pi_core's transport test and a native Xvfb capture against Pi's 0.99.1 release binary | Routing, `hello` and reconnection, metadata commands, active tools, settings, sessions, trust, tree navigation, reload and fork into a folder |
+| Desktop extension | Channel unit tests; pi_core's transport test and a native Xvfb capture against Pi's 1.0.0 release binary | Routing, `hello` and reconnection, metadata commands, active tools, settings, sessions, trust, tree navigation, reload and fork into a folder |
 | Embedded pi | Desktop unpack tests; `fetch_pi.py` digest, layout and version checks | Cache extraction of the embedded archive |
 | Packaging | Offline archive and release-policy tests | Binary architecture, staging, notices, exact target matrix, checksums and tag validation |
 | Native UI | Capture scripts driving real GPUI windows and the X11 clipboard | Layout, selection/copy, scrolling, dialogs, navigation and file operations |

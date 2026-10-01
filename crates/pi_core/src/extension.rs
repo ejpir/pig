@@ -12,7 +12,7 @@ const FILE: &str = "pi-desktop.ts";
 /// The extension's own command, which pi lists with the user's commands.
 const COMMAND: &str = "pi-desktop";
 /// The pi release the extension is written against, and the one packaging embeds.
-pub const PI_VERSION: &str = "0.99.1";
+pub const PI_VERSION: &str = "1.0.0";
 
 /// Where sessions load the extension from: the cache folder, else the temporary folder.
 pub fn default_dir() -> PathBuf {

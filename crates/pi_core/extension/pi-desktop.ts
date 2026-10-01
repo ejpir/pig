@@ -43,7 +43,7 @@ import {
 import { Type } from "typebox";
 
 /** The pi release this extension is written against; the desktop refuses others. */
-const EXTENSION_VERSION = "0.99.1-1";
+const EXTENSION_VERSION = "1.0.0-1";
 const PROTOCOL_VERSION = 2;
 const COMMAND = "pi-desktop";
 const COMMAND_DESCRIPTION = "Pi Desktop's session requests (used by the desktop app)";

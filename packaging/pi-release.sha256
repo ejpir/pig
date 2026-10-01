@@ -1,9 +1,9 @@
-# pi 0.99.1: SHA-256 of the release assets packaging embeds (from the release's SHA256SUMS).
-4692aba1dcd48219b61edb4ecebc3c33f6199ebe65299228fce5ba69c31a23a6  pi-darwin-arm64.tar.gz
-9ad6fc356f4d08b9d10e8a6f929ac1ba4908dd533544ba989c54c73b92b53e13  pi-darwin-x64.tar.gz
-c81b9a367bb2985fa45a2c0d4f12b147acc43655683910a5abf937fe22208425  pi-linux-x64.tar.gz
-e632a9e55bc86525ffd0f71d09185d630883f64b9cfc858f731d1edc92716954  pi-linux-arm64.tar.gz
-7e5c2971c0be6019a8b89edc5e3f0efb4cbdeb0ac236fd3a3307c1f62057528f  pi-windows-x64.zip
-a16cfd489dbbf9d6c60033cae3d15b035e7b4a5c1260f833f84c4b37f58706fc  pi-windows-arm64.zip
-e9603de201b58de2bee338637a3ef69fcd78e60c5f8e1887d017810eb14f32cd  pi-coding-agent-install-package.json
-50f42ce7a899505ab5fb5215939f3c645dcef8fea75e9694b02364f66b732da1  pi-coding-agent-install-package-lock.json
+# pi 1.0.0: SHA-256 of the release assets packaging embeds (from the release's SHA256SUMS).
+97291e7d2eb2d7d95ab1f67d26de7902302201bc8786c132bbbc9e53fa8526cc  pi-darwin-arm64.tar.gz
+62fb78fcdbc7c0dbd21044dd44bfb3af20df447285bb55e9debf86ff4838776d  pi-darwin-x64.tar.gz
+8fd5543a52a889d60ad57ccbf6c969e73c75c5240aae18ac40b506947a63dc38  pi-linux-x64.tar.gz
+b60b3fda830a43c1dc3f5edb5fc7b681f22a0a930b48cdac13b97570c6045819  pi-linux-arm64.tar.gz
+f7dbd39814bf6763f01e7f688ad089615de1d0eb55fc8915a49acdc2088f4404  pi-windows-x64.zip
+122d3a1825eac4aa17081c769188c1d058febf579a9407091ae829626997ea96  pi-windows-arm64.zip
+6267f396d1997f52c5a31d3b9c68b11543fdcf24ea02b6a0a141995a47893171  pi-coding-agent-install-package.json
+6cd08f50db03de4551ad6b3902be9d69e61ae0960242104881d7c7ef576f169c  pi-coding-agent-install-package-lock.json
