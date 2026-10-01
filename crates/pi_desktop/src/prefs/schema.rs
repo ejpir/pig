@@ -5,26 +5,6 @@ use pi_settings::{Kind, Scope, Setting};
 
 pub const DESKTOP: &[Setting] = &[
     Setting {
-        key: "general.backend",
-        category: "General",
-        title: "Backend",
-        kind: Kind::Text,
-        default: None,
-        default_text: "Automatic",
-        description: "What each new session runs: a JavaScript file, such as pi-desktop-backend's src/cli.mjs, run with Node.js, or a pi executable. Automatic runs the backend built into the app, or pi from PATH in builds without one. PI_DESKTOP_RPC_ENTRY and PI_DESKTOP_PI still win.",
-        scope: Scope::UserOnly,
-    },
-    Setting {
-        key: "general.node",
-        category: "General",
-        title: "Node.js",
-        kind: Kind::Text,
-        default: None,
-        default_text: "Automatic",
-        description: "The node executable that runs a JavaScript backend. Automatic uses node from PATH. PI_DESKTOP_NODE still wins.",
-        scope: Scope::UserOnly,
-    },
-    Setting {
         key: "general.reopenSessions",
         category: "General",
         title: "Reopen sessions at launch",

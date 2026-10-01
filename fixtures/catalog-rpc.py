@@ -4,6 +4,8 @@ import json
 import os
 import sys
 
+import desktop_channel
+
 models = [
     {"id": "atlas-large", "name": "Atlas Large", "provider": "fixture-ai", "contextWindow": 200000,
      "maxTokens": 32000, "reasoning": True, "input": ["text", "image"],
@@ -40,8 +42,8 @@ commands = [
     {"name": "skill:review", "description": "Review changes carefully", "source": "skill", "sourceInfo": {"path": "/offline/skills/review/SKILL.md", "source": "auto", "scope": "user", "origin": "top-level"}},
     {"name": "release-notes", "description": "Draft release notes from changes", "source": "prompt", "sourceInfo": {"path": "/offline/prompts/release.md", "source": "auto", "scope": "user", "origin": "top-level"}},
 ]
-for line in sys.stdin:
-    command = json.loads(line)
+def answer(command):
+    global selected
     kind = command["type"]
     if log := os.environ.get("PI_CATALOG_LOG"):
         with open(log, "a", encoding="utf-8") as out:
@@ -82,7 +84,13 @@ for line in sys.stdin:
         response["data"] = responses[kind]
     else:
         response["error"] = "Offline catalog peer forbids prompts, model calls and tools"
-    print(json.dumps(response), flush=True)
     if kind == "get_project_trust" and os.environ.get("PI_CATALOG_NOTICE") == "1":
-        print(json.dumps({"type": "extension_ui_request", "method": "notify", "notifyType": "info",
-                          "message": "Package configuration changed. Use Reload resources to apply it to this session."}), flush=True)
+        desktop_channel.emit({"type": "extension_ui_request", "method": "notify", "notifyType": "info",
+                              "message": "Package configuration changed. Use Reload resources to apply it to this session."})
+    return response
+
+
+desktop_channel.serve(answer)
+for line in sys.stdin:
+    with desktop_channel.lock:
+        desktop_channel.emit(answer(json.loads(line)))

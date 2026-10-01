@@ -1,7 +1,6 @@
 /target/
 /artifacts/
 /dist/
-/packages/pi-desktop-backend/dist/
 /.jj/
 .DS_Store
 __pycache__/

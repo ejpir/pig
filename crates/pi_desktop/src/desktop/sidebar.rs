@@ -27,6 +27,8 @@ pub struct SidebarView {
     pub search: Entity<TextInput>,
     expanded_projects: HashSet<PathBuf>,
     unabridged_projects: HashSet<PathBuf>,
+    active_expanded: bool,
+    projects_expanded: bool,
     scroll: ScrollHandle,
     _subscriptions: Vec<gpui::Subscription>,
     #[cfg(test)]
@@ -57,6 +59,8 @@ impl SidebarView {
             search,
             expanded_projects,
             unabridged_projects: HashSet::new(),
+            active_expanded: true,
+            projects_expanded: true,
             scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
             #[cfg(test)]
@@ -144,7 +148,31 @@ impl SidebarView {
                     .pr(px(8.))
                     .mt(px(5.))
                     .mb(px(8.))
-                    .child(label("ACTIVE", theme))
+                    .child(
+                        h_flex()
+                            .id("sidebar-active-toggle")
+                            .debug_selector(|| "sidebar-active-toggle".into())
+                            .role(Role::Button)
+                            .aria_expanded(self.active_expanded)
+                            .gap(px(5.))
+                            .cursor_pointer()
+                            .child(
+                                icon(
+                                    if self.active_expanded {
+                                        "chevron_down"
+                                    } else {
+                                        "chevron_right"
+                                    },
+                                    theme.faint,
+                                )
+                                .size(px(10.)),
+                            )
+                            .child(label("ACTIVE", theme))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_expanded = !this.active_expanded;
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         div()
                             .font_family(MONO)
@@ -153,8 +181,10 @@ impl SidebarView {
                             .child(active.len().to_string()),
                     ),
             );
-        for (index, open) in active {
-            list = list.child(self.active_row(*index, open, cx, theme));
+        if self.active_expanded || !query.is_empty() {
+            for (index, open) in active {
+                list = list.child(self.active_row(*index, open, cx, theme));
+            }
         }
         list = list.child(
             h_flex()
@@ -164,7 +194,31 @@ impl SidebarView {
                 .pr(px(4.))
                 .mt(px(12.))
                 .mb(px(8.))
-                .child(label("PROJECTS", theme))
+                .child(
+                    h_flex()
+                        .id("sidebar-projects-toggle")
+                        .debug_selector(|| "sidebar-projects-toggle".into())
+                        .role(Role::Button)
+                        .aria_expanded(self.projects_expanded)
+                        .gap(px(5.))
+                        .cursor_pointer()
+                        .child(
+                            icon(
+                                if self.projects_expanded {
+                                    "chevron_down"
+                                } else {
+                                    "chevron_right"
+                                },
+                                theme.faint,
+                            )
+                            .size(px(10.)),
+                        )
+                        .child(label("PROJECTS", theme))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.projects_expanded = !this.projects_expanded;
+                            cx.notify();
+                        })),
+                )
                 .child(
                     h_flex()
                         .id("sidebar-open-folder")
@@ -182,84 +236,86 @@ impl SidebarView {
                         })),
                 ),
         );
-        for (index, project) in workspace.projects.iter().cloned().enumerate() {
-            let rows = self.project_rows(&project, &saved, &query, cx);
-            if !query.is_empty() && rows.is_empty() {
-                continue;
+        if self.projects_expanded || !query.is_empty() {
+            for (index, project) in workspace.projects.iter().cloned().enumerate() {
+                let rows = self.project_rows(&project, &saved, &query, cx);
+                if !query.is_empty() && rows.is_empty() {
+                    continue;
+                }
+                let expanded = !query.is_empty() || self.expanded_projects.contains(&project);
+                let running = workspace
+                    .summaries
+                    .values()
+                    .any(|summary| summary.cwd == project && summary.busy);
+                list = list.child(self.project_row(
+                    index,
+                    &project,
+                    rows.len(),
+                    running,
+                    expanded,
+                    cx,
+                    theme,
+                ));
+                if !expanded {
+                    continue;
+                }
+                let unabridged = !query.is_empty() || self.unabridged_projects.contains(&project);
+                let shown = if unabridged {
+                    rows.len()
+                } else {
+                    rows.len().min(PROJECT_PREVIEW)
+                };
+                for row in &rows[..shown] {
+                    list = list.child(self.session_row(row, now, cx, theme));
+                }
+                if query.is_empty() && rows.len() > PROJECT_PREVIEW {
+                    list = list.child(
+                        div()
+                            .id(("show-more", index))
+                            .debug_selector(move || format!("show-more-{index}"))
+                            .role(Role::Button)
+                            .flex_shrink_0()
+                            .h(px(26.))
+                            .pl(px(56.))
+                            .pt(px(4.))
+                            .text_size(px(11.))
+                            .text_color(theme.faint)
+                            .cursor_pointer()
+                            .hover(move |row| row.text_color(theme.muted))
+                            .child(if unabridged {
+                                "Show fewer".to_owned()
+                            } else {
+                                format!("Show {} more", rows.len() - PROJECT_PREVIEW)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.unabridged_projects.remove(&project) {
+                                    this.unabridged_projects.insert(project.clone());
+                                }
+                                cx.notify();
+                            })),
+                    );
+                }
             }
-            let expanded = !query.is_empty() || self.expanded_projects.contains(&project);
-            let running = workspace
-                .summaries
-                .values()
-                .any(|summary| summary.cwd == project && summary.busy);
-            list = list.child(self.project_row(
-                index,
-                &project,
-                rows.len(),
-                running,
-                expanded,
-                cx,
-                theme,
-            ));
-            if !expanded {
-                continue;
-            }
-            let unabridged = !query.is_empty() || self.unabridged_projects.contains(&project);
-            let shown = if unabridged {
-                rows.len()
-            } else {
-                rows.len().min(PROJECT_PREVIEW)
-            };
-            for row in &rows[..shown] {
-                list = list.child(self.session_row(row, now, cx, theme));
-            }
-            if query.is_empty() && rows.len() > PROJECT_PREVIEW {
-                list = list.child(
-                    div()
-                        .id(("show-more", index))
-                        .debug_selector(move || format!("show-more-{index}"))
-                        .role(Role::Button)
-                        .flex_shrink_0()
-                        .h(px(26.))
-                        .pl(px(56.))
-                        .pt(px(4.))
-                        .text_size(px(11.))
-                        .text_color(theme.faint)
-                        .cursor_pointer()
-                        .hover(move |row| row.text_color(theme.muted))
-                        .child(if unabridged {
-                            "Show fewer".to_owned()
-                        } else {
-                            format!("Show {} more", rows.len() - PROJECT_PREVIEW)
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.unabridged_projects.remove(&project) {
-                                this.unabridged_projects.insert(project.clone());
-                            }
-                            cx.notify();
-                        })),
-                );
-            }
+            list = list.child(
+                h_flex()
+                    .id("open-folder")
+                    .role(Role::Button)
+                    .flex_shrink_0()
+                    .h(px(28.))
+                    .pl(px(4.))
+                    .rounded(px(5.))
+                    .text_size(px(12.))
+                    .text_color(theme.muted)
+                    .cursor_pointer()
+                    .hover(move |row| row.bg(theme.hover))
+                    .child(icon("plus", theme.faint).size(px(12.)))
+                    .child(div().ml(px(24.)).child("Open Folder…"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace
+                            .update(cx, |workspace, cx| workspace.open_folder(cx))
+                    })),
+            );
         }
-        list = list.child(
-            h_flex()
-                .id("open-folder")
-                .role(Role::Button)
-                .flex_shrink_0()
-                .h(px(28.))
-                .pl(px(4.))
-                .rounded(px(5.))
-                .text_size(px(12.))
-                .text_color(theme.muted)
-                .cursor_pointer()
-                .hover(move |row| row.bg(theme.hover))
-                .child(icon("plus", theme.faint).size(px(12.)))
-                .child(div().ml(px(24.)).child("Open Folder…"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.workspace
-                        .update(cx, |workspace, cx| workspace.open_folder(cx))
-                })),
-        );
         // Rows run to the sidebar's edge, so the scrollbar gets a gutter instead of
         // covering their counts and ages.
         let list = div().flex_1().min_h_0().child(list).custom_scrollbars(
@@ -317,17 +373,7 @@ impl SidebarView {
                         .rounded(px(5.))
                         .text_size(px(13.))
                         .text_color(color)
-                        .when(selected, |row| {
-                            row.bg(theme.selected).child(
-                                div()
-                                    .absolute()
-                                    .left(px(-10.))
-                                    .top(px(6.))
-                                    .w(px(2.))
-                                    .h(px(16.))
-                                    .bg(theme.accent),
-                            )
-                        })
+                        .when(selected, |row| row.bg(theme.selected))
                         .when_some(view, |row, view| {
                             row.cursor_pointer()
                                 .hover(move |row| row.bg(theme.hover))
@@ -568,7 +614,17 @@ impl SidebarView {
             .h(px(28.))
             .pl(px(36.))
             .pr(px(8.))
-            .child(icon("thread", if selected { theme.accent } else { theme.faint }).size(px(13.)))
+            .child(
+                icon(
+                    "thread",
+                    if selected {
+                        theme.secondary
+                    } else {
+                        theme.faint
+                    },
+                )
+                .size(px(13.)),
+            )
             .child(row_title(&title, selected, theme).ml(px(7.)))
             .child(
                 div()
@@ -627,18 +683,7 @@ fn selectable_row(id: impl Into<ElementId>, selected: bool, theme: Theme) -> Sta
         .rounded(px(5.))
         .cursor_pointer()
         .hover(move |row| row.bg(theme.raised))
-        .when(selected, |row| {
-            row.bg(theme.selected).child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(6.))
-                    .bottom(px(6.))
-                    .w(px(2.))
-                    .rounded(px(1.))
-                    .bg(theme.accent),
-            )
-        })
+        .when(selected, |row| row.bg(theme.selected))
 }
 
 fn row_title(title: &str, selected: bool, theme: Theme) -> Div {

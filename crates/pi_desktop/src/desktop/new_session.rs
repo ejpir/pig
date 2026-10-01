@@ -275,12 +275,6 @@ impl NewSessionForm {
             .px(px(10.))
             .gap(px(9.))
             .rounded(px(6.))
-            .border_1()
-            .border_color(if selected {
-                theme.focus
-            } else {
-                gpui::transparent_black()
-            })
             .when(selected, |row| row.bg(theme.selected))
             .when(!self.creating, |row| {
                 row.cursor_pointer().hover(move |row| row.bg(theme.hover))
@@ -292,14 +286,10 @@ impl NewSessionForm {
                     .justify_center()
                     .rounded_full()
                     .border_1()
-                    .border_color(if selected {
-                        theme.accent
-                    } else {
-                        theme.line_strong
-                    })
+                    .border_color(theme.line_strong)
                     .bg(theme.canvas)
                     .when(selected, |radio| {
-                        radio.child(div().size(px(7.)).rounded_full().bg(theme.accent))
+                        radio.child(div().size(px(7.)).rounded_full().bg(theme.text))
                     }),
             )
             .child(
@@ -700,16 +690,17 @@ impl Render for NewSessionForm {
                 .on_action(cx.listener(|_, _: &super::ExpandMessageEditor, _, cx| cx.stop_propagation()))
                 .child(h_flex().px(px(24.)).pt(px(20.)).pb(px(16.)).justify_between().flex_shrink_0()
                     .child(div().font_family(SERIF).italic().text_size(px(22.)).line_height(px(28.)).child("New session"))
-                    .child(icon_button("close-new-session", "close", "Cancel new session", theme).size(px(20.))
-                        .tooltip(ui::Tooltip::text("Cancel · Escape")).on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))))
+                    .child(h_flex().gap(px(6.))
+                        .child(icon_button("new-session-folder", "plus", "Open folder", theme).size(px(20.))
+                            .tooltip(ui::Tooltip::text("Add a project folder"))
+                            .on_click(cx.listener(|this, _, _, cx| { if !this.creating { this.pick(cx); } })))
+                        .child(icon_button("close-new-session", "close", "Cancel new session", theme).size(px(20.))
+                            .tooltip(ui::Tooltip::text("Cancel · Escape")).on_click(cx.listener(|this, _, _, cx| this.cancel(cx))))))
                 .child(v_flex().id("new-session-content").debug_selector(|| "new-session-content".into()).px(px(24.)).pb(px(16.))
                     .min_h_0().overflow_y_scroll()
                     .child(label("PROJECT", theme).mb(px(6.)))
                     .child(v_flex().id("new-session-projects").max_h(px(126.)).overflow_y_scroll().gap(px(4.)).flex_shrink_0()
                         .children(projects.iter().enumerate().map(|(index, path)| self.project_row(index, path, cx, theme))))
-                    .child(h_flex().id("new-session-folder").role(gpui::Role::Button).aria_label("Open Folder").h(px(28.)).gap(px(8.)).px(px(12.)).mt(px(2.)).cursor_pointer()
-                        .text_size(px(12.)).text_color(theme.muted).child(icon("plus", theme.faint).size(px(12.))).child("Open Folder…")
-                        .on_click(cx.listener(|this, _, _, cx| { if !this.creating { this.pick(cx); } })))
                     .child(label("RUN IN", theme).mt(px(8.)).mb(px(4.)))
                     .child(h_flex().child(segments([(false, "Project folder"), (true, "New git worktree")].into_iter().map(|(worktree, title)| {
                         segment(("new-session-location", worktree as usize), title, self.worktree == worktree, theme).h(px(20.))

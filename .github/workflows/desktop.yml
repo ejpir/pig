@@ -39,14 +39,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22.19.0'
-          cache: npm
-          cache-dependency-path: pi-desktop/packages/pi-desktop-backend/npm-shrinkwrap.json
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
       - name: Linux dependencies
         run: |
           sudo apt-get update
@@ -69,19 +61,13 @@ jobs:
         run: |
           cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
           cargo clippy --locked -p pi_lsp_bridge --features fake-lsp --all-targets --no-deps -- -D warnings
-      - name: Backend contracts (no provider calls)
+      # The pi that release builds embed: the desktop extension against it (no
+      # provider calls), and the desktop with it embedded.
+      - name: Built-in pi
         run: |
-          npm ci --prefix packages/pi-desktop-backend
-          npm run check --prefix packages/pi-desktop-backend
-          npm test --prefix packages/pi-desktop-backend
-      # The standalone build that release builds embed: the same suite against
-      # the compiled executable, and the desktop with it embedded.
-      - name: Built-in backend
-        run: |
-          backend="$RUNNER_TEMP/backend"
-          node packages/pi-desktop-backend/scripts/build-binary.mjs --platform linux-x64 --out "$backend"
-          PI_DESKTOP_BACKEND_BINARY="$backend/linux-x64/pi-desktop-backend" npm test --prefix packages/pi-desktop-backend
-          PI_DESKTOP_BACKEND_ARCHIVE="$backend/pi-desktop-backend-linux-x64.tar.zst" \
+          python scripts/fetch_pi.py --platform linux-x64 --out "$RUNNER_TEMP/pi"
+          PI_DESKTOP_TEST_PI="$RUNNER_TEMP/pi/linux-x64/pi" cargo test --locked -p pi_core --test transport -- --ignored
+          PI_DESKTOP_BACKEND_ARCHIVE="$RUNNER_TEMP/pi/pi-linux-x64.tar.gz" \
             cargo clippy --locked -p pi-desktop --features bundled-backend --all-targets --no-deps -- -D warnings
       - name: Packaging and release-policy tests
         run: python -m unittest discover -s scripts -p 'test_packaging.py' -v
@@ -108,10 +94,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64, os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, binary: pi-desktop, backend: linux-x64 }
-          - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, binary: pi-desktop, backend: linux-arm64 }
-          - { name: macos-arm64, os: macos-14, target: aarch64-apple-darwin, binary: pi-desktop, backend: darwin-arm64 }
-          - { name: windows-amd64, os: windows-2022, target: x86_64-pc-windows-msvc, binary: pi-desktop.exe, backend: windows-x64 }
+          - { name: linux-amd64, os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, binary: pi-desktop, pi: linux-x64 }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, binary: pi-desktop, pi: linux-arm64 }
+          - { name: macos-arm64, os: macos-14, target: aarch64-apple-darwin, binary: pi-desktop, pi: darwin-arm64 }
+          - { name: windows-amd64, os: windows-2022, target: x86_64-pc-windows-msvc, binary: pi-desktop.exe, pi: windows-x64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -135,14 +121,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # npm collects the licenses of the npm packages compiled into pi.
       - uses: actions/setup-node@v4
         with:
           node-version: '22.19.0'
-          cache: npm
-          cache-dependency-path: pi-desktop/packages/pi-desktop-backend/npm-shrinkwrap.json
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
       - name: Validate version tag
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -170,18 +152,17 @@ jobs:
         with:
           workspaces: pi-desktop
           key: release-${{ matrix.target }}
-      # Built into the executable (the bundled-backend feature): see docs/architecture.md.
-      - name: Built-in backend
+      # pi's release binary, built into the executable (the bundled-backend
+      # feature): see docs/architecture.md.
+      - name: Built-in pi
         shell: bash
-        run: |
-          npm ci --prefix packages/pi-desktop-backend
-          node packages/pi-desktop-backend/scripts/build-binary.mjs --platform ${{ matrix.backend }} --out "$RUNNER_TEMP/backend"
+        run: python scripts/fetch_pi.py --platform ${{ matrix.pi }} --out "$RUNNER_TEMP/pi" --notices
       - name: Native release build
         env:
-          PI_DESKTOP_BACKEND_ARCHIVE: ${{ runner.temp }}/backend/pi-desktop-backend-${{ matrix.backend }}.tar.zst
+          PI_DESKTOP_BACKEND_ARCHIVE: ${{ runner.temp }}/pi/pi-${{ matrix.pi }}.tar.gz
         run: cargo build --locked --release -p pi-desktop --target ${{ matrix.target }} --features bundled-backend
       - name: Package only distributable files
-        run: python scripts/package_desktop.py --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.binary }} --notices ${{ runner.temp }}/backend/pi-desktop-backend-notices.txt
+        run: python scripts/package_desktop.py --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.binary }} --notices ${{ runner.temp }}/pi/pi-notices.txt
       - uses: actions/upload-artifact@v4
         with:
           name: pi-desktop-${{ matrix.name }}

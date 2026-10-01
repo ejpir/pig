@@ -278,18 +278,6 @@ impl TreeView {
                     .rounded(px(5.))
                     .when(selected, |d| d.bg(theme.selected)),
             )
-            .when(selected, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .left(px(2.))
-                        .top(px(7.))
-                        .w(px(2.))
-                        .h(px(22.))
-                        .rounded(px(1.))
-                        .bg(theme.accent),
-                )
-            })
             .child(self.graph.element(index, theme))
             .child(
                 div()
@@ -421,7 +409,7 @@ impl TreeView {
             .child(pair("Output",e["message"]["usage"]["output"].as_u64().map(|n|format!("{} tokens",count(n))).unwrap_or_else(||"—".into()),theme))
             .child(pair("Tool calls",tools.to_string(),theme)).child(divider(theme).mt(px(10.)))
             .child(section("MESSAGE","",theme).mt(px(12.)))
-            .child(div().id("tree-message-preview").mt(px(6.)).max_h(px(160.)).overflow_y_scroll().px(px(12.)).py(px(8.)).rounded(px(6.)).border_1().border_color(theme.line).relative().bg(theme.canvas).child(div().absolute().left_0().top(px(6.)).bottom(px(6.)).w(px(2.)).bg(theme.accent)).child(self.document.clone()))
+            .child(div().id("tree-message-preview").mt(px(6.)).max_h(px(160.)).overflow_y_scroll().px(px(12.)).py(px(8.)).rounded(px(6.)).border_1().border_color(theme.line).bg(theme.canvas).child(self.document.clone()))
             .child(h_flex().mt(px(13.)).h(px(20.)).justify_between().child(label("BRANCH SUMMARY",theme))
                 .child(div().id("view-branch-summary").text_size(px(10.)).font_family(MONO).text_color(if has_summary{theme.accent}else{theme.faint}).when(has_summary,|d|d.cursor_pointer()).child("[ VIEW ]").on_click(cx.listener(move|this,_,_,cx|{if has_summary{this.summary_open = !this.summary_open;cx.notify();}}))))
             .child(note(summary_note,theme).mt(px(8.)).line_height(px(18.)))

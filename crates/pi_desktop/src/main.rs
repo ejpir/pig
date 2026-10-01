@@ -46,7 +46,7 @@ impl Options {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "pi-desktop [--demo] [--light] [--project DIR]\n\nNormal mode reopens the sessions open at the last quit, or starts a session in DIR.\nSessions run the backend built into release builds, else pi --mode rpc from PATH.\nSettings → General chooses another backend; environment variables win over it.\nSet PI_DESKTOP_RPC_ENTRY to the absolute path to ../pi/packages/coding-agent/dist/cli.js,\nor PI_DESKTOP_PI to a pi executable. --demo is offline and never starts pi."
+                        "pi-desktop [--demo] [--light] [--project DIR]\n\nNormal mode reopens the sessions open at the last quit, or starts a session in DIR.\nSessions run the pi built into release builds, else pi from PATH, with Pi Desktop's extension.\nFor development, PI_DESKTOP_PI names a pi executable, or PI_DESKTOP_RPC_ENTRY a JavaScript\nentry such as ../pi/packages/coding-agent/dist/cli.js (run with PI_DESKTOP_NODE or node).\n--demo is offline and never starts pi."
                     );
                     std::process::exit(0);
                 }
@@ -100,7 +100,9 @@ fn main() -> Result<()> {
                     titlebar: Some(TitlebarOptions {
                         title: Some("pi desktop".into()),
                         appears_transparent: cfg!(target_os = "macos"),
-                        traffic_light_position: Some(gpui::point(px(16.), px(20.))),
+                        // The compact header draws smaller controls; keep AppKit's
+                        // standard buttons off-canvas while preserving native window behavior.
+                        traffic_light_position: Some(gpui::point(px(-100.), px(10.))),
                     }),
                     app_id: Some("dev.pi.desktop".into()),
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

@@ -7,8 +7,8 @@ Validation is performed on Linux aarch64 using isolated projects and configurati
 | Area | Evidence | Scope |
 | --- | --- | --- |
 | Rust | Workspace regression tests; separate fake-LSP tests; warnings-denied Clippy | Session lifecycle, transport, rendering isolation, input, editor and jj behavior |
-| Backend | Contract suite against Node and the standalone Bun executable | Bootstrap, history, settings, shell policy, extension dialogs, trust and shutdown |
-| Embedded backend | Desktop unpack tests and native Xvfb launch without Node/npm/Pi on PATH | Cache extraction and session startup using the embedded executable |
+| Desktop extension | Channel unit tests; pi_core's transport test and a native Xvfb capture against Pi's 0.99.1 release binary | Routing, `hello` and reconnection, metadata commands, active tools, settings, sessions, trust, tree navigation, reload and fork into a folder |
+| Embedded pi | Desktop unpack tests; `fetch_pi.py` digest, layout and version checks | Cache extraction of the embedded archive |
 | Packaging | Offline archive and release-policy tests | Binary architecture, staging, notices, exact target matrix, checksums and tag validation |
 | Native UI | Capture scripts driving real GPUI windows and the X11 clipboard | Layout, selection/copy, scrolling, dialogs, navigation and file operations |
 
@@ -16,7 +16,7 @@ These checks were recorded in separate runs, not one combined release qualificat
 
 ## Reproduce the checks
 
-Install the [native prerequisites](../README.md#native-prerequisites-and-packaging) and use the sibling Zed checkout pinned in [the workflow](../.github/workflows/desktop.yml). CI pins Rust 1.98.1, Python 3.12, Node 22.19.0 and Bun 1.4.2.
+Install the [native prerequisites](../README.md#native-prerequisites-and-packaging) and use the sibling Zed checkout pinned in [the workflow](../.github/workflows/desktop.yml). CI pins Rust 1.98.1, Python 3.12 and Node 22.19.0 (npm collects Pi's license notices when packaging).
 
 From the repository root:
 
@@ -36,21 +36,17 @@ cargo test --locked -p pi_lsp_bridge --features fake-lsp
 cargo clippy --locked -p pi_lsp_bridge --features fake-lsp \
   --all-targets --no-deps -- -D warnings
 
-npm ci --prefix packages/pi-desktop-backend
-npm run check --prefix packages/pi-desktop-backend
-npm test --prefix packages/pi-desktop-backend
 python3 -m unittest discover -s scripts -p 'test_packaging.py' -v
 ```
 
-To test the embedded backend on Linux arm64, with Bun on PATH:
+To test the desktop extension against the embedded pi on Linux arm64 (no provider calls):
 
 ```sh
-node packages/pi-desktop-backend/scripts/build-binary.mjs \
-  --platform linux-arm64 --out "$PWD/artifacts/backend"
-export PI_DESKTOP_BACKEND_BINARY="$PWD/artifacts/backend/linux-arm64/pi-desktop-backend"
-npm test --prefix packages/pi-desktop-backend
+python3 scripts/fetch_pi.py --platform linux-arm64 --out "$PWD/artifacts/pi"
+PI_DESKTOP_TEST_PI="$PWD/artifacts/pi/linux-arm64/pi" \
+  cargo test --locked -p pi_core --test transport -- --ignored
 
-export PI_DESKTOP_BACKEND_ARCHIVE="$PWD/artifacts/backend/pi-desktop-backend-linux-arm64.tar.zst"
+export PI_DESKTOP_BACKEND_ARCHIVE="$PWD/artifacts/pi/pi-linux-arm64.tar.gz"
 cargo test --locked -p pi-desktop --features bundled-backend
 cargo clippy --locked -p pi-desktop --features bundled-backend \
   --all-targets --no-deps -- -D warnings
@@ -81,9 +77,9 @@ Run additional scripts with the same Xvfb invocation:
 | `capture-projects-shell.sh` | Chooser, model picker, resources, directory references and correlated dialogs |
 | `capture-status-tools.sh` | Session-local TPS display and names-only tools with metadata tooltips |
 | `capture-process-scrollbar.sh` | Demo overflow, thumb/track input and fixed popup header/footer |
-| `capture-backend.sh` | Desktop interoperability with the published SDK and metadata-only command checks |
+| `capture-backend.sh` | Desktop interoperability with Pi's release binary and the desktop extension; metadata-only command checks |
 
-Capture scripts isolate HOME, XDG directories, agent configuration and project files. Historical tools are displayed, not replayed. The shell probe executes a harmless local fixture command; the diagnostic probe sends a prompt to a fake backend that rejects model execution. The process-scrollbar probe starts no Pi subprocesses. Pixel/OCR comparisons check specific geometry and content, not complete pixel equality or hardware frame rate.
+Capture scripts isolate HOME, XDG directories, agent configuration and project files. Scripts with real pi use `PI_DESKTOP_TEST_PI`, or fetch Pi's release binary into `artifacts/pi`, and log both stdio and the desktop channel through `scripts/pi-proxy.mjs`. Scripts with fake peers answer the channel through `fixtures/desktop_channel.py`. Historical tools are displayed, not replayed. The shell probe executes a harmless local fixture command; the diagnostic probe sends a prompt to a fake backend that rejects model execution. The process-scrollbar probe starts no Pi subprocesses. Pixel/OCR comparisons check specific geometry and content, not complete pixel equality or hardware frame rate.
 
 Logs, screenshots and protocol proofs are local, ignored outputs under `artifacts/`. Diagnostics apply best-effort redaction only; review them before sharing.
 
@@ -102,7 +98,7 @@ Pushes, pull requests and manual runs upload package artifacts. Version tags pub
 
 ## Unverified behavior
 
-- Hosted release builds and publication, native macOS/Windows UI and embedded-backend execution.
+- Hosted release builds and publication, native macOS/Windows UI and embedded-pi execution; the channel's Windows TCP path is tested on Linux only.
 - Developer ID signing/notarization and Windows signing. Current macOS packages are ad-hoc signed; Windows packages are unsigned.
 - Live provider streaming, real authentication, remote package operations and sharing uploads. Upload tests use mocks and synthetic conversations.
 - Broad production language-server compatibility, native add-ons under Bun and large-repository snapshot costs.

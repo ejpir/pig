@@ -116,8 +116,12 @@ impl CatalogView {
                     .gap(px(4.))
                     .rounded(px(7.))
                     .border_1()
-                    .border_color(if selected { theme.accent } else { theme.line })
-                    .bg(theme.panel)
+                    .border_color(theme.line)
+                    .bg(if selected {
+                        theme.selected
+                    } else {
+                        theme.panel
+                    })
                     .cursor_pointer()
                     .tooltip(ui::Tooltip::text(format!("{name} · {status}")))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -194,12 +198,6 @@ impl CatalogView {
                 theme.hover.opacity(0.4)
             } else {
                 theme.canvas
-            })
-            .border_l_2()
-            .border_color(if selected {
-                theme.accent
-            } else {
-                gpui::transparent_black()
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected = Some(id.clone());

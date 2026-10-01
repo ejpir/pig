@@ -8,8 +8,8 @@ license.workspace = true
 # Compile Metal shaders with macOS's runtime; no standalone `xcrun metal` required.
 default = ["runtime-shaders"]
 runtime-shaders = ["gpui_platform/runtime_shaders"]
-# Embeds the standalone backend that PI_DESKTOP_BACKEND_ARCHIVE names (from
-# packages/pi-desktop-backend/scripts/build-binary.mjs). Release packaging turns it on.
+# Embeds pi's release binary from the archive PI_DESKTOP_BACKEND_ARCHIVE names (from
+# scripts/fetch_pi.py). Release packaging turns it on.
 bundled-backend = []
 
 [dependencies]
@@ -40,9 +40,9 @@ unicode-segmentation = "1.12"
 util.workspace = true
 log = "0.4"
 env_logger = "0.11"
-# Unpacking the bundled backend.
+# Unpacking the bundled pi (scripts/fetch_pi.py writes a gzip-compressed tar).
+flate2 = "1.1"
 tar = { version = "0.4.46", default-features = false }
-zstd = "0.13"
 
 # The Dock icon for unbundled runs; the same bindings gpui_macos uses.
 [target.'cfg(target_os = "macos")'.dependencies]

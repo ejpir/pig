@@ -7,13 +7,12 @@ Pi Desktop is a native GPUI application. It embeds Zed's editor, project, Markdo
 | Component | Responsibility |
 | --- | --- |
 | `pi_desktop` | Window, session controllers/views, navigation, preferences and native dialogs |
-| `pi_core` | GPUI-independent session reducer, typed RPC commands, transport and process ownership |
+| `pi_core` | GPUI-independent session reducer, typed commands and their routing, transport, desktop channel, desktop extension and process ownership |
 | `pi_editor` | Shared Zed projects/buffers, file operations and editor integration |
-| `pi_lsp_bridge` | Local extension bridge for language-server feedback and desktop services |
+| `pi_lsp_bridge` | Socket answering the desktop extension's language-server and jj requests |
 | `pi_jj` | File-history operations through pinned `jj-lib`; no installed jj CLI required |
 | `pi_terminal` | PTY shells and a standalone view over Zed's terminal emulator |
 | `pi_settings` | Settings schemas, validation and atomic JSON file updates |
-| `packages/pi-desktop-backend` | JSONL adapter over the published Pi SDK; Node or standalone Bun execution |
 
 ```text
 Desktop
@@ -30,13 +29,13 @@ Desktop
 
 Each open session retains its own controller, draft, attachments, queues, disclosures, scroll state, editor tabs and terminals. Selecting another session does not repurpose its process or recover text into another composer. Views read the controller's state and issue typed commands; they cannot mutate the core model directly. Subscriptions and background tasks use weak receivers to avoid ownership cycles.
 
-Project selection is independent of session selection. Selecting a project does not start a backend, and closing its last session does not remove the project.
+Project selection is independent of session selection. Selecting a project does not start pi, and closing its last session does not remove the project.
 
 ## RPC and session lifecycle
 
-Each session owns one backend subprocess. `pi_core` handles strict LF-framed UTF-8 JSONL, bounded queues, request correlation and deadlines. Records are limited to 16 MiB; stderr is diagnostic output, never protocol input. Responses must match both request ID and command. A timeout leaves the outcome unknown and never triggers an automatic prompt retry.
+Each session owns one pi subprocess. `pi_core` handles strict LF-framed UTF-8 JSONL, bounded queues, request correlation and deadlines. Records are limited to 16 MiB; stderr is diagnostic output, never protocol input. Responses must match both request ID and command. A timeout leaves the outcome unknown and never triggers an automatic prompt retry.
 
-Submission stays disabled until state, messages, statistics and saved-session bootstrap complete. Resume checks the requested session identity against the backend's response. Optional metadata, including backend capabilities, is not an identity gate.
+Submission stays disabled until state, messages, statistics and saved-session bootstrap complete. Resume checks the requested session identity against pi's response. Optional metadata, including the extension's versions and features, is not an identity gate.
 
 - Streaming blocks update by content index; tools are keyed by tool-call ID. History and live events use the same reducer.
 - Prompt acknowledgements report acceptance, not completion. Only `agent_settled` completes a run.
@@ -62,34 +61,53 @@ Presentation preserves original content and copy:
 
 `@` matching uses Zed's standalone `fuzzy` crate over existing owner snapshots. Background matches are cancellable and guarded by query, range and generation. Files and directories serialize as path references; directories never attach recursive contents. Other mention types serialize explicit text. Image attachments are separate prompt image blocks, with a 20 MB per-image limit.
 
-## Pi SDK backend
+## Pi and the desktop extension
 
-The adapter creates one Pi `AgentSessionRuntime` per subprocess and rebinds services and subscriptions after session replacement. The npm version and dependency graph are pinned; private Pi imports and compatibility checks are isolated in `src/compat.mjs`.
+Each session runs stock `pi --mode rpc` with the desktop extension, `crates/pi_core/extension/pi-desktop.ts`, which `pi_core` installs into the cache folder and passes with `-e`. Pi performs its own startup: stdout protection, proxy settings, trust, built-in extensions and model scope. The desktop uses no private Pi modules.
 
-Mutations and prompt preflight are serialized. Metadata reads, aborts and correlated extension-dialog replies remain responsive. Standard confirm/select requests use a bounded, session-local FIFO; timeout, abort or disconnect cancels them. Unsupported interactive requests cancel explicitly rather than inventing answers.
+Problem: Pi's RPC mode lacks part of what the desktop needs, such as custom entries, active tools, a settings snapshot, labels, a fork into another folder, session listing, sharing, trust details, auth providers and packages. The extension supplies these through Pi's public extension API and package exports.
 
-Tool inventories, resources, model capabilities and usage come from reported backend metadata. Unknown values remain distinct from empty, zero or false. Catalog views reuse existing controllers rather than starting inspection processes.
+`pi_core` routes every `Command` (`Command::route`):
 
-Sharing uses Pi's branch exporter and credential resolver. Uploads require explicit confirmation, are bounded and cancellable, and remove temporary exports. Authentication remains a terminal handoff; the desktop does not read credential files.
+| Route | Commands | Transport |
+| --- | --- | --- |
+| Pi | Commands Pi's RPC has, including `fork` without a folder and `set_model` without `persist` | stdin/stdout |
+| Extension | `get_backend_info`, `get_active_tools`, custom entries, `get_settings`, labels, `fork` into a folder, `list_sessions`, renaming another session, auth providers, trust, packages, model cycle and per-model thinking, `set_model` with `persist`, share, tree navigation, reload | desktop channel |
 
-## Built-in backend
+The desktop channel is a socket that `pi_core` owns for each pi process: a private Unix socket directory, or loopback TCP with a random token on Windows (`PI_DESKTOP_CHANNEL`, `PI_DESKTOP_CHANNEL_TOKEN`). The extension connects when a session starts and says `hello`. Pi recreates extensions whenever it replaces its session (new, resume, fork, reload), so the new instance connects again. Requests go to the newest connection. Replies are accepted from any connection, because a request sent before a reload is answered on the connection that received it. Requests sent before the first `hello` wait for it, and their deadlines still run. Replies have the shape of Pi's RPC responses, so both transports share correlation, deadlines and the session reducer. The language-server bridge (`pi_lsp_bridge`) remains a separate socket for the extension's own requests to the desktop.
 
-Release packaging compiles the adapter with Bun and embeds its executable and runtime assets as a compressed archive through the `bundled-backend` Cargo feature. Development builds without that feature remain usable with an external backend.
+Tree navigation, reload and the trust details need Pi's command context. The extension runs them as its `/pi-desktop` command, which it dispatches itself with `sendUserMessage`. Pi executes an extension command at once and never sends it to the model; the extension refuses if its command is not loaded, so the text can never become a prompt. The desktop hides this command from the user's command lists.
 
-At startup, the app extracts the archive into a build-specific cache directory through temporary staging and rename. Later launches reuse it. Extraction failure is logged and leaves the external Pi fallback available.
+Settings changes (default model with `persist`, model cycle, per-model thinking) use the extension's own Pi `SettingsManager`. Pi writes settings under its lock and rereads the file, writing back only fields it changed. Such changes apply to new sessions; the current model's thinking level also changes at once. The extension serializes mutations and answers reads at once. Pi's own RPC mode handles extension dialogs (`extension_ui_request`).
 
-Backend selection follows this precedence:
+Sharing first asks the extension to upload the current branch to Radius, as Pi's `/share` does, with the token from Pi's public model registry. Without Radius, `session_actions::share` exports Pi's HTML with RPC `export_html` and creates a private gist with the GitHub CLI. Uploads require explicit confirmation and are bounded. Session deletion moves the file to the system trash from Rust after checking its header; there is no permanent-delete fallback. Authentication remains a terminal handoff; the desktop does not read credential files.
 
-1. `PI_DESKTOP_RPC_ENTRY` or `PI_DESKTOP_PI` environment override.
-2. Settings → General → Backend.
-3. Embedded backend, when available.
-4. `pi` from PATH.
+Tool inventories, resources, model capabilities and usage come from reported metadata. Unknown values remain distinct from empty, zero or false; a failed `get_active_tools` leaves tools unreported without raising a session error. Catalog views reuse existing controllers rather than starting inspection processes.
 
-JavaScript backend paths use Node; executables run directly. `PI_DESKTOP_NODE` overrides the configured Node program. The embedded backend needs neither Node nor Pi for agent execution, but terminal login, npm packages and Node-based language servers still require their respective external tools. Native Node add-ons may be incompatible with Bun.
+Accepted consequences of stock Pi:
 
-Every backend starts with `NODE_USE_SYSTEM_CA=1` unless the environment sets it, so Bun and Node trust the system's certificates as native apps do. Without it, a company proxy that re-signs HTTPS makes every model request fail with "Connection error." (seen on macOS with the built-in backend).
+- A broken user extension stops the session from starting, as in every Pi mode; the desktop shows Pi's stderr diagnostic.
+- Resources lists only extensions that register tools or commands. Pi exposes no list of loaded extensions.
+- The saved model cycle, and per-model thinking for models other than the current one, apply to new sessions.
+- Radius sharing resolves its token without Pi's five-minute validity margin.
 
-Packages include application, Pi, Bun and dependency notices. Current macOS packages are ad-hoc signed, not Developer ID signed or notarized; Windows packages are unsigned. Native release targets are Linux amd64/arm64, macOS arm64 and Windows amd64.
+## Built-in pi
+
+Release builds embed Pi's official release binary for one pinned version (`PI_VERSION` in `crates/pi_core/src/extension.rs`, which the extension's version must match). `scripts/fetch_pi.py` downloads the platform's release archive, checks it against `packaging/pi-release.sha256`, which is committed and reviewed with each version change, and repacks pi's executable and the files beside it as a gzip-compressed tar for the `bundled-backend` Cargo feature (`PI_DESKTOP_BACKEND_ARCHIVE`). On macOS, `PI_DESKTOP_CODESIGN_IDENTITY` re-signs pi for the hardened runtime with `packaging/macos/backend.entitlements`. Development builds without the feature run `pi` from PATH.
+
+At startup, the app extracts the archive into a build-specific cache directory through temporary staging and rename. Later launches reuse it. Extraction failure is logged and leaves `pi` from PATH as the fallback.
+
+Program selection follows this precedence:
+
+1. For development, `PI_DESKTOP_PI` (an executable) or `PI_DESKTOP_RPC_ENTRY` (a JavaScript entry run with `PI_DESKTOP_NODE` or `node`, such as `scripts/pi-rpc.mjs` for a sibling `../pi` checkout).
+2. The embedded pi, when available.
+3. `pi` from PATH.
+
+Settings shows which pi and extension versions answer, and notes a pi other than the pinned version. The embedded pi needs neither Node nor an installed pi for agent execution, but terminal login, npm packages and Node-based language servers still require their respective external tools. Native Node add-ons may be incompatible with Bun, which Pi's release binary is built with.
+
+Every pi starts with `NODE_USE_SYSTEM_CA=1` unless the environment sets it, so it trusts the system's certificates as native apps do. Without it, a company proxy that re-signs HTTPS makes every model request fail with "Connection error." (seen on macOS with the built-in backend).
+
+Packages include application, Pi, Bun and npm dependency notices (`fetch_pi.py --notices` installs Pi's release lockfile with `npm ci --ignore-scripts` and collects the licenses). Current macOS packages are ad-hoc signed, not Developer ID signed or notarized; Windows packages are unsigned. Native release targets are Linux amd64/arm64, macOS arm64 and Windows amd64.
 
 ## Editor, files and language services
 
@@ -109,11 +127,11 @@ Conversation navigation and filesystem history are independent. Tree follows Pi'
 
 Optional jj integration snapshots before and after a run. A run that changes files becomes a recorded turn; a read-only run creates no change. Changes displays immutable turn diffs, not a live Git diff. Successful tool-reported edits without a linked snapshot remain explicitly incomplete and cannot authorize rollback.
 
-The SDK backend persists exact turn links as `pi-desktop-turn` custom entries outside model context. Reopening resolves their change/commit identities; it never infers associations from prompts, paths or transcript positions. Backends without these commands retain associations only while the session is open.
+The desktop extension persists exact turn links as `pi-desktop-turn` custom entries outside model context. Reopening resolves their change/commit identities; it never infers associations from prompts, paths or transcript positions. Without the extension, associations last only while the session is open.
 
 Undo, redo, file restoration and operation restoration run between agent runs and reject unsafe shared-buffer or repository states. Conflict-aware undo requires an explicit choice; a proposed fix remains a draft. Command snapshots are session-local and may cover a whole parallel tool batch. File snapshots cannot distinguish agent changes from concurrent edits in the same workspace.
 
-Parallel-session workspaces, bringing turns into another workspace and forks with historical files are explicit operations. Forking with a different directory requires backend support. jj initialization is opt-in and colocated with Git; operations load current repository state and import/export Git refs.
+Parallel-session workspaces, bringing turns into another workspace and forks with historical files are explicit operations. Forking with a different directory uses the desktop extension, which writes the new session file. jj initialization is opt-in and colocated with Git; operations load current repository state and import/export Git refs.
 
 ## Settings and persistence
 
@@ -126,7 +144,7 @@ Parallel-session workspaces, bringing turns into another workspace and forks wit
 
 Desktop settings resolve project override → user value → default. Invalid values are ignored; malformed files are shown as errors and never overwritten. Background writers serialize updates and write the newest pending snapshot atomically. Unknown JSON keys are preserved.
 
-Theme and editor preferences apply immediately; backend choices apply to new sessions, and shell choices to new terminals. Pi settings do not silently reconfigure running sessions. Saved trust and effective process trust are shown separately; saving trust is not a reload.
+Theme and editor preferences apply immediately; shell choices apply to new terminals. Pi settings do not silently reconfigure running sessions. Saved trust and effective process trust are shown separately; saving trust is not a reload.
 
 ## Safety and limitations
 

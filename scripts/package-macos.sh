@@ -5,14 +5,13 @@ cd "$(dirname "$0")/.."
 target="${PI_DESKTOP_TARGET:-aarch64-apple-darwin}"
 [[ "$target" == aarch64-apple-darwin ]] || { echo "Unsupported macOS release target: $target" >&2; exit 1; }
 export MACOSX_DEPLOYMENT_TARGET=12.0
-# The built-in backend (needs Node.js 22.19+ and Bun): see docs/architecture.md.
-# PI_DESKTOP_CODESIGN_IDENTITY signs it for the hardened runtime before it is embedded.
-backend_out="$PWD/artifacts/backend"
-npm ci --prefix packages/pi-desktop-backend
-node packages/pi-desktop-backend/scripts/build-binary.mjs --platform darwin-arm64 --out "$backend_out"
-PI_DESKTOP_BACKEND_ARCHIVE="$backend_out/pi-desktop-backend-darwin-arm64.tar.zst" \
+# The built-in pi, pi's own release binary (notices need npm): see docs/architecture.md.
+# PI_DESKTOP_CODESIGN_IDENTITY re-signs it for the hardened runtime before it is embedded.
+pi_out="$PWD/artifacts/pi"
+python3 scripts/fetch_pi.py --platform darwin-arm64 --out "$pi_out" --notices
+PI_DESKTOP_BACKEND_ARCHIVE="$pi_out/pi-darwin-arm64.tar.gz" \
   cargo build --locked --release -p pi-desktop --target "$target" --features bundled-backend
 python3 scripts/package_desktop.py --target "$target" \
   --binary "${CARGO_TARGET_DIR:-target}/$target/release/pi-desktop" \
-  --notices "$backend_out/pi-desktop-backend-notices.txt"
+  --notices "$pi_out/pi-notices.txt"
 printf 'Packaged macOS arm64 (ad-hoc signed; not Developer ID signed or notarized).\n'

@@ -33,13 +33,15 @@ Selected SVGs copied from Zed's `assets/icons/`, including those Zed's `ui` comp
 
 ## Pi
 
-Pi runs outside the Rust UI in a subprocess. Protocol definitions were checked against the sibling checkout's `rpc-types.ts` and `docs/{rpc,rpc-commands,json,message-types,rpc-extension-ui}.md`. The fallback `scripts/pi-rpc.mjs` launches that checkout using its own source resolver.
+Pi runs outside the Rust UI in a subprocess. Protocol definitions were checked against Pi's `rpc-types.ts` and `docs/{rpc,rpc-commands,json,message-types,rpc-extension-ui}.md`. The fallback `scripts/pi-rpc.mjs` launches a sibling source checkout using its own source resolver.
 
-The optional `packages/pi-desktop-backend` adapter instead depends on the published `@earendil-works/pi-coding-agent` and `pi-ai` 0.99.1 packages (MIT), locked with tarball integrity in `npm-shrinkwrap.json`. Its command/UI/session binding contracts and headless sharing flow are adapted from Pi's RPC and session-sharing implementations; Pi's copyright and MIT terms are preserved in `packages/pi-desktop-backend/PI-LICENSE`. Internal Pi module imports are isolated in `src/compat.mjs`. The SDK runtime and credentials stay in the backend process, not the Rust renderer. Release builds embed this package, compiled with Bun, in the executable (see below); packages carry Pi's license as `licenses/PI-MIT.txt` and the licenses of all bundled npm packages, generated from `npm-shrinkwrap.json` by `scripts/build-binary.mjs`, as `licenses/PI-DESKTOP-BACKEND-NOTICES.txt`.
+Release builds embed Pi's official 0.99.1 release binary (MIT), downloaded by `scripts/fetch_pi.py` and checked against the SHA-256 digests committed in `packaging/pi-release.sha256`. Packages carry Pi's license as `licenses/PI-MIT.txt` and, as `licenses/PI-NOTICES.txt`, the licenses of the npm packages compiled into Pi's executable, collected by installing Pi's release lockfile (`fetch_pi.py --notices`).
+
+The desktop extension, `crates/pi_core/extension/pi-desktop.ts`, uses only Pi's public extension API and package exports. Its sharing flow follows Pi's `/share` (branch export with a `pi.share` entry, Radius upload, private gist fallback).
 
 ## Bun
 
-The built-in backend is a Bun 1.4.2 standalone executable, so it contains the Bun runtime: MIT-licensed, statically linking JavaScriptCore/WebKit (LGPL-2) and the other libraries listed in `licenses/BUN-LICENSE.md` (copied unmodified from Bun's `LICENSE.md` at tag `bun-v1.4.2`). That file also explains how to rebuild Bun with a modified JavaScriptCore, as the LGPL requires. The executable is embedded compressed in `pi-desktop` and written to the user's cache folder before it runs.
+Pi's release binary is a Bun standalone executable (Bun 1.3.14 for Pi 0.99.1), so it contains the Bun runtime: MIT-licensed, statically linking JavaScriptCore/WebKit (LGPL-2) and the other libraries listed in `licenses/BUN-LICENSE.md` (copied unmodified from Bun's `LICENSE.md` at tag `bun-v1.3.14`; update it when a new Pi release reports another `bunVersion`). That file also explains how to rebuild Bun with a modified JavaScriptCore, as the LGPL requires. The executable is embedded compressed in `pi-desktop` and written to the user's cache folder before it runs.
 
 ## Design
 

@@ -621,8 +621,12 @@ fn clear_queue_does_not_abort_and_search_cannot_submit(cx: &mut TestAppContext) 
     });
     assert_eq!(draft(&a, &cx), queued);
     cx.simulate_keystrokes("secondary-k");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("global-search").is_some());
     cx.simulate_input("search text");
     cx.simulate_keystrokes("enter escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("global-search").is_none());
     assert_eq!(draft(&a, &cx), queued);
     a.controller
         .read_with(&cx, |controller, _| assert!(controller.model().busy()));
@@ -638,6 +642,17 @@ fn sidebar_lists_active_sessions_and_project_scoped_saved_rows(cx: &mut TestAppC
     assert!(cx.debug_bounds("open-session-1").is_some());
     assert!(cx.debug_bounds("saved-session-demo-mistral").is_some());
     assert!(cx.debug_bounds("saved-session-demo-zed").is_some());
+    let active_toggle = cx.debug_bounds("sidebar-active-toggle").unwrap();
+    cx.simulate_click(active_toggle.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("active-session-0").is_none());
+    let projects_toggle = cx.debug_bounds("sidebar-projects-toggle").unwrap();
+    cx.simulate_click(projects_toggle.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("saved-session-demo-mistral").is_none());
+    cx.simulate_click(projects_toggle.center(), gpui::Modifiers::default());
+    cx.simulate_click(active_toggle.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
     let search = desktop.read_with(&cx, |desktop, cx| desktop.sidebar.read(cx).search.clone());
     search.update(&mut cx, |input, cx| input.set_content("signatures", cx));
     cx.run_until_parked();
@@ -932,7 +947,9 @@ fn all_sessions_and_settings_open_from_the_sidebar(cx: &mut TestAppContext) {
     cx.simulate_click(nav.center(), gpui::Modifiers::none());
     cx.run_until_parked();
     assert!(cx.debug_bounds("all-sessions").is_some());
-    assert!(cx.debug_bounds("app-view-title").is_some());
+    assert!(cx.debug_bounds("app-view-title").is_none());
+    assert!(cx.debug_bounds("new-session").is_some());
+    assert!(cx.debug_bounds("toggle-search").is_some());
     assert!(cx.debug_bounds("session-row-0").is_some());
     assert!(cx.debug_bounds("sessions-inspector").is_some());
 

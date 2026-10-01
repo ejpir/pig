@@ -38,18 +38,18 @@ xdotool windowfocus --sync "$window"
 sleep 2
 click() { xdotool mousemove --window "$window" "$1" "$2"; sleep 0.15; xdotool click 1; sleep 0.3; }
 shot() { import -window "$window" "artifacts/diagnostic-$1.png"; }
-click 944 72
+click 944 55
 sleep 2
-click 1100 145
+click 1100 128
 xdotool type --clearmodifiers broken.yaml
 sleep 0.3
-click 1130 184
+click 1130 167
 sleep 1
 shot before-trust
-click 1160 684
+click 1160 668
 sleep 0.4
 shot trust
-click 250 210
+click 250 193
 for _ in $(seq 1 150); do
   grep -q textDocument/didOpen "$PI_LSP_TEST_LOG" 2>/dev/null && break
   sleep 0.1
@@ -57,7 +57,7 @@ done
 shot server
 grep -q textDocument/didOpen "$PI_LSP_TEST_LOG"
 # The error spans the first six characters on the first line.
-xdotool mousemove --window "$window" 304 151
+xdotool mousemove --window "$window" 304 134
 sleep 2
 shot hover
 # One card (design study 05) instead of Zed's popovers: message and code, the
@@ -102,7 +102,7 @@ shot fixed
 # The server still reports the error (it always does), so the card comes back.
 xdotool mousemove --window "$window" 600 600
 sleep 0.5
-xdotool mousemove --window "$window" 304 151
+xdotool mousemove --window "$window" 304 134
 sleep 2
 shot ask
 ocr ask
@@ -126,7 +126,7 @@ if grep -Eq 'no rendered diagnostic|panicked at|Failed to start language server|
 python3 - "$PI_FILES_COMMAND_LOG" <<'PY'
 import sys
 commands=set(open(sys.argv[1]).read().splitlines())
-assert commands <= {'get_state','get_messages','get_session_stats','list_sessions','get_entries','get_settings','get_commands','prompt'},commands
+assert commands <= {'get_state','get_active_tools','get_messages','get_session_stats','list_sessions','get_backend_info','get_custom_entries','get_entries','get_settings','get_commands','prompt'},commands
 assert 'prompt' in commands, commands
 PY
 xdotool key ctrl+q

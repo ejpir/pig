@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Actual native desktop + released Pi SDK. Isolated metadata/history only.
+# Actual native desktop + pi's release binary with Pi Desktop's extension. Isolated metadata/history only.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo="$PWD"
@@ -17,7 +17,11 @@ while IFS= read -r key; do
   case "$key" in *API_KEY*|*ACCESS_TOKEN*|*AUTH_TOKEN*) unset "$key";; esac
 done < <(compgen -e)
 unset WAYLAND_DISPLAY PI_DESKTOP_PI PI_DESKTOP_DEMO_WORKSPACE PI_DESKTOP_DEMO_READABILITY
-export PI_DESKTOP_RPC_ENTRY="$tmp/entry.mjs"
+# pi's release binary, as release builds embed it (fetched once into artifacts/pi).
+pi="${PI_DESKTOP_TEST_PI:-$repo/artifacts/pi/linux-$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')/pi}"
+[[ -x "$pi" ]] || python3 scripts/fetch_pi.py --out "$repo/artifacts/pi" > /dev/null
+export PI_DESKTOP_RPC_ENTRY="$repo/scripts/pi-proxy.mjs" PI_PROXY_PI="$pi" PI_PROXY_LOG="$tmp"
+export PI_PROXY_ARGS="[\"--offline\",\"-e\",\"$repo/fixtures/pi/extension.ts\",\"--session\",\"$tmp/history.jsonl\"]"
 export LIBGL_ALWAYS_SOFTWARE=1 WGPU_BACKEND=vulkan
 for driver in /usr/share/vulkan/icd.d/lvp*.json; do
   if [[ -f "$driver" ]]; then export VK_DRIVER_FILES="$driver" VK_ICD_FILENAMES="$driver"; break; fi
@@ -33,28 +37,6 @@ records = [
     {'type':'session_info','id':'name','parentId':'user','timestamp':'2026-09-29T12:00:00Z','name':'Offline backend'},
 ]
 (root/'history.jsonl').write_text(''.join(json.dumps(record)+'\n' for record in records))
-(root/'entry.mjs').write_text('''import {spawn} from 'node:child_process';
-import {appendFileSync} from 'node:fs';
-const root=process.env.PI_BACKEND_TEST_ROOT, repo=process.env.PI_BACKEND_TEST_REPO;
-const plumbing=/^(PATH|HOME|PI_CODING_AGENT_DIR|PI_OFFLINE|PI_SKIP_VERSION_CHECK|PI_DESKTOP_LSP(?:_TOKEN)?|SystemRoot|ComSpec|TEMP|TMP|TMPDIR|LANG|LC_.*|TZ|SSL_CERT_FILE|NODE_EXTRA_CA_CERTS|HTTPS?_PROXY|ALL_PROXY|NO_PROXY|https?_proxy|all_proxy|no_proxy)$/;
-const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>plumbing.test(key)));
-const child=spawn(process.execPath,[repo+'/packages/pi-desktop-backend/src/cli.mjs',
-  '--offline','-e',repo+'/packages/pi-desktop-backend/test/fixtures/extension.ts',
-  '--session',root+'/history.jsonl',...process.argv.slice(2)],{env,stdio:['pipe','inherit','inherit']});
-let pending='';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data',chunk=>{
-  pending+=chunk; let index;
-  while((index=pending.indexOf('\\n'))>=0){
-    const line=pending.slice(0,index); pending=pending.slice(index+1);
-    appendFileSync(root+'/commands.jsonl',JSON.stringify({type:JSON.parse(line).type})+'\\n');
-    child.stdin.write(line+'\\n');
-  }
-});
-process.stdin.on('end',()=>child.stdin.end());
-child.on('error',error=>{console.error(error.message);process.exit(1);});
-child.on('exit',code=>process.exit(code??1));
-''')
 PY
 "$binary" --project "$tmp/project" --light > artifacts/backend-native-app.log 2>&1 & app=$!
 window=""
@@ -103,7 +85,7 @@ for name, expected in [('models','offline'),('resources','packages'),('sessions'
     text=subprocess.check_output(['tesseract',f'artifacts/backend-native-{name}.png','stdout','--psm','11'],text=True,stderr=subprocess.DEVNULL).lower()
     assert expected in text,(name,text)
     assert 'setup failed' not in text and 'did not resume' not in text,(name,text)
-allowed={'get_state','get_messages','get_entries','get_session_stats','get_settings','get_available_models','get_available_thinking_levels','get_commands','get_auth_providers','get_project_trust','list_packages','list_sessions'}
+allowed={'get_state','get_active_tools','get_messages','get_entries','get_session_stats','get_settings','get_available_models','get_available_thinking_levels','get_commands','get_backend_info','get_custom_entries','get_auth_providers','get_project_trust','list_packages','list_sessions'}
 commands={json.loads(line)['type'] for line in Path(sys.argv[1]).read_text().splitlines()}
 assert commands<=allowed,commands
 assert {'get_settings','get_auth_providers','get_project_trust','list_packages'}<=commands,commands
@@ -113,7 +95,7 @@ xdotool key ctrl+q
 for _ in $(seq 1 75); do
   if ! kill -0 "$app" 2>/dev/null; then
     wait "$app"; app=""
-    echo 'PASS: actual desktop bootstraps saved history and Models/Resources/Sessions against the released Pi SDK; metadata-only commands; clean exit.'
+    echo 'PASS: actual desktop bootstraps saved history and Models/Resources/Sessions against pi'"'"'s release binary and the desktop extension; metadata-only commands; clean exit.'
     exit 0
   fi
   sleep .1

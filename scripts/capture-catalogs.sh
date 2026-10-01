@@ -110,18 +110,21 @@ shot model-search
 xdotool key ctrl+a BackSpace
 sleep .4
 word Resources 0 450 207 715
+word User 210 35 390 115
 shot resources
 if [[ "${PI_CATALOG_NOTICE:-}" == 1 ]]; then
   # Notice floats over the page. Dismiss it before probing resource tabs.
   shot notice
-  click 970 96
+  click 970 79
   shot notice-dismissed
 fi
-word Skills 210 150 1015 420
+word Skills 210 75 1015 200
+word review 210 115 1015 200
 shot skills
-word Copy 1020 200 1344 710
+click 1313 65
 /usr/bin/xclip -selection clipboard -o > artifacts/catalog-resource-copy.txt
-word Packages 210 220 1015 270
+word Packages 210 75 1015 200
+click 500 143
 word Remove 1020 200 1344 710
 shot remove-confirm
 # A modal must block both background navigation and the global search shortcut.
@@ -156,7 +159,7 @@ assert '/offline/skills/review/SKILL.md' in Path('artifacts/catalog-resource-cop
 assert 'remove package' in text('remove-confirm')
 assert 'remove package' not in text('remove-cancelled')
 commands=[json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
-allowed={'get_state','get_messages','get_entries','get_settings','get_session_stats','list_sessions','get_commands','get_available_models','get_available_thinking_levels','get_auth_providers','get_project_trust','list_packages','set_model'}
+allowed={'get_state','get_active_tools','get_messages','get_entries','get_settings','get_session_stats','list_sessions','get_commands','get_backend_info','get_custom_entries','get_available_models','get_available_thinking_levels','get_auth_providers','get_project_trust','list_packages','set_model'}
 assert {c['type'] for c in commands} <= allowed,commands
 selected=[c for c in commands if c['type']=='set_model']
 assert len(selected)==1 and selected[0]['modelId']=='atlas-small' and not selected[0].get('persist'),selected

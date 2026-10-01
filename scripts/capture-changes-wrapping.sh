@@ -28,7 +28,7 @@ done
 xdotool windowfocus --sync "$window"
 sleep 2
 click() { xdotool mousemove --window "$window" "$1" "$2"; sleep 0.15; xdotool click 1; sleep 0.3; }
-click 330 72
+click 330 55
 import -window "$window" artifacts/wrapping-on.png
 # Locate the controls from actual rendered text, avoiding font-specific baselines.
 python3 - <<'PY' > "$tmp/controls"
@@ -68,7 +68,7 @@ for mode in ['on','off']:
 raw=Path('artifacts/wrapping-copy.txt').read_text()
 assert 'call_'+'very-long-id-'*24+'終点' in raw
 assert 'WRAP_START '+'A deliberately long fixture line with preserved spaces. '*8+'WRAP_END' in raw
-assert set(Path(sys.argv[1]).read_text().splitlines()) <= {'get_state','get_messages','get_session_stats','list_sessions','get_commands','get_entries','get_settings'}
+assert set(Path(sys.argv[1]).read_text().splitlines()) <= {'get_state','get_active_tools','get_messages','get_session_stats','list_sessions','get_commands','get_backend_info','get_custom_entries','get_entries','get_settings'}
 PY
 [[ ! -e "$tmp/project/long.txt" ]]
 xdotool key ctrl+q

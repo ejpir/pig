@@ -264,10 +264,6 @@ pub fn short_path(path: &str) -> String {
 }
 
 /// The three-colour pi mark from the supplied study, not a substitute π glyph.
-pub fn brand_mark() -> Div {
-    brand_mark_sized(18.)
-}
-
 pub fn brand_mark_sized(size: f32) -> Div {
     let scale = size / 18.;
     let block = |x, y, w, h, color| {

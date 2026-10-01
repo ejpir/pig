@@ -13,7 +13,6 @@ pub struct SessionView {
     pub landing: Entity<super::landing::LandingView>,
     landing_visible: bool,
     _landing_subscription: gpui::Subscription,
-    _inspector_subscription: gpui::Subscription,
     pub inspector: Entity<InspectorView>,
     diagnostics: Entity<super::diagnostics::DiagnosticsView>,
     pub page: super::panels::SessionPage,
@@ -72,8 +71,6 @@ impl SessionView {
         let inspector = cx.new(|cx| InspectorView::new(controller.clone(), cx));
         let diagnostics =
             cx.new(|cx| super::diagnostics::DiagnosticsView::new(controller.clone(), cx));
-        let inspector_subscription =
-            cx.subscribe(&inspector, |this, _, page, cx| this.set_page(*page, cx));
         let tree = cx.new(|cx| super::tree::TreeView::new(controller.clone(), cx));
         let file_changes =
             cx.new(|cx| super::changes::ChangesView::new(controller.clone(), files.clone(), cx));
@@ -230,7 +227,6 @@ impl SessionView {
             landing_visible: controller.read(cx).not_started(),
             landing,
             _landing_subscription: landing_subscription,
-            _inspector_subscription: inspector_subscription,
             controller,
             composer,
             transcript,

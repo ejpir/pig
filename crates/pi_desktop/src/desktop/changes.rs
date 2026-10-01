@@ -360,12 +360,6 @@ impl ChangesView {
             .px(px(6.))
             .gap(px(6.))
             .rounded(px(4.))
-            .border_l_2()
-            .border_color(if selected {
-                theme.accent
-            } else {
-                gpui::transparent_black()
-            })
             .cursor_pointer()
             .when(selected, |v| v.bg(theme.selected))
             .hover(move |s| s.bg(theme.hover))
@@ -643,12 +637,6 @@ impl ChangesView {
                     .pr(px(6.))
                     .gap(px(5.))
                     .rounded(px(4.))
-                    .border_l_2()
-                    .border_color(if selected {
-                        theme.accent
-                    } else {
-                        gpui::transparent_black()
-                    })
                     .cursor_pointer()
                     .when(selected, |v| v.bg(theme.selected))
                     .hover(move |s| s.bg(theme.hover))

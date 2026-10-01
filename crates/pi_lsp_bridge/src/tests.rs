@@ -1,7 +1,7 @@
 use super::*;
 use gpui::TestAppContext;
 use serde_json::json;
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 pub(super) async fn ask(
     checker: &Entity<Checker>,
@@ -83,16 +83,9 @@ fn transports() -> Vec<Transport> {
 fn each_transport_answers_one_json_line_per_connection(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     for transport in transports() {
-        let data = tempfile::tempdir().unwrap();
         let bridge = cx
-            .update(|cx| {
-                Bridge::start_in(|_| None, |_, _| true, echo(), data.path(), transport, cx)
-            })
+            .update(|cx| Bridge::start_with(|_| None, |_, _| true, echo(), transport, cx))
             .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(bridge.extension()).unwrap(),
-            EXTENSION
-        );
         assert_eq!(
             request(&bridge, json!({"op": "run_end"}), cx),
             json!({"text": ""}),
@@ -118,18 +111,8 @@ fn each_transport_answers_one_json_line_per_connection(cx: &mut TestAppContext) 
 #[gpui::test]
 fn a_port_answers_only_requests_with_its_token(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let data = tempfile::tempdir().unwrap();
     let bridge = cx
-        .update(|cx| {
-            Bridge::start_in(
-                |_| None,
-                |_, _| true,
-                echo(),
-                data.path(),
-                Transport::Tcp,
-                cx,
-            )
-        })
+        .update(|cx| Bridge::start_with(|_| None, |_, _| true, echo(), Transport::Tcp, cx))
         .unwrap();
     let wrong = request(&bridge, json!({"op": "run_end", "token": "guess"}), cx);
     assert_eq!(wrong, json!({"error": "Missing or wrong token"}));

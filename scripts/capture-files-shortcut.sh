@@ -37,7 +37,7 @@ shot() { import -window "$window" "artifacts/files-shortcut-$1.png"; }
 shot before
 tesseract artifacts/files-shortcut-before.png stdout --psm 11 2>/dev/null | grep -q 'inspect-offline'
 # Only this disposable repository is opted into jj; no prompts are submitted.
-click 933 150
+click 940 130
 for _ in $(seq 1 50); do [[ ! -d "$tmp/project/.jj" ]] || break; sleep 0.1; done
 [[ -d "$tmp/project/.jj" ]]
 sleep 1
@@ -45,7 +45,7 @@ shot enabled
 # Hide the inspector, then reopen Files from the new toolbar icon.
 click 1312 25
 shot hidden
-click 1272 72
+click 1272 55
 sleep 1
 shot browser
 xdotool windowsize "$window" 1000 680
@@ -69,7 +69,7 @@ PY
 python3 - "$tmp/commands.log" <<'PY'
 import sys
 commands=set(open(sys.argv[1]).read().splitlines())
-assert commands <= {'get_state','get_messages','get_session_stats','list_sessions','get_entries','get_settings','get_commands'},commands
+assert commands <= {'get_state','get_active_tools','get_messages','get_session_stats','list_sessions','get_backend_info','get_custom_entries','get_entries','get_settings','get_commands'},commands
 PY
 xdotool key ctrl+q
 for _ in $(seq 1 50); do

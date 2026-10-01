@@ -14,7 +14,7 @@ See [docs/architecture.md](docs/architecture.md) for how it works.
 
 ## Install
 
-Download a package for Linux (amd64, arm64), macOS (Apple Silicon) or Windows (amd64) from the releases. pi's backend is built into the executable, so you don't need Node.js or pi. Existing pi settings and sign-ins in `~/.pi/agent` are reused. Signing in to a provider currently opens a terminal that runs `pi`, so that one step still needs pi installed.
+Download a package for Linux (amd64, arm64), macOS (Apple Silicon) or Windows (amd64) from the releases. pi is built into the executable, so you don't need Node.js or pi. Existing pi settings and sign-ins in `~/.pi/agent` are reused. Signing in to a provider currently opens a terminal that runs `pi`, so that one step still needs pi installed.
 
 The macOS app is ad-hoc signed and the Windows ZIP is unsigned, so the first launch may need an explicit override.
 
@@ -45,26 +45,23 @@ Run an offline preview, which never starts pi:
 cargo run --locked -p pi-desktop -- --demo
 ```
 
-Run for real with the backend from source (Node.js 22.19+):
+Run for real with pi's release binary, as release builds embed it:
 
 ```sh
-npm ci --prefix packages/pi-desktop-backend
-PI_DESKTOP_RPC_ENTRY="$PWD/packages/pi-desktop-backend/src/cli.mjs" \
+python3 scripts/fetch_pi.py                # writes artifacts/pi/<platform>/pi
+PI_DESKTOP_PI="$PWD/artifacts/pi/linux-x64/pi" \
   cargo run --release --locked -p pi-desktop -- --project /path/to/project
 ```
 
 Real sessions use your provider credentials and can edit files, just like pi.
 
-### Which backend runs
+### Which pi runs
 
-A session runs the first of these that is set:
+Each session runs stock `pi --mode rpc` with Pi Desktop's extension, which supplies what pi's RPC mode lacks (see [architecture](docs/architecture.md#pi-and-the-desktop-extension)). The first of these that is set runs:
 
-1. `PI_DESKTOP_RPC_ENTRY`: a JavaScript entry, run with Node.js (`PI_DESKTOP_NODE`). Or `PI_DESKTOP_PI`: an executable.
-2. Settings → PI DESKTOP → General → Backend.
-3. The backend built into release builds (the `bundled-backend` feature).
-4. `pi` from PATH.
-
-`scripts/pi-rpc.mjs` runs a sibling `../pi` source checkout instead, when used as `PI_DESKTOP_RPC_ENTRY`.
+1. For development, `PI_DESKTOP_PI`: an executable. Or `PI_DESKTOP_RPC_ENTRY`: a JavaScript entry, run with `PI_DESKTOP_NODE` or `node`; `scripts/pi-rpc.mjs` runs a sibling `../pi` source checkout this way.
+2. The pi built into release builds (the `bundled-backend` feature).
+3. `pi` from PATH.
 
 ## Package
 
@@ -72,7 +69,7 @@ A session runs the first of these that is set:
 bash scripts/package-linux.sh      # or package-macos.sh; ./scripts/package-windows.ps1 on Windows
 ```
 
-Packaging needs Node.js 22.19+, [Bun](https://bun.sh) 1.4.2 and Python 3.11+. It compiles the backend into one executable, embeds it, and writes an archive to `dist/`. On macOS, `PI_DESKTOP_CODESIGN_IDENTITY` signs the backend for the hardened runtime. Details: [Built-in backend](docs/architecture.md#built-in-backend).
+Packaging needs Python 3.11+ and npm (for license notices). It downloads pi's release binary for the pinned version, checks it against `packaging/pi-release.sha256`, embeds it, and writes an archive to `dist/`. On macOS, `PI_DESKTOP_CODESIGN_IDENTITY` re-signs pi for the hardened runtime. Details: [Built-in pi](docs/architecture.md#built-in-pi).
 
 CI ([`.github/workflows/desktop.yml`](.github/workflows/desktop.yml)):
 - **Every push:** runs the tests and lints on Linux and builds all four packages.
@@ -85,7 +82,7 @@ cargo fmt -p pi_core -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi
 cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
 cargo test --locked --workspace
 cargo test --locked -p pi_lsp_bridge --features fake-lsp
-npm test --prefix packages/pi-desktop-backend
+PI_DESKTOP_TEST_PI="$PWD/artifacts/pi/linux-x64/pi" cargo test --locked -p pi_core --test transport -- --ignored
 python3 -m unittest discover -s scripts -p 'test_packaging.py'
 ```
 

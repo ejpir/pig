@@ -33,7 +33,7 @@ done
 xdotool windowfocus --sync "$window"
 sleep 2
 import -window "$window" artifacts/thread-evening.png
-xdotool mousemove --window "$window" 1276 26 click 1
+xdotool key --clearmodifiers ctrl+shift+t
 sleep 1
 import -window "$window" artifacts/thread-moonstone.png
 # Locate rendered controls: tool grouping and the new-session chooser move them.

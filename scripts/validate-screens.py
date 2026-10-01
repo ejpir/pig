@@ -51,7 +51,7 @@ def main():
     load("new", (1000, 680))
     for image, colors in ((evening, ["1a212b", "161d27", "1f2630"]),
                           (moonstone, ["f2efeb", "faf9f7", "ebe7e4"])):
-        for position, expected in zip([(100, 400), (700, 100), (700, 30)], colors):
+        for position, expected in zip([(100, 400), (700, 500), (700, 30)], colors):
             color(image, position, expected)
     for name in ("evening", "moonstone"):
         content = text(name)

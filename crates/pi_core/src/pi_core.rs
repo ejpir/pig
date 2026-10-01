@@ -1,4 +1,6 @@
+mod channel;
 pub mod clock;
+pub mod extension;
 pub mod history;
 mod process_tree;
 pub use process_tree::bounded_output;

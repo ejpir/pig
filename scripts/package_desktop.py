@@ -55,14 +55,14 @@ def check_binary(binary: Path, target: str) -> None:
 def copy_legal(destination: Path, notices: Path | None = None) -> None:
     """Keep licenses and runtime prerequisites alongside every executable.
 
-    `notices` lists the licenses of the npm packages bundled into the built-in
-    backend (from packages/pi-desktop-backend/scripts/build-binary.mjs)."""
+    `notices` lists the licenses of the npm packages compiled into the built-in
+    pi (from scripts/fetch_pi.py --notices)."""
     destination.mkdir(parents=True, exist_ok=True)
     for name in ["LICENSE", "THIRD_PARTY.md", "README.md"]:
         shutil.copy2(ROOT / name, destination / name)
     shutil.copytree(ROOT / "licenses", destination / "licenses")
     if notices is not None:
-        shutil.copy2(notices, destination / "licenses" / "PI-DESKTOP-BACKEND-NOTICES.txt")
+        shutil.copy2(notices, destination / "licenses" / "PI-NOTICES.txt")
 
 
 def package(binary: Path, target: str, output: Path, notices: Path | None = None) -> Path:
@@ -121,7 +121,7 @@ def main() -> None:
     parser.add_argument("--target", choices=TARGETS, required=True)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
-    parser.add_argument("--notices", type=Path, help="the built-in backend's npm license notices")
+    parser.add_argument("--notices", type=Path, help="the built-in pi's npm license notices")
     args = parser.parse_args()
     notices = args.notices.resolve() if args.notices else None
     print(package(args.binary.resolve(), args.target, args.output.resolve(), notices))

@@ -1,21 +1,19 @@
 use super::workspace::{WorkspaceController, WorkspaceEvent};
 use super::*;
 use gpui::EventEmitter;
-use gpui::{Role, WindowControlArea};
+use gpui::{Div, ElementId, Role, Stateful, WindowControlArea, rgb};
 
 #[derive(Clone, Copy)]
 pub enum ShellEvent {
     Sidebar,
     Inspector,
-    Theme,
-    ResourcesInstall,
-    ResourcesRefresh,
 }
 pub struct HeaderView {
     workspace: Entity<WorkspaceController>,
     search: Entity<TextInput>,
     layout: Layout,
-    _subscription: gpui::Subscription,
+    search_open: bool,
+    _subscriptions: Vec<gpui::Subscription>,
 }
 impl EventEmitter<ShellEvent> for HeaderView {}
 impl HeaderView {
@@ -25,18 +23,22 @@ impl HeaderView {
         layout: Layout,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.subscribe(&workspace, |_, workspace, event, cx| {
-            if matches!(event, WorkspaceEvent::Selection(_) | WorkspaceEvent::View)
-                || matches!(event, WorkspaceEvent::Summary(id) if *id == workspace.read(cx).active)
-            {
-                cx.notify();
-            }
-        });
+        let subscriptions = vec![
+            cx.subscribe(&workspace, |_, workspace, event, cx| {
+                if matches!(event, WorkspaceEvent::Selection(_) | WorkspaceEvent::View)
+                    || matches!(event, WorkspaceEvent::Summary(id) if *id == workspace.read(cx).active)
+                {
+                    cx.notify();
+                }
+            }),
+            cx.observe(&search, |_, _, cx| cx.notify()),
+        ];
         Self {
             workspace,
             search,
             layout,
-            _subscription: subscription,
+            search_open: false,
+            _subscriptions: subscriptions,
         }
     }
     pub fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
@@ -45,12 +47,24 @@ impl HeaderView {
             cx.notify();
         }
     }
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = true;
+        self.search.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+    pub fn dismiss_search(&mut self, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.search
+            .update(cx, |search, cx| search.set_content("", cx));
+        cx.notify();
+    }
 }
 impl Render for HeaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.header(
             self.layout.show_inspector(window.viewport_size().width),
             window.viewport_size().width < px(1150.),
+            window.is_window_active(),
             cx,
             theme(cx),
         )
@@ -61,277 +75,328 @@ impl HeaderView {
     pub(super) fn header(
         &self,
         show_inspector: bool,
-        compact: bool,
+        _compact: bool,
+        window_active: bool,
         cx: &Context<Self>,
         theme: Theme,
     ) -> impl IntoElement {
         h_flex()
             .w_full()
-            .h(px(52.))
+            .h(super::HEADER_HEIGHT)
             .flex_shrink_0()
             .bg(theme.bar)
             .border_b_1()
             .border_color(theme.edge)
-            .child(
-                h_flex()
-                    // Aligned with the sidebar when it shows; just the brand when hidden.
-                    .when(self.layout.show_sidebar, |brand| {
-                        brand.w(self.layout.sidebar_width)
-                    })
-                    .h_full()
-                    .flex_shrink_0()
-                    .pl(px(93.))
-                    .pr(px(10.))
-                    .gap(px(9.))
-                    .window_control_area(WindowControlArea::Drag)
-                    .child(brand_mark())
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("pi"),
-                    )
-                    .child(div().flex_1().h_full())
-                    .child(
-                        icon_button(
-                            "toggle-sidebar",
-                            if self.layout.show_sidebar {
-                                "threads_sidebar_left_open"
-                            } else {
-                                "threads_sidebar_left_closed"
-                            },
-                            "Toggle sidebar",
-                            theme,
+            .debug_selector(|| "desktop-header".into())
+            .px(px(10.))
+            .gap(px(6.))
+            .when(cfg!(target_os = "macos"), |header| {
+                header.child(
+                    h_flex()
+                        .gap(px(8.))
+                        .mr(px(10.))
+                        .child(
+                            mac_window_button(
+                                "mac-close",
+                                "Close window",
+                                if window_active { 0xff5f57 } else { 0xb9b5b2 },
+                            )
+                            .on_click(|_, window, _| window.remove_window()),
                         )
-                        .debug_selector(|| "toggle-sidebar".into())
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ShellEvent::Sidebar))),
-                    ),
+                        .child(
+                            mac_window_button(
+                                "mac-minimize",
+                                "Minimize window",
+                                if window_active { 0xfebc2e } else { 0xb9b5b2 },
+                            )
+                            .on_click(|_, window, _| window.minimize_window()),
+                        )
+                        .child(
+                            mac_window_button(
+                                "mac-zoom",
+                                "Zoom window",
+                                if window_active { 0x28c840 } else { 0xb9b5b2 },
+                            )
+                            .on_click(|_, window, _| window.zoom_window()),
+                        ),
+                )
+            })
+            .child(
+                icon_button(
+                    "toggle-sidebar",
+                    if self.layout.show_sidebar {
+                        "threads_sidebar_left_open"
+                    } else {
+                        "threads_sidebar_left_closed"
+                    },
+                    "Toggle sidebar",
+                    theme,
+                )
+                .debug_selector(|| "toggle-sidebar".into())
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(ShellEvent::Sidebar))),
             )
             .child(
-                h_flex()
+                icon_button("toggle-search", "magnifying_glass", "Search", theme)
+                    .debug_selector(|| "toggle-search".into())
+                    .tooltip(|_, cx| ui::Tooltip::for_action("Search", &super::FocusSearch, cx))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.focus_search(window, cx);
+                    })),
+            )
+            .child(
+                div()
                     .flex_1()
-                    .min_w_0()
                     .h_full()
-                    .pl(px(24.))
-                    .pr(px(16.))
-                    .gap(px(16.))
-                    .when_some(self.workspace.read(cx).view, |bar, view| {
-                        bar.child(
+                    .window_control_area(WindowControlArea::Drag),
+            )
+            .child(
+                icon_button("new-session", "plus", "New session", theme)
+                    .debug_selector(|| "new-session".into())
+                    .tooltip(|_, cx| ui::Tooltip::for_action("New session", &super::NewSession, cx))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        super::new_session::show(this.workspace.clone(), window, cx)
+                    })),
+            )
+            .child(
+                icon_button(
+                    "toggle-inspector",
+                    if show_inspector {
+                        "threads_sidebar_right_open"
+                    } else {
+                        "threads_sidebar_right_closed"
+                    },
+                    "Toggle inspector",
+                    theme,
+                )
+                .debug_selector(|| "toggle-inspector".into())
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(ShellEvent::Inspector))),
+            )
+            .when(self.search_open, |header| {
+                header.child(self.search_palette(cx, theme))
+            })
+    }
+
+    fn search_palette(&self, cx: &Context<Self>, theme: Theme) -> AnyElement {
+        let query = self.search.read(cx).content().trim().to_lowercase();
+        let matches = |label: &str| query.is_empty() || label.to_lowercase().contains(&query);
+        let mut actions = v_flex().gap(px(2.));
+        if matches("New session") {
+            actions = actions.child(
+                search_row(
+                    "search-new-session",
+                    "plus",
+                    "New session",
+                    Some(
+                        if cfg!(target_os = "macos") {
+                            "⌘ N"
+                        } else {
+                            "Ctrl+N"
+                        }
+                        .into(),
+                    ),
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.dismiss_search(cx);
+                    super::new_session::show(this.workspace.clone(), window, cx);
+                })),
+            );
+        }
+        if matches("Open folder") {
+            actions = actions.child(
+                search_row(
+                    "search-open-folder",
+                    "folder",
+                    "Open folder…",
+                    Some(
+                        if cfg!(target_os = "macos") {
+                            "⌘ O"
+                        } else {
+                            "Ctrl+O"
+                        }
+                        .into(),
+                    ),
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.dismiss_search(cx);
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.open_folder(cx));
+                })),
+            );
+        }
+        for (index, view) in [
+            super::app_views::AppView::Sessions,
+            super::app_views::AppView::Models,
+            super::app_views::AppView::Resources,
+            super::app_views::AppView::Settings,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if matches(view.title()) {
+                actions = actions.child(
+                    search_row(
+                        ("search-view", index),
+                        view.icon(),
+                        view.title(),
+                        None,
+                        theme,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.dismiss_search(cx);
+                        this.workspace
+                            .update(cx, |workspace, cx| workspace.show_view(view, cx));
+                    })),
+                );
+            }
+        }
+        let mut sessions: Vec<_> = self
+            .workspace
+            .read(cx)
+            .summaries
+            .iter()
+            .filter(|(_, summary)| {
+                query.is_empty()
+                    || summary.title.to_lowercase().contains(&query)
+                    || summary
+                        .cwd
+                        .display()
+                        .to_string()
+                        .to_lowercase()
+                        .contains(&query)
+            })
+            .map(|(id, summary)| (*id, summary.title.clone(), summary.cwd.clone()))
+            .collect();
+        sessions.sort_by_key(|entry| entry.1.to_lowercase());
+        let has_sessions = !sessions.is_empty();
+        let mut session_rows = v_flex().gap(px(2.));
+        for (id, title, cwd) in sessions.into_iter().take(6) {
+            session_rows = session_rows.child(
+                search_row(
+                    ("search-session", id.0 as usize),
+                    "chat",
+                    title,
+                    cwd.file_name()
+                        .map(|name| name.to_string_lossy().into_owned()),
+                    theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.dismiss_search(cx);
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.select(id, cx));
+                })),
+            );
+        }
+        gpui::deferred(
+            h_flex()
+                .absolute()
+                .top(px(46.))
+                .left_0()
+                .right_0()
+                .justify_center()
+                .child(
+                    v_flex()
+                        .id("global-search")
+                        .debug_selector(|| "global-search".into())
+                        .occlude()
+                        .w(px(600.))
+                        .max_h(px(520.))
+                        .overflow_y_scroll()
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(theme.line)
+                        .bg(theme.panel)
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_search(cx)))
+                        .child(
                             h_flex()
-                                .w(px(164.))
-                                .flex_shrink_0()
-                                .gap(px(9.))
-                                .debug_selector(|| "app-view-title".into())
-                                .child(icon(view.icon(), theme.muted).size(px(18.)))
+                                .h(px(44.))
+                                .px(px(14.))
+                                .gap(px(10.))
+                                .border_b_1()
+                                .border_color(theme.line)
+                                .child(icon("magnifying_glass", theme.faint))
+                                .child(div().flex_1().min_w_0().child(self.search.clone()))
                                 .child(
                                     div()
-                                        .text_size(px(14.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(view.title()),
+                                        .font_family(MONO)
+                                        .text_size(px(10.))
+                                        .text_color(theme.faint)
+                                        .child("ESC"),
                                 ),
                         )
-                    })
-                    .when(self.workspace.read(cx).view.is_none(), |bar| {
-                        bar.child(
-                            h_flex()
-                                .w(px(164.))
-                                .flex_shrink_0()
-                                .gap(px(9.))
-                                .child(icon("thread", theme.muted).size(px(18.)))
+                        .child(
+                            label("QUICK ACTIONS", theme)
+                                .mx(px(14.))
+                                .mt(px(10.))
+                                .mb(px(4.)),
+                        )
+                        .child(actions.mx(px(8.)))
+                        .when(has_sessions, |palette| {
+                            palette
+                                .child(divider(theme).mx(px(14.)).mt(px(8.)))
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(px(14.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(
-                                            self.workspace
-                                                .read(cx)
-                                                .summaries
-                                                .get(&self.workspace.read(cx).active)
-                                                .map(|s| s.title.clone())
-                                                .or_else(|| {
-                                                    self.workspace
-                                                        .read(cx)
-                                                        .selected_project
-                                                        .as_ref()
-                                                        .map(|path| {
-                                                            path.file_name()
-                                                                .unwrap_or(path.as_os_str())
-                                                                .to_string_lossy()
-                                                                .into_owned()
-                                                        })
-                                                })
-                                                .unwrap_or_else(|| "No project open".into()),
-                                        ),
+                                    label("OPEN SESSIONS", theme)
+                                        .mx(px(14.))
+                                        .mt(px(7.))
+                                        .mb(px(4.)),
                                 )
-                                .child(icon("chevron_down", theme.faint).size(px(12.))),
-                        )
-                    })
-                    .child(div().w(px(1.)).h(px(23.)).bg(theme.chip_line))
-                    .child(
-                        h_flex()
-                            .id("new-session")
-                            .when(
-                                self.workspace.read(cx).view.is_some_and(|view| {
-                                    !matches!(view, super::app_views::AppView::Sessions | super::app_views::AppView::Resources)
-                                }),
-                                |new| new.invisible(),
-                            )
-                            .role(Role::Button)
-                            .aria_label(if self.workspace.read(cx).view == Some(super::app_views::AppView::Resources) { "Install package" } else { "New session" })
-                            .tooltip(ui::Tooltip::text(
-                                self.workspace
-                                    .read(cx)
-                                    .selected_project
-                                    .as_ref()
-                                    .map(|p| format!("New session in {}", p.display()))
-                                    .unwrap_or_else(|| "Open a project to start a session".into()),
-                            ))
-                            .h(px(27.))
-                            .px(px(9.))
-                            .gap(px(6.))
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(theme.chip_line)
-                            .bg(theme.chip)
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(theme.hover))
-                            .text_size(px(12.))
-                            .text_color(theme.secondary)
-                            .child(icon("plus", theme.secondary))
-                            .child(if self.workspace.read(cx).view == Some(super::app_views::AppView::Resources) { "Install…" } else { "New" })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if this.workspace.read(cx).view == Some(super::app_views::AppView::Resources) { cx.emit(ShellEvent::ResourcesInstall); }
-                                else { super::new_session::show(this.workspace.clone(), window, cx); }
-                            })),
-                    )
-                    .when(self.workspace.read(cx).view == Some(super::app_views::AppView::Resources), |bar| bar.child(
-                        icon_button("refresh-resources", "refresh", "Refresh resource metadata", theme)
-                            .tooltip(ui::Tooltip::text("Refresh resource metadata · does not reload or execute extensions"))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ShellEvent::ResourcesRefresh))),
-                    ))
-                    .child(
-                        h_flex()
-                            .gap(px(16.))
-                            .text_color(theme.faint)
-                            // Session controls; an app view has none.
-                            .when(self.workspace.read(cx).view.is_some(), |icons| {
-                                icons.invisible()
-                            })
-                            .child(icon("git_branch", theme.faint).size(px(18.)))
-                            .child(icon("compact", theme.faint).size(px(18.)))
-                            .child(
-                                icon_button(
-                                    "open-diagnostics",
-                                    "ellipsis",
-                                    "Session diagnostics",
-                                    theme,
-                                )
-                                .tooltip(|_, cx| {
-                                    ui::Tooltip::for_action(
-                                        "Session diagnostics",
-                                        &super::ShowDiagnostics,
-                                        cx,
-                                    )
-                                })
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(super::ShowDiagnostics), cx)
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .window_control_area(WindowControlArea::Drag),
-                    )
-                    .child(
-                        h_flex()
-                            .w(px(268.))
-                            .min_w(px(130.))
-                            .h(px(28.))
-                            .px(px(9.))
-                            .gap(px(8.))
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(theme.chip_line)
-                            .bg(theme.canvas)
-                            .child(icon("magnifying_glass", theme.faint))
-                            .child(div().flex_1().min_w_0().child(self.search.clone()))
-                            .child(
-                                div()
-                                    .font_family(MONO)
-                                    .text_size(px(10.))
-                                    .text_color(theme.faint)
-                                    .child(if cfg!(target_os = "macos") {
-                                        "⌘ K"
-                                    } else {
-                                        "⌃ K"
-                                    }),
-                            ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w(if show_inspector && !compact {
-                        self.layout.inspector_width
-                    } else {
-                        px(92.)
-                    })
-                    .flex_shrink_0()
-                    .h_full()
-                    .px(px(20.))
-                    .gap(px(12.))
-                    .when(show_inspector && !compact, |row| {
-                        row.child(label("INSPECTOR", theme).text_color(theme.muted))
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .window_control_area(WindowControlArea::Drag),
-                    )
-                    .child(
-                        h_flex()
-                            .id("theme")
-                            .role(Role::Button)
-                            .aria_label("Toggle Evening and Moonstone")
-                            .size(px(24.))
-                            .justify_center()
-                            .rounded(px(4.))
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(theme.hover))
-                            .child(
-                                div()
-                                    .relative()
-                                    .size(px(13.))
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(theme.muted)
-                                    .overflow_hidden()
-                                    .child(div().h_full().w(px(6.)).bg(theme.muted)),
-                            )
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ShellEvent::Theme))),
-                    )
-                    .child(
-                        icon_button(
-                            "toggle-inspector",
-                            if show_inspector {
-                                "threads_sidebar_right_open"
-                            } else {
-                                "threads_sidebar_right_closed"
-                            },
-                            "Toggle inspector",
-                            theme,
-                        )
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.emit(ShellEvent::Inspector);
-                        })),
-                    ),
-            )
+                                .child(session_rows.mx(px(8.)).mb(px(8.)))
+                        }),
+                ),
+        )
+        .with_priority(2)
+        .into_any_element()
     }
+}
+
+fn mac_window_button(id: &'static str, description: &'static str, color: u32) -> Stateful<Div> {
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(description)
+        .size(px(10.))
+        .rounded_full()
+        .bg(rgb(color))
+        .cursor_pointer()
+}
+
+fn search_row(
+    id: impl Into<ElementId>,
+    glyph: &'static str,
+    title: impl Into<SharedString>,
+    detail: Option<String>,
+    theme: Theme,
+) -> Stateful<Div> {
+    let title: SharedString = title.into();
+    h_flex()
+        .id(id)
+        .role(Role::Button)
+        .h(px(32.))
+        .px(px(8.))
+        .gap(px(10.))
+        .rounded(px(5.))
+        .cursor_pointer()
+        .hover(move |row| row.bg(theme.hover))
+        .child(icon(glyph, theme.muted))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(13.))
+                .child(title),
+        )
+        .when_some(detail, |row, detail| {
+            row.child(
+                div()
+                    .font_family(MONO)
+                    .text_size(px(10.))
+                    .text_color(theme.faint)
+                    .child(detail),
+            )
+        })
 }
 
 #[cfg(target_os = "macos")]

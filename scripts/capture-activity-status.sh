@@ -57,7 +57,7 @@ PY
   python3 - "$PI_ACTIVITY_LOG" <<'PY'
 import json, sys
 from pathlib import Path
-allowed = {'get_state', 'get_messages', 'get_entries', 'get_session_stats', 'get_available_models', 'get_available_thinking_levels', 'get_settings', 'get_commands', 'list_sessions'}
+allowed = {'get_state', 'get_messages', 'get_entries', 'get_session_stats', 'get_available_models', 'get_available_thinking_levels', 'get_settings', 'get_commands', 'list_sessions', 'get_backend_info', 'get_custom_entries', 'get_active_tools'}
 commands = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
 assert {command['type'] for command in commands} <= allowed, commands
 PY

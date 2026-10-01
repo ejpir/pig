@@ -99,6 +99,25 @@ fn extension_confirm_select_are_cancel_default_correlated_and_do_not_leak_shortc
     );
     cx.run_until_parked();
     assert!(cx.debug_bounds("confirmation-dialog").is_none());
+
+    receive(
+        &tab,
+        json!({"type":"extension_ui_request","id":"timeout-4","method":"confirm","title":"Timed request","message":"Pi resolves this automatically","timeout":10}),
+        &mut cx,
+    );
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("confirmation-dialog").is_some());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(11));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("confirmation-dialog").is_none());
+    let response = tab.controller.read_with(&cx, |controller, _| {
+        controller.extension_responses.last().unwrap().clone()
+    });
+    assert_eq!(
+        response,
+        json!({"type":"extension_ui_response","id":"timeout-4","cancelled":true})
+    );
 }
 
 #[gpui::test]

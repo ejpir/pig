@@ -6,20 +6,30 @@ use serde_json::Value;
 
 pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 
+/// Where a command goes: pi's RPC mode, or the desktop extension pi loads
+/// (`extension/pi-desktop.ts`), which supplies what RPC mode lacks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    Pi,
+    Extension,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
-    /// pi-desktop-backend's versions and commands; plain `pi --mode rpc` does not know it.
+    /// The extension's and pi's versions, and the extension's commands.
     GetBackendInfo,
     GetState,
+    /// The tools pi currently declares to the model; `get_state` does not report them.
+    GetActiveTools,
     GetMessages,
     GetEntries,
-    /// pi-desktop-backend: every `custom` entry of one type, from all branches.
+    /// Every `custom` entry of one type, from all branches.
     GetCustomEntries {
         #[serde(rename = "customType")]
         custom_type: String,
     },
-    /// pi-desktop-backend: a data-only entry pi keeps out of the model's context.
+    /// A data-only entry pi keeps out of the model's context.
     /// Only types starting with `pi-desktop-`; only while pi is idle.
     AppendCustomEntry {
         #[serde(rename = "customType")]
@@ -40,8 +50,8 @@ pub enum Command {
     Fork {
         #[serde(rename = "entryId")]
         entry_id: String,
-        /// pi-desktop-backend (`fork_cwd`): a new session file whose header
-        /// names this folder; the running process keeps its session.
+        /// A new session file whose header names this folder; the running process
+        /// keeps its session. Without it, pi's own fork replaces the session.
         #[serde(skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
@@ -93,6 +103,7 @@ pub enum Command {
         patterns: Option<Vec<String>>,
         persist: bool,
     },
+    /// Saved for new sessions; the current model's level also changes now.
     SetModelThinkingLevel {
         provider: String,
         #[serde(rename = "modelId")]
@@ -103,6 +114,7 @@ pub enum Command {
         provider: String,
         #[serde(rename = "modelId")]
         model_id: String,
+        /// Also make it the default for new sessions.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         persist: bool,
     },
@@ -119,14 +131,12 @@ pub enum Command {
         #[serde(rename = "sessionPath", skip_serializing_if = "Option::is_none")]
         session_path: Option<String>,
     },
-    DeleteSession {
-        #[serde(rename = "sessionPath")]
-        session_path: String,
-    },
     ExportHtml {
         #[serde(rename = "outputPath", skip_serializing_if = "Option::is_none")]
         output_path: Option<String>,
     },
+    /// Uploads the current branch to Radius when it is set up; otherwise answers
+    /// `{"destination": null}` (see `session_actions::share` for the gist fallback).
     Share,
     Clone,
     Reload,
@@ -168,6 +178,60 @@ impl Command {
         Ok(record)
     }
 
+    pub fn route(&self) -> Route {
+        match self {
+            Self::GetBackendInfo
+            | Self::GetActiveTools
+            | Self::GetCustomEntries { .. }
+            | Self::AppendCustomEntry { .. }
+            | Self::GetSettings
+            | Self::NavigateTree { .. }
+            | Self::SetLabel { .. }
+            | Self::Fork { cwd: Some(_), .. }
+            | Self::ListSessions { .. }
+            | Self::GetAuthProviders
+            | Self::GetProjectTrust
+            | Self::ListPackages
+            | Self::SetProjectTrust { .. }
+            | Self::InstallPackage { .. }
+            | Self::RemovePackage { .. }
+            | Self::UpdatePackages { .. }
+            | Self::SetScopedModels { .. }
+            | Self::SetModelThinkingLevel { .. }
+            | Self::SetModel { persist: true, .. }
+            | Self::SetSessionName {
+                session_path: Some(_),
+                ..
+            }
+            | Self::Share
+            | Self::Reload => Route::Extension,
+            Self::GetState
+            | Self::GetMessages
+            | Self::GetEntries
+            | Self::Fork { cwd: None, .. }
+            | Self::SetAutoCompaction { .. }
+            | Self::GetSessionStats
+            | Self::Prompt { .. }
+            | Self::ClearQueue
+            | Self::Abort
+            | Self::Bash { .. }
+            | Self::AbortBash
+            | Self::CycleModel
+            | Self::CycleThinkingLevel
+            | Self::GetAvailableModels
+            | Self::GetAvailableThinkingLevels
+            | Self::GetCommands
+            | Self::SetModel { persist: false, .. }
+            | Self::SetThinkingLevel { .. }
+            | Self::Compact { .. }
+            | Self::SetSessionName {
+                session_path: None, ..
+            }
+            | Self::ExportHtml { .. }
+            | Self::Clone => Route::Pi,
+        }
+    }
+
     /// pi answers these only after the work completes (a compaction can take minutes),
     /// so a request deadline would report a running command as failed.
     pub fn replies_when_finished(&self) -> bool {
@@ -187,6 +251,7 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Self::GetState => "get_state",
+            Self::GetActiveTools => "get_active_tools",
             Self::GetMessages => "get_messages",
             Self::GetEntries => "get_entries",
             Self::GetSettings => "get_settings",
@@ -222,7 +287,6 @@ impl Command {
             Self::SetThinkingLevel { .. } => "set_thinking_level",
             Self::Compact { .. } => "compact",
             Self::SetSessionName { .. } => "set_session_name",
-            Self::DeleteSession { .. } => "delete_session",
             Self::ExportHtml { .. } => "export_html",
             Self::Share => "share",
             Self::Clone => "clone",
@@ -276,8 +340,9 @@ pub struct SessionState {
     pub is_bash_running: Option<bool>,
     #[serde(default)]
     pub auto_compaction_enabled: bool,
-    /// Current SDK loadout, not tools inferred from conversation history.
-    /// Missing means this backend does not report it; `[]` means none active.
+    /// pi's current loadout from `get_active_tools`, not tools inferred from
+    /// conversation history. Missing means not reported yet; `[]` means none active.
+    #[serde(default)]
     pub active_tools: Option<Vec<ActiveTool>>,
 }
 

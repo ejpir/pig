@@ -3,7 +3,7 @@
 //! conversation (design study 05, decision 01).
 //!
 //! The only code that knows the encoding: `custom` entries of type
-//! [`CUSTOM_TYPE`], written by pi-desktop-backend. pi keeps them out of the
+//! [`CUSTOM_TYPE`], written by the desktop extension. pi keeps them out of the
 //! model's context and copies them into forks. Ids are hex, so nothing here
 //! needs jj types; another agent needs only another place to keep the same events.
 use pi_core::protocol::Command;

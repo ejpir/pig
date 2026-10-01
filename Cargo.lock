@@ -8558,6 +8558,7 @@ dependencies = [
  "dirs",
  "embed-resource",
  "env_logger 0.11.8",
+ "flate2",
  "fuzzy",
  "gpui",
  "gpui_platform",
@@ -8586,7 +8587,6 @@ dependencies = [
  "ui",
  "unicode-segmentation",
  "util",
- "zstd 0.13.3",
 ]
 
 [[package]]
@@ -8595,10 +8595,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
+ "dirs",
  "libc",
+ "rand 0.9.4",
  "serde",
  "serde_json",
  "tempfile",
+ "trash",
  "windows-sys 0.61.2",
 ]
 
@@ -8649,7 +8652,6 @@ name = "pi_lsp_bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dirs",
  "fs",
  "futures",
  "gpui",

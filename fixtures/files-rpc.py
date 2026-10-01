@@ -4,6 +4,8 @@ import json
 import os
 import sys
 
+import desktop_channel
+
 if os.environ.get("PI_FILES_PID_LOG"):
     with open(os.environ["PI_FILES_PID_LOG"], "a", encoding="utf-8") as log:
         log.write(json.dumps({"pid": os.getpid(), "cwd": os.getcwd()}) + "\n")
@@ -19,8 +21,7 @@ if os.environ.get("PI_FILES_LONG_CHANGE"):
         {"role": "toolResult", "toolCallId": call_id, "toolName": "write", "content": [{"type": "text", "text": "Fixture only; no file was written."}]},
     ]
 
-for line in sys.stdin:
-    command = json.loads(line)
+def answer(command):
     kind = command["type"]
     with open(os.environ["PI_FILES_COMMAND_LOG"], "a", encoding="utf-8") as log:
         log.write(kind + "\n")
@@ -44,7 +45,14 @@ for line in sys.stdin:
         response["data"] = responses[kind]
     else:
         response["error"] = "Native file test forbids prompts, tools and model calls"
-    print(json.dumps(response), flush=True)
-    if kind == "get_commands" and os.environ.get("PI_FILES_CRASH"):
+    return response
+
+
+desktop_channel.serve(answer)
+for line in sys.stdin:
+    command = json.loads(line)
+    with desktop_channel.lock:
+        desktop_channel.emit(answer(command))
+    if command["type"] == "get_commands" and os.environ.get("PI_FILES_CRASH"):
         print("node:events:487\nUnhandled error event\nError: EACCES opening saved session\n    at fixture.resume (fixture.js:42:1)", file=sys.stderr, flush=True)
         sys.exit(1)

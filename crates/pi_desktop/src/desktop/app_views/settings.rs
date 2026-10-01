@@ -613,7 +613,7 @@ impl SettingsView {
             )
     }
 
-    /// What runs sessions, from the open sessions' `get_backend_info` answers.
+    /// Which pi runs sessions, from the open sessions' `get_backend_info` answers.
     fn found(&self, cx: &App, theme: Theme) -> AnyElement {
         let workspace = self.workspace.read(cx);
         let controllers: Vec<_> = workspace
@@ -643,24 +643,36 @@ impl SettingsView {
                     value => display(value),
                 };
                 panel = panel
-                    .child(detail(
-                        "Backend",
-                        format!("{} {}", text("backend"), text("version")),
-                        true,
-                        theme,
-                    ))
                     .child(detail("pi", text("piVersion"), true, theme))
+                    .child(detail("Extension", text("version"), true, theme))
                     .child(detail("Protocol", text("protocolVersion"), true, theme))
                     .child(match &info["bunVersion"] {
                         Value::String(version) => {
-                            detail("Runtime", format!("Bun {version}, built in"), true, theme)
+                            detail("Runtime", format!("Bun {version}"), true, theme)
                         }
                         _ => detail("Node.js", text("nodeVersion"), true, theme),
                     });
+                if info["piVersion"].as_str() != Some(pi_core::extension::PI_VERSION) {
+                    panel = panel.child(
+                        note(
+                            format!(
+                                "Pi Desktop supports pi {}; this pi may lack what it needs.",
+                                pi_core::extension::PI_VERSION
+                            ),
+                            theme,
+                        )
+                        .mt(px(4.)),
+                    );
+                }
             }
             BackendInfo::Unsupported => {
-                panel = panel
-                    .child(note("pi's own RPC mode, which reports no versions.", theme).mt(px(4.)))
+                panel = panel.child(
+                    note(
+                        "A pi without Pi Desktop's extension, which reports no versions.",
+                        theme,
+                    )
+                    .mt(px(4.)),
+                )
             }
             BackendInfo::Unknown => {
                 panel = panel.child(note("Waiting for the session to answer.", theme).mt(px(4.)))
@@ -755,12 +767,6 @@ impl SettingsView {
                 Kind::Choice(_) => setting.choices().iter().map(|choice| source.label(setting, choice)).collect::<Vec<_>>().join(", "),
                 _ => setting.allowed(),
             }, true, theme))
-            .when(source == Source::Desktop && key == "general.backend", |panel| {
-                panel
-                    .child(divider(theme).my(px(10.)))
-                    .child(section("FOUND", "", theme))
-                    .child(self.found(cx, theme))
-            })
             .when(source == Source::Desktop && key == "general.rememberDismissed" && dismissed > 0, |panel| {
                 panel
                     .child(divider(theme).my(px(10.)))
@@ -820,6 +826,13 @@ impl SettingsView {
                         )
                     }),
             )
+            // pi reads these settings; which pi that is.
+            .when(source == Source::Pi, |panel| {
+                panel
+                    .child(divider(theme).my(px(10.)))
+                    .child(section("PI", "", theme))
+                    .child(self.found(cx, theme))
+            })
             .child(div().flex_1().min_h(px(16.)))
             .child(note(match (source, project) {
                 (Source::Pi, _) => "New sessions start with these settings. Running sessions keep theirs until they restart.",
@@ -867,17 +880,7 @@ impl SettingsView {
             } else {
                 theme.faint
             })
-            .when(selected, |row| {
-                row.bg(theme.selected).child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(px(5.))
-                        .w(px(2.))
-                        .h(px(16.))
-                        .bg(theme.accent),
-                )
-            })
+            .when(selected, |row| row.bg(theme.selected))
             .hover(move |row| row.bg(theme.hover))
             .child(div().flex_1().child(category))
             .when(changed, |row| {

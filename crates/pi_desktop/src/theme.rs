@@ -74,7 +74,7 @@ impl Theme {
             chip: color(0x29313c, 0xffffff),
             chip_line: color(0x3a434f, 0xd3ccc5),
             composer: color(0x1f2630, 0xffffff),
-            focus: color(0x3a5068, 0xb4bcc6),
+            focus: color(0x424954, 0xcbc3bb),
             user: color(0x131922, 0xffffff),
             user_line: color(0x3a434f, 0xd3ccc5),
             track: color(0x252d38, 0xe3ddd7),

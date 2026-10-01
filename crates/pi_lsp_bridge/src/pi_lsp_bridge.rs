@@ -1,34 +1,26 @@
 //! Feeds the desktop's language-server errors back to pi; pi itself has no LSP support.
 //!
-//! Each session's pi loads `extension/pi-desktop-lsp.ts` (`pi -e`), which asks this
-//! session's bridge after `edit` and `write` results and when a run ends. The
+//! The desktop extension every session's pi loads (`pi_core`'s `extension/pi-desktop.ts`)
+//! asks this session's bridge after `edit` and `write` results and when a run ends. The
 //! [`Checker`] answers from the session folder's Zed `Project`, and only once the
 //! user has started language services there; otherwise every answer is empty.
 //!
-//! The same extension and socket carry the session's other requests (jj snapshots
-//! around `bash`, pi's jj tools): anything that is not `file` or `run_end` goes to
-//! the session's [`Handler`].
+//! The same socket carries the extension's other requests (jj snapshots around
+//! `bash`, pi's jj tools): anything that is not `file` or `run_end` goes to the
+//! session's [`Handler`].
 mod check;
 #[cfg(all(test, feature = "fake-lsp"))]
 mod fake_lsp_tests;
 #[cfg(test)]
 mod tests;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 pub use check::{Checker, FILE_WAIT, RUN_WAIT, Request};
 use gpui::{App, AppContext as _, AsyncApp, Entity, Task, WeakEntity};
 use project::Project;
 use smol::io::{AsyncRead, AsyncWrite};
-use std::{
-    ffi::OsString,
-    net::Ipv4Addr,
-    path::{Path, PathBuf},
-    rc::Rc,
-    sync::Arc,
-};
+use std::{ffi::OsString, net::Ipv4Addr, rc::Rc, sync::Arc};
 
-/// The extension pi loads; it does nothing without [`ADDRESS_ENV`].
-pub const EXTENSION: &str = include_str!("../extension/pi-desktop-lsp.ts");
 /// Where the extension connects: a socket path, or `tcp:<port>` on 127.0.0.1.
 pub const ADDRESS_ENV: &str = "PI_DESKTOP_LSP";
 /// With a port: the token each request must carry.
@@ -57,7 +49,6 @@ pub type Handler = Rc<dyn Fn(serde_json::Value, &mut App) -> Task<Result<String>
 /// One session's listener. Dropping it stops listening and removes a socket file.
 pub struct Bridge {
     env: Vec<(&'static str, OsString)>,
-    extension: PathBuf,
     _socket_dir: Option<tempfile::TempDir>,
     _checker: Entity<Checker>,
     _listener: Task<()>,
@@ -72,23 +63,14 @@ impl Bridge {
         handler: Handler,
         cx: &mut App,
     ) -> Result<Self> {
-        let data = dirs::data_local_dir().context("Cannot locate desktop data directory")?;
-        Self::start_in(
-            project,
-            allow,
-            handler,
-            &data.join("pi-desktop"),
-            TRANSPORT,
-            cx,
-        )
+        Self::start_with(project, allow, handler, TRANSPORT, cx)
     }
 
-    /// Like [`Bridge::start`], writing the extension into `extension_dir`.
-    fn start_in(
+    /// Like [`Bridge::start`], over `transport`.
+    fn start_with(
         project: impl Fn(&App) -> Option<Entity<Project>> + 'static,
         allow: impl Fn(&Request, &App) -> bool + 'static,
         handler: Handler,
-        extension_dir: &Path,
         transport: Transport,
         cx: &mut App,
     ) -> Result<Self> {
@@ -132,35 +114,18 @@ impl Bridge {
                 (env, None, task)
             }
         };
-        let extension = install_extension(extension_dir)?;
         Ok(Self {
             env,
-            extension,
             _socket_dir: socket_dir,
             _checker: checker,
             _listener: listener,
         })
     }
 
-    /// Pass to pi as `-e <extension>`.
-    pub fn extension(&self) -> &Path {
-        &self.extension
-    }
-
     /// Add to pi's environment: [`ADDRESS_ENV`], and [`TOKEN_ENV`] with a port.
     pub fn env(&self) -> &[(&'static str, OsString)] {
         &self.env
     }
-}
-
-/// Writes the extension where pi can load it, once per content change.
-fn install_extension(dir: &Path) -> Result<PathBuf> {
-    let path = dir.join("pi-desktop-lsp.ts");
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(EXTENSION) {
-        std::fs::create_dir_all(dir)?;
-        std::fs::write(&path, EXTENSION)?;
-    }
-    Ok(path)
 }
 
 fn serve_later<S>(

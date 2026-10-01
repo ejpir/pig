@@ -66,10 +66,11 @@ pub enum BackendInfo {
     /// Not asked, or no answer yet.
     #[default]
     Unknown,
-    /// pi-desktop-backend's answer: `backend`, `version`, `piVersion`,
-    /// `protocolVersion`, `nodeVersion`, `bunVersion` (standalone build only), `commands`.
+    /// The desktop extension's answer: `backend`, `version`, `piVersion`,
+    /// `protocolVersion`, `nodeVersion`, `bunVersion` (pi's release binary), `commands`,
+    /// `features`.
     Found(Value),
-    /// A program without the command, such as plain `pi --mode rpc`.
+    /// No answer: a program without the desktop extension.
     Unsupported,
 }
 
@@ -362,6 +363,10 @@ impl Session {
                 self.shell = None;
             }
         }
+        // Optional metadata: a failure keeps "not reported" and is not a session error.
+        if record["command"] == "get_active_tools" && record["success"] != true {
+            return Ok(());
+        }
         // Optional: a program without it is not an error.
         if record["command"] == "get_backend_info" {
             self.backend = if record["success"] == true {
@@ -371,8 +376,7 @@ impl Session {
             };
             return Ok(());
         }
-        // The desktop's own records, which it keeps and handles itself. Plain
-        // `pi --mode rpc` has neither command.
+        // The desktop's own records, which it keeps and handles itself.
         if matches!(
             record["command"].as_str(),
             Some("get_custom_entries" | "append_custom_entry")
@@ -386,14 +390,23 @@ impl Session {
         let data = &record["data"];
         match record["command"].as_str().unwrap_or("") {
             "get_state" => {
+                // pi's state has no tools; `get_active_tools` reports them.
+                let active_tools = self.state.active_tools.take();
                 self.state =
                     serde_json::from_value(data.clone()).context("invalid get_state response")?;
+                self.state.active_tools = active_tools;
                 if self.state.is_streaming {
                     self.run = RunState::Running;
                 }
                 if self.state.is_compacting {
                     self.run = RunState::Compacting;
                 }
+            }
+            "get_active_tools" => {
+                self.state.active_tools = Some(
+                    serde_json::from_value(data["activeTools"].clone())
+                        .context("invalid active tools")?,
+                )
             }
             "get_entries" => {
                 self.history = Some(std::sync::Arc::new(crate::history::History::parse(data)?))
@@ -446,7 +459,10 @@ impl Session {
                 self.thinking_levels = serde_json::from_value(data["levels"].clone())?
             }
             "get_commands" => {
-                self.commands = serde_json::from_value(data["commands"].clone())?;
+                let mut commands: Vec<crate::protocol::SlashCommand> =
+                    serde_json::from_value(data["commands"].clone())?;
+                commands.retain(|command| !crate::extension::is_own(command));
+                self.commands = commands;
                 self.commands_loaded = true;
             }
             "set_model" => self.state.model = serde_json::from_value(data.clone())?,

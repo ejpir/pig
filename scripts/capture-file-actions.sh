@@ -43,28 +43,28 @@ click() { xdotool mousemove --window "$window" "$1" "$2"; sleep 0.15; xdotool cl
 shot() { import -window "$window" "artifacts/file-actions-$1.png"; }
 wait_file() { for _ in $(seq 1 70); do [[ -e "$1" ]] && return; sleep 0.1; done; shot failure; echo "Missing expected path: $1" >&2; return 1; }
 name() { xdotool key ctrl+a; xdotool type --clearmodifiers --delay 30 "$1"; xdotool key Return; sleep 0.6; }
-click 944 72
+click 944 55
 sleep 2
 shot browser
-click 1258 152
+click 1258 135
 name created.txt
 wait_file "$tmp/project/created.txt"
 shot created
 # Existing files must not be truncated by New File.
-click 1258 152
+click 1258 135
 name existing.txt
 [[ "$(< "$tmp/project/existing.txt")" == 'KEEP EXISTING' ]]
 shot duplicate
 xdotool key Escape
 sleep 0.2
-click 1258 152
+click 1258 135
 name ../escape.txt
 [[ ! -e "$tmp/escape.txt" ]]
 shot containment
 xdotool key Escape
 sleep 0.2
 # Rename via the context menu (New File, New Folder, Rename).
-click 1140 190 3
+click 1140 173 3
 sleep 0.3
 shot menu
 xdotool key Home Down Down Return
@@ -73,24 +73,24 @@ name renamed.txt
 wait_file "$tmp/project/renamed.txt"
 [[ ! -e "$tmp/project/created.txt" ]]
 shot renamed
-click 1285 152
+click 1285 135
 name newdir
 wait_file "$tmp/project/newdir"
-click 1258 152
+click 1258 135
 name nested.txt
 wait_file "$tmp/project/newdir/nested.txt"
 shot nested
 # Unsaved editor content blocks directory deletion.
-click 365 154
+click 365 137
 xdotool type --clearmodifiers --delay 30 UNSAVED_GUARD
 sleep 0.4
 [[ ! -s "$tmp/project/newdir/nested.txt" ]]
-delete_folder() { click 1100 210 3; sleep 0.3; shot delete-menu; click 1140 368; sleep 0.4; }
+delete_folder() { click 1100 193 3; sleep 0.3; shot delete-menu; click 1140 351; sleep 0.4; }
 delete_folder
 shot unsaved-guard
 tesseract artifacts/file-actions-unsaved-guard.png stdout 2>/dev/null | grep -qi 'Save or close unsaved'
 [[ -d "$tmp/project/newdir" ]]
-click 365 195
+click 365 178
 xdotool key ctrl+s
 for _ in $(seq 1 50); do grep -q UNSAVED_GUARD "$tmp/project/newdir/nested.txt" && break; sleep 0.1; done
 grep -q UNSAVED_GUARD "$tmp/project/newdir/nested.txt"
@@ -117,7 +117,7 @@ if grep -Eq 'Unknown option: --printenv|Failed to load shell environment|panicke
 python3 - "$PI_FILES_COMMAND_LOG" <<'PY'
 import sys
 commands=set(open(sys.argv[1]).read().splitlines())
-assert commands <= {'get_state','get_messages','get_session_stats','list_sessions','get_entries','get_settings','get_commands'},commands
+assert commands <= {'get_state','get_active_tools','get_messages','get_session_stats','list_sessions','get_backend_info','get_custom_entries','get_entries','get_settings','get_commands'},commands
 PY
 xdotool key ctrl+q
 for _ in $(seq 1 50); do

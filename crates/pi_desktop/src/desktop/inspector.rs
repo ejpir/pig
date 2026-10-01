@@ -1,7 +1,7 @@
-use super::panels::{SessionPage, note};
+use super::panels::note;
 use super::session::{Changes, SessionController, SessionEvent};
 use super::*;
-use gpui::{Div, EventEmitter};
+use gpui::Div;
 
 #[derive(Clone, Default)]
 pub enum InspectorPage {
@@ -24,7 +24,6 @@ pub struct InspectorView {
     #[cfg(test)]
     pub renders: usize,
 }
-impl EventEmitter<SessionPage> for InspectorView {}
 impl InspectorView {
     pub fn new(controller: Entity<SessionController>, cx: &mut Context<Self>) -> Self {
         let subscription = cx.subscribe(&controller, |_, _, event, cx| {
@@ -200,24 +199,7 @@ impl InspectorView {
                     })
                     .child(div().flex_1().min_w_0().truncate().child(status)),
             )
-            .child(
-                h_flex()
-                    .gap(px(22.))
-                    .mt(px(8.))
-                    .h(px(34.))
-                    .border_b_1()
-                    .border_color(theme.line)
-                    .child(inspector_tab("inspector-overview", "OVERVIEW", true, theme))
-                    .child(
-                        inspector_tab("inspector-tree", "TREE", false, theme)
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SessionPage::Tree))),
-                    )
-                    .child(
-                        inspector_tab("inspector-files", "FILES", false, theme).on_click(
-                            |_, window, cx| window.dispatch_action(Box::new(super::ShowFiles), cx),
-                        ),
-                    ),
-            )
+            .child(divider(theme).mt(px(8.)))
             .children(self.prompt_mentions(cx, theme));
         if new {
             panel.child(self.before_start(cx, theme))
@@ -313,13 +295,16 @@ impl InspectorView {
             .debug_selector(|| "inspector-active-tools".into())
             .child(section("TOOLS", &hint, theme).mt(px(12.)));
         let Some(tools) = tools else {
-            return panel.child(note(
-                "This backend does not report active tools. Use the standalone SDK backend to inspect the live loadout.",
-                theme,
-            ));
+            return panel.child(
+                note("Pi has not reported its active tools.", theme)
+                    .debug_selector(|| "active-tools-unreported".into()),
+            );
         };
         if tools.is_empty() {
-            return panel.child(note("No tools are active in this session.", theme));
+            return panel.child(
+                note("No tools are active in this session.", theme)
+                    .debug_selector(|| "active-tools-empty".into()),
+            );
         }
         for (index, tool) in tools.iter().enumerate() {
             let mut details = format!(
@@ -383,8 +368,6 @@ impl InspectorView {
             } else {
                 "No jj turn history. Older sessions keep their conversation, but file snapshots cannot be reconstructed."
             }, theme))
-                .child(button("observed-changes", "Review observed edits", theme).mt(px(8.))
-                    .debug_selector(||"observed-changes".into()).on_click(cx.listener(|_,_,_,cx|cx.emit(SessionPage::Changes))))
                 .child(note("Successful edit/write calls only; shell and external changes may be missing. No undo for unrecorded work.", theme).mt(px(4.)));
         } else {
             let current = records.iter().rposition(|r| r.undone.is_none());
@@ -475,12 +458,10 @@ impl InspectorView {
                         }),
                 );
             }
-            body = body.child(h_flex().gap(px(8.)).mt(px(6.))
-                .child(primary_button("history-undo", "Undo last turn", enabled && current.is_some(), theme)
-                    .debug_selector(||"history-undo".into()).on_click(cx.listener(move|this,_,_,cx|{
+            body = body.child(primary_button("history-undo", "Undo last turn", enabled && current.is_some(), theme)
+                    .mt(px(6.)).debug_selector(||"history-undo".into()).on_click(cx.listener(move|this,_,_,cx|{
                         if let Some(i)=current && this.controller.read(cx).jj().project.is_some(){this.controller.update(cx,|c,cx|c.undo_turn(i,cx));}
                     })))
-                .child(button("history-changes", "Review changes", theme).on_click(cx.listener(|_,_,_,cx|cx.emit(SessionPage::Changes)))))
                 .child(note("Recorded turns only. Earlier or unrecorded work is not covered by these snapshots.",theme).mt(px(4.)));
         }
         body
@@ -607,29 +588,6 @@ fn context(model: &Session, theme: Theme) -> Div {
                 ),
         )
 }
-fn inspector_tab(
-    id: &'static str,
-    title: &'static str,
-    selected: bool,
-    theme: Theme,
-) -> gpui::Stateful<Div> {
-    h_flex()
-        .id(id)
-        .debug_selector(move || id.into())
-        .role(gpui::Role::Tab)
-        .aria_label(title)
-        .h_full()
-        .pt(px(2.))
-        .cursor_pointer()
-        .border_b_2()
-        .border_color(if selected {
-            theme.accent
-        } else {
-            gpui::transparent_black()
-        })
-        .child(label(title, theme).when(selected, |label| label.text_color(theme.text)))
-}
-
 fn project_history(recording: bool, theme: Theme) -> Div {
     v_flex()
         .mt(px(6.))

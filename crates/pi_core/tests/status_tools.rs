@@ -47,10 +47,10 @@ fn active_tool_metadata_is_reported_not_inferred_from_history() {
     session
         .apply(&json!({"type":"response","command":"get_state","success":true,"data":{}}))
         .unwrap();
-    assert!(session.state.active_tools.is_none());
-    session.apply(&json!({"type":"response","command":"get_state","success":true,"data":{"activeTools":[]}})).unwrap();
+    assert!(session.state.active_tools.is_none(), "not reported yet");
+    session.apply(&json!({"type":"response","command":"get_active_tools","success":true,"data":{"activeTools":[]}})).unwrap();
     assert!(session.state.active_tools.as_ref().unwrap().is_empty());
-    session.apply(&json!({"type":"response","command":"get_state","success":true,"data":{"activeTools":[{"name":"custom","description":"Original description\nsecond line","sourceInfo":{"path":"/fixture/tool.ts","source":"local","scope":"project","origin":"top-level"}}]}})).unwrap();
+    session.apply(&json!({"type":"response","command":"get_active_tools","success":true,"data":{"activeTools":[{"name":"custom","description":"Original description\nsecond line","sourceInfo":{"path":"/fixture/tool.ts","source":"local","scope":"project","origin":"top-level"}}]}})).unwrap();
     let tool = &session.state.active_tools.as_ref().unwrap()[0];
     assert_eq!(tool.name, "custom");
     assert_eq!(
@@ -64,11 +64,15 @@ fn active_tool_metadata_is_reported_not_inferred_from_history() {
         session.state.active_tools.as_ref().unwrap()[0].name,
         "custom"
     );
+    // pi's state has no tools: it keeps the last report until the next one.
     session
-        .apply(&json!({"type":"response","command":"get_state","success":true,"data":{}}))
+        .apply(&json!({"type":"response","command":"get_state","success":true,"data":{"sessionId":"next"}}))
         .unwrap();
-    assert!(
-        session.state.active_tools.is_none(),
-        "A replacement/backend without metadata must not retain the previous loadout"
+    assert_eq!(session.state.session_id.as_deref(), Some("next"));
+    assert_eq!(
+        session.state.active_tools.as_ref().unwrap()[0].name,
+        "custom"
     );
+    session.apply(&json!({"type":"response","command":"get_active_tools","success":true,"data":{"activeTools":[]}})).unwrap();
+    assert!(session.state.active_tools.as_ref().unwrap().is_empty());
 }

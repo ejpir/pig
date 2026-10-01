@@ -289,12 +289,7 @@ impl TerminalDrawer {
             .font_family(MONO)
             .text_size(px(11.))
             .cursor_pointer()
-            .when(active, |tab| {
-                tab.bg(theme.selected)
-                    .border_1()
-                    .border_color(theme.focus)
-                    .text_color(theme.text)
-            })
+            .when(active, |tab| tab.bg(theme.selected).text_color(theme.text))
             .when(!active, |tab| {
                 tab.text_color(theme.muted)
                     .hover(move |tab| tab.bg(theme.hover))

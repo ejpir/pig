@@ -5,6 +5,8 @@ import os
 import sys
 from pathlib import Path
 
+import desktop_channel
+
 records = [json.loads(line) for line in Path(__file__).with_name("readability.jsonl").read_text().splitlines()]
 messages = records[2]["data"]["messages"]
 end = next(i for i, message in enumerate(messages) if i > 0 and message["role"] == "user")
@@ -26,8 +28,7 @@ responses = {
     "get_commands": {"commands": []},
     "list_sessions": {"sessions": []},
 }
-for line in sys.stdin:
-    command = json.loads(line)
+def answer(command):
     with open(os.environ["PI_ACTIVITY_LOG"], "a", encoding="utf-8") as log:
         log.write(json.dumps(command) + "\n")
     kind = command["type"]
@@ -36,4 +37,10 @@ for line in sys.stdin:
         response["data"] = responses[kind]
     else:
         response["error"] = "Offline activity fixture forbids prompts and mutations"
-    print(json.dumps(response), flush=True)
+    return response
+
+
+desktop_channel.serve(answer)
+for line in sys.stdin:
+    with desktop_channel.lock:
+        desktop_channel.emit(answer(json.loads(line)))

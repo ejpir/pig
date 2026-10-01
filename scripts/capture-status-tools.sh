@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Native footer/active-tools validation against published Pi SDK; synthetic data only.
+# Native footer/active-tools validation against pi's release binary; synthetic data only.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo="$PWD"
@@ -13,48 +13,15 @@ export PI_STATUS_TEST_ROOT="$tmp" PI_STATUS_TEST_REPO="$repo"
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$tmp/project" artifacts
 chmod 700 "$XDG_RUNTIME_DIR"
 unset WAYLAND_DISPLAY PI_DESKTOP_PI PI_DESKTOP_DEMO_WORKSPACE PI_DESKTOP_DEMO_READABILITY
-export PI_DESKTOP_RPC_ENTRY="$tmp/entry.mjs"
+# pi's release binary, as release builds embed it (fetched once into artifacts/pi).
+pi="${PI_DESKTOP_TEST_PI:-$repo/artifacts/pi/linux-$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')/pi}"
+[[ -x "$pi" ]] || python3 scripts/fetch_pi.py --out "$repo/artifacts/pi" > /dev/null
+export PI_DESKTOP_RPC_ENTRY="$repo/scripts/pi-proxy.mjs" PI_PROXY_PI="$pi" PI_PROXY_LOG="$tmp"
+export PI_PROXY_ARGS="[\"--offline\",\"--no-session\",\"-e\",\"$repo/fixtures/pi/extension.ts\",\"-e\",\"$repo/fixtures/pi/telemetry.ts\"]"
 export LIBGL_ALWAYS_SOFTWARE=1 WGPU_BACKEND=vulkan
 for driver in /usr/share/vulkan/icd.d/lvp*.json; do
   if [[ -f "$driver" ]]; then export VK_DRIVER_FILES="$driver" VK_ICD_FILENAMES="$driver"; break; fi
 done
-python3 - <<'PY'
-import os
-from pathlib import Path
-root = Path(os.environ['PI_STATUS_TEST_ROOT'])
-(root/'entry.mjs').write_text('''import {spawn} from 'node:child_process';
-import {appendFileSync} from 'node:fs';
-const root=process.env.PI_STATUS_TEST_ROOT, repo=process.env.PI_STATUS_TEST_REPO;
-const plumbing=/^(PATH|HOME|PI_CODING_AGENT_DIR|PI_OFFLINE|PI_SKIP_VERSION_CHECK|PI_DESKTOP_LSP(?:_TOKEN)?|SystemRoot|ComSpec|TEMP|TMP|TMPDIR|LANG|LC_.*|TZ|SSL_CERT_FILE|NODE_EXTRA_CA_CERTS|HTTPS?_PROXY|ALL_PROXY|NO_PROXY|https?_proxy|all_proxy|no_proxy)$/;
-const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>plumbing.test(key)));
-const child=spawn(process.execPath,[repo+'/packages/pi-desktop-backend/src/cli.mjs',
-  '--offline','--no-session','-e',repo+'/packages/pi-desktop-backend/test/fixtures/extension.ts',
-  '-e',repo+'/packages/pi-desktop-backend/test/fixtures/telemetry.ts',...process.argv.slice(2)],
-  {env,stdio:['pipe','pipe','inherit']});
-let input='', output='';
-process.stdin.setEncoding('utf8'); child.stdout.setEncoding('utf8');
-process.stdin.on('data',chunk=>{
-  input+=chunk; let index;
-  while((index=input.indexOf('\\n'))>=0){
-    const line=input.slice(0,index); input=input.slice(index+1);
-    appendFileSync(root+'/commands.jsonl',JSON.stringify({type:JSON.parse(line).type})+'\\n');
-    child.stdin.write(line+'\\n');
-  }
-});
-child.stdout.on('data',chunk=>{
-  process.stdout.write(chunk); output+=chunk; let index;
-  while((index=output.indexOf('\\n'))>=0){
-    const line=output.slice(0,index); output=output.slice(index+1); const record=JSON.parse(line);
-    appendFileSync(root+'/events.jsonl',JSON.stringify({type:record.type,method:record.method})+'\\n');
-    if(record.type==='response'&&record.command==='get_state'&&record.success)
-      appendFileSync(root+'/tools.jsonl',JSON.stringify(record.data.activeTools)+'\\n');
-  }
-});
-process.stdin.on('end',()=>child.stdin.end());
-child.on('error',error=>{console.error(error.message);process.exit(1);});
-child.on('exit',code=>process.exit(code??1));
-''')
-PY
 "$binary" --project "$tmp/project" > artifacts/status-tools-native-app.log 2>&1 & app=$!
 window=""
 for _ in $(seq 1 100); do
@@ -116,11 +83,12 @@ for name in ['wide','narrow']:
     assert 'validation never executes' not in body.lower(),body
     assert 'Active tool inventory is not exposed' not in body,body
     Path(f'artifacts/status-tools-{name}-footer.txt').write_text(footer)
-tools=json.loads((root/'tools.jsonl').read_text().splitlines()[-1])
+responses=[json.loads(line) for line in (root/'responses.jsonl').read_text().splitlines()]
+tools=[r for r in responses if r['command']=='get_active_tools' and r['success']][-1]['data']['activeTools']
 assert any(tool['name']=='read' and tool['sourceInfo']['source']=='builtin' for tool in tools),tools
 assert any(tool['name']=='backend_probe' and tool['description'] for tool in tools),tools
 commands={json.loads(line)['type'] for line in (root/'commands.jsonl').read_text().splitlines()}
-allowed={'get_state','get_messages','get_session_stats','list_sessions','get_commands'}
+allowed={'get_state','get_active_tools','get_messages','get_session_stats','list_sessions','get_commands','get_backend_info','get_custom_entries'}
 assert commands<=allowed,commands
 events=[json.loads(line)['type'] for line in (root/'events.jsonl').read_text().splitlines()]
 assert not any(event.startswith(('agent_','tool_execution_')) for event in events),events

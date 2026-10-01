@@ -60,13 +60,16 @@ def main():
         ("composer bounds", (276, 700, 768, 134)),
         ("queue bounds", (277, 701, 766, 29)),
     ]:
-        expected, color = study_rect(*rect, stroke=name == "composer bounds")
-        measured = bounds_of_color(actual, expected, color)
+        expected, color = study_rect(*rect, stroke=False)
+        if name == "composer bounds":
+            # Selection/focus outlines are intentionally neutral rather than blue.
+            color = (203, 195, 187)
+        measured = bounds_of_color(actual, expected, color, margin=3 if name == "composer bounds" else 24)
         error = max(abs(a - b) for a, b in zip(expected, measured))
         assert error <= 3, (name, expected, measured)
         checks[name] = {"expected": expected, "rendered": measured, "max_error_px": error}
     report = {"reference": "design/desktop-thread-study-light.svg", "checks": checks,
-              "note": "Live data, native OS controls, bordered messages, and collapsed/selectable tool details differ intentionally. Checks cover surfaces and composer/queue geometry, not pixel-perfect text."}
+              "note": "Live data, native OS controls, neutral selection borders, bordered messages, and collapsed/selectable tool details differ intentionally. Checks cover surfaces and composer/queue geometry, not pixel-perfect text."}
     (OUT / "study-comparison.json").write_text(json.dumps(report, indent=2) + "\n")
     comparison = Image.new("RGB", (2688, 764), "#ebe7e4")
     comparison.paste(reference, (0, 24))

@@ -392,13 +392,8 @@ impl SessionsView {
             if answer.await != Ok(0) {
                 return;
             }
-            let task = session_actions::on_session(
-                PathBuf::from(&saved.cwd),
-                saved.path,
-                saved.id,
-                Command::Share,
-                backend,
-            );
+            let task =
+                session_actions::share(PathBuf::from(&saved.cwd), saved.path, saved.id, backend);
             this.update(cx, |this, cx| {
                 this.busy = Some("Uploading…");
                 cx.notify();
@@ -436,17 +431,16 @@ impl SessionsView {
         let answer = window.prompt(
             PromptLevel::Critical,
             &format!("Delete “{}”?", saved.title()),
-            Some("pi moves the session file to the trash when a trash command is installed, and deletes it otherwise."),
+            Some("The session file moves to the trash."),
             &["Delete", "Cancel"],
             cx,
         );
-        let backend = crate::prefs::backend(cx);
         cx.spawn(async move |this, cx| {
             if answer.await != Ok(0) {
                 return;
             }
             let path = saved.path.clone();
-            let task = session_actions::delete(PathBuf::from(&saved.cwd), saved.path, backend);
+            let task = session_actions::delete(saved.path);
             let result = task.await;
             this.update(cx, |this, cx| {
                 match result {
@@ -499,19 +493,18 @@ impl SessionsView {
                 gpui::transparent_black()
             })
             .hover(move |row| row.bg(theme.hover))
-            .when(selected, |row| {
-                row.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(px(7.))
-                        .w(px(2.))
-                        .h(px(20.))
-                        .bg(theme.accent),
-                )
-            })
             .on_click(cx.listener(move |this, _, _, cx| this.select(path.clone(), cx)))
-            .child(icon("chat", if selected { theme.accent } else { theme.faint }).size(px(14.)))
+            .child(
+                icon(
+                    "chat",
+                    if selected {
+                        theme.secondary
+                    } else {
+                        theme.faint
+                    },
+                )
+                .size(px(14.)),
+            )
             .child(
                 h_flex()
                     .flex_1()

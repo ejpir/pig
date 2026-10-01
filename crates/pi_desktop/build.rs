@@ -1,6 +1,6 @@
 //! Embeds the app icon in the Windows executable. Other platforms use
 //! packaging/macos/AppIcon.icns and the PNGs in assets/app-icon. With the
-//! `bundled-backend` feature, also names the embedded backend archive.
+//! `bundled-backend` feature, also names the embedded pi archive.
 
 fn main() {
     if std::env::var_os("CARGO_FEATURE_BUNDLED_BACKEND").is_some() {
@@ -28,13 +28,13 @@ fn main() {
 }
 
 /// Points `include_bytes!` at PI_DESKTOP_BACKEND_ARCHIVE and names this archive
-/// by a hash of it, so each different backend unpacks into its own folder.
+/// by a hash of it, so each different pi unpacks into its own folder.
 fn bundled_backend() {
     use std::hash::{Hash, Hasher};
     println!("cargo:rerun-if-env-changed=PI_DESKTOP_BACKEND_ARCHIVE");
     let archive = std::env::var_os("PI_DESKTOP_BACKEND_ARCHIVE").expect(
-        "the bundled-backend feature needs PI_DESKTOP_BACKEND_ARCHIVE: the .tar.zst from \
-         packages/pi-desktop-backend/scripts/build-binary.mjs",
+        "the bundled-backend feature needs PI_DESKTOP_BACKEND_ARCHIVE: the .tar.zst of pi's \
+         release that scripts/fetch_pi.py writes",
     );
     let archive = std::path::absolute(archive).expect("PI_DESKTOP_BACKEND_ARCHIVE");
     println!("cargo:rerun-if-changed={}", archive.display());

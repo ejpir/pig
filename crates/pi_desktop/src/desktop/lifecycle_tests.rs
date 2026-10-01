@@ -68,19 +68,21 @@ fn files_shortcut_opens_hidden_inspector_without_changing_the_draft(cx: &mut Tes
 }
 
 #[gpui::test]
-fn inspector_tabs_share_height_and_baseline(cx: &mut TestAppContext) {
+fn middle_navigation_is_the_only_inspector_navigation(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
-    open(&desktop, "/demo/new", None, &mut cx);
-    let overview = cx.debug_bounds("inspector-overview").unwrap();
-    for name in ["inspector-tree", "inspector-files"] {
-        let tab = cx.debug_bounds(name).unwrap();
-        assert_eq!(tab.origin.y, overview.origin.y);
-        assert_eq!(tab.size.height, overview.size.height);
+    let id = open(&desktop, "/demo/new", None, &mut cx);
+    for name in ["inspector-overview", "inspector-tree", "inspector-files"] {
+        assert!(cx.debug_bounds(name).is_none());
     }
-    let files = cx.debug_bounds("inspector-files").unwrap();
-    cx.simulate_click(files.center(), gpui::Modifiers::default());
+    let tree = cx.debug_bounds("tab-tree").unwrap();
+    cx.simulate_click(tree.center(), gpui::Modifiers::default());
     cx.run_until_parked();
-    assert!(cx.debug_bounds("file-browser").is_some());
+    assert_eq!(
+        tab(&desktop, id, &cx)
+            .view
+            .read_with(&cx, |view, _| view.page),
+        panels::SessionPage::Tree
+    );
 }
 
 #[gpui::test]
@@ -216,7 +218,7 @@ fn inspector_navigation_keeps_workspace_shortcuts_and_hidden_drafts_safe(cx: &mu
     let count = first
         .controller
         .read_with(&cx, |c, _| c.model().messages.len());
-    let button = cx.debug_bounds("observed-changes").unwrap();
+    let button = cx.debug_bounds("tab-changes").unwrap();
     cx.simulate_click(button.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     cx.simulate_keystrokes("enter secondary-n");

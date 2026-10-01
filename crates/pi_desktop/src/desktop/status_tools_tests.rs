@@ -60,7 +60,7 @@ fn tool_inventory_uses_current_metadata_and_preserves_original_details(cx: &mut 
     );
     receive(
         &a,
-        json!({"type":"response","command":"get_state","success":true,"data":{"sessionId":"tool-metadata","activeTools":[{"name":"read","description":"Read a file"},{"name":"fixture_probe","description":description,"sourceInfo":{"path":"/offline/extensions/probe.ts","source":"local","scope":"project","origin":"top-level"}}]}}),
+        json!({"type":"response","command":"get_active_tools","success":true,"data":{"activeTools":[{"name":"read","description":"Read a file"},{"name":"fixture_probe","description":description,"sourceInfo":{"path":"/offline/extensions/probe.ts","source":"local","scope":"project","origin":"top-level"}}]}}),
         &mut cx,
     );
     cx.run_until_parked();
@@ -95,13 +95,14 @@ fn tool_inventory_uses_current_metadata_and_preserves_original_details(cx: &mut 
     // A reported empty loadout is not an unavailable inventory.
     receive(
         &a,
-        json!({"type":"response","command":"get_state","success":true,"data":{"activeTools":[]}}),
+        json!({"type":"response","command":"get_active_tools","success":true,"data":{"activeTools":[]}}),
         &mut cx,
     );
     cx.run_until_parked();
-    let empty = cx.debug_bounds("inspector-active-tools").unwrap();
+    assert!(cx.debug_bounds("active-tools-empty").is_some());
+    assert!(cx.debug_bounds("active-tools-unreported").is_none());
     assert!(cx.debug_bounds("active-tool-0").is_none());
     select(&desktop, other, &mut cx);
-    let unknown = cx.debug_bounds("inspector-active-tools").unwrap();
-    assert!(unknown.size.height > empty.size.height);
+    assert!(cx.debug_bounds("active-tools-unreported").is_some());
+    assert!(cx.debug_bounds("active-tools-empty").is_none());
 }

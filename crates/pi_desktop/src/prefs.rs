@@ -90,8 +90,7 @@ pub struct Prefs {
     state: SettingsFile,
     /// `--light`: Moonstone for this run, whatever the setting says.
     pub force_light: bool,
-    /// The backend built into this executable, once unpacked: what sessions run
-    /// when `general.backend` is Automatic.
+    /// The pi built into this executable, once unpacked: what sessions run.
     pub bundled_backend: Option<PathBuf>,
     writers: HashMap<PathBuf, Writer>,
 }
@@ -245,15 +244,13 @@ pub fn text(cx: &App, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// What runs sessions and pi's short-lived helpers: `general.backend` and
-/// `general.node`. Environment variables still win (`Launch::pi_with`).
+/// What runs sessions and pi's short-lived helpers: the pi built into release
+/// builds. Development environment variables still win (`Launch::pi_with`).
 pub fn backend(cx: &App) -> pi_core::transport::Backend {
     pi_core::transport::Backend {
-        program: text(cx, "general.backend").map(PathBuf::from).or_else(|| {
-            cx.try_global::<Prefs>()
-                .and_then(|prefs| prefs.bundled_backend.clone())
-        }),
-        node: text(cx, "general.node").map(PathBuf::from),
+        program: cx
+            .try_global::<Prefs>()
+            .and_then(|prefs| prefs.bundled_backend.clone()),
     }
 }
 

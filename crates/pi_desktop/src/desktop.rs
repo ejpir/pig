@@ -79,6 +79,7 @@ enum Pane {
     Sidebar,
     Inspector,
 }
+const HEADER_HEIGHT: Pixels = px(36.);
 const SIDEBAR_WIDTH: Pixels = px(208.);
 const INSPECTOR_WIDTH: Pixels = px(328.);
 #[derive(Clone, Copy, PartialEq)]
@@ -187,19 +188,6 @@ impl Desktop {
             cx.subscribe(&header, |this, _, event, cx| match event {
                 ShellEvent::Sidebar => this.toggle_sidebar(cx),
                 ShellEvent::Inspector => this.toggle_inspector(cx),
-                ShellEvent::Theme => this.toggle_theme(cx),
-                ShellEvent::ResourcesInstall => {
-                    if let Some(screen) = &this.resources_view {
-                        screen.view.update(cx, |view, cx| view.open_install(cx));
-                    }
-                }
-                ShellEvent::ResourcesRefresh => {
-                    if let Some(screen) = &this.resources_view {
-                        screen
-                            .view
-                            .update(cx, |view, cx| view.refresh_resources(cx));
-                    }
-                }
             }),
         ];
         let this = Self {
@@ -457,16 +445,14 @@ impl Render for Desktop {
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                this.sidebar
-                    .read(cx)
-                    .search
-                    .focus_handle(cx)
-                    .focus(window, cx)
+                this.header
+                    .update(cx, |header, cx| header.focus_search(window, cx));
             }))
             .on_action(cx.listener(|this, _: &Stop, window, cx| {
                 let search = this.sidebar.read(cx).search.clone();
                 if search.focus_handle(cx).is_focused(window) {
-                    search.update(cx, |search, cx| search.set_content("", cx));
+                    this.header
+                        .update(cx, |header, cx| header.dismiss_search(cx));
                     this.focus_composer(window, cx);
                 } else if let Some(tab) = this.workspace.read(cx).active_tab_opt() {
                     let controller = tab.controller.clone();
@@ -476,7 +462,7 @@ impl Render for Desktop {
             .child(
                 self.header.clone().cached(
                     gpui::StyleRefinement::default()
-                        .h(px(52.))
+                        .h(HEADER_HEIGHT)
                         .w_full()
                         .flex_shrink_0(),
                 ),
@@ -554,12 +540,12 @@ impl Render for Desktop {
             )
     }
 }
-/// A vertical scrollbar that shows whenever the content overflows, not only while
-/// scrolling. Attach it to a non-scrolling wrapper around the element that tracks
-/// `handle`: on the scrolling element itself, the thumb would scroll away with the content. With a `gutter` colour it reserves its own space, so the thumb never
-/// covers content that reaches the pane's edge.
+/// An auto-hiding vertical scrollbar. Attach it to a non-scrolling wrapper around
+/// the element that tracks `handle`: on the scrolling element itself, the thumb
+/// would scroll away with the content. With a `gutter` colour it reserves its own
+/// space, so the thumb never covers content that reaches the pane's edge.
 fn scrollbar(id: &'static str, handle: &ScrollHandle, gutter: Option<gpui::Hsla>) -> Scrollbars {
-    let scrollbar = Scrollbars::always_visible(ScrollAxes::Vertical)
+    let scrollbar = Scrollbars::new(ScrollAxes::Vertical)
         .id(id)
         .tracked_scroll_handle(handle);
     match gutter {

@@ -880,6 +880,7 @@ impl SessionController {
             && !matches!(
                 command,
                 Command::GetState
+                    | Command::GetActiveTools
                     | Command::GetMessages
                     | Command::GetEntries
                     | Command::GetSettings
@@ -1893,6 +1894,7 @@ impl SessionController {
                                 changes |= Changes::METADATA;
                             }
                             "get_state"
+                            | "get_active_tools"
                             | "get_session_stats"
                             | "set_model"
                             | "set_thinking_level"
@@ -1987,6 +1989,10 @@ impl SessionController {
                 }
                 if response && record["success"] == true && !self.demo {
                     match record["command"].as_str() {
+                        // pi's state has no tools; the extension reports them.
+                        Some("get_state") => {
+                            self.command(Command::GetActiveTools, cx);
+                        }
                         Some("set_model" | "set_scoped_models" | "set_model_thinking_level") => {
                             self.command(Command::GetSettings, cx);
                             self.command(Command::GetAvailableThinkingLevels, cx);
@@ -2236,7 +2242,6 @@ fn lsp_bridge(
         cx,
     ) {
         Ok(bridge) => {
-            launch.args.extend(["-e".into(), bridge.extension().into()]);
             launch.env.extend(
                 bridge
                     .env()

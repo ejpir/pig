@@ -1,8 +1,8 @@
-//! The standalone pi-desktop-backend that release builds carry inside the
-//! executable (the `bundled-backend` feature). It runs from disk, so the first
-//! launch of each build unpacks it into the cache folder; later launches find it
-//! there. Sessions run it unless Settings or an environment variable name
-//! another backend.
+//! pi's official release binary, which release builds carry inside the executable
+//! (the `bundled-backend` feature) together with the files pi reads beside it. It
+//! runs from disk, so the first launch of each build unpacks it into the cache
+//! folder; later launches find it there. Sessions run it unless a development
+//! environment variable names another pi.
 
 // Without the feature only the tests unpack anything.
 #![cfg_attr(not(feature = "bundled-backend"), allow(dead_code))]
@@ -12,14 +12,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-const PROGRAM: &str = if cfg!(windows) {
-    "pi-desktop-backend.exe"
-} else {
-    "pi-desktop-backend"
-};
+const PROGRAM: &str = if cfg!(windows) { "pi.exe" } else { "pi" };
 
-/// The unpacked backend's executable, or `None` in builds without one or when
-/// unpacking failed (sessions then run `pi` from PATH, as before).
+/// The unpacked pi executable, or `None` in builds without one or when
+/// unpacking failed (sessions then run `pi` from PATH).
 pub fn unpack() -> Option<PathBuf> {
     #[cfg(feature = "bundled-backend")]
     {
@@ -28,22 +24,18 @@ pub fn unpack() -> Option<PathBuf> {
         let started = std::time::Instant::now();
         match unpack_into(&root, env!("PI_DESKTOP_BACKEND_ID"), ARCHIVE) {
             Ok(program) => {
-                log::info!(
-                    "bundled backend {} ({:?})",
-                    program.display(),
-                    started.elapsed()
-                );
+                log::info!("bundled pi {} ({:?})", program.display(), started.elapsed());
                 return Some(program);
             }
-            Err(error) => log::error!("could not unpack the bundled backend: {error:#}"),
+            Err(error) => log::error!("could not unpack the bundled pi: {error:#}"),
         }
     }
     None
 }
 
-/// Unpacks `archive` (a zstd-compressed tar) into `root/id` unless it is already
+/// Unpacks `archive` (a gzip-compressed tar) into `root/id` unless it is already
 /// there, and removes other builds' folders. Unpacking goes to a temporary
-/// folder that is renamed into place, so a crash never leaves half a backend.
+/// folder that is renamed into place, so a crash never leaves half a pi.
 pub(crate) fn unpack_into(root: &Path, id: &str, archive: &[u8]) -> Result<PathBuf> {
     let folder = root.join(id);
     let program = folder.join(PROGRAM);
@@ -51,8 +43,7 @@ pub(crate) fn unpack_into(root: &Path, id: &str, archive: &[u8]) -> Result<PathB
         fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
         let partial = root.join(format!(".{id}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&partial);
-        let unpacked = zstd::Decoder::new(archive)
-            .and_then(|decoder| tar::Archive::new(decoder).unpack(&partial));
+        let unpacked = tar::Archive::new(flate2::read::GzDecoder::new(archive)).unpack(&partial);
         if let Err(error) = unpacked {
             let _ = fs::remove_dir_all(&partial);
             return Err(error).with_context(|| format!("unpacking into {}", partial.display()));
@@ -111,7 +102,9 @@ mod tests {
             header.set_cksum();
             builder.append_data(&mut header, path, *bytes).unwrap();
         }
-        zstd::encode_all(&builder.into_inner().unwrap()[..], 3).unwrap()
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut encoder, &builder.into_inner().unwrap()).unwrap();
+        encoder.finish().unwrap()
     }
 
     #[test]
@@ -159,7 +152,7 @@ mod tests {
     #[test]
     fn a_damaged_archive_is_an_error() {
         let root = tempfile::tempdir().unwrap();
-        assert!(unpack_into(root.path(), "a", b"not zstd").is_err());
+        assert!(unpack_into(root.path(), "a", b"not gzip").is_err());
         let no_program = archive(&[("README.md", b"hi", 0o644)]);
         assert!(unpack_into(root.path(), "a", &no_program).is_err());
         let partials = fs::read_dir(root.path())

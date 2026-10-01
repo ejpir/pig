@@ -11,6 +11,10 @@ use std::{
 };
 
 fn client(mode: &str, cwd: &std::path::Path) -> RpcClient {
+    client_with(mode, cwd, None)
+}
+
+fn client_with(mode: &str, cwd: &std::path::Path, extension: Option<PathBuf>) -> RpcClient {
     RpcClient::spawn(Launch {
         program: if cfg!(windows) {
             "python".into()
@@ -26,6 +30,7 @@ fn client(mode: &str, cwd: &std::path::Path) -> RpcClient {
         cwd: cwd.into(),
         env: vec![],
         request_timeout: Duration::from_millis(if mode == "timeout" { 80 } else { 3000 }),
+        extension,
     })
     .unwrap()
 }
@@ -39,6 +44,49 @@ fn next(events: &async_channel::Receiver<TransportEvent>) -> TransportEvent {
         assert!(Instant::now() < deadline, "RPC event deadline elapsed");
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn extension_commands_take_the_channel_and_join_the_same_events() {
+    let directory = tempfile::tempdir().unwrap();
+    let client = client_with(
+        "extension",
+        directory.path(),
+        Some(directory.path().join("extension")),
+    );
+    let events = client.events();
+    // Sent before the extension connects: it waits for the extension's hello.
+    let sessions = client
+        .send(Command::ListSessions {
+            scope: "all".into(),
+        })
+        .unwrap();
+    let state = client.send(Command::GetState).unwrap();
+    let mut answered = std::collections::HashMap::new();
+    while answered.len() < 2 {
+        if let TransportEvent::Record(record) = next(&events) {
+            answered.insert(record["id"].as_str().unwrap().to_owned(), record);
+        }
+    }
+    assert_eq!(answered[&sessions]["command"], "list_sessions");
+    assert_eq!(answered[&sessions]["data"]["via"], "extension");
+    assert_eq!(answered[&state]["command"], "get_state");
+    assert_eq!(
+        answered[&state]["data"]["cwd"],
+        directory.path().to_str().unwrap()
+    );
+    assert!(
+        directory.path().join("extension/pi-desktop.ts").is_file(),
+        "pi loads the installed extension"
+    );
+}
+
+#[test]
+fn extension_commands_fail_at_once_without_the_extension() {
+    let directory = tempfile::tempdir().unwrap();
+    let client = client("ok", directory.path());
+    let error = client.send(Command::GetSettings).unwrap_err().to_string();
+    assert!(error.contains("without Pi Desktop's extension"), "{error}");
 }
 
 #[test]
@@ -151,6 +199,7 @@ fn startup_errors_are_actionable() {
         cwd: std::env::temp_dir(),
         env: vec![],
         request_timeout: Duration::from_secs(1),
+        extension: None,
     };
     assert!(
         RpcClient::spawn(launch)
@@ -162,21 +211,16 @@ fn startup_errors_are_actionable() {
 }
 
 #[test]
-#[ignore = "set PI_DESKTOP_TEST_RPC_ENTRY to scripts/pi-rpc.mjs or a built pi CLI"]
+#[ignore = "set PI_DESKTOP_TEST_PI to pi's release binary (see docs/validation.md)"]
 fn local_pi_metadata_handshake_without_model_calls() {
-    let entry =
-        std::env::var_os("PI_DESKTOP_TEST_RPC_ENTRY").expect("PI_DESKTOP_TEST_RPC_ENTRY required");
+    let pi = std::env::var_os("PI_DESKTOP_TEST_PI").expect("PI_DESKTOP_TEST_PI required");
     let directory = tempfile::tempdir().unwrap();
     let session_file = directory.path().join("resume.jsonl");
     std::fs::write(&session_file, format!("{}\n{}\n",
         json!({"type":"session","version":3,"id":"resume-fixture","timestamp":"2026-09-28T09:41:00Z","cwd":directory.path()}),
         json!({"type":"message","id":"a1b2c3d4","parentId":null,"timestamp":"2026-09-28T09:41:00Z","message":{"role":"user","content":[{"type":"text","text":"hello"}],"timestamp":1790588460000_u64}})
     )).unwrap();
-    let mut args = vec![
-        entry,
-        "--session".into(),
-        session_file.clone().into_os_string(),
-    ];
+    let mut args = vec!["--session".into(), session_file.clone().into_os_string()];
     args.extend(
         [
             "--mode",
@@ -191,7 +235,7 @@ fn local_pi_metadata_handshake_without_model_calls() {
         .map(OsString::from),
     );
     let client = RpcClient::spawn(Launch {
-        program: "node".into(),
+        program: pi,
         args,
         cwd: directory.path().into(),
         env: vec![(
@@ -199,6 +243,7 @@ fn local_pi_metadata_handshake_without_model_calls() {
             directory.path().join("config").into_os_string(),
         )],
         request_timeout: Duration::from_secs(30),
+        extension: Some(directory.path().join("extension")),
     })
     .unwrap();
     let events = client.events();
@@ -214,6 +259,9 @@ fn local_pi_metadata_handshake_without_model_calls() {
         Command::ListSessions {
             scope: "all".into(),
         },
+        Command::GetActiveTools,
+        Command::GetSettings,
+        Command::GetBackendInfo,
     ] {
         ids.insert(client.send(command).unwrap());
     }
@@ -231,4 +279,24 @@ fn local_pi_metadata_handshake_without_model_calls() {
     assert_eq!(model.state.session_id.as_deref(), Some("resume-fixture"));
     assert_eq!(model.state.session_file.as_deref(), session_file.to_str());
     assert_eq!(model.title(), "hello");
+    assert!(
+        model
+            .state
+            .active_tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty())
+    );
+    assert!(model.settings.is_some());
+    assert!(
+        matches!(&model.backend, pi_core::session::BackendInfo::Found(info) if info["piVersion"] == pi_core::extension::PI_VERSION),
+        "{:?}",
+        model.backend
+    );
+    assert!(
+        model
+            .commands
+            .iter()
+            .all(|command| command.name != "pi-desktop"),
+        "the extension's own command is not the user's"
+    );
 }

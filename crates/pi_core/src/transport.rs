@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, VecDeque},
     ffi::OsString,
     io::{BufReader, Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command as ProcessCommand, Stdio},
     sync::{
         Arc, Mutex,
@@ -17,8 +17,9 @@ use async_channel::{Receiver, Sender};
 use serde_json::Value;
 
 use crate::{
+    channel::{self, Channel},
     process_tree::ProcessTree,
-    protocol::{Command, MAX_RECORD_BYTES, read_record},
+    protocol::{Command, MAX_RECORD_BYTES, Route, read_record},
 };
 
 #[derive(Clone, Debug)]
@@ -28,57 +29,36 @@ pub struct Launch {
     pub cwd: PathBuf,
     pub env: Vec<(OsString, OsString)>,
     pub request_timeout: Duration,
+    /// Where to install the desktop extension, which pi then loads (`-e`) and which
+    /// answers [`Route::Extension`] commands. `None` runs a program without it.
+    pub extension: Option<PathBuf>,
 }
 
-/// What runs sessions when no environment variable says otherwise: the desktop's
-/// `general.backend` and `general.node` settings.
+/// What runs sessions when no environment variable says otherwise: the pi that
+/// release builds embed.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Backend {
-    /// A JavaScript entry, run with Node.js, or an executable.
     pub program: Option<PathBuf>,
-    /// The Node.js that runs a JavaScript entry.
-    pub node: Option<PathBuf>,
 }
 
-/// The program and its first arguments. `PI_DESKTOP_RPC_ENTRY` (run with
-/// `PI_DESKTOP_NODE`) and `PI_DESKTOP_PI` win over `backend`, for development.
+/// The program and its first arguments. For development, `PI_DESKTOP_PI` (an
+/// executable) and `PI_DESKTOP_RPC_ENTRY` (a JavaScript entry run with
+/// `PI_DESKTOP_NODE`, or `node`) win over `backend`.
 fn program(env: impl Fn(&str) -> Option<OsString>, backend: &Backend) -> (OsString, Vec<OsString>) {
-    let script = |path: &Path| {
-        matches!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some("js" | "mjs" | "cjs")
-        )
-    };
-    let env_entry = env("PI_DESKTOP_RPC_ENTRY");
-    let env_pi = env("PI_DESKTOP_PI");
-    let chosen = backend
-        .program
-        .clone()
-        .filter(|_| env_entry.is_none() && env_pi.is_none());
-    let entry = env_entry.or_else(|| {
-        chosen
-            .clone()
-            .filter(|path| script(path))
-            .map(OsString::from)
-    });
-    match entry {
-        Some(path) => (
-            env("PI_DESKTOP_NODE")
-                .or_else(|| backend.node.clone().map(OsString::from))
-                .unwrap_or_else(|| "node".into()),
-            vec![path],
-        ),
-        None => (
-            env_pi
-                .or_else(|| chosen.map(OsString::from))
-                .unwrap_or_else(|| if cfg!(windows) { "pi.cmd" } else { "pi" }.into()),
-            vec![],
-        ),
+    if let Some(entry) = env("PI_DESKTOP_RPC_ENTRY") {
+        return (
+            env("PI_DESKTOP_NODE").unwrap_or_else(|| "node".into()),
+            vec![entry],
+        );
     }
+    let program = env("PI_DESKTOP_PI")
+        .or_else(|| backend.program.clone().map(OsString::from))
+        .unwrap_or_else(|| if cfg!(windows) { "pi.cmd" } else { "pi" }.into());
+    (program, vec![])
 }
 
 /// What the backend gets on top of the desktop's own environment.
-fn environment(env: impl Fn(&str) -> Option<OsString>) -> Vec<(OsString, OsString)> {
+pub(crate) fn environment(env: impl Fn(&str) -> Option<OsString>) -> Vec<(OsString, OsString)> {
     let mut vars = Vec::new();
     if cfg!(target_os = "macos") {
         // Finder does not inherit a terminal's PATH. Include standard native package-manager bins.
@@ -118,8 +98,33 @@ impl Launch {
             cwd,
             env: environment(|name| std::env::var_os(name)),
             request_timeout: Duration::from_secs(30),
+            extension: Some(crate::extension::default_dir()),
         }
     }
+}
+
+/// Correlates a response with its request before it joins the event stream; late
+/// replies to timed-out requests are dropped. `false` once nobody listens.
+fn deliver(record: Value, pending: &PendingMap, events: &Sender<TransportEvent>) -> bool {
+    if record["type"] == "response" {
+        let id = record["id"].as_str().unwrap_or("");
+        let request = pending.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        if let Some(request) = request {
+            if record["command"].as_str() != Some(&request.command) {
+                return events
+                    .send_blocking(TransportEvent::RequestFailed {
+                        id: id.into(),
+                        command: request.command,
+                        error: "RPC response command mismatch".into(),
+                    })
+                    .is_ok();
+            }
+        } else if !id.is_empty() {
+            // Late replies to timed-out requests must not mutate newer state.
+            return true;
+        }
+    }
+    events.send_blocking(TransportEvent::Record(record)).is_ok()
 }
 
 #[derive(Debug)]
@@ -146,7 +151,7 @@ struct Pending {
 type PendingMap = Arc<Mutex<HashMap<String, Pending>>>;
 
 /// Pipe I/O never runs on GPUI's foreground executor. One client owns one child.
-/// Both queues are bounded; backpressure cannot block the UI's send path.
+/// All queues are bounded; backpressure cannot block the UI's send path.
 pub struct RpcClient {
     writes: Sender<Vec<u8>>,
     events: Receiver<TransportEvent>,
@@ -155,16 +160,38 @@ pub struct RpcClient {
     next_id: AtomicU64,
     timeout: Duration,
     pid: u32,
+    channel: Option<Channel>,
     supervisor: Option<thread::JoinHandle<()>>,
 }
 
 impl RpcClient {
     pub fn spawn(launch: Launch) -> Result<Self> {
+        let (event_sender, events) = async_channel::bounded(256);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let mut args = launch.args;
+        let mut env = launch.env;
+        let channel = match &launch.extension {
+            Some(dir) => {
+                let extension = crate::extension::install(dir)
+                    .context("Could not install Pi Desktop's extension")?;
+                let channel = Channel::open(channel::TRANSPORT, stopped.clone(), {
+                    let pending = pending.clone();
+                    let events = event_sender.clone();
+                    move |record| deliver(record, &pending, &events)
+                })
+                .context("Could not open the extension channel")?;
+                args.extend(["-e".into(), extension.into_os_string()]);
+                env.extend(channel.env().iter().cloned());
+                Some(channel)
+            }
+            None => None,
+        };
         let mut command = ProcessCommand::new(&launch.program);
         command
-            .args(&launch.args)
+            .args(&args)
             .current_dir(&launch.cwd)
-            .envs(launch.env)
+            .envs(env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -202,9 +229,6 @@ impl RpcClient {
         let stdout = child.stdout.take().context("child stdout unavailable")?;
         let mut stderr = child.stderr.take().context("child stderr unavailable")?;
         let (writes, write_receiver) = async_channel::bounded::<Vec<u8>>(64);
-        let (event_sender, events) = async_channel::bounded(256);
-        let stopped = Arc::new(AtomicBool::new(false));
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let diagnostics = Arc::new(Mutex::new(VecDeque::<u8>::new()));
 
         thread::spawn({
@@ -261,33 +285,7 @@ impl RpcClient {
                 loop {
                     match read_record(&mut reader) {
                         Ok(Some(record)) => {
-                            if record["type"] == "response" {
-                                let id = record["id"].as_str().unwrap_or("");
-                                let request =
-                                    pending.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
-                                if let Some(request) = request {
-                                    if record["command"].as_str() != Some(&request.command) {
-                                        if events
-                                            .send_blocking(TransportEvent::RequestFailed {
-                                                id: id.into(),
-                                                command: request.command,
-                                                error: "RPC response command mismatch".into(),
-                                            })
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
-                                        continue;
-                                    }
-                                } else if !id.is_empty() {
-                                    // Late replies to timed-out requests must not mutate newer state.
-                                    continue;
-                                }
-                            }
-                            if events
-                                .send_blocking(TransportEvent::Record(record))
-                                .is_err()
-                            {
+                            if !deliver(record, &pending, &events) {
                                 break;
                             }
                         }
@@ -409,6 +407,7 @@ impl RpcClient {
             next_id: AtomicU64::new(1),
             timeout: launch.request_timeout,
             pid,
+            channel,
             supervisor: Some(supervisor),
         })
     }
@@ -434,7 +433,11 @@ impl RpcClient {
                         .then(|| Instant::now() + self.timeout),
                 },
             );
-        if let Err(error) = self.send_record(record) {
+        let sent = match command.route() {
+            Route::Pi => self.send_record(record),
+            Route::Extension => self.send_to_extension(record),
+        };
+        if let Err(error) = sent {
             self.pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -457,6 +460,22 @@ impl RpcClient {
             .try_send(bytes)
             .context("RPC write queue full or closed")
     }
+
+    fn send_to_extension(&self, record: Value) -> Result<()> {
+        let channel = self
+            .channel
+            .as_ref()
+            .context("This program runs without Pi Desktop's extension")?;
+        if self.stopped.load(Ordering::Acquire) {
+            bail!("RPC process is disconnected");
+        }
+        let mut bytes = serde_json::to_vec(&record)?;
+        if bytes.len() >= MAX_RECORD_BYTES {
+            bail!("Extension command is too large");
+        }
+        bytes.push(b'\n');
+        channel.send(bytes)
+    }
 }
 
 impl Drop for RpcClient {
@@ -478,37 +497,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_backend_setting_picks_node_or_an_executable_and_the_environment_wins() {
+    fn the_embedded_pi_runs_unless_the_environment_names_another() {
         let none = |_: &str| None;
         let default = if cfg!(windows) { "pi.cmd" } else { "pi" };
         assert_eq!(program(none, &Backend::default()), (default.into(), vec![]));
-        let script = Backend {
-            program: Some("/app/backend/src/cli.mjs".into()),
-            node: Some("/opt/node/bin/node".into()),
+        let embedded = Backend {
+            program: Some("/cache/pi-desktop/backend/1/pi".into()),
         };
         assert_eq!(
-            program(none, &script),
-            (
-                "/opt/node/bin/node".into(),
-                vec!["/app/backend/src/cli.mjs".into()]
-            )
-        );
-        let executable = Backend {
-            program: Some("/usr/local/bin/pi".into()),
-            node: Some("/opt/node/bin/node".into()),
-        };
-        assert_eq!(
-            program(none, &executable),
-            ("/usr/local/bin/pi".into(), vec![])
+            program(none, &embedded),
+            ("/cache/pi-desktop/backend/1/pi".into(), vec![])
         );
         let env = |name: &str| (name == "PI_DESKTOP_PI").then(|| OsString::from("/dev/pi"));
-        assert_eq!(program(env, &script), ("/dev/pi".into(), vec![]));
+        assert_eq!(program(env, &embedded), ("/dev/pi".into(), vec![]));
         let env = |name: &str| match name {
             "PI_DESKTOP_RPC_ENTRY" => Some(OsString::from("/dev/cli.js")),
+            "PI_DESKTOP_NODE" => Some(OsString::from("/opt/node/bin/node")),
             _ => None,
         };
         assert_eq!(
-            program(env, &executable),
+            program(env, &embedded),
             ("/opt/node/bin/node".into(), vec!["/dev/cli.js".into()])
         );
     }

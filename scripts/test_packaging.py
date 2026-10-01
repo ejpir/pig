@@ -1,5 +1,6 @@
 """Offline archive/publish-policy tests; synthetic headers do not prove native builds."""
 import hashlib
+import io
 import plistlib
 import struct
 import tarfile
@@ -9,6 +10,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import fetch_pi
 from package_desktop import TARGETS, archive_name, check_binary, package
 from release_desktop import manifest, validate_tag
 
@@ -79,7 +81,7 @@ class PackagingTests(unittest.TestCase):
             self.assertNotIn("scratch.log", names)
             self.assertFalse(any(".git/" in name or "node_modules/" in name for name in names))
 
-    def test_backend_notices_and_bundled_licenses_ship_in_licenses(self):
+    def test_pi_notices_and_bundled_licenses_ship_in_licenses(self):
         target = "x86_64-unknown-linux-gnu"
         notices = self.root / "notices.txt"
         notices.write_text("== undici@8.10.2 ==\nMIT\n")
@@ -87,9 +89,9 @@ class PackagingTests(unittest.TestCase):
         prefix = archive.name.removesuffix(".tar.gz")
         with tarfile.open(archive) as tar:
             names = tar.getnames()
-            for name in ["PI-DESKTOP-BACKEND-NOTICES.txt", "BUN-LICENSE.md", "PI-MIT.txt"]:
+            for name in ["PI-NOTICES.txt", "BUN-LICENSE.md", "PI-MIT.txt"]:
                 self.assertIn(f"{prefix}/licenses/{name}", names)
-            copied = tar.extractfile(f"{prefix}/licenses/PI-DESKTOP-BACKEND-NOTICES.txt").read()
+            copied = tar.extractfile(f"{prefix}/licenses/PI-NOTICES.txt").read()
             self.assertEqual(copied, notices.read_bytes())
 
     def test_macos_stage_signs_verifies_and_keeps_the_app_bundle(self):
@@ -113,6 +115,41 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual([call[0] for call in calls], ["codesign", "codesign", "ditto"])
         self.assertIn("--verify", calls[1])
         self.assertIn("--keepParent", calls[2])
+
+    def test_the_embedded_pi_is_the_release_the_extension_pins(self):
+        version = fetch_pi.pinned_version()
+        hashes = fetch_pi.pinned_hashes(version)
+        for platform in ["darwin-arm64", "linux-x64", "linux-arm64"]:
+            self.assertRegex(hashes[f"pi-{platform}.tar.gz"], r"^[0-9a-f]{64}$")
+        self.assertRegex(hashes["pi-windows-x64.zip"], r"^[0-9a-f]{64}$")
+        extension = (fetch_pi.ROOT / "crates/pi_core/extension/pi-desktop.ts").read_text()
+        self.assertIn(f'const EXTENSION_VERSION = "{version}-', extension)
+
+    def test_pi_archives_unpack_with_the_executable_at_the_top(self):
+        def tarball():
+            data = tempfile.SpooledTemporaryFile()
+            with tarfile.open(fileobj=data, mode="w:gz") as tar:
+                for name in ["pi/pi", "pi/theme/dark.json"]:
+                    info = tarfile.TarInfo(name)
+                    info.size = 2
+                    tar.addfile(info, io.BytesIO(b"{}"))
+            data.seek(0)
+            return data.read()
+
+        def zipped():
+            data = io.BytesIO()
+            with zipfile.ZipFile(data, "w") as archive:
+                archive.writestr("pi.exe", "MZ")
+                archive.writestr("theme/dark.json", "{}")
+            return data.getvalue()
+
+        for name, data, program in [("pi-linux-x64.tar.gz", tarball(), "pi"), ("pi-windows-x64.zip", zipped(), "pi.exe")]:
+            folder = self.root / name
+            folder.mkdir()
+            fetch_pi.unpack(data, name, folder)
+            self.assertTrue((folder / program).is_file(), name)
+            self.assertTrue((folder / "theme/dark.json").is_file(), name)
+            self.assertEqual(sorted(entry.name for entry in folder.iterdir()), sorted([program, "theme"]))
 
     def test_macos_refuses_non_native_packaging(self):
         with patch("package_desktop.sys.platform", "linux"):

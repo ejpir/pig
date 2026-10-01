@@ -165,7 +165,7 @@ impl Render for ConfirmationPrompt {
                                     .min_h(px(28.))
                                     .py(px(4.))
                                     .when(selected, |b| {
-                                        b.border_color(theme.accent).bg(theme.selected)
+                                        b.border_color(theme.line).bg(theme.selected)
                                     })
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.stop_propagation();

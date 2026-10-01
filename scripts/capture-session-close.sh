@@ -31,6 +31,7 @@ xdotool windowfocus --sync "$window"
 sleep 2
 click() { xdotool mousemove --window "$window" "$1" "$2"; sleep 0.2; xdotool click 1; sleep 0.5; }
 shot() { import -window "$window" "artifacts/close-$1.png"; }
+create_session() { shot chooser; click 847 520; }
 last_pid() { python3 - "$tmp/pids.jsonl" <<'PY'
 import json,sys
 print(json.loads(open(sys.argv[1]).readlines()[-1])['pid'])
@@ -52,7 +53,7 @@ PY
 }
 first="$(last_pid)"
 xdotool type --clearmodifiers 'KEEP_DRAFT'
-click 184 110
+click 184 94
 shot draft-confirm
 xdotool key Escape
 sleep 0.4
@@ -60,32 +61,34 @@ kill -0 "$first"
 # Cancellation restores the composer; clear only the test's draft, not a file.
 click 400 627
 xdotool key ctrl+a BackSpace
-click 184 110
+click 184 94
 wait_dead "$first"
 shot empty-selected-project
 # Last session is gone, but Ctrl+N must still use the selected project.
 xdotool key ctrl+n
 sleep 0.8
+create_session
 wait_cwd "$tmp/project" 2
 second="$(last_pid)"
-click 184 110
+click 184 94
 wait_dead "$second"
 # Select the other project heading (no process starts on selection).
-click 76 174
+click 76 158
 shot selected-other
 xdotool key ctrl+n
 sleep 0.8
+create_session
 wait_cwd "$tmp/other" 3
 third="$(last_pid)"
 shot other-session
-click 184 110
+click 184 94
 wait_dead "$third"
 # Remove the first project, cancel once, then confirm with the native prompt.
-click 184 146
+click 184 130
 shot project-confirm
 xdotool key Escape
 sleep 0.3
-click 184 146
+click 184 130
 shot project-confirm
 # Cancel is the safe default. Tab selects the explicit close action.
 xdotool key Tab Return
@@ -99,7 +102,7 @@ after=Image.open('artifacts/close-project-removed.png')
 assert before.getpixel((300,300))==after.getpixel((300,300)), 'Confirmation was not dismissed'
 def sidebar(image,name):
     path=f'artifacts/close-{name}-text.png'
-    image.crop((8,130,200,242)).resize((576,336)).save(path)
+    image.crop((8,110,200,222)).resize((576,336)).save(path)
     return subprocess.check_output(['tesseract',path,'stdout','--psm','6'],stderr=subprocess.DEVNULL,text=True).lower()
 a,b=sidebar(before,'before'),sidebar(after,'after')
 assert re.search(r'\bproject\b',a),a
@@ -109,7 +112,7 @@ PY
 [[ "$(< "$tmp/other/saved.jsonl")" == 'KEEP HISTORY' ]]
 python3 - "$tmp/commands.log" <<'PY'
 import sys
-allowed={'get_state','get_messages','get_session_stats','list_sessions','get_commands','get_entries','get_settings'}
+allowed={'get_state','get_active_tools','get_messages','get_session_stats','list_sessions','get_commands','get_backend_info','get_custom_entries','get_entries','get_settings'}
 assert set(open(sys.argv[1]).read().splitlines())<=allowed
 PY
 ! grep -q 'panicked at' artifacts/close-app.log

@@ -89,16 +89,16 @@ expect() {
 start --project "$project" --light
 # Open broken.yaml and trust the project, as capture-diagnostic-hover.sh does, so the
 # language server runs and reports a problem.
-click 944 72
+click 944 55
 sleep 2
-click 1100 145
+click 1100 128
 xdotool type --clearmodifiers broken.yaml
 sleep 0.3
-click 1130 184
+click 1130 167
 sleep 1
-click 1160 684
+click 1160 668
 sleep 0.4
-click 250 210
+click 250 193
 for _ in $(seq 1 150); do
   grep -q textDocument/didOpen "$PI_LSP_TEST_LOG" 2>/dev/null && break
   sleep 0.1
@@ -160,9 +160,9 @@ quit
 # the message goes to a new one.
 start --demo --light
 shot demo
-ocr demo
-read -r x y < <(word demo New)
-click "$x" "$y"
+xdotool key ctrl+n
+sleep 0.5
+click 847 565
 sleep 1.5
 
 xdotool type --clearmodifiers 'Compare @op'

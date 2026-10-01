@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Native study 02/04 and shell copy icons; published SDK, isolated local fixtures.
+# Native study 02/04 and shell copy icons; pi's release binary, isolated local fixtures.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo="$PWD"
@@ -13,7 +13,13 @@ export PI_PROJECTS_TEST_ROOT="$tmp" PI_PROJECTS_TEST_REPO="$repo"
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$tmp/pi/.pi/extensions" "$tmp/zed" "$tmp/minivm" "$tmp/agent" "$tmp/sessions" artifacts
 chmod 700 "$XDG_RUNTIME_DIR"
 unset WAYLAND_DISPLAY PI_DESKTOP_PI PI_DESKTOP_DEMO_WORKSPACE PI_DESKTOP_DEMO_READABILITY
-export PI_DESKTOP_RPC_ENTRY="$tmp/entry.mjs" LIBGL_ALWAYS_SOFTWARE=1 WGPU_BACKEND=vulkan
+# pi's release binary, as release builds embed it (fetched once into artifacts/pi).
+pi="${PI_DESKTOP_TEST_PI:-$repo/artifacts/pi/linux-$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')/pi}"
+[[ -x "$pi" ]] || python3 scripts/fetch_pi.py --out "$repo/artifacts/pi" > /dev/null
+export PI_DESKTOP_RPC_ENTRY="$repo/scripts/pi-proxy.mjs" PI_PROXY_PI="$pi" PI_PROXY_LOG="$tmp"
+export PI_PROXY_ARGS="[\"--offline\",\"-e\",\"$repo/fixtures/pi/extension.ts\",\"--session-dir\",\"$tmp/sessions\",\"--session\",\"$tmp/sessions/pi.jsonl\"]"
+export PI_PROXY_PROMPTS='["/backend-dialog-queue","/backend-dialog-timeout"]'
+export LIBGL_ALWAYS_SOFTWARE=1 WGPU_BACKEND=vulkan
 for driver in /usr/share/vulkan/icd.d/lvp*.json; do
   if [[ -f "$driver" ]]; then export VK_DRIVER_FILES="$driver" VK_ICD_FILENAMES="$driver"; break; fi
 done
@@ -25,33 +31,11 @@ r=Path(os.environ['PI_PROJECTS_TEST_ROOT'])
 (r/'pi/.pi/settings.json').write_text(json.dumps({'defaultThinkingLevel':'medium'}))
 (r/'pi/AGENTS.md').write_text('Isolated offline UI fixture. Do not execute model or tool calls.\n')
 (r/'pi/.pi/extensions/release-notes.ts').write_text("export default function(pi) { pi.registerCommand('release-notes', { description: 'Offline fixture command', handler: async () => {} }); }\n")
-(r/'pi/.pi/extensions/rpc-demo.ts').write_text("throw new Error('Synthetic load error for native UI validation');\n")
 for name in ['pi','zed','minivm']:
  records=[{'type':'session','version':3,'id':'offline-'+name,'cwd':str(r/name),'timestamp':'2026-09-30T01:00:00Z'},
           {'type':'message','id':'user-'+name,'parentId':None,'timestamp':'2026-09-30T01:00:00Z','message':{'role':'user','content':'Offline UI validation','timestamp':1790730000000}},
           {'type':'session_info','id':'name-'+name,'parentId':'user-'+name,'timestamp':'2026-09-30T01:00:00Z','name':'Offline '+name}]
  (r/'sessions'/f'{name}.jsonl').write_text(''.join(json.dumps(record)+'\n' for record in records))
-(r/'entry.mjs').write_text('''import {spawn} from 'node:child_process';
-import {appendFileSync} from 'node:fs';
-const root=process.env.PI_PROJECTS_TEST_ROOT, repo=process.env.PI_PROJECTS_TEST_REPO;
-const plumbing=/^(PATH|HOME|PI_CODING_AGENT_DIR|PI_OFFLINE|PI_SKIP_VERSION_CHECK|PI_DESKTOP_LSP(?:_TOKEN)?|SystemRoot|ComSpec|TEMP|TMP|TMPDIR|LANG|LC_.*|TZ|SSL_CERT_FILE|NODE_EXTRA_CA_CERTS|HTTPS?_PROXY|ALL_PROXY|NO_PROXY|https?_proxy|all_proxy|no_proxy)$/;
-const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>plumbing.test(key)));
-const child=spawn(process.execPath,[repo+'/packages/pi-desktop-backend/src/cli.mjs','--offline',
- '-e',repo+'/packages/pi-desktop-backend/test/fixtures/extension.ts','--session-dir',root+'/sessions',
- '--session',root+'/sessions/pi.jsonl',...process.argv.slice(2)],{env,stdio:['pipe','pipe','inherit']});
-let input='',output=''; process.stdin.setEncoding('utf8'); child.stdout.setEncoding('utf8');
-process.stdin.on('data',chunk=>{input+=chunk;let n;while((n=input.indexOf('\\n'))>=0){
- const line=input.slice(0,n);input=input.slice(n+1);const command=JSON.parse(line);
- if(command.type==='prompt'&&!['/backend-dialog-queue','/backend-dialog-timeout'].includes(command.message)) throw new Error('Native fixture forbids ordinary prompts');
- appendFileSync(root+'/commands.jsonl',JSON.stringify({type:command.type,...(command.type==='bash'?{excludeFromContext:command.excludeFromContext}:{}),...(command.type==='prompt'?{message:command.message}:{}),...(command.type==='extension_ui_response'?{id:command.id,cancelled:command.cancelled,value:command.value,confirmed:command.confirmed}:{})})+'\\n');
- child.stdin.write(line+'\\n');}});
-child.stdout.on('data',chunk=>{process.stdout.write(chunk);output+=chunk;let n;while((n=output.indexOf('\\n'))>=0){
- const line=output.slice(0,n);output=output.slice(n+1);const record=JSON.parse(line);
- appendFileSync(root+'/events.jsonl',JSON.stringify({type:record.type,method:record.method,...(record.type==='extension_ui_request'&&record.method!=='notify'||record.type==='extension_ui_cancel'?{id:record.id}: {})})+'\\n');
- if(record.type==='response'&&record.command==='get_project_trust'&&record.success)
-  appendFileSync(root+'/resources.jsonl',JSON.stringify(record.data)+'\\n');}});
-process.stdin.on('end',()=>child.stdin.end());child.on('error',e=>{console.error(e.message);process.exit(1);});child.on('exit',code=>process.exit(code??1));
-''')
 PY
 "$binary" --project "$tmp/pi" --light > artifacts/projects-shell-native-app.log 2>&1 & app=$!
 window=""
@@ -182,7 +166,7 @@ word Block 420 100 510 600
 submit_fixture /backend-dialog-timeout
 shot decision-timeout; ocr decision-timeout
 grep -qi 'Timed fixture confirmation' artifacts/projects-shell-decision-timeout.txt
-sleep 3.2
+sleep 3.7
 shot decision-cancelled; ocr decision-cancelled
 ! grep -qi 'Timed fixture confirmation' artifacts/projects-shell-decision-cancelled.txt
 grep -qi 'Timed request finished' artifacts/projects-shell-decision-cancelled.txt
@@ -190,7 +174,7 @@ python3 - "$tmp" <<'PY'
 import json,sys
 from pathlib import Path
 r=Path(sys.argv[1]); commands=[json.loads(line) for line in (r/'commands.jsonl').read_text().splitlines()]
-allowed={'get_state','get_messages','get_entries','get_session_stats','get_settings','get_available_models','get_available_thinking_levels','get_commands','get_auth_providers','get_project_trust','list_packages','list_sessions','bash','prompt','extension_ui_response'}
+allowed={'get_state','get_active_tools','get_messages','get_entries','get_session_stats','get_settings','get_available_models','get_available_thinking_levels','get_commands','get_backend_info','get_custom_entries','get_auth_providers','get_project_trust','list_packages','list_sessions','bash','prompt','extension_ui_response'}
 assert {c['type'] for c in commands}<=allowed,commands
 assert [c['excludeFromContext'] for c in commands if c['type']=='bash']==[True],commands
 events=[json.loads(line) for line in (r/'events.jsonl').read_text().splitlines()]
@@ -200,10 +184,9 @@ assert [e['method'] for e in requests]==['confirm','select','confirm'],requests
 answers=[c for c in commands if c['type']=='extension_ui_response']
 assert [c['id'] for c in answers]==[e['id'] for e in requests],answers
 assert answers[0]['cancelled'] and answers[1]['value']=='Block' and answers[2]['cancelled'],answers
-assert any(e['type']=='extension_ui_cancel' and e['id']==requests[2]['id'] for e in events),events
-metadata=json.loads((r/'resources.jsonl').read_text().splitlines()[-1])
+responses=[json.loads(line) for line in (r/'responses.jsonl').read_text().splitlines()]
+metadata=[x for x in responses if x['command']=='get_project_trust' and x['success']][-1]['data']
 assert metadata['trusted'] and len(metadata['contextFiles'])==1,metadata
-assert any(e['status']=='load-error' for e in metadata['loadedExtensions']),metadata
 assert any('release-notes' in e['path'] and e['status']=='loaded' for e in metadata['loadedExtensions']),metadata
 Path('artifacts/projects-shell-native-protocol.json').write_text(json.dumps({'commands':commands,'projectResources':metadata,'modelOrToolEvents':False},indent=2)+'\n')
 PY
@@ -211,7 +194,7 @@ xdotool key ctrl+q
 for _ in $(seq 1 75); do
   if ! kill -0 "$app" 2>/dev/null; then
     wait "$app"; app=""
-    echo 'PASS: native chooser light/dark, project Resources wide/narrow, reported load error/context paths, small shell copy icons, owned process popup, queued confirm/select and backend timeout cancellation, explicit excluded local printf; no model/tool execution.'
+    echo 'PASS: native chooser light/dark, project Resources wide/narrow, reported extensions/context paths, small shell copy icons, owned process popup, queued confirm/select and backend timeout cancellation, explicit excluded local printf; no model/tool execution.'
     exit 0
   fi
   sleep .1

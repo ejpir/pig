@@ -63,6 +63,23 @@ impl super::session_view::SessionView {
         let controller = self.controller.clone();
         let session_id = controller.read(cx).model().state.session_id.clone();
         self.active_extension = Some(id.clone());
+        if let Some(timeout) = request["timeout"].as_u64().filter(|timeout| *timeout > 0) {
+            let timeout_id = id.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(timeout))
+                    .await;
+                this.update_in(cx, |this, window, cx| {
+                    if this.active_extension.as_deref() == Some(timeout_id.as_str())
+                        && window.has_active_prompt()
+                    {
+                        window.dispatch_action(Box::new(super::prompts::CancelPrompt), cx);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
         cx.spawn(async move |this, cx| {
             let answer = answer.await.ok().unwrap_or(0);
             // Respond to the owning controller/request, never whichever tab is now selected.

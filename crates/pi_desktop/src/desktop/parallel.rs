@@ -278,7 +278,7 @@ impl Render for Form {
                             .gap(px(10.))
                             .rounded(px(6.))
                             .border_1()
-                            .border_color(if selected { theme.focus } else { theme.line })
+                            .border_color(theme.line)
                             .when(selected, |row| row.bg(theme.selected))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -294,12 +294,12 @@ impl Render for Form {
                                     .flex_shrink_0()
                                     .rounded_full()
                                     .border_1()
-                                    .border_color(if selected { theme.accent } else { theme.line_strong })
+                                    .border_color(theme.line_strong)
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .when(selected, |dot| {
-                                        dot.child(div().size(px(6.)).rounded_full().bg(theme.accent))
+                                        dot.child(div().size(px(6.)).rounded_full().bg(theme.text))
                                     }),
                             )
                             .child(

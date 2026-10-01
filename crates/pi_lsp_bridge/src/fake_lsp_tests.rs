@@ -13,6 +13,7 @@ use serde_json::json;
 use settings::SettingsStore;
 use std::{
     collections::BTreeMap,
+    path::Path,
     sync::{Arc, Mutex},
 };
 use util::path;
