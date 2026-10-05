@@ -134,3 +134,28 @@ pub fn long_press_feedback() {
         java.long_press_feedback();
     }
 }
+
+/// Opens the app's full-screen QR camera. A decoded URL arrives through
+/// `Application::on_open_urls`, exactly like a system-camera deep link.
+pub fn scan_qr() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current().is_some_and(|java| java.scan_qr())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
+/// A friendly hardware name shown while approving a newly paired phone.
+pub fn device_name() -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current().and_then(|java| java.device_name())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        None
+    }
+}

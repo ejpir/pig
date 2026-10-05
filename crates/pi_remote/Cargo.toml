@@ -15,13 +15,19 @@ bundled-durable = []
 [dependencies]
 anyhow.workspace = true
 async-channel.workspace = true
+base64 = "0.22"
+fs2 = "0.4"
+qrcode = { version = "0.14", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 pi_core = { path = "../pi_core" }
 dirs = "6"
 rand = "0.9"
 sha2 = "0.10"
+shell-words = "1.1"
+ssh-key = { version = "0.7.0-rc.11", features = ["ed25519", "getrandom"] }
 tempfile = "3.23"
+whoami = "1.6"
 flate2 = { version = "1.1", optional = true }
 tar = { version = "0.4.46", default-features = false, optional = true }
 

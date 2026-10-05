@@ -111,7 +111,16 @@ def main():
             "StrictModes yes", "PasswordAuthentication no", "KbdInteractiveAuthentication no",
             "PubkeyAuthentication yes", "UsePAM no", "PermitRootLogin no",
             f"AllowUsers {getpass.getuser()}", "AllowTcpForwarding no", "AllowAgentForwarding no",
-            "X11Forwarding no", "PermitTTY no", f"ForceCommand {force}", "LogLevel VERBOSE", "",
+            "X11Forwarding no", "PermitTTY no",
+            "SetEnv " + " ".join([
+                f"PI_DESKTOP_AUTHORIZED_KEYS_FILE={keys}",
+                f"PI_DESKTOP_PAIRING_DIR={directory / 'pairing'}",
+                f"PI_DESKTOP_REMOTE_STATE_DIR={state}",
+                f"PI_DESKTOP_DURABLE_RUNNER={args.runner.resolve()}",
+                "PI_DESKTOP_DURABLE_PROVIDER=faux", "PI_DESKTOP_DURABLE_MODEL=faux-1",
+                f"PI_DESKTOP_PI={state / 'DO-NOT-START-STOCK-PI'}",
+            ]),
+            "LogLevel VERBOSE", "",
         ]))
         subprocess.run([args.sshd, "-t", "-f", str(ssh_config)], check=True)
         with (args.output / "sshd.log").open("wb") as log:
@@ -132,15 +141,27 @@ def main():
                 environment.update({
                     "PI_ANDROID_TEST_SSH": f"{getpass.getuser()}@127.0.0.1:{port}",
                     "PI_ANDROID_TEST_KEYS": str(keys), "PI_ANDROID_TEST_PROJECT": str(project),
+                    "PI_ANDROID_TEST_HELPER": str(args.helper.resolve()),
+                    "PI_ANDROID_TEST_FORCE_COMMAND": force,
                 })
+                cargo = environment.get("CARGO", "cargo")
                 result = subprocess.run([
-                    "cargo", "test", "-p", "pi_android", "--lib", "--offline",
+                    cargo, "test", "-p", "pi_android", "--lib", "--offline",
                     "a_durable_session_runs_over_ssh", "--", "--ignored", "--nocapture",
                 ], cwd=repository, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 (args.output / "test.log").write_bytes(result.stdout)
                 sys.stdout.buffer.write(result.stdout)
                 result.check_returncode()
                 print("PASS isolated SSH catalog, folders, image prompt, follow-ups, second watcher and deletion")
+                keys.write_text("")
+                result = subprocess.run([
+                    cargo, "test", "-p", "pi_android", "--lib", "--offline",
+                    "qr_pairing_replaces_the_bootstrap", "--", "--ignored", "--nocapture",
+                ], cwd=repository, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                (args.output / "pairing.log").write_bytes(result.stdout)
+                sys.stdout.buffer.write(result.stdout)
+                result.check_returncode()
+                print("PASS QR bootstrap, pinned host, confirmation, permanent key, restricted gateway")
             finally:
                 server.terminate()
                 server.wait(timeout=5)

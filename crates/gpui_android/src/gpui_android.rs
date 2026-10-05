@@ -18,6 +18,8 @@ mod ime;
 mod keys;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod lifecycle;
+#[cfg(any(target_os = "android", test))]
+mod qr;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod touch;
 

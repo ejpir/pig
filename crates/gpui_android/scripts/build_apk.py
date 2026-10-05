@@ -44,6 +44,8 @@ class App:
     output: str  # the library's folder under target/<triple>/<profile>
     permissions: tuple = ()
     debuggable: bool = False  # permits read-only run-as fixture telemetry, independent of Rust optimization
+    qr_scanner: bool = False
+    deep_links: tuple = ()  # (scheme, host), opened in the main activity
 
 
 TOUCH = App(
@@ -136,7 +138,8 @@ ATTRIBUTE_IDS = {  # android.R.attr
     "theme": 0x01010000, "label": 0x01010001, "name": 0x01010003, "hasCode": 0x0101000C,
     "debuggable": 0x0101000F, "exported": 0x01010010, "authorities": 0x01010018,
     "grantUriPermissions": 0x0101001B, "launchMode": 0x0101001D, "configChanges": 0x0101001F,
-    "value": 0x01010024, "minSdkVersion": 0x0101020C, "versionCode": 0x0101021B,
+    "value": 0x01010024, "scheme": 0x01010027, "host": 0x01010028,
+    "minSdkVersion": 0x0101020C, "versionCode": 0x0101021B,
     "versionName": 0x0101021C, "targetSdkVersion": 0x01010270,
     "extractNativeLibs": 0x010104EA,
 }
@@ -191,7 +194,23 @@ def manifest(app, debuggable):
                     element("action", [attribute("name", STRING, "android.intent.action.MAIN")]),
                     element("category", [attribute("name", STRING, "android.intent.category.LAUNCHER")]),
                 ]),
+                *(element("intent-filter", [], [
+                    element("action", [attribute("name", STRING, "android.intent.action.VIEW")]),
+                    element("category", [attribute("name", STRING, "android.intent.category.DEFAULT")]),
+                    element("category", [attribute("name", STRING, "android.intent.category.BROWSABLE")]),
+                    element("data", [
+                        attribute("scheme", STRING, scheme),
+                        attribute("host", STRING, host),
+                    ]),
+                ]) for scheme, host in app.deep_links),
             ]),
+            *( [element("activity", [
+                attribute("name", STRING, "dev.pi.gpui.PairScannerActivity"),
+                attribute("exported", BOOLEAN, False),
+                attribute("label", STRING, "Scan computer"),
+                attribute("theme", REFERENCE, THEME_NO_ACTION_BAR),
+                attribute("configChanges", INT_HEX, CONFIG_CHANGES),
+            ])] if app.qr_scanner else []),
             # Serves copied images to the apps that paste them.
             element("provider", [
                 attribute("name", STRING, "dev.pi.gpui.ClipboardProvider"),
@@ -269,11 +288,11 @@ def encode_xml(root):
     return struct.pack("<HHI", 0x0003, 8, 8 + len(chunks)) + chunks
 
 
-def debug_keystore():
+def debug_keystore(keytool="keytool"):
     keystore = Path.home() / ".android" / "debug.keystore"
     if not keystore.exists():
         keystore.parent.mkdir(parents=True, exist_ok=True)
-        run(["keytool", "-genkeypair", "-keystore", keystore, "-storepass", "android",
+        run([keytool, "-genkeypair", "-keystore", keystore, "-storepass", "android",
              "-keypass", "android", "-alias", "androiddebugkey", "-keyalg", "RSA",
              "-keysize", "2048", "-validity", "10000", "-dname", "CN=Android Debug,O=Android,C=US"])
     return keystore
@@ -284,13 +303,17 @@ def build(app, debug, out):
     android_jar = tool("ANDROID_JAR", lambda: sdk and find_android_jar(sdk), f"android.jar (API {MIN_SDK}+)")
     d8 = tool("D8_JAR", lambda: sdk and find_build_tool(sdk, "d8.jar"), "d8.jar (build-tools)")
     apksigner = tool("APKSIGNER_JAR", lambda: sdk and find_build_tool(sdk, "apksigner.jar"), "apksigner.jar (build-tools)")
-    for program in ("javac", "java", "keytool"):
-        if not shutil.which(program):
+    java = os.environ.get("JAVA", "java")
+    javac = os.environ.get("JAVAC", "javac")
+    keytool = os.environ.get("KEYTOOL", "keytool")
+    for program in (javac, java, keytool):
+        if not Path(program).is_file() and not shutil.which(program):
             fail(f"{program} not found; install a JDK (Android Studio's is in its jbr folder)")
 
     env = {**os.environ, **ndk_linker_env(sdk)}
+    cargo = env.get("CARGO", "cargo")
     profile = [] if debug else ["--release"]
-    run(["cargo", "build", *app.cargo, "--target", TARGET, *profile], cwd=WORKSPACE, env=env)
+    run([cargo, "build", *app.cargo, "--target", TARGET, *profile], cwd=WORKSPACE, env=env)
     target_dir = Path(env.get("CARGO_TARGET_DIR", WORKSPACE / "target"))
     library = target_dir / TARGET / ("debug" if debug else "release") / app.output / f"lib{app.library}.so"
 
@@ -298,8 +321,8 @@ def build(app, debug, out):
         scratch = Path(scratch)
         classes = scratch / "classes"
         sources = sorted((CRATE / "java").rglob("*.java"))
-        run(["javac", "--release", "11", "-classpath", android_jar, "-d", classes, *sources])
-        run(["java", "-cp", d8, "com.android.tools.r8.D8", "--min-api", MIN_SDK, "--lib", android_jar,
+        run([javac, "--release", "11", "-classpath", android_jar, "-d", classes, *sources])
+        run([java, "-cp", d8, "com.android.tools.r8.D8", "--min-api", MIN_SDK, "--lib", android_jar,
              "--output", scratch, *sorted(classes.rglob("*.class"))])
         unsigned = scratch / "unsigned.apk"
         with zipfile.ZipFile(unsigned, "w", zipfile.ZIP_DEFLATED) as apk:
@@ -308,7 +331,7 @@ def build(app, debug, out):
             apk.write(library, f"lib/arm64-v8a/lib{app.library}.so")
             apk.write(CRATE / "assets/fonts/OFL.txt", "assets/licenses/NotoEmoji-OFL.txt")
         out.parent.mkdir(parents=True, exist_ok=True)
-        run(["java", "-jar", apksigner, "sign", "--ks", debug_keystore(), "--ks-pass", "pass:android",
+        run([java, "-jar", apksigner, "sign", "--ks", debug_keystore(keytool), "--ks-pass", "pass:android",
              "--min-sdk-version", MIN_SDK, "--out", out, unsigned])
     print(f"Built {out}\nInstall it with: adb install -r {out}")
 

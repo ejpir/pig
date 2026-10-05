@@ -96,6 +96,8 @@ pub struct PhoneApp {
     pub(crate) address: Entity<TextArea>,
     pub(crate) connect_error: Option<SharedString>,
     pub(crate) connecting: bool,
+    /// Enrollment progress and the code that must match the computer.
+    pub(crate) pairing_status: Option<SharedString>,
     /// The phone's public key, once made: one line for authorized_keys.
     pub(crate) phone_key: Option<String>,
     /// The computer turned down the phone's key on the last try.
@@ -269,6 +271,7 @@ impl PhoneApp {
             address,
             connect_error: None,
             connecting: false,
+            pairing_status: None,
             phone_key,
             key_refused: false,
             data_dir,
@@ -693,6 +696,7 @@ impl PhoneApp {
         };
         let known = self.prefs(cx).host_keys.get(&address.to_string()).cloned();
         self.connecting = true;
+        self.pairing_status = None;
         self.connect_error = None;
         window.dismiss_virtual_keyboard();
         window.focus(&self.focus, cx);
@@ -727,6 +731,80 @@ impl PhoneApp {
         .detach();
     }
 
+    /// Opens the dedicated camera scanner. Its result comes back through the
+    /// same URL path as a QR opened by Android's system camera.
+    pub(crate) fn scan_computer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.dismiss_virtual_keyboard();
+        window.focus(&self.focus, cx);
+        self.connect_error = None;
+        if !activity::scan_qr() {
+            self.connect_error = Some("This device couldn't open the QR scanner".into());
+        }
+        cx.notify();
+    }
+
+    fn pair(
+        &mut self,
+        offer: pi_core::pairing::Offer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connecting {
+            return;
+        }
+        if let Err(error) = offer.check_time() {
+            self.connect_error = Some(error.to_string().into());
+            cx.notify();
+            return;
+        }
+        let identity = match self.identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                self.connect_error = Some(format!("{error:#}").into());
+                cx.notify();
+                return;
+            }
+        };
+        let public_key = identity.public_line();
+        let code = pi_core::pairing::confirmation_code(&offer.id, &public_key);
+        let address = Address {
+            user: offer.user.clone(),
+            host: offer.hosts[0].clone(),
+            port: offer.port,
+        };
+        self.address
+            .update(cx, |field, cx| field.set_text(address.to_string(), cx));
+        self.connecting = true;
+        self.key_refused = false;
+        self.connect_error = None;
+        self.pairing_status = Some(format!("Confirm {code} on the computer").into());
+        window.dismiss_virtual_keyboard();
+        window.focus(&self.focus, cx);
+        cx.notify();
+
+        let device_name = activity::device_name().unwrap_or_else(|| "Android phone".into());
+        cx.spawn_in(window, async move |this, cx| {
+            let reached = crate::pairing::enroll(offer, identity, public_key, device_name).await;
+            this.update_in(cx, |this, window, cx| {
+                this.connecting = false;
+                match reached {
+                    Ok((address, connection, helper, listed)) => {
+                        this.pairing_status = Some("Paired securely".into());
+                        this.connected(address, connection, helper, listed, window, cx);
+                    }
+                    Err(error) => {
+                        this.pairing_status = None;
+                        this.connect_error = Some(format!("{error:#}").into());
+                        this.routes = vec![Route::Connect];
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn connected(
         &mut self,
         address: Address,
@@ -736,6 +814,7 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.pairing_status = None;
         let fingerprint = connection.fingerprint.clone();
         let prefs = self.prefs(cx);
         let wanted = prefs
@@ -1128,6 +1207,17 @@ impl PhoneApp {
         if let Some(name) = url.strip_prefix("pi://preview/") {
             if crate::SCREENS.contains(&name) {
                 self.preview(name, window, cx);
+            }
+            return;
+        }
+        if url.starts_with(pi_core::pairing::URL_PREFIX) {
+            match pi_core::pairing::Offer::parse(url) {
+                Ok(offer) => self.pair(offer, window, cx),
+                Err(error) => {
+                    self.connect_error = Some(error.to_string().into());
+                    self.routes = vec![Route::Connect];
+                    cx.notify();
+                }
             }
             return;
         }

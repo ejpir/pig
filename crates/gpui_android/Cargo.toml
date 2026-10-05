@@ -22,6 +22,8 @@ log = "0.4"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+qrcode = { version = "0.14", default-features = false }
+quircs = "0.10"
 
 [target.'cfg(target_os = "android")'.dependencies]
 gpui_wgpu = { path = "../../../zed/crates/gpui_wgpu" }
@@ -32,5 +34,6 @@ jni = "0.22"
 memmap2 = "0.9"
 ndk = { version = "0.9", features = ["rwh_06", "nativewindow"] }
 ndk-sys = "0.6"
+quircs = "0.10"
 raw-window-handle = "0.6"
 uuid = "1"

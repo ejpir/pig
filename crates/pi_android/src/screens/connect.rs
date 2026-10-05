@@ -171,12 +171,58 @@ impl PhoneApp {
                         .child(ui::label("Step 1 of 2 · Connect a computer", &colors).mt(px(12.)))
                         .child(
                             ui::hint(
-                                "Connect over SSH first. Next, choose a project from folders on the computer—no path needed here. Its sessions keep working while the phone is away.",
+                                "Scan the code printed by Pi on your computer. It securely authorizes this phone through SSH—no address or key copying.",
                                 &colors,
                             )
                             .mt(px(10.))
                             .text_size(px(15.))
                             .line_height(relative(1.5)),
+                        )
+                        .child({
+                            let button = ui::button(
+                                "scan-computer",
+                                Button::Primary,
+                                Some("scan"),
+                                if self.connecting && self.pairing_status.is_some() {
+                                    "Pairing…"
+                                } else {
+                                    "Scan computer QR"
+                                },
+                                false,
+                                &colors,
+                            )
+                            .mt(px(20.))
+                            .w_full();
+                            if self.connecting {
+                                ui::disabled(button, &colors)
+                            } else {
+                                button.on_click(cx.listener(|this, _, window, cx| {
+                                    this.scan_computer(window, cx)
+                                }))
+                            }
+                        })
+                        .children(self.pairing_status.clone().map(|status| {
+                            div()
+                                .mt(px(10.))
+                                .px(px(12.))
+                                .py(px(10.))
+                                .rounded(px(12.))
+                                .bg(colors.tint(colors.accent))
+                                .text_center()
+                                .text_size(px(14.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors.accent)
+                                .child(status)
+                        }))
+                        .child(
+                            div()
+                                .mt(px(24.))
+                                .flex()
+                                .items_center()
+                                .gap(px(12.))
+                                .child(div().h(px(1.)).flex_1().bg(colors.line))
+                                .child(ui::label("Or connect manually", &colors))
+                                .child(div().h(px(1.)).flex_1().bg(colors.line)),
                         )
                         .child(steps),
                 ),

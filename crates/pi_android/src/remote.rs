@@ -18,11 +18,20 @@ pub struct Helper {
     /// The computer account's home, to show folders as `~/…`.
     pub home: String,
     pub images: bool,
+    /// A paired phone runs through an authorized_keys forced-command gateway.
+    pub gateway: bool,
 }
 
 impl Helper {
     fn command(&self, arguments: &str) -> Result<String> {
-        Ok(format!("{} {arguments}", quote(&self.path)?))
+        Ok(format!(
+            "{} {arguments}",
+            if self.gateway {
+                "pi-desktop-remote".to_owned()
+            } else {
+                quote(&self.path)?
+            }
+        ))
     }
 
     /// `~/repos/pi` for `/Users/nick/repos/pi`.
@@ -62,6 +71,7 @@ pub fn choose(listing: &str) -> Result<Helper> {
                 path: path.to_owned(),
                 home,
                 images: capabilities["imagePrompts"] == true,
+                gateway: false,
             });
         }
     }
@@ -79,6 +89,19 @@ pub fn choose(listing: &str) -> Result<Helper> {
 }
 
 pub async fn find(connection: &Connection) -> Result<Helper> {
+    // A paired key cannot run a shell to search the account. Its forced gateway
+    // exposes only this fixed discovery command and the helper's allowlisted API.
+    let discovered = connection.run("pi-desktop-remote discover".into()).await?;
+    if discovered.status == Some(0)
+        && let Ok(helper) = serde_json::from_str::<pi_core::pairing::Helper>(&discovered.stdout)
+    {
+        return Ok(Helper {
+            path: helper.path,
+            home: helper.home,
+            images: helper.images,
+            gateway: helper.gateway,
+        });
+    }
     let output = connection.run(format!("sh -c '{FIND}'")).await?;
     choose(&output.stdout)
 }

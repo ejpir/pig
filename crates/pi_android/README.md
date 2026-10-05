@@ -25,6 +25,7 @@ instead, with no computer.
      cargo build --release -p pi_remote --features bundled-durable
    mkdir -p ~/.pi/desktop/bin/phone
    cp target/release/pi-desktop-remote ~/.pi/desktop/bin/phone/
+   ln -sfn ~/.pi/desktop/bin/phone/pi-desktop-remote ~/.pi/desktop/bin/pi-desktop-remote
    ```
 
    The phone uses the newest helper under `~/.pi/desktop/bin/` that runs
@@ -36,11 +37,27 @@ instead, with no computer.
 
 ## Connect
 
-Enter `you@computer` (an IP address or a Tailscale name works where `.local`
-names don't), and tap Connect. The first time, the computer turns the phone's
-key down: copy it from the second step into `~/.ssh/authorized_keys` there, and
-connect again. The computer's host key is kept then; a different one later is
-refused until the computer is forgotten in Settings.
+The easiest first connection is QR pairing. On the computer, run:
+
+```sh
+~/.pi/desktop/bin/pi-desktop-remote pair
+```
+
+Then tap **Scan computer QR** in the Android app, scan the terminal code, and
+compare the six-digit confirmation code shown on both devices. Press Enter on
+the computer to allow it. The QR expires after two minutes and its one-use key
+is replaced with the phone's permanent Ed25519 key only after confirmation.
+The installed key is restricted to Pi helper commands, and pairing uses the
+computer's existing SSH server—there is no extra listening port or pairing
+daemon. The QR also pins the SSH host fingerprint, so the first connection is
+not trust-on-first-use.
+
+Manual setup remains available below the scanner. Enter `you@computer` (an IP
+address or a Tailscale name works where `.local` names don't), and tap Connect.
+The first time, the computer turns the phone's key down: copy it from the second
+step into `~/.ssh/authorized_keys` there, and connect again. The computer's host
+key is kept then; a different one later is refused until the computer is
+forgotten in Settings.
 
 Connecting is step one. Step two offers recent projects and a read-only folder
 browser on that computer: Home, parent folders, hidden folders, and an optional
@@ -179,10 +196,11 @@ release APKs are not. The telemetry contains routes, bounds and character/image
 counts, never credentials or prompt contents, and is disabled for real sessions.
 Screenshots require visual
 inspection: the script checks process survival and crash logs, not appearance.
-`test_interactions.py` waits for settled layouts and asserts typing, model search,
-thinking selection, long Unicode edits, Stop, actual system-picker image import,
-image preview/send, scrollbars, drawer/sheet drags, confirmed swipe deletion,
-completed activity details, long tool/reply scrolling and project selection.
+`test_interactions.py` waits for settled layouts and asserts the QR connect screen
+and native camera scanner, typing, model search, thinking selection, long Unicode
+edits, Stop, actual system-picker image import, image preview/send, scrollbars,
+drawer/sheet drags, confirmed swipe deletion, completed activity details, long
+tool/reply scrolling and project selection.
 It saves screenshots and a JSON report. Use `--case input`, `--case picker`,
 `--case models`, etc. to repeat a case. The picker case supports English AOSP
 DocumentsUI and Xiaomi's picker; it creates a uniquely named synthetic PNG and
@@ -199,14 +217,17 @@ empty field, long-paste editing and scrolling, send with the keyboard open,
 back from New session, drawer/sheet scrims, completed activity expansion,
 tool-output scrolling, and reading earlier text while updates arrive.
 
-`test_ssh.py` runs `live::tests::a_durable_session_runs_over_ssh` through a
-temporary loopback-only OpenSSH server, a separate authorized-keys file and
-the faux-only durable runner. It verifies model/folder discovery before a
-session exists, prompts, image bytes reaching the provider, follow-ups, a
-second watcher, host-key rejection and deletion that keeps project files.
-It never changes the account's SSH service, real authorized keys or provider
-configuration; detached test daemons and temporary keys are cleaned up.
-The Rust test refuses keys/projects outside this harness's temporary folder.
+`test_ssh.py` runs both the durable-session regression and the complete QR
+enrollment through a temporary loopback-only OpenSSH server, a separate
+authorized-keys file and the faux-only durable runner. It verifies model/folder
+discovery before a session exists, prompts, image bytes reaching the provider,
+follow-ups, a second watcher, host-key rejection and deletion that keeps project
+files. It then creates a one-use QR offer, pins the host key, exchanges the
+bootstrap key after confirmation, reconnects with the phone key, and proves the
+permanent forced-command key cannot run a shell. It never changes the account's
+SSH service, real authorized keys or provider configuration; detached test
+daemons and temporary keys are cleaned up. The Rust tests refuse keys/projects
+outside this harness's temporary folder.
 
 ```sh
 python3 crates/pi_android/scripts/test_ssh.py \

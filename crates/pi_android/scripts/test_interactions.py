@@ -34,7 +34,8 @@ class Phone:
     def state(self):
         state = json.loads(self.run("exec-out", "run-as", PACKAGE, "cat", "files/ui-test-state.json"))
         if self.fixture_name and state["fixture"] == self.fixture_name:
-            assert state["sample"], "Refusing to act on anything except sample sessions"
+            safe_connect = self.fixture_name == "connect" and state["route"] == "Connect"
+            assert state["sample"] or safe_connect, "Refusing to act on anything except sample sessions or the inert connect fixture"
         return state
 
     def wait(self, predicate, description, timeout=12):
@@ -122,6 +123,19 @@ class Phone:
         self.capture("keyboard-failure")
         raise AssertionError(f"Keyboard visibility did not become {visible}")
 
+    def wait_activity(self, name, description, timeout=12):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            dump = self.run("shell", "dumpsys", "activity", "activities").decode()
+            resumed = next((line for line in dump.splitlines() if "topResumedActivity=" in line), "")
+            if name in resumed:
+                self.results.append({"check": description, "passed": True})
+                print(f"PASS {description}", flush=True)
+                return
+            time.sleep(0.2)
+        self.capture("activity-failure")
+        raise AssertionError(f"Activity did not become {name}")
+
     def capture(self, name):
         self.output.joinpath(f"{name}.png").write_bytes(self.run("exec-out", "screencap", "-p"))
 
@@ -177,6 +191,20 @@ def input_and_selectors(phone):
     phone.wait_keyboard(False)
     phone.tap("thinking", 2)
     phone.wait(lambda s: s["sheet"] is None and s["thinking"] == "Low" and s["draft_chars"] == 11, "thinking selection preserves the draft")
+
+
+def pairing_scanner(phone):
+    phone.fixture("connect")
+    phone.bounds("scan-computer")
+    phone.capture("pairing-connect")
+    phone.run("shell", "pm", "grant", PACKAGE, "android.permission.CAMERA")
+    phone.tap("scan-computer")
+    phone.wait_activity("dev.pi.gpui.PairScannerActivity", "pairing opens the native offline QR scanner")
+    phone.capture("pairing-scanner")
+    phone.native_tap("Close scanner")
+    phone.wait_activity("dev.pi.gpui.GpuiActivity", "scanner close returns to the same app")
+    phone.wait(lambda s: s["fixture"] == "connect" and s["route"] == "Connect",
+               "closing the scanner preserves the connect screen")
 
 
 def gboard_typing(phone):
@@ -437,7 +465,7 @@ def native_image_picker(phone):
         phone.run("shell", "rm", destination)
 
 
-CASES = {"input": input_and_selectors, "long-input": long_input_and_stop,
+CASES = {"pairing": pairing_scanner, "input": input_and_selectors, "long-input": long_input_and_stop,
          "models": model_scroll, "images": images, "delete": deletion,
          "picker": native_image_picker, "gestures": gestures, "ime": gboard_typing,
          "conversation": conversation, "projects": projects}
@@ -452,6 +480,12 @@ def main():
     phone = Phone(args.serial, args.output)
     try:
         phone.run("shell", "pm", "path", PACKAGE)
+        phone.run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
+        phone.run("shell", "wm", "dismiss-keyguard")
+        time.sleep(0.5)
+        policy = phone.run("shell", "dumpsys", "window", "policy").decode()
+        if "mIsShowing=true" in policy and "mKeyguardOccluded=false" in policy:
+            raise RuntimeError("Unlock the phone before running physical interaction tests")
         for name in args.case or CASES:
             try:
                 CASES[name](phone)

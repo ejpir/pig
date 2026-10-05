@@ -16,7 +16,7 @@ use jni::{
     Env, EnvUnowned, JValue, JavaVM, jni_sig, jni_str,
     objects::{JByteArray, JClass, JObject, JObjectArray, JString},
     refs::Global,
-    sys::{jint, jobject},
+    sys::{jint, jobject, jstring},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -324,6 +324,29 @@ impl Java {
         });
     }
 
+    pub fn scan_qr(&self) -> bool {
+        self.call("scanQr", |env, activity| {
+            env.call_method(activity, jni_str!("scanQr"), jni_sig!("()Z"), &[])?
+                .z()
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn device_name(&self) -> Option<String> {
+        self.call("deviceName", |env, activity| {
+            let name = env
+                .call_method(
+                    activity,
+                    jni_str!("deviceName"),
+                    jni_sig!("()Ljava/lang/String;"),
+                    &[],
+                )?
+                .l()?;
+            let name = env.cast_local::<JString>(name)?;
+            name.try_to_string(env)
+        })
+    }
+
     pub fn notifications_enabled(&self) -> bool {
         self.call("notificationsEnabled", |env, activity| {
             env.call_method(
@@ -542,6 +565,45 @@ pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeInsets<'caller>(
         });
         Ok(())
     });
+}
+
+/// Decodes the luminance plane from Camera2 without uploading or retaining a frame.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_pi_gpui_PairScannerActivity_nativeDecodeQr<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    bytes: JByteArray<'caller>,
+    width: jint,
+    height: jint,
+    row_stride: jint,
+) -> jstring {
+    let mut result = std::ptr::null_mut();
+    native(&mut env, |env| {
+        let (width, height, stride) = (width as usize, height as usize, row_stride as usize);
+        if width == 0 || height == 0 || width > 8192 || height > 8192 || stride < width {
+            return Ok(());
+        }
+        let source = env.convert_byte_array(&bytes)?;
+        let needed = stride.saturating_mul(height.saturating_sub(1)) + width;
+        if source.len() < needed {
+            return Ok(());
+        }
+        let image = if stride == width {
+            source[..width * height].to_vec()
+        } else {
+            let mut packed = Vec::with_capacity(width * height);
+            for row in 0..height {
+                let start = row * stride;
+                packed.extend_from_slice(&source[start..start + width]);
+            }
+            packed
+        };
+        if let Some(text) = crate::qr::decode(width, height, &image) {
+            result = JString::from_str(env, &text)?.into_raw();
+        }
+        Ok(())
+    });
+    result
 }
 
 /// A `String[]` for Java.

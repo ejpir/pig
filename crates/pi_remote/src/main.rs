@@ -4,6 +4,7 @@ mod directories;
 mod durable;
 mod executable;
 mod files;
+mod pairing;
 mod server;
 mod sessions;
 use anyhow::{Context, Result, bail};
@@ -19,7 +20,24 @@ fn platform() -> &'static str {
     }
 }
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("gateway") {
+        anyhow::ensure!(args.len() == 2, "Invalid SSH gateway command");
+        args = pairing::gateway_command()?;
+        return dispatch(args, true);
+    }
+    if args.first().map(String::as_str) == Some("pair") {
+        if args.get(1).map(String::as_str) == Some("exchange") {
+            anyhow::ensure!(args.len() == 3, "Invalid pairing exchange command");
+            return pairing::exchange(&args[2]);
+        }
+        return pairing::pair(&args[1..]);
+    }
+    dispatch(args, false)
+}
+
+fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
+    let mut args = args.into_iter();
     match args.next().as_deref() {
         Some("--version") => println!(
             "pi-desktop-remote {VERSION} {PROTOCOL_VERSION} {}",
@@ -29,6 +47,10 @@ fn main() -> Result<()> {
             "{}",
             serde_json::json!({"pi":true,"durable":cfg!(unix),"durableExperimental":true,"watchers":true,"sessions":true,"directories":true,"deleteSessions":cfg!(unix),"imagePrompts":cfg!(feature = "bundled-durable")})
         ),
+        Some("discover") => {
+            anyhow::ensure!(args.next().is_none(), "Unexpected discover argument");
+            pairing::print_discovery(gateway)?;
+        }
         Some("--licenses") => {
             println!(
                 "{}\n{}\n{}\n{}",
@@ -85,7 +107,7 @@ fn main() -> Result<()> {
             server::daemon(target)?;
         }
         _ => bail!(
-            "Usage: pi-desktop-remote connect --stdio | files --stdio | sessions | models | directories --path PATH [--show-hidden] | pi [ARGS] | --version | --licenses"
+            "Usage: pi-desktop-remote pair [OPTIONS] | connect --stdio | files --stdio | sessions | models | directories --path PATH [--show-hidden] | pi [ARGS] | --version | --licenses"
         ),
     }
     Ok(())

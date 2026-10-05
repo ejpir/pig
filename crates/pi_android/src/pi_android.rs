@@ -16,6 +16,7 @@ mod live;
 mod message;
 mod model;
 mod motion;
+mod pairing;
 mod prefs;
 mod preview;
 mod projection;

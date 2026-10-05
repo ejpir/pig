@@ -9,7 +9,10 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use russh::{
     ChannelMsg,
     client::{self, Handle},
-    keys::{Algorithm, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate},
+    keys::{
+        Algorithm, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate,
+        ssh_key::private::Ed25519Keypair,
+    },
 };
 use serde_json::Value;
 use std::{
@@ -99,6 +102,14 @@ impl Identity {
             .to_openssh()
             .unwrap_or_else(|_| "ssh-ed25519".into())
     }
+
+    /// A one-use identity from a QR offer. It is held in memory only and is
+    /// discarded as soon as the computer installs this phone's lasting key.
+    pub fn from_pairing_seed(seed: &[u8; 32]) -> Self {
+        let mut key = PrivateKey::from(Ed25519Keypair::from_seed(seed));
+        key.set_comment("pi-pair-bootstrap");
+        Self { key: Arc::new(key) }
+    }
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -177,7 +188,7 @@ pub fn spawn(work: impl Future<Output = ()> + Send + 'static) {
 }
 
 struct Client {
-    known: Option<String>,
+    known: Option<Vec<String>>,
     seen: Arc<Mutex<Option<String>>>,
 }
 
@@ -189,11 +200,11 @@ impl client::Handler for Client {
             bail!("The computer offered a certificate; use a plain host key");
         };
         let now = key.fingerprint(HashAlg::Sha256).to_string();
-        if let Some(seen) = &self.known
-            && *seen != now
+        if let Some(known) = &self.known
+            && !known.contains(&now)
         {
             return Err(Failure::HostKeyChanged {
-                seen: seen.clone(),
+                seen: known.join(", "),
                 now,
             }
             .into());
@@ -231,6 +242,16 @@ impl Connection {
     /// Connects and signs in with the phone's key. `known` is the host key
     /// fingerprint seen before, if any.
     pub async fn open(address: Address, identity: Identity, known: Option<String>) -> Result<Self> {
+        Self::open_with_host_keys(address, identity, known.map(|key| vec![key])).await
+    }
+
+    /// Connects only when the server presents one of the keys authenticated by
+    /// a QR offer. Unlike the manual first connection, this never uses TOFU.
+    pub async fn open_with_host_keys(
+        address: Address,
+        identity: Identity,
+        known: Option<Vec<String>>,
+    ) -> Result<Self> {
         on_runtime(async move {
             let config = Arc::new(client::Config {
                 keepalive_interval: Some(Duration::from_secs(15)),

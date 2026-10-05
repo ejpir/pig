@@ -21,7 +21,13 @@ PI = build_apk.App(
     cargo=["-p", "pi_android", "--lib"],
     output="",
     # SSH to the computer; questions and finished sessions arrive as notifications.
-    permissions=("android.permission.INTERNET", "android.permission.POST_NOTIFICATIONS"),
+    permissions=(
+        "android.permission.INTERNET",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.CAMERA",
+    ),
+    qr_scanner=True,
+    deep_links=(("pi", "pair"),),
 )
 
 if __name__ == "__main__":

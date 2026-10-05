@@ -2,6 +2,7 @@ mod channel;
 pub mod clock;
 pub mod extension;
 pub mod history;
+pub mod pairing;
 mod process_tree;
 pub use process_tree::bounded_output;
 pub mod protocol;

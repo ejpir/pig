@@ -1321,7 +1321,14 @@ mod tests {
             "The isolated authorized_keys must start empty"
         );
         let identity = ssh::Identity::load_or_create(&directory.join("client/id_ed25519")).unwrap();
-        std::fs::write(&keys, format!("{}\n", identity.public_line())).unwrap();
+        let forced = variable("PI_ANDROID_TEST_FORCE_COMMAND")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        std::fs::write(
+            &keys,
+            format!("restrict,command=\"{forced}\" {}\n", identity.public_line()),
+        )
+        .unwrap();
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

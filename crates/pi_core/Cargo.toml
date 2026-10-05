@@ -10,6 +10,7 @@ path = "src/pi_core.rs"
 [dependencies]
 anyhow.workspace = true
 async-channel.workspace = true
+base64 = "0.22"
 dirs = "6"
 rand = "0.9"
 sha2 = "0.10"

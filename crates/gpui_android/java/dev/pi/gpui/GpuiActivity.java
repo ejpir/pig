@@ -13,6 +13,7 @@ import android.graphics.Color;
 import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 import android.text.Editable;
 import android.text.Selection;
 import android.text.SpannableStringBuilder;
@@ -57,6 +58,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class GpuiActivity extends NativeActivity {
     private static final String TAG = "GpuiActivity";
+    private static final int QR_REQUEST = 0x6F10;
 
     private static native void nativeImeState(
             int seq,
@@ -547,6 +549,31 @@ public class GpuiActivity extends NativeActivity {
                                         .putExtra(Intent.EXTRA_TITLE, suggestedName)));
     }
 
+    /** Opens the private, offline Camera2 scanner used by Pi pairing. */
+    public boolean scanQr() {
+        try {
+            runOnUiThread(
+                    () ->
+                            startActivityForResult(
+                                    new Intent(this, PairScannerActivity.class)
+                                            .putExtra("library", libraryName()),
+                                    QR_REQUEST));
+            return true;
+        } catch (ActivityNotFoundException | SecurityException e) {
+            Log.w(TAG, "Could not open the QR scanner", e);
+            return false;
+        }
+    }
+
+    public String deviceName() {
+        String maker = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.trim();
+        String model = Build.MODEL == null ? "Android phone" : Build.MODEL.trim();
+        if (!maker.isEmpty() && !model.toLowerCase().startsWith(maker.toLowerCase())) {
+            return maker + " " + model;
+        }
+        return model;
+    }
+
     private void startPick(int request, boolean save, Intent intent) {
         try {
             picks.put(request, save);
@@ -559,6 +586,12 @@ public class GpuiActivity extends NativeActivity {
 
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
+        if (request == QR_REQUEST) {
+            if (result == RESULT_OK && data != null && data.getData() != null) {
+                nativeOpenUrl(data.getData().toString());
+            }
+            return;
+        }
         Boolean save = picks.remove(request);
         if (save == null) {
             super.onActivityResult(request, result, data);
