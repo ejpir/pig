@@ -790,6 +790,13 @@ mod tests {
             app.update(cx, |app, cx| app.preview("model-long-list", window, cx))
         });
         cx.run_until_parked();
+        let viewport = app.read_with(cx, |app, _| app.sheet_scroll.bounds());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-40.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
         let (from, to) = app.read_with(cx, |app, _| {
             let scroll = &app.sheet_scroll;
             let g = crate::scroll::Geometry::new(

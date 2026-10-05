@@ -90,6 +90,8 @@ pub struct Composer {
     /// What `@` offers: the files a session touched; `None` for the sample's
     /// files and commands.
     files: Option<Vec<String>>,
+    files_loading: bool,
+    files_error: Option<String>,
     _area: Subscription,
 }
 
@@ -112,6 +114,8 @@ impl Composer {
             imports: 0,
             import_generation: 0,
             files: None,
+            files_loading: false,
+            files_error: None,
             _area: subscription,
         }
     }
@@ -119,6 +123,20 @@ impl Composer {
     /// The files `@` offers, or `None` for the sample's files and commands.
     pub fn use_files(&mut self, files: Option<Vec<String>>) {
         self.files = files;
+        self.files_loading = false;
+        self.files_error = None;
+    }
+
+    pub fn load_files(&mut self) {
+        self.files = Some(Vec::new());
+        self.files_loading = true;
+        self.files_error = None;
+    }
+
+    pub fn fail_files(&mut self, error: String) {
+        self.files = Some(Vec::new());
+        self.files_loading = false;
+        self.files_error = Some(error);
     }
 
     pub fn set_model_label(&mut self, model: String, thinking: String) {
@@ -282,13 +300,21 @@ impl Composer {
                     (file.to_string(), mention, glyph)
                 })
                 .collect();
-            let title = if word.is_empty() {
+            let title = if self.files_loading {
+                "Loading project files…".into()
+            } else if self.files_error.is_some() {
+                "Project files unavailable".into()
+            } else if files.is_empty() && word.is_empty() {
+                "No project files found".into()
+            } else if files.is_empty() {
+                format!("No files matching “{word}”").into()
+            } else if word.is_empty() {
                 "Files".into()
             } else {
                 format!("Files matching “{word}”").into()
             };
             let _ = range;
-            return (!files.is_empty()).then_some((title, files));
+            return (self.files.is_some() || !files.is_empty()).then_some((title, files));
         }
         if let Some((range, word)) = area.token_before_caret('/')
             && range.start == 0
@@ -339,6 +365,8 @@ impl Render for Composer {
         // or in landscape. The rest of a long draft scrolls inside the field.
         let lines = (f32::from(window.fully_visible_bounds().size.height) * 0.3 / 22.) as usize;
         area.update(cx, |area, _| area.set_max_lines(lines.clamp(2, 8)));
+        // Keep the visual control compact while preserving Android's 48 dp
+        // touch target around it.
         let send = div()
             .id("send")
             .relative()
@@ -350,27 +378,78 @@ impl Render for Composer {
             .items_center()
             .justify_center()
             .rounded_full()
-            .bg(if can_send {
-                colors.accent
-            } else {
-                colors.raised
-            })
-            .child(icon(
-                "send",
-                20.,
-                if can_send {
-                    colors.on_accent
-                } else {
-                    colors.muted
-                },
-            ))
+            .child(
+                div()
+                    .size(px(40.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(if can_send {
+                        colors.accent
+                    } else {
+                        colors.raised
+                    })
+                    .child(icon(
+                        "send",
+                        19.,
+                        if can_send {
+                            colors.on_accent
+                        } else {
+                            colors.muted
+                        },
+                    )),
+            )
             .when(can_send, |send| {
                 send.active(|style| style.opacity(0.85))
                     .on_click(cx.listener(|this, _, _, cx| this.send(cx)))
             });
         let clip = ui::tap("attach", "clip", &colors)
-            .size(px(48.))
             .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Attach)));
+        let model = div()
+            .id("model")
+            .relative()
+            .child(crate::testing::probe("composer-model"))
+            .debug_selector(|| "composer-model".into())
+            .h(px(48.))
+            .min_w_0()
+            .max_w(px(136.))
+            .px(px(7.))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .rounded(px(10.))
+            .text_size(px(12.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(colors.secondary)
+            .active(|style| style.bg(colors.selected))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(self.model_label.clone().unwrap_or(prefs.model)),
+            )
+            .child(icon("chev_d", 12., colors.muted))
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::ChooseModel)));
+        let thinking = div()
+            .id("thinking")
+            .relative()
+            .child(crate::testing::probe("composer-thinking"))
+            .debug_selector(|| "composer-thinking".into())
+            .h(px(48.))
+            .flex_none()
+            .px(px(7.))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .rounded(px(10.))
+            .text_size(px(12.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(colors.secondary)
+            .child(self.thinking_label.clone().unwrap_or(prefs.thinking))
+            .child(icon("chev_d", 12., colors.muted))
+            .active(|style| style.bg(colors.selected))
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::ChooseThinking)));
         let attachments = (!self.attachments.is_empty()).then(|| {
             div()
                 .flex()
@@ -520,69 +599,6 @@ impl Render for Composer {
             .child(
                 div()
                     .mt(px(6.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .id("model")
-                            .relative()
-                            .child(crate::testing::probe("composer-model"))
-                            .debug_selector(|| "composer-model".into())
-                            .h(px(44.))
-                            .flex_1()
-                            .min_w_0()
-                            .px(px(10.))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .rounded(px(10.))
-                            .bg(colors.raised)
-                            .text_size(px(13.))
-                            .text_color(colors.secondary)
-                            .active(|style| style.bg(colors.selected))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .truncate()
-                                    .child(self.model_label.clone().unwrap_or(prefs.model)),
-                            )
-                            .child(icon("chev_d", 14., colors.muted))
-                            .on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::ChooseModel)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("thinking")
-                            .relative()
-                            .child(crate::testing::probe("composer-thinking"))
-                            .debug_selector(|| "composer-thinking".into())
-                            .h(px(44.))
-                            .flex_none()
-                            .px(px(10.))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .rounded(px(10.))
-                            .bg(colors.raised)
-                            .text_size(px(13.))
-                            .text_color(colors.secondary)
-                            .child(format!(
-                                "Think: {}",
-                                self.thinking_label.clone().unwrap_or(prefs.thinking)
-                            ))
-                            .child(icon("chev_d", 14., colors.muted))
-                            .active(|style| style.bg(colors.selected))
-                            .on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::ChooseThinking)),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .mt(px(4.))
                     .ml(px(-8.))
                     .flex()
                     .items_center()
@@ -594,28 +610,33 @@ impl Render for Composer {
                             cx.listener(|this, _, window, cx| this.start_command(window, cx)),
                         ))
                     })
-                    .child(div().flex_1().when(self.imports > 0, |space| {
-                        space.child(ui::hint("Preparing…", &colors))
-                    }))
+                    .child(model)
+                    .child(thinking)
+                    .child(div().flex_1())
+                    .when(self.imports > 0, |row| {
+                        row.child(ui::hint("Preparing…", &colors))
+                    })
                     .when(self.running, |row| {
                         row.child(
-                            ui::button(
-                                "stop",
-                                ui::Button::Quiet,
-                                Some("stop"),
-                                if self.stopping { "Stopping…" } else { "Stop" },
-                                true,
-                                &colors,
-                            )
-                            .debug_selector(|| "composer-stop".into())
-                            .h(px(48.))
-                            .text_color(colors.coral)
-                            .when(self.stopping, |button| button.opacity(0.5))
-                            .when(!self.stopping, |button| {
-                                button.on_click(
-                                    cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Stop)),
-                                )
-                            }),
+                            div()
+                                .id("stop")
+                                .relative()
+                                .child(crate::testing::probe("stop"))
+                                .debug_selector(|| "composer-stop".into())
+                                .size(px(48.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .child(icon("stop", 18., colors.coral))
+                                .active(|style| style.bg(colors.selected))
+                                .when(self.stopping, |button| button.opacity(0.5))
+                                .when(!self.stopping, |button| {
+                                    button.on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Stop)),
+                                    )
+                                }),
                         )
                     })
                     .child(send),
@@ -641,5 +662,64 @@ impl Render for Composer {
                 })
                 .child(body),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn remote_project_files_drive_mentions_and_keep_states_visible(cx: &mut TestAppContext) {
+        let composer = cx.new(|cx| Composer::new("", cx));
+        composer.update(cx, |composer, cx| {
+            composer.use_files(Some(vec![
+                "src/main.rs".into(),
+                "docs/中文 guide.md".into(),
+                "src/components/".into(),
+            ]));
+            composer.set_text("Compare @main", cx);
+        });
+        composer.read_with(cx, |composer, cx| {
+            let (title, items) = composer.suggestions(cx).expect("remote suggestions");
+            assert_eq!(title, "Files matching “main”");
+            assert_eq!(
+                items[0],
+                ("src/main.rs".into(), "@src/main.rs ".into(), "file")
+            );
+        });
+
+        composer.update(cx, |composer, cx| {
+            composer.set_text("Read @中文", cx);
+        });
+        composer.read_with(cx, |composer, cx| {
+            let (_, items) = composer.suggestions(cx).expect("unicode suggestion");
+            assert_eq!(
+                items[0],
+                (
+                    "docs/中文 guide.md".into(),
+                    "@\"docs/中文 guide.md\" ".into(),
+                    "file"
+                )
+            );
+        });
+
+        composer.update(cx, |composer, cx| {
+            composer.load_files();
+            composer.set_text("@", cx);
+        });
+        composer.read_with(cx, |composer, cx| {
+            let (title, items) = composer.suggestions(cx).expect("loading state");
+            assert_eq!(title, "Loading project files…");
+            assert!(items.is_empty());
+        });
+
+        composer.update(cx, |composer, _| composer.fail_files("offline".into()));
+        composer.read_with(cx, |composer, cx| {
+            let (title, items) = composer.suggestions(cx).expect("error state");
+            assert_eq!(title, "Project files unavailable");
+            assert!(items.is_empty());
+        });
     }
 }

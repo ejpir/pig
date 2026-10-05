@@ -389,34 +389,36 @@ impl PhoneApp {
 
 /// "You · 09:41" and what was asked.
 fn prompt(turn: &Turn, index: usize, colors: &Theme) -> Div {
-    div()
-        .p(px(14.))
-        .rounded(px(16.))
-        .bg(colors.panel)
-        .border_1()
-        .border_color(colors.line)
-        .child(ui::label(
-            format!("You · Turn {} · {}", index + 1, turn.at),
-            colors,
-        ))
-        .child(
-            div()
-                .mt(px(8.))
-                .line_height(relative(1.5))
-                .child(turn.prompt.clone()),
-        )
-        .when(!turn.attachments.is_empty(), |prompt| {
-            prompt.child(
-                div().mt(px(8.)).flex().flex_wrap().gap(px(8.)).children(
-                    turn.attachments
-                        .iter()
-                        .enumerate()
-                        .map(|(index, attachment)| {
-                            ui::chip(("sent", index), Some("clip"), attachment.clone(), colors)
-                        }),
-                ),
+    div().flex().justify_end().child(
+        div()
+            .max_w(relative(0.88))
+            .px(px(12.))
+            .py(px(10.))
+            .rounded(px(14.))
+            .bg(colors.panel)
+            .child(ui::label(
+                format!("You · Turn {} · {}", index + 1, turn.at),
+                colors,
+            ))
+            .child(
+                div()
+                    .mt(px(4.))
+                    .line_height(relative(1.4))
+                    .child(turn.prompt.clone()),
             )
-        })
+            .when(!turn.attachments.is_empty(), |prompt| {
+                prompt.child(
+                    div().mt(px(6.)).flex().flex_wrap().gap(px(6.)).children(
+                        turn.attachments
+                            .iter()
+                            .enumerate()
+                            .map(|(index, attachment)| {
+                                ui::chip(("sent", index), Some("clip"), attachment.clone(), colors)
+                            }),
+                    ),
+                )
+            }),
+    )
 }
 
 fn stage_row(stage: &Stage, line_below: bool, colors: &Theme) -> Div {

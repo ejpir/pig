@@ -48,6 +48,49 @@ impl ProjectBrowser {
 }
 
 impl PhoneApp {
+    pub(crate) fn load_project_files(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.project_files_generation += 1;
+        let generation = self.project_files_generation;
+        let Some(store) = &self.store else { return };
+        if store.is_sample() {
+            self.start.update(cx, |start, _| start.use_files(None));
+            return;
+        }
+        let (Some(project), Some(live)) = (store.projects.get(index), store.live.as_ref()) else {
+            self.start
+                .update(cx, |start, _| start.use_files(Some(Vec::new())));
+            return;
+        };
+        let path = project.path.clone();
+        let host = store.computer.address.clone();
+        let connection = live.connection.clone();
+        let helper = live.helper.clone();
+        self.start.update(cx, |start, _| start.load_files());
+        cx.spawn(async move |this, cx| {
+            let result = remote::project_files(&connection, &helper, &host, &path)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            this.update(cx, |this, cx| {
+                if this.project_files_generation != generation
+                    || this
+                        .store
+                        .as_ref()
+                        .and_then(|store| store.projects.get(this.project))
+                        .is_none_or(|project| project.path != path)
+                {
+                    return;
+                }
+                this.start.update(cx, |start, _| match result {
+                    Ok(files) => start.use_files(Some(files)),
+                    Err(error) => start.fail_files(error),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn browse_projects(&mut self, path: Option<String>, cx: &mut Context<Self>) {
         let Some(store) = &self.store else { return };
         let Some(live) = &store.live else {
@@ -117,6 +160,7 @@ impl PhoneApp {
                 });
             }
         }
+        self.load_project_files(index, cx);
         if self.route() == Route::Projects {
             self.routes = vec![Route::Sessions, Route::Start];
         }

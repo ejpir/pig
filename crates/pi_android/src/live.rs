@@ -456,6 +456,14 @@ impl Live {
         self.watches.get(&id)?.pi.state.model.as_ref()
     }
 
+    /// The unshortened computer path used by file-channel operations.
+    pub fn session_cwd(&self, id: SessionId) -> Option<&str> {
+        self.watches
+            .get(&id)
+            .map(|watch| watch.target.cwd.as_str())
+            .or_else(|| self.listed.get(&id).map(|listed| listed.cwd.as_str()))
+    }
+
     pub fn thinking_levels(&self, id: SessionId) -> Option<Vec<String>> {
         let watch = self.watches.get(&id)?;
         if watch.pi.thinking_levels.is_empty() {

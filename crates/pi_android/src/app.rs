@@ -120,6 +120,8 @@ pub struct PhoneApp {
     pub(crate) start_visible_height: Option<gpui::Pixels>,
     pub(crate) project: usize,
     pub(crate) project_browser: ProjectBrowser,
+    /// Invalidates project-tree replies when the selected folder changes.
+    pub(crate) project_files_generation: u64,
     pub(crate) threads: HashMap<SessionId, Entity<Composer>>,
     /// Sample sessions have their own model selection, just like live sessions.
     sample_models: HashMap<SessionId, (String, String)>,
@@ -288,6 +290,7 @@ impl PhoneApp {
             start_visible_height: None,
             project: 0,
             project_browser: ProjectBrowser::default(),
+            project_files_generation: 0,
             threads: HashMap::new(),
             sample_models: HashMap::new(),
             review,
@@ -640,6 +643,7 @@ impl PhoneApp {
     /// The sample sessions, for trying the app without a computer.
     pub(crate) fn open_store(&mut self, address: &str) {
         self.project_browser.clear();
+        self.project_files_generation += 1;
         self.project = 0;
         self.store = Some(Store::sample(Computer::from_address(address)));
         self.routes = vec![Route::Sessions];
@@ -848,6 +852,7 @@ impl PhoneApp {
             prefs.sample = false;
             prefs.host_keys.insert(address.to_string(), fingerprint);
         });
+        self.load_project_files(self.project, cx);
         self.start_pump(cx);
         activity::request_notification_permission();
         self.entered(window, cx);
@@ -1446,7 +1451,49 @@ impl PhoneApp {
                 }
                 files
             });
-        composer.update(cx, |composer, _| composer.use_files(files));
+        let remote_files = self.store.as_ref().and_then(|store| {
+            let live = store.live.as_ref()?;
+            Some((
+                live.connection.clone(),
+                live.helper.clone(),
+                store.computer.address.clone(),
+                live.session_cwd(id)?.to_owned(),
+                files.clone().unwrap_or_default(),
+            ))
+        });
+        if let Some((connection, helper, host, cwd, touched)) = remote_files {
+            composer.update(cx, |composer, _| composer.load_files());
+            cx.spawn(async move |this, cx| {
+                let result = remote::project_files(&connection, &helper, &host, &cwd)
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                this.update(cx, |this, cx| {
+                    let Some(composer) = this.threads.get(&id) else {
+                        return;
+                    };
+                    composer.update(cx, |composer, _| match result {
+                        Ok(mut files) => {
+                            for path in touched {
+                                if !files.contains(&path) {
+                                    files.push(path);
+                                }
+                            }
+                            composer.use_files(Some(files));
+                        }
+                        Err(error) if !touched.is_empty() => {
+                            composer.use_files(Some(touched));
+                            log::warn!("Could not load project files for mentions: {error}");
+                        }
+                        Err(error) => composer.fail_files(error),
+                    });
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        } else {
+            composer.update(cx, |composer, _| composer.use_files(files));
+        }
         let sends = self.prefs(cx).return_sends;
         composer
             .read(cx)

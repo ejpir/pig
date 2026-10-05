@@ -68,18 +68,19 @@ class Phone:
         return self.settled_state()
 
     def settled_state(self):
-        # InputMethodManager reports hidden before the resize animation finishes.
-        # Target two fresh, equal layouts, never a pre-IME telemetry snapshot.
+        # InputMethodManager can report its destination before the resize
+        # animation finishes. Wait until bounds have stayed unchanged; a static
+        # screen is allowed to stop repainting entirely.
         deadline = time.monotonic() + 8
-        after = time.time()
-        previous = None
+        previous = self.state()
+        unchanged_since = time.monotonic()
         while time.monotonic() < deadline:
             state = self.state()
-            if state["time"] >= after:
-                if previous and state["bounds"] == previous["bounds"]:
-                    return state
-                previous = state
-                after = state["time"] + 0.001
+            if state["bounds"] != previous["bounds"]:
+                unchanged_since = time.monotonic()
+            elif time.monotonic() - unchanged_since >= 0.6:
+                return state
+            previous = state
             time.sleep(0.15)
         raise AssertionError("The app layout did not settle")
 
@@ -353,8 +354,14 @@ def conversation(phone):
     phone.fixture("long-reply")
     state = phone.settled_state()
     viewport, _ = phone.bounds('scroll:NamedInteger("thread", 1)', state=state)
-    thumb, _ = phone.bounds('thumb:NamedInteger("thread", 1)', state=state)
     x, y, width, height = viewport
+    # Scrollbars intentionally rest hidden. A short content scroll reveals the
+    # thumb before testing its direct-drag affordance.
+    phone.swipe((x + width / 2, y + height * 0.35),
+                (x + width / 2, y + height * 0.5), 180)
+    time.sleep(0.1)
+    state = phone.state()
+    thumb, _ = phone.bounds('thumb:NamedInteger("thread", 1)', state=state)
     tx, ty, tw, th = thumb
     phone.swipe((tx + tw / 2, ty + th / 2), (tx + tw / 2, y + height * 0.2), 650)
     state = phone.settled_state()

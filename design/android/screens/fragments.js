@@ -9,8 +9,8 @@ window.FRAG = {
       <span class="tap"><i data-i="dots"></i></span>
     </div>
     <div class="scroll col gap16" style="padding-top:6px">
-      <div>
-        <div class="label">You · 09:41</div>
+      <div class="user-turn">
+        <div class="label">You · Turn 1 · 09:41</div>
         <p style="margin-top:4px">qwen3.8-flash on OpenCode returns empty thinking signatures and we reject the response. Accept empty signatures there, but keep the check strict for Anthropic.</p>
       </div>
       <div class="col gap16" style="margin-top:4px">
@@ -48,12 +48,14 @@ window.FRAG = {
     <div style="padding:10px 16px 8px" class="row gap12">
       <span class="dot live"></span>
       <div class="grow"><div style="font-size:14px;font-weight:600">Working</div><div class="hint" style="margin-top:-2px">Editing a file · 1:12</div></div>
-      <span class="btn small" style="color:var(--coral)"><i data-i="stop" class="sm"></i>Stop</span>
     </div>
-    <div class="composer row" style="padding:6px 6px 6px 16px">
-      <span class="draft ph grow">Queue a follow-up…</span>
-      <span class="tap" style="width:40px;height:40px"><i data-i="clip"></i></span>
-      <span class="send off"><i data-i="send"></i></span>
+    <div class="composer">
+      <div class="draft ph">Queue a follow-up…</div>
+      <div class="tools"><span class="tap"><i data-i="clip"></i></span>
+        <span class="composer-control"><span class="ell">Opus 5.5</span><i data-i="chev-d" class="xs"></i></span>
+        <span class="composer-control">High<i data-i="chev-d" class="xs"></i></span><span class="grow"></span>
+        <span class="tap" style="color:var(--coral)"><i data-i="stop"></i></span><span class="send off"><i data-i="send"></i></span>
+      </div>
     </div>`,
 
   done: `
@@ -82,9 +84,12 @@ window.FRAG = {
       </div>
       <span class="btn primary wide"><i data-i="diff" class="sm"></i>Review 2 changed files</span>
     </div>
-    <div class="composer row" style="padding:6px 6px 6px 16px">
-      <span class="draft ph grow">Ask a follow-up…</span>
-      <span class="tap" style="width:40px;height:40px"><i data-i="clip"></i></span>
-      <span class="send off"><i data-i="send"></i></span>
+    <div class="composer">
+      <div class="draft ph">Ask a follow-up…</div>
+      <div class="tools"><span class="tap"><i data-i="clip"></i></span>
+        <span class="composer-control"><span class="ell">Opus 5.5</span><i data-i="chev-d" class="xs"></i></span>
+        <span class="composer-control">High<i data-i="chev-d" class="xs"></i></span><span class="grow"></span>
+        <span class="send off"><i data-i="send"></i></span>
+      </div>
     </div>`,
 };

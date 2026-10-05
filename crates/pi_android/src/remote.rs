@@ -3,10 +3,13 @@
 //! that runs durable sessions, lets several apps watch one, and lists them.
 
 use crate::ssh::{Connection, Pipe, quote};
-use anyhow::{Result, bail};
-use pi_core::ssh::{PROTOCOL_VERSION, RemoteBackend, SshTarget};
+use anyhow::{Context as _, Result, bail, ensure};
+use pi_core::{
+    remote_files::{FILE_PROTOCOL_VERSION, Request as FileRequest, Tree},
+    ssh::{PROTOCOL_VERSION, RemoteBackend, SshTarget},
+};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Each installed helper with its version and capabilities, newest first, after
 /// the account's home folder. No single quotes: it runs inside `sh -c '…'`.
@@ -208,6 +211,71 @@ pub async fn directories(
         bail!("Could not open this folder: {}", output.stderr.trim());
     }
     parse_directory(&output.stdout)
+}
+
+async fn file_request(pipe: &Pipe, id: &str, request: FileRequest) -> Result<Value> {
+    let mut record = serde_json::to_value(request)?;
+    record
+        .as_object_mut()
+        .context("Invalid remote file request")?
+        .insert("id".into(), json!(id));
+    pipe.input
+        .send(record)
+        .await
+        .map_err(|_| anyhow::anyhow!("The remote file channel closed"))?;
+    while let Ok(record) = pipe.records.recv().await {
+        if record["type"] == "response" && record["id"] == id {
+            ensure!(
+                record["success"] == true,
+                "{}",
+                record["error"]
+                    .as_str()
+                    .unwrap_or("The computer could not list project files")
+            );
+            return Ok(record["data"].clone());
+        }
+    }
+    let ended = pipe
+        .ended
+        .recv()
+        .await
+        .unwrap_or_else(|_| "The remote file channel closed".into());
+    bail!("{ended}")
+}
+
+/// Lists the bounded project tree through the helper's existing file channel.
+/// Paths stay relative to `cwd`, which is exactly what a prompt mention needs.
+pub async fn project_files(
+    connection: &Connection,
+    helper: &Helper,
+    host: &str,
+    cwd: &str,
+) -> Result<Vec<String>> {
+    let pipe = connection.pipe(helper.command("files --stdio")?).await?;
+    let target = SshTarget::new(host.to_owned(), cwd.to_owned())?;
+    file_request(
+        &pipe,
+        "phone-files-attach",
+        FileRequest::FilesAttach {
+            version: FILE_PROTOCOL_VERSION,
+            target,
+        },
+    )
+    .await?;
+    let tree: Tree = serde_json::from_value(
+        file_request(&pipe, "phone-files-list", FileRequest::FilesList).await?,
+    )?;
+    Ok(tree
+        .entries
+        .into_iter()
+        .map(|entry| {
+            if entry.directory {
+                format!("{}/", entry.path.trim_end_matches('/'))
+            } else {
+                entry.path
+            }
+        })
+        .collect())
 }
 
 /// Attaches to a session, starting its daemon if it isn't up. Records from

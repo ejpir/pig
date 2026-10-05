@@ -5,7 +5,7 @@ use crate::{
     model::State,
     motion::SwipeMotion,
     theme::theme,
-    ui::{self, Button, icon},
+    ui::{self, icon},
 };
 use gpui::{AnyElement, Context, FontWeight, Window, div, prelude::*, px};
 
@@ -42,7 +42,9 @@ impl PhoneApp {
             .map(|store| store.computer.name.clone())
             .unwrap_or_else(|| "Connect a computer".into());
         let active = self.route();
-        let width = px(320.).min(window.viewport_size().width - px(48.));
+        // Leave enough of the current screen visible that this still reads as
+        // navigation, rather than a second full-screen destination.
+        let width = px(300.).min(window.viewport_size().width - px(56.));
         let progress = self.drawer_motion.position();
         div()
             .absolute()
@@ -79,14 +81,14 @@ impl PhoneApp {
                     .child(
                         div()
                             .flex_none()
-                            .px(px(16.))
-                            .py(px(12.))
+                            .h(px(64.))
+                            .px(px(12.))
                             .flex()
                             .items_center()
-                            .gap(px(12.))
-                            .child(ui::tile_box(40., 12., colors.accent, &colors).child(icon(
+                            .gap(px(10.))
+                            .child(ui::tile_box(32., 10., colors.accent, &colors).child(icon(
                                 "pi",
-                                24.,
+                                20.,
                                 colors.accent,
                             )))
                             .child(
@@ -95,11 +97,17 @@ impl PhoneApp {
                                     .min_w_0()
                                     .child(
                                         div()
-                                            .text_size(px(20.))
+                                            .text_size(px(17.))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("Pi"),
                                     )
-                                    .child(ui::hint(computer, &colors).truncate()),
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(colors.muted)
+                                            .truncate()
+                                            .child(computer),
+                                    ),
                             )
                             .child(
                                 ui::tap("close-drawer", "x", &colors)
@@ -107,30 +115,40 @@ impl PhoneApp {
                             ),
                     )
                     .child(
-                        div().flex_none().px(px(16.)).pb(px(12.)).child(
-                            ui::button(
-                                "drawer-new",
-                                Button::Primary,
-                                Some("plus"),
-                                "New session",
-                                false,
-                                &colors,
-                            )
-                            .w_full()
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.routes = vec![Route::Sessions];
-                                    this.push(Route::Start, window, cx);
-                                },
-                            )),
-                        ),
+                        div()
+                            .id("drawer-new")
+                            .relative()
+                            .child(crate::testing::probe("drawer-new"))
+                            .mx(px(8.))
+                            .mb(px(4.))
+                            .h(px(48.))
+                            .px(px(12.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .rounded(px(12.))
+                            .bg(colors.tint(colors.accent))
+                            .text_color(colors.accent)
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .active(|style| style.bg(colors.selected))
+                            .child(icon("plus", 18., colors.accent))
+                            .child("New session")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.routes = vec![Route::Sessions];
+                                this.push(Route::Start, window, cx);
+                            })),
                     )
                     .child(
                         ui::row("all-sessions", true, &colors)
                             .mx(px(8.))
+                            .min_h(px(48.))
+                            .py(px(4.))
+                            .gap(px(12.))
                             .rounded(px(12.))
                             .when(active == Route::Sessions, |row| row.bg(colors.selected))
-                            .child(icon("layers", 20., colors.accent))
+                            .child(icon("layers", 18., colors.accent))
                             .child("All sessions")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.close_drawer(cx);
@@ -141,9 +159,9 @@ impl PhoneApp {
                     )
                     .child(
                         ui::label("Recent sessions", &colors)
-                            .mx(px(20.))
-                            .mt(px(20.))
-                            .mb(px(8.)),
+                            .mx(px(16.))
+                            .mt(px(16.))
+                            .mb(px(6.)),
                     )
                     .child(
                         crate::scroll::vertical("drawer-sessions", &self.drawer_scroll)
@@ -152,6 +170,8 @@ impl PhoneApp {
                             .px(px(8.))
                             .children(sessions.iter().map(|session| {
                                 let id = session.id;
+                                let is_active =
+                                    active == Route::Thread(id) || active == Route::Review(id);
                                 let color = match session.state {
                                     State::NeedsYou => colors.wait,
                                     State::Working => colors.read,
@@ -159,32 +179,44 @@ impl PhoneApp {
                                     _ => colors.muted,
                                 };
                                 ui::row(("drawer-session", id.0 as usize), true, &colors)
+                                    .min_h(px(52.))
+                                    .px(px(12.))
+                                    .py(px(5.))
+                                    .gap(px(10.))
                                     .rounded(px(12.))
-                                    .when(
-                                        active == Route::Thread(id) || active == Route::Review(id),
-                                        |row| row.bg(colors.selected),
-                                    )
-                                    .child(icon(
-                                        if session.state == State::Working {
-                                            "clock"
-                                        } else {
-                                            "chat"
-                                        },
-                                        18.,
+                                    .when(is_active, |row| row.bg(colors.selected))
+                                    .child(ui::dot(
                                         color,
-                                    ))
-                                    .child(ui::row_text(
-                                        session.title.clone(),
-                                        Some(
-                                            format!(
-                                                "{} · {}",
-                                                session.project,
-                                                session.status_line()
-                                            )
-                                            .into(),
-                                        ),
+                                        matches!(session.state, State::NeedsYou | State::Working),
                                         &colors,
                                     ))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(
+                                                div()
+                                                    .text_size(px(14.))
+                                                    .font_weight(if is_active {
+                                                        FontWeight::SEMIBOLD
+                                                    } else {
+                                                        FontWeight::NORMAL
+                                                    })
+                                                    .truncate()
+                                                    .child(session.title.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .text_color(colors.muted)
+                                                    .truncate()
+                                                    .child(format!(
+                                                        "{} · {}",
+                                                        session.project,
+                                                        session.status_line()
+                                                    )),
+                                            ),
+                                    )
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.show_session(id, window, cx)
                                     }))
@@ -193,8 +225,15 @@ impl PhoneApp {
                     .child(
                         ui::row("drawer-settings", false, &colors)
                             .flex_none()
-                            .child(icon("settings", 20., colors.muted))
-                            .child("Settings and tools")
+                            .min_h(px(52.))
+                            .px(px(16.))
+                            .py(px(4.))
+                            .gap(px(12.))
+                            .border_t_1()
+                            .border_color(colors.line)
+                            .text_size(px(14.))
+                            .child(icon("settings", 18., colors.muted))
+                            .child("Settings")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.routes = vec![Route::Sessions];
                                 this.push(Route::Settings, window, cx);

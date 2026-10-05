@@ -21,7 +21,7 @@ use gpui::{
     fill, point, prelude::*, px, relative, size,
 };
 use gpui_android::activity;
-use std::{ops::Range, rc::Rc};
+use std::{ops::Range, rc::Rc, time::Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
@@ -99,6 +99,8 @@ pub struct TextArea {
     bounds: Option<Bounds<Pixels>>,
     scroll: Pixels,
     scroll_x: Pixels,
+    /// Last vertical motion, for the shared hold-and-fade scrollbar policy.
+    scrollbar_motion: Option<Instant>,
     /// Reveal after editing or moving the caret, not after a user's scroll.
     reveal_caret: bool,
     /// The bar with Cut, Copy and Paste, after a long press or a double tap.
@@ -147,6 +149,7 @@ impl TextArea {
             bounds: None,
             scroll: px(0.),
             scroll_x: px(0.),
+            scrollbar_motion: None,
             reveal_caret: true,
             menu: false,
             anchor: None,
@@ -535,6 +538,9 @@ impl TextArea {
         let next = (*offset - delta).max(px(0.)).min(maximum.max(px(0.)));
         if next != *offset {
             *offset = next;
+            if self.multiline {
+                self.scrollbar_motion = Some(Instant::now());
+            }
             self.reveal_caret = false;
             self.menu = false;
             self.mouse_anchor = None;
@@ -1157,6 +1163,8 @@ struct Prepaint {
     layout: Layout,
     scroll: Pixels,
     scroll_x: Pixels,
+    scrollbar_opacity: f32,
+    scrollbar_moved: bool,
     caret: Option<PaintQuad>,
     selection: Vec<PaintQuad>,
     mentions: Vec<PaintQuad>,
@@ -1279,6 +1287,17 @@ impl Element for TextBody {
         scroll_x = scroll_x
             .max(px(0.))
             .min((layout.width() + px(2.) - bounds.size.width).max(px(0.)));
+        let now = Instant::now();
+        let scrollbar_moved = scroll != area.scroll;
+        let scrollbar_opacity = crate::scroll::thumb_opacity(
+            if scrollbar_moved {
+                Some(now)
+            } else {
+                area.scrollbar_motion
+            },
+            false,
+            now,
+        );
         let origin = point(bounds.left() - scroll_x, bounds.top() - scroll);
         let caret = selection.is_empty().then(|| {
             fill(
@@ -1370,6 +1389,8 @@ impl Element for TextBody {
             layout,
             scroll,
             scroll_x,
+            scrollbar_opacity,
+            scrollbar_moved,
             caret,
             selection: quads,
             mentions,
@@ -1427,14 +1448,21 @@ impl Element for TextBody {
             {
                 window.paint_quad(caret);
             }
-            if let Some(geometry) = crate::scroll::Geometry::new(
-                bounds,
-                layout.height() - bounds.size.height,
-                -prepaint.scroll,
-            ) {
+            if prepaint.scrollbar_opacity > 0.
+                && let Some(geometry) = crate::scroll::Geometry::new(
+                    bounds,
+                    layout.height() - bounds.size.height,
+                    -prepaint.scroll,
+                )
+            {
                 window.paint_quad(
-                    fill(geometry.thumb, theme(cx).muted.opacity(0.65)).corner_radii(px(2.)),
+                    fill(
+                        geometry.thumb,
+                        theme(cx).muted.opacity(0.65 * prepaint.scrollbar_opacity),
+                    )
+                    .corner_radii(px(2.)),
                 );
+                window.request_animation_frame();
             }
         });
         let accent = theme(cx).accent;
@@ -1463,6 +1491,9 @@ impl Element for TextBody {
             area.bounds = Some(bounds);
             area.scroll = scroll;
             area.scroll_x = prepaint.scroll_x;
+            if prepaint.scrollbar_moved {
+                area.scrollbar_motion = Some(Instant::now());
+            }
             area.reveal_caret = false;
         });
     }

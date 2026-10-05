@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>13 · Navigation drawer</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  .under { filter:saturate(.75); }
+  .drawer-scrim { position:absolute; inset:0; background:var(--scrim); }
+  .drawer { position:absolute; left:0; top:0; bottom:0; width:300px; padding-top:32px; display:flex; flex-direction:column;
+    background:var(--canvas); border-right:1px solid var(--line); box-shadow:8px 0 24px rgba(37,47,61,.12); }
+  .drawer-head { height:64px; padding:0 12px; display:flex; align-items:center; gap:10px; }
+  .mark { width:32px; height:32px; border-radius:10px; display:flex; align-items:center; justify-content:center;
+    color:var(--accent); background:color-mix(in srgb,var(--accent) 14%,transparent); }
+  .mark i { width:20px; height:20px; }
+  .drawer-nav { height:48px; margin:0 8px 4px; padding:0 12px; display:flex; align-items:center; gap:12px; border-radius:12px; font-size:14px; }
+  .drawer-nav.new { color:var(--accent); background:color-mix(in srgb,var(--accent) 14%,transparent); font-weight:600; }
+  .drawer-nav.on { background:var(--selected); }
+  .drawer-nav i { width:18px; height:18px; }
+  .drawer-label { margin:16px 16px 6px; }
+  .recent { flex:1; min-height:0; padding:0 8px; }
+  .session { min-height:52px; padding:5px 12px; display:flex; align-items:center; gap:10px; border-radius:12px; }
+  .session.on { background:var(--selected); }
+  .session .name { font-size:14px; line-height:1.35; }
+  .session.on .name { font-weight:600; }
+  .session .meta { font-size:12px; color:var(--muted); line-height:1.35; }
+  .drawer-foot { min-height:52px; padding:4px 16px; display:flex; align-items:center; gap:12px; border-top:1px solid var(--line); font-size:14px; }
+  .drawer-foot i { width:18px; height:18px; color:var(--muted); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content under">
+    <div class="appbar"><span class="tap"><i data-i="layers"></i></span><div class="title"><b>Sessions</b></div><span class="tap"><i data-i="search"></i></span></div>
+    <div class="scroll"><div class="card"><div class="listrow"><span class="dot live"></span><div class="grow"><div class="t">Streaming retry</div><div class="s">pi · Changing</div></div></div></div></div>
+  </main>
+  <div class="drawer-scrim"></div>
+  <aside class="drawer">
+    <div class="drawer-head">
+      <span class="mark"><i data-i="pi"></i></span>
+      <div class="grow"><div style="font-size:17px;font-weight:600;line-height:1.25">Pi</div><div class="ell muted" style="font-size:12px">studio-mac</div></div>
+      <span class="tap"><i data-i="x"></i></span>
+    </div>
+    <div class="drawer-nav new"><i data-i="plus"></i><span>New session</span></div>
+    <div class="drawer-nav on"><i data-i="layers" style="color:var(--accent)"></i><span>All sessions</span></div>
+    <div class="drawer-label label">Recent sessions</div>
+    <div class="recent">
+      <div class="session">
+        <span class="dot wait"></span><div class="grow"><div class="name ell">Qwen signatures</div><div class="meta ell">pi · Needs your answer</div></div>
+      </div>
+      <div class="session">
+        <span class="dot live"></span><div class="grow"><div class="name ell">Streaming retry</div><div class="meta ell">pi · Changing · 2 files</div></div>
+      </div>
+      <div class="session">
+        <span class="dot ok" style="background:var(--muted)"></span><div class="grow"><div class="name ell">Mistral thinking</div><div class="meta ell">pi · Done · checks passed</div></div>
+      </div>
+      <div class="session">
+        <span class="dot ok" style="background:var(--coral)"></span><div class="grow"><div class="name ell">VM snapshot restore</div><div class="meta ell">minivm · Failed</div></div>
+      </div>
+    </div>
+    <div class="drawer-foot"><i data-i="settings"></i><span>Settings</span></div>
+  </aside>
+</div>
+<script src="phone.js"></script>
+</body></html>

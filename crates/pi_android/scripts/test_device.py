@@ -38,17 +38,30 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     run("shell", "pm", "path", PACKAGE)
     for name in screens:
+        try:
+            before = json.loads(run("exec-out", "run-as", PACKAGE, "cat", "files/ui-test-state.json"))
+        except (subprocess.CalledProcessError, json.JSONDecodeError):
+            before = None
         launched = time.time()
         run("shell", "am", "start", "-n", ACTIVITY, "-a",
             "android.intent.action.VIEW", "-d", f"pi://preview/{name}")
         deadline = time.monotonic() + 10
         previous = None
+        unchanged_since = None
         while True:
             try:
                 state = json.loads(run("exec-out", "run-as", PACKAGE, "cat", "files/ui-test-state.json"))
-                if state["fixture"] == name and state["time"] > launched:
-                    if previous and state["time"] > previous["time"] and state["bounds"] == previous["bounds"]:
-                        break
+                same_static_fixture = before and before["fixture"] == name and state["time"] == before["time"]
+                if state["fixture"] == name and (state["time"] > launched or same_static_fixture):
+                    if previous and state["bounds"] == previous["bounds"]:
+                        unchanged_since = unchanged_since or time.monotonic()
+                        # A static screen may have no reason to repaint. Treat
+                        # unchanged telemetry as settled without manufacturing
+                        # continuous frames just for the screenshot runner.
+                        if state["time"] > previous["time"] or time.monotonic() - unchanged_since >= 0.45:
+                            break
+                    else:
+                        unchanged_since = time.monotonic()
                     previous = state
             except (subprocess.CalledProcessError, json.JSONDecodeError):
                 pass

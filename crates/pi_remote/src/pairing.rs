@@ -126,7 +126,7 @@ pub fn pair(arguments: &[String]) -> Result<()> {
     let helper = helper(true)?;
     let forced = forced_command(&helper.path, &["pair", "exchange", &id])?;
     let line = format!("restrict,command={forced} {bootstrap_public}\n");
-    edit_authorized_keys(&[&marker], Some(&line))?;
+    edit_authorized_keys(&[&marker], None, Some(&line))?;
     let _bootstrap = BootstrapGuard(state.clone());
     write_json(&state_path(&id)?, &state)?;
 
@@ -175,7 +175,7 @@ pub fn pair(arguments: &[String]) -> Result<()> {
             }
         }
     };
-    validate_request(&state, &request)?;
+    let phone_key = validate_request(&state, &request)?;
     let code = confirmation_code(&id, &request.public_key);
     println!("{} requests access.", clean_name(&request.device_name));
     println!("Confirmation code: {code}");
@@ -190,10 +190,17 @@ pub fn pair(arguments: &[String]) -> Result<()> {
     };
 
     let response = if approved {
-        let (permanent, phone_marker) = permanent_line(&helper.path, &request)?;
+        let (permanent, phone_marker) = permanent_line(&helper.path, phone_key.clone())?;
         // Re-pairing the same phone upgrades its forced command to this helper
-        // instead of leaving an older matching key earlier in the file.
-        edit_authorized_keys(&[&marker, &phone_marker], Some(&permanent))?;
+        // instead of leaving an older matching key earlier in the file. Match
+        // the key material too: a key copied during manual setup has a different
+        // comment and no Pi marker, but OpenSSH would otherwise accept that
+        // unrestricted entry before reaching the gateway entry below it.
+        edit_authorized_keys(
+            &[&marker, &phone_marker],
+            Some(&phone_key),
+            Some(&permanent),
+        )?;
         Response {
             version: VERSION,
             approved: true,
@@ -201,7 +208,7 @@ pub fn pair(arguments: &[String]) -> Result<()> {
             helper: Some(helper),
         }
     } else {
-        edit_authorized_keys(&[&marker], None)?;
+        edit_authorized_keys(&[&marker], None, None)?;
         Response {
             version: VERSION,
             approved: false,
@@ -230,13 +237,13 @@ pub fn exchange(id: &str) -> Result<()> {
         Err(error) => {
             // A killed foreground pairing process may have installed the key
             // just before its state write. Its only usable command removes it.
-            edit_authorized_keys(&[&marker], None).ok();
+            edit_authorized_keys(&[&marker], None, None).ok();
             cleanup_files(id);
             return Err(error).context("This pairing code is no longer active");
         }
     };
     if state.id != id || pairing::now() > state.expires_at {
-        edit_authorized_keys(&[&marker], None).ok();
+        edit_authorized_keys(&[&marker], None, None).ok();
         cleanup_files(id);
         bail!("This pairing code expired");
     }
@@ -328,8 +335,7 @@ fn validate_request(state: &State, request: &Request) -> Result<PublicKey> {
     Ok(key)
 }
 
-fn permanent_line(path: &str, request: &Request) -> Result<(String, String)> {
-    let mut key = PublicKey::from_openssh(&request.public_key)?;
+fn permanent_line(path: &str, mut key: PublicKey) -> Result<(String, String)> {
     let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
     let short: String = fingerprint
         .chars()
@@ -470,13 +476,18 @@ fn authorized_keys_path() -> Result<PathBuf> {
         .join(".ssh/authorized_keys"))
 }
 
-fn edit_authorized_keys(remove_markers: &[&str], append: Option<&str>) -> Result<()> {
-    edit_authorized_keys_at(authorized_keys_path()?, remove_markers, append)
+fn edit_authorized_keys(
+    remove_markers: &[&str],
+    remove_key: Option<&PublicKey>,
+    append: Option<&str>,
+) -> Result<()> {
+    edit_authorized_keys_at(authorized_keys_path()?, remove_markers, remove_key, append)
 }
 
 fn edit_authorized_keys_at(
     requested: PathBuf,
     remove_markers: &[&str],
+    remove_key: Option<&PublicKey>,
     append: Option<&str>,
 ) -> Result<()> {
     let parent = requested
@@ -498,9 +509,21 @@ fn edit_authorized_keys_at(
         .open(&lock_path)?;
     lock.lock_exclusive()?;
     let original = fs::read_to_string(&path).unwrap_or_default();
+    let remove_key = remove_key
+        .map(PublicKey::to_openssh)
+        .transpose()?
+        .and_then(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.to_owned(), fields.next()?.to_owned()))
+        });
     let mut next = original
         .lines()
-        .filter(|line| !remove_markers.iter().any(|marker| line.contains(*marker)))
+        .filter(|line| {
+            !remove_markers.iter().any(|marker| line.contains(*marker))
+                && !remove_key
+                    .as_ref()
+                    .is_some_and(|key| line_contains_public_key(line, key))
+        })
         .map(|line| format!("{line}\n"))
         .collect::<String>();
     if let Some(line) = append
@@ -517,6 +540,19 @@ fn edit_authorized_keys_at(
     }
     fs2::FileExt::unlock(&lock)?;
     Ok(())
+}
+
+/// Finds the adjacent OpenSSH key type and base64 fields even when the entry
+/// starts with quoted options whose forced command contains spaces.
+fn line_contains_public_key(line: &str, key: &(String, String)) -> bool {
+    let mut previous = None;
+    for field in line.split_whitespace() {
+        if previous == Some(key.0.as_str()) && field == key.1 {
+            return true;
+        }
+        previous = Some(field);
+    }
+    false
 }
 
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
@@ -576,7 +612,7 @@ fn wait_for_done(id: &str, duration: Duration) -> Result<()> {
 }
 
 fn cleanup(state: &State) -> Result<()> {
-    edit_authorized_keys(&[&state.bootstrap_marker], None)?;
+    edit_authorized_keys(&[&state.bootstrap_marker], None, None)?;
     cleanup_files(&state.id);
     Ok(())
 }
@@ -651,6 +687,7 @@ mod tests {
         edit_authorized_keys_at(
             keys.clone(),
             &["pi-pair-bootstrap:old"],
+            None,
             Some("restrict ssh-ed25519 new pi-phone:new\n"),
         )
         .unwrap();
@@ -658,6 +695,40 @@ mod tests {
         assert!(text.contains("ssh-ed25519 existing user@host"));
         assert!(text.contains("pi-phone:new"));
         assert!(!text.contains("pi-pair-bootstrap:old"));
+    }
+
+    #[test]
+    fn qr_pairing_replaces_every_entry_with_the_same_phone_key() {
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        let private = PrivateKey::from(Ed25519Keypair::from_seed(&[7; 32]));
+        let public = private.public_key().clone();
+        let openssh = public.to_openssh().unwrap();
+        let encoded = openssh.split_whitespace().nth(1).unwrap();
+        fs::write(
+            &keys,
+            format!(
+                "ssh-ed25519 unrelated user@host\n{openssh} manual-copy\nrestrict,command=\"exec /old helper gateway old\" {openssh} pi-phone:old\n"
+            ),
+        )
+        .unwrap();
+        let (permanent, marker) = permanent_line("/new helper", public.clone()).unwrap();
+
+        edit_authorized_keys_at(
+            keys.clone(),
+            &["pi-phone:old"],
+            Some(&public),
+            Some(&permanent),
+        )
+        .unwrap();
+
+        let text = fs::read_to_string(&keys).unwrap();
+        assert!(text.contains("ssh-ed25519 unrelated user@host"));
+        assert!(text.contains("/new helper"));
+        assert!(text.contains(&marker));
+        assert!(!text.contains("manual-copy"));
+        assert!(!text.contains("/old helper"));
+        assert_eq!(text.matches(encoded).count(), 1);
     }
 
     #[test]
@@ -674,7 +745,7 @@ mod tests {
             "Phone".into(),
         );
         assert!(validate_request(&state, &request).is_ok());
-        let (line, marker) = permanent_line("/tmp/pi helper", &request).unwrap();
+        let (line, marker) = permanent_line("/tmp/pi helper", key.public_key().clone()).unwrap();
         assert!(line.contains("restrict,command="));
         assert!(line.contains(" gateway "));
         assert!(line.contains(&marker));

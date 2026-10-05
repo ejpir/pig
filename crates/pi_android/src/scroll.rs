@@ -8,6 +8,10 @@ use gpui::{
     StyleRefinement, TouchDragEvent, TouchPhase, Window, canvas, div, fill, point, prelude::*, px,
     size,
 };
+use std::time::{Duration, Instant};
+
+const THUMB_HOLD: Duration = Duration::from_millis(500);
+const THUMB_FADE: Duration = Duration::from_millis(260);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Geometry {
@@ -44,8 +48,49 @@ impl Geometry {
 }
 
 #[derive(Default)]
-struct Drag {
+struct ScrollbarState {
     grab: Option<Pixels>,
+    last_offset: Option<Pixels>,
+    last_motion: Option<Instant>,
+}
+
+impl ScrollbarState {
+    fn observe(&mut self, offset: Pixels, now: Instant) {
+        if self
+            .last_offset
+            .replace(offset)
+            .is_some_and(|previous| previous != offset)
+        {
+            self.last_motion = Some(now);
+        }
+    }
+
+    fn reveal(&mut self, now: Instant) {
+        self.last_motion = Some(now);
+    }
+
+    fn opacity(&self, now: Instant) -> f32 {
+        thumb_opacity(self.last_motion, self.grab.is_some(), now)
+    }
+}
+
+/// Shared by full-screen viewports and long composer drafts so every vertical
+/// scroll affordance has the same quiet hold-and-fade behavior.
+pub(crate) fn thumb_opacity(last_motion: Option<Instant>, active: bool, now: Instant) -> f32 {
+    if active {
+        return 1.;
+    }
+    let Some(last_motion) = last_motion else {
+        return 0.;
+    };
+    let elapsed = now.saturating_duration_since(last_motion);
+    if elapsed <= THUMB_HOLD {
+        1.
+    } else if elapsed < THUMB_HOLD + THUMB_FADE {
+        1. - (elapsed - THUMB_HOLD).as_secs_f32() / THUMB_FADE.as_secs_f32()
+    } else {
+        0.
+    }
 }
 
 #[derive(IntoElement)]
@@ -128,21 +173,31 @@ impl RenderOnce for ScrollArea {
                                 );
                             }
                         }
-                        let drag =
-                            window.use_keyed_state("scrollbar-drag", cx, |_, _| Drag::default());
-                        let hitbox = geometry
-                            .map(|g| window.insert_hitbox(g.track, gpui::HitboxBehavior::Normal));
-                        (geometry, hitbox, drag)
+                        let state = window.use_keyed_state("scrollbar-state", cx, |_, _| {
+                            ScrollbarState::default()
+                        });
+                        let now = Instant::now();
+                        state.update(cx, |state, _| state.observe(measure.offset().y, now));
+                        let opacity = state.read(cx).opacity(now);
+                        let hitbox = geometry.filter(|_| opacity > 0.).map(|geometry| {
+                            window.insert_hitbox(geometry.track, gpui::HitboxBehavior::Normal)
+                        });
+                        (geometry, hitbox, state, opacity)
                     },
-                    move |_, (geometry, hitbox, drag), window, cx| {
+                    move |_, (geometry, hitbox, state, opacity), window, cx| {
                         let Some(geometry) = geometry else { return };
-                        let hitbox = hitbox.unwrap();
+                        if opacity > 0. {
+                            window.paint_quad(
+                                fill(geometry.thumb, theme(cx).muted.opacity(0.65 * opacity))
+                                    .corner_radii(px(2.)),
+                            );
+                            // Keep rendering through the hold and fade, then stop
+                            // requesting frames completely while the thumb is hidden.
+                            window.request_animation_frame();
+                        }
+                        let Some(hitbox) = hitbox else { return };
                         let touch_hitbox = hitbox.clone();
-                        window.paint_quad(
-                            fill(geometry.thumb, theme(cx).muted.opacity(0.65))
-                                .corner_radii(px(2.)),
-                        );
-                        let down_drag = drag.clone();
+                        let down_state = state.clone();
                         let down_scroll = handle.clone();
                         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                             if phase != DispatchPhase::Capture
@@ -158,7 +213,10 @@ impl RenderOnce for ScrollArea {
                             } else {
                                 geometry.thumb.size.height / 2.
                             };
-                            down_drag.update(cx, |drag, _| drag.grab = Some(grab));
+                            down_state.update(cx, |state, _| {
+                                state.grab = Some(grab);
+                                state.reveal(Instant::now());
+                            });
                             down_scroll.set_offset(point(
                                 down_scroll.offset().x,
                                 geometry.offset(event.position.y, grab),
@@ -167,13 +225,13 @@ impl RenderOnce for ScrollArea {
                             window.prevent_default();
                             window.refresh();
                         });
-                        let moving_drag = drag.clone();
+                        let moving_state = state.clone();
                         let moving_scroll = handle.clone();
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                             if phase != DispatchPhase::Capture {
                                 return;
                             }
-                            if let Some(grab) = moving_drag.read(cx).grab {
+                            if let Some(grab) = moving_state.read(cx).grab {
                                 moving_scroll.set_offset(point(
                                     moving_scroll.offset().x,
                                     geometry.offset(event.position.y, grab),
@@ -182,12 +240,15 @@ impl RenderOnce for ScrollArea {
                                 window.refresh();
                             }
                         });
-                        let released_drag = drag.clone();
+                        let released_state = state.clone();
                         window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
                             if phase == DispatchPhase::Capture
-                                && released_drag.read(cx).grab.is_some()
+                                && released_state.read(cx).grab.is_some()
                             {
-                                released_drag.update(cx, |drag, _| drag.grab = None);
+                                released_state.update(cx, |state, _| {
+                                    state.grab = None;
+                                    state.reveal(Instant::now());
+                                });
                                 cx.stop_propagation();
                                 window.refresh();
                             }
@@ -210,17 +271,23 @@ impl RenderOnce for ScrollArea {
                                 } else {
                                     geometry.thumb.size.height / 2.
                                 };
-                                drag.update(cx, |drag, _| drag.grab = Some(grab));
+                                state.update(cx, |state, _| {
+                                    state.grab = Some(grab);
+                                    state.reveal(Instant::now());
+                                });
                                 window.prevent_default();
                             }
-                            if let Some(grab) = drag.read(cx).grab {
+                            if let Some(grab) = state.read(cx).grab {
                                 handle.set_offset(point(
                                     handle.offset().x,
                                     geometry.offset(event.position.y, grab),
                                 ));
                                 if matches!(event.phase, TouchPhase::Ended | TouchPhase::Cancelled)
                                 {
-                                    drag.update(cx, |drag, _| drag.grab = None);
+                                    state.update(cx, |state, _| {
+                                        state.grab = None;
+                                        state.reveal(Instant::now());
+                                    });
                                 }
                                 cx.stop_propagation();
                                 window.refresh();
@@ -248,5 +315,22 @@ mod tests {
         assert_eq!(top.offset(top.track.bottom(), px(0.)), px(-4500.));
         let end = Geometry::new(bounds, px(4500.), px(-9999.)).unwrap();
         assert_eq!(end.thumb.bottom(), end.track.bottom());
+    }
+
+    #[test]
+    fn thumb_stays_hidden_until_motion_then_holds_and_fades() {
+        let start = Instant::now();
+        let mut state = ScrollbarState::default();
+        state.observe(px(0.), start);
+        assert_eq!(state.opacity(start), 0.);
+
+        state.observe(px(-12.), start + Duration::from_millis(10));
+        assert_eq!(state.opacity(start + Duration::from_millis(500)), 1.);
+        let fading = state.opacity(start + Duration::from_millis(640));
+        assert!(fading > 0. && fading < 1.);
+        assert_eq!(state.opacity(start + Duration::from_millis(800)), 0.);
+
+        state.grab = Some(px(2.));
+        assert_eq!(state.opacity(start + Duration::from_secs(30)), 1.);
     }
 }
