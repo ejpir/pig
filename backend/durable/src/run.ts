@@ -15,6 +15,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { authProviders, publicModel } from "./catalog.ts";
+import { findImage, imageReferences, promptContent } from "./images.ts";
 
 const context = BACKGROUND_CONTEXT;
 const MAX_RECORD = 16 * 1024 * 1024;
@@ -32,11 +33,13 @@ const commands = [
   "get_session_stats", "get_backend_info", "get_active_tools", "get_available_models",
   "get_available_thinking_levels", "get_auth_providers", "get_commands", "get_settings",
   "set_model", "set_thinking_level", "set_session_name", "set_auto_compaction",
+  "get_image",
+  "cancel_submission",
 ];
 const info = {
   backend: "pi-durable", version: "1", piVersion: "1.0.2", protocolVersion: 1,
   bunVersion: Bun.version, workerPid: process.pid, commands,
-  features: ["durable_execution", "committed_snapshots", "request_deduplication", "remote_pi_credentials", "builtin_providers"],
+  features: ["durable_execution", "committed_snapshots", "request_deduplication", "remote_pi_credentials", "builtin_providers", "image_prompts", "image_references"],
   experimental: true,
   limitations: ["Login on the SSH host; no interactive durable login flow yet", "No stock Pi extensions, skills or session-tree migration"],
 };
@@ -69,6 +72,13 @@ function string(record: Record<string, unknown>, key: string): string {
 
 export async function run(models: Models, extensions: readonly Extension[] = []): Promise<void> {
   const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === "--list-models") {
+    // Discovery is independent of session admission/storage. Only public
+    // metadata is returned; no provider call or conversation is created.
+    await models.refresh({ allowNetwork: false });
+    console.log(JSON.stringify({ version: 1, models: (await models.getAvailable()).map(publicModel) }));
+    return;
+  }
   const option = (name: string) => {
     const index = args.indexOf(name);
     if (index < 0 || !args[index + 1]) throw new Error(`Missing ${name}`);
@@ -135,7 +145,7 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
     return next;
   };
   const snapshot = (value: ConversationView) => send({ type: "durable_state", key,
-    data: { ...value, docs: { ...value.docs, "app.desktop": metadata.value } }, backend: info });
+    data: imageReferences({ ...value, docs: { ...value.docs, "app.desktop": metadata.value } }), backend: info });
   await snapshot(watch.value);
   watch.start(async (value) => { await snapshot(value); });
   // Missing definitions, corrupt/newer storage and startup errors must fail closed, not select stock Pi.
@@ -151,6 +161,11 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
       case "get_backend_info": return info;
       case "get_state": return {}; // Rust derives state from the committed view, never these read acknowledgements.
       case "get_messages": return { remoteSnapshot: true };
+      case "get_image": {
+        const image = findImage(value, string(record, "imageId"));
+        if (!image) throw new Error("Image is not in this session");
+        return { image };
+      }
       case "get_session_stats": return {};
       case "get_commands": return { commands: [] };
       case "get_settings": return { effective: { compaction: { enabled: autoCompaction } }, durable: true };
@@ -190,13 +205,13 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
         return {};
       }
       case "prompt": {
-        if (record.images !== undefined && (!Array.isArray(record.images) || record.images.length)) throw new Error("Image prompts are not enabled in the durable prototype");
         const message = string(record, "message"), requestId = string(record, "requestId");
         if (!/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) throw new Error("Invalid persistent requestId");
         if (!chosenModel()) throw new Error("Choose a configured model before submitting a durable prompt");
+        const content = promptContent(message, record.images, chosenModel()!.input.includes("image"));
         const mode = record.streamingBehavior;
         if (mode !== undefined && mode !== "steer" && mode !== "followUp") throw new Error("Invalid streamingBehavior");
-        const hash = createHash("sha256").update(JSON.stringify([message, mode ?? "reject"])).digest("hex");
+        const hash = createHash("sha256").update(JSON.stringify([content, mode ?? "reject"])).digest("hex");
         const duplicate = await root.commit(async (tx) => {
           const existing = await tx.submissionByRequest(root.id, requestId);
           const hashes = (await tx.doc(Receipts, root.id)).hashes;
@@ -207,7 +222,7 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
           hashes[requestId] = hash;
           return existing !== undefined;
         }, context);
-        const submission = await root.submit({ type: "input", content: message, requestId, whenBusy: mode ?? "reject" }, context);
+        const submission = await root.submit({ type: "input", content, requestId, whenBusy: mode ?? "reject" }, context);
         const receipt = await submission.status(context);
         return { disposition: duplicate ? "handled" : receipt.status === "queued" ? "queued" : "started", submissionId: submission.id, requestId, duplicate };
       }
@@ -215,6 +230,14 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
       case "clear_queue": {
         const inbox = value.docs["pi.inbox"].items as { id: SubmissionId }[];
         for (const item of inbox) await harness.abortSubmission(item.id, context, root.id);
+        return {};
+      }
+      case "cancel_submission": {
+        const wanted = string(record, "submissionId");
+        const inbox = value.docs["pi.inbox"].items as { id: SubmissionId }[];
+        const item = inbox.find((item) => String(item.id) === wanted);
+        if (!item) throw new Error("This prompt is no longer queued; refresh the session");
+        await harness.abortSubmission(item.id, context, root.id);
         return {};
       }
       case "abort": await root.abort(context); return {};

@@ -2,6 +2,8 @@
 //! the bottom sheets together.
 
 mod connect;
+mod drawer;
+mod projects;
 mod review;
 mod sessions;
 mod settings;
@@ -10,16 +12,11 @@ mod start;
 mod thread;
 
 use crate::{theme::Theme, ui};
-use gpui::{Div, ElementId, ScrollHandle, Stateful, div, prelude::*, px};
+use gpui::{Div, ElementId, ScrollHandle, div, prelude::*, px};
 
 /// A screen's scrolling middle.
-fn scroll_area(id: impl Into<ElementId>, handle: &ScrollHandle) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scroll()
-        .track_scroll(handle)
+fn scroll_area(id: impl Into<ElementId>, handle: &ScrollHandle) -> crate::scroll::ScrollArea {
+    crate::scroll::vertical(id, handle).flex_1()
 }
 
 /// A section's heading above a card.

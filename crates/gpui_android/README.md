@@ -2,8 +2,9 @@
 
 A GPUI platform for Android. The demo app has run on a phone: drawing, touch,
 the on-screen keyboard, the clipboard with images, file pickers and links
-work. Back, notifications and links into the app are new and not yet tried on
-a device. The plain-Rust parts are unit-tested on any host.
+work. Back and fixture links into the app are also tested on a device;
+notification delivery still needs device coverage. The plain-Rust parts are
+unit-tested on any host.
 [Pi for Android](../pi_android/README.md) is built on it.
 
 ## What it does
@@ -35,11 +36,17 @@ a device. The plain-Rust parts are unit-tested on any host.
   key caused (such as the keyboard's delete) does not restart the keyboard, so
   holding delete repeats and speeds up as in Android's own fields.
   `activity::long_press_feedback` gives the buzz of a long press that selects.
+  Keyboard activation is resolved after a rendered frame so a newly focused
+  GPUI handler exists. The shared Android editor retires its InputConnection
+  on blur and restarts it for a new logical field; stale composition cannot
+  write into another field.
 - **Screen:** the app draws edge to edge. The system bars, display cutouts and
   the keyboard are reported as insets (`window.fully_visible_bounds()`),
   following the keyboard as it slides. Density sets the scale factor, dark
   mode sets the appearance and the status bar icons; an app whose theme
   differs from the system's sets the icons with `activity::set_bar_icons`.
+  Android's `adjustNothing` leaves IME layout to GPUI's animated insets instead
+  of panning the native surface independently of its input coordinates.
 - **Back:** the back button and gesture arrive as the `back` key, so an app
   binds it to an action (close a sheet, go up a screen). When nothing handles
   it, Android does, and the app goes to the background.
@@ -60,8 +67,13 @@ a device. The plain-Rust parts are unit-tested on any host.
   drawn π for now. `activity::request_notification_permission` asks on
   Android 13 and later, once; `activity::notifications_enabled` says whether
   they show.
-- **Fonts:** every font in `/system/fonts` is memory-mapped, so CJK and emoji
-  fallback work without loading them into memory. Roboto is the UI font.
+- **Fonts:** fonts in `/system/fonts` and `/product/fonts` are memory-mapped
+  for language fallback. Roboto is the default UI font. A compatible Noto
+  Color Emoji bitmap font is bundled because newer Android COLRv1 fonts
+  render blank with the current Swash renderer. The unmodified font comes
+  from [googlefonts/noto-emoji](https://github.com/googlefonts/noto-emoji/tree/e20cbc2bbec1926686be9f9bee7d1d2cfa1fea0e/2D/fonts)
+  (SHA-256 `15671215ab769fdc7162a045d56fd7d7e477c51b04e6b3c761d914d8fdd6cc44`);
+  its OFL license is in `assets/fonts/OFL.txt` and included in each APK.
 
 Not yet: screen readers, stored credentials, and mouse or stylus as anything
 but touch.

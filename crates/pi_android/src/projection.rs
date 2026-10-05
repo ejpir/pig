@@ -52,7 +52,7 @@ pub fn project(pi: &Pi, facts: Facts) -> Session {
         turns.push(turn);
     }
     if let Some(turn) = turns.last_mut() {
-        settle(turn, state, pi);
+        settle(turn, state, pi, facts.cwd);
     }
     let started = pi
         .messages
@@ -232,11 +232,17 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                     let name = block["name"].as_str().unwrap_or("");
                     let observed = tool(pi, id);
                     let args = observed.map_or(&block["arguments"], |tool| &tool.args);
-                    add_tool(turn, name, args, observed, cwd);
+                    add_tool(turn, id, name, args, observed, cwd);
                 }
                 let text = text_of(message);
-                if !text.trim().is_empty() && message["stopReason"] != "toolUse" {
-                    turn.summary = Some(summary(&text));
+                if !text.trim().is_empty() {
+                    // Commentary before/between tools is visible progress too.
+                    // Each message occurs once in Pi's authoritative history.
+                    let source = turn.summary.as_ref().map_or_else(
+                        || text.clone(),
+                        |previous| format!("{}\n\n{text}", previous.text()),
+                    );
+                    turn.summary = Some(summary(&source));
                 }
             }
             _ => {}
@@ -245,9 +251,29 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
     turns
 }
 
-fn add_tool(turn: &mut Turn, name: &str, args: &Value, observed: Option<&Tool>, cwd: &str) {
+fn add_tool(
+    turn: &mut Turn,
+    id: &str,
+    name: &str,
+    args: &Value,
+    observed: Option<&Tool>,
+    cwd: &str,
+) {
     let kind = kind(name);
     let stage = turn.stage_mut(kind);
+    stage.tools.push(crate::model::ToolActivity {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        target: args["path"]
+            .as_str()
+            .or_else(|| args["command"].as_str())
+            .or_else(|| args["pattern"].as_str())
+            .unwrap_or("")
+            .to_owned(),
+        output: observed.map_or_else(String::new, |tool| tool.output.clone()),
+        finished: observed.is_some_and(|tool| tool.finished),
+        failed: observed.is_some_and(|tool| tool.is_error),
+    });
     stage.status = StageStatus::Done;
     let path = args["path"].as_str().map(|path| relative(path, cwd));
     match kind {
@@ -325,7 +351,7 @@ fn one_line(text: &str, limit: usize) -> String {
 }
 
 /// Marks the last turn's stages for how the session stands now.
-fn settle(turn: &mut Turn, state: State, pi: &Pi) {
+fn settle(turn: &mut Turn, state: State, pi: &Pi, cwd: &str) {
     if state.is_running() {
         let running = pi.tools.iter().rev().find(|tool| !tool.finished);
         let live = running.map(|tool| kind(&tool.name)).or_else(|| {
@@ -335,6 +361,15 @@ fn settle(turn: &mut Turn, state: State, pi: &Pi) {
         match live {
             Some(live) => {
                 if let Some(tool) = running {
+                    // Execution events can precede the assistant's toolCall.
+                    if !turn
+                        .stages
+                        .iter()
+                        .flat_map(|s| &s.tools)
+                        .any(|t| t.id == tool.id)
+                    {
+                        add_tool(turn, &tool.id, &tool.name, &tool.args, Some(tool), cwd);
+                    }
                     let stage = turn.stage_mut(live);
                     stage.status = StageStatus::Live;
                     stage.what = doing(tool);
@@ -415,18 +450,27 @@ fn summary(text: &str) -> Summary {
         .char_indices()
         .find(|(index, c)| matches!(c, '.' | '!' | '?') && first_line[index + 1..].starts_with(' '))
         .map_or(first_line.len(), |(index, _)| index + 1);
+    // An entire paragraph or a code fence is body text, not an enormous
+    // decorative heading. Never discard the rest of an answer.
+    if first_line[..cut].chars().count() > 160 || first_line.starts_with("```") {
+        return Summary {
+            headline: "Pi".into(),
+            body: text.to_owned(),
+            source: Some(text.to_owned()),
+        };
+    }
     let headline = first_line[..cut]
         .trim()
         .trim_start_matches('#')
         .trim()
         .to_owned();
     let body = text[cut..].trim();
-    let body = if body.chars().count() > 600 {
-        format!("{}…", body.chars().take(600).collect::<String>().trim_end())
-    } else {
-        body.to_owned()
-    };
-    Summary { headline, body }
+    let body = body.to_owned();
+    Summary {
+        headline,
+        body,
+        source: Some(text.to_owned()),
+    }
 }
 
 /// Pi's numbered diff lines: "+212 text", "-211 text", " 210 text"; an
@@ -695,6 +739,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn long_replies_keep_every_paragraph_and_final_character() {
+        for count in [1, 20, 1000, 20_000] {
+            let body = format!(
+                "{}\n\nFINAL 中文 👩🏽‍💻",
+                "A complete paragraph.\n\n".repeat(count)
+            );
+            let reply = summary(&format!("Result.\n\n{body}"));
+            assert_eq!(reply.headline, "Result.");
+            assert_eq!(reply.body, body);
+        }
+        let single_paragraph = "Long unbroken answer ".repeat(1000);
+        assert_eq!(summary(&single_paragraph).body, single_paragraph.trim());
+    }
+
     const DIFF: &str = "  210 const a = 1;\n-211 old();\n+211 new();\n+212 more();\n  213 end\n     ...\n  300 x\n+301 y";
 
     fn finished_run() -> Pi {
@@ -782,6 +841,56 @@ mod tests {
         assert_eq!(
             stages.last(),
             Some(&(StageKind::HandOff, StageStatus::Planned))
+        );
+        let tools = &shown.turns[0]
+            .stages
+            .iter()
+            .find(|s| s.kind == StageKind::Change)
+            .unwrap()
+            .tools;
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].target, "/Users/nick/repos/pi/src/lib.rs");
+        assert!(!tools[0].finished);
+    }
+
+    #[test]
+    fn commentary_and_streaming_tool_output_stay_visible() {
+        let mut pi = session(&[
+            json!({"type":"agent_start"}),
+            json!({"type":"message_end","message":{"role":"user","content":"Check it"}}),
+            json!({"type":"message_end","message":{"role":"assistant","content":[
+                {"type":"text","text":"I am checking the tests."},
+                {"type":"toolCall","id":"b","name":"bash","arguments":{"command":"cargo test"}}
+            ],"stopReason":"toolUse"}}),
+            json!({"type":"tool_execution_start","toolCallId":"b","toolName":"bash","args":{"command":"cargo test"}}),
+            json!({"type":"tool_execution_update","toolCallId":"b","partialResult":{"content":[{"type":"text","text":"running 100 tests"}]}}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        let turn = &shown.turns[0];
+        assert_eq!(
+            turn.summary.as_ref().unwrap().text(),
+            "I am checking the tests."
+        );
+        let tools = &turn
+            .stages
+            .iter()
+            .find(|s| s.kind == StageKind::Verify)
+            .unwrap()
+            .tools;
+        assert_eq!(
+            tools.len(),
+            1,
+            "execution events must not duplicate tool calls"
+        );
+        assert_eq!(tools[0].output, "running 100 tests");
+        pi.apply(&json!({"type":"message_end","message":{"role":"assistant","content":"All tests passed.","stopReason":"stop"}})).unwrap();
+        assert_eq!(
+            project(&pi, facts(&[])).turns[0]
+                .summary
+                .as_ref()
+                .unwrap()
+                .text(),
+            "I am checking the tests.\n\nAll tests passed."
         );
     }
 

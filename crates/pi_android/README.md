@@ -42,31 +42,86 @@ key down: copy it from the second step into `~/.ssh/authorized_keys` there, and
 connect again. The computer's host key is kept then; a different one later is
 refused until the computer is forgotten in Settings.
 
+Connecting is step one. Step two offers recent projects and a read-only folder
+browser on that computer: Home, parent folders, hidden folders, and an optional
+path field. Choose **Use this folder** to open the new-session composer. No
+session starts while browsing. **Just view sessions** skips project selection.
+The last chosen project is remembered separately for each computer. Folder
+browsing requires the updated helper's `directories` command; an older helper
+shows an update message and leaves recent projects available.
+
 ## What works
 
 - **Sessions on the computer:** every session Pi Desktop or the phone started
   over SSH, from the helper's list. Running ones are watched at once, so the
   list stays current and notifications fire; others attach when opened. Pi
   Desktop and the phone can watch one session together.
-- **New sessions:** in a folder the computer has sessions in, or one typed in
-  the project sheet. The prompt shows at once, then Pi's turns: the stages its
+- **New sessions:** choose a recent project or browse folders remotely, with
+  optional manual path entry. The prompt shows at once, then Pi's turns: the stages its
   tools went through, the files it changed with Pi's own diffs, the last check
   it ran, and its answer.
 - **Follow-ups, Stop and the queue:** a follow-up during a run waits for it;
-  Stop aborts the run on the computer.
+  Stop aborts the run on the computer. New tasks, follow-ups and revisions use
+  the same multiline composer, with separate model and thinking controls.
+  Models are searchable by name, provider and ID; the search stays above the
+  scrolling results. The computer's read-only model catalog loads immediately
+  after connecting, before any session exists, and can be reloaded after
+  configuring a provider. This requires the helper's `models` command.
+  Stop lives in the composer toolbar. In an existing
+  session, those choices change that session, not the default for new tasks.
 - **Questions:** a stock Pi session's confirm or select dialog opens as a
   sheet and is answered from the phone. Durable sessions have no extensions,
   so they don't ask.
 - **Review:** one file at a time; tapping lines names them (“About lines
   211–212 of src/app.rs”) in a follow-up.
 - **Reconnecting:** when the connection drops, the phone connects again and
-  attaches to what it was watching.
+  attaches to what it was watching. Unacknowledged prompts retry with their
+  original admission ID and complete image payload. Obsolete connection
+  updates are ignored. Rejected prompts stay available as **Edit and retry**;
+  recovery never replaces a draft already being edited.
 - **Back, notifications, links, selecting text, settings:** as in the sample.
+- **Navigation drawer:** open the left menu from Sessions or a conversation
+  to start work, switch sessions or reach Settings. Swipe left to close it;
+  swipe down from a sheet's handle (or its content when scrolled to the top)
+  to dismiss the sheet. Back and close buttons remain available.
+  Panels follow the finger until release, then settle smoothly; partial and
+  cancelled drags return to their starting position. Reduced motion is honored.
+  Sheet headers and close buttons remain visible while long content scrolls.
+- **Delete sessions:** swipe a row right, or use the session's More menu, then
+  confirm permanent deletion. The computer deletes only that durable session's
+  history; project edits are kept. Working sessions must be stopped first.
+  This requires an updated remote helper/daemon. Older helpers report the
+  requirement without deleting anything; legacy stock-Pi history is managed
+  on the computer. A server-side tombstone prevents stale clients recreating
+  a deleted session; daemon and writer locks protect the deletion.
+- **Readable conversations:** numbered user turns, full Markdown replies,
+  copyable code blocks, and an activity rail that expands after completion.
+  Tap a stage for commands, full tool output and file details. Live commentary
+  and tool previews stay visible while the run works; scrolling up pauses
+  following, and **Latest reply** returns to the bottom.
+- **Long drafts:** bounded, scrollable composers; horizontal scrolling for
+  one-line inputs; Unicode-aware cursor/deletion. Return adds a line by
+  default. With Return sends enabled, Shift+Return still adds a line.
+- **Attachments:** the system document picker imports images and UTF-8 text.
+  Images have a thumbnail, separate remove target, and full preview. Image-only
+  messages work. Import/normalization runs off the UI thread; Send waits until
+  it finishes. Up to four images (eight attachments total); each source image
+  is limited to 20 MB, resized to at most 2048 pixels and 1 MiB for upload.
+  Text files are limited to 256 KiB; their contents, not just filenames, are
+  included. A vision-capable model and image-enabled helper/daemon are required.
+  Running old daemons are not restarted automatically.
+- **File mentions:** typed, pasted and suggested `@path` references have a
+  bordered highlight. Paths with spaces use `@"my folder/file.rs"`. The text
+  remains directly editable. Mentions reference computer-side files; the
+  paperclip uploads phone-side bytes.
+- **Large lists and replies:** proportional scrollbars expose overflow and
+  allow direct dragging, independently of sheet dismissal.
 
-Not yet: images and files from the phone (only the text is sent), Pi's
-commands and resources in durable sessions, staying connected in the
-background, and several computers at once. Each update carries the whole
-session, which is fine on Wi-Fi and heavy for long sessions on mobile data.
+Not yet: Pi's commands/resources in durable sessions, background connection
+service, multiple computers at once, reopening past-message images on the phone,
+and persistent phone-side unsent drafts across process death. Computer-side admitted history is durable. Session
+updates still carry the full text projection; image bytes are replaced with
+small content-hash references and can be retrieved with `get_image`.
 
 ## Build and install
 
@@ -93,15 +148,83 @@ cargo run -p pi_android --example preview -- waiting  # a named state
 The named states use the sample sessions and match the design's screens:
 `connect`, `sessions`, `search`, `start`, `working`, `waiting`, `done`,
 `review`, `typing`, `details`, `evening`, `settings`, and the sheets `model`,
-`attach`, `more`, `project`, `models` and `resources`. The tests render each
-one.
+`attach`, `more`, `project`, `models` and `resources`. Stress states include
+`long-input`, `long-reply`, `streaming-reply`, `long-labels`, `empty-search`,
+`failed`, `stopped`, `drawer`, `activity`, `markdown`, `multi-turn` and
+`tool-output`, `follow-up-input`, `delete`, `delete-running`, `projects`,
+`project-empty`, `project-error`, `project-loading`, `project-long-path`,
+`model-long-list`, `model-no-match`, `thinking`, `mentions`, `image-input`
+and `image-only`. The tests
+render every state at 320×640, 384×854 and 640×360.
 
-`live::tests::a_durable_session_runs_over_ssh` runs the whole path against a
-real SSH server: set `PI_ANDROID_TEST_SSH` (`user@host:port`),
-`PI_ANDROID_TEST_KEYS` (that account's authorized_keys, which the test adds
-its key to) and `PI_ANDROID_TEST_PROJECT`, then run it with `--ignored`. With
-backend/durable's faux test runner as `PI_DESKTOP_DURABLE_RUNNER` there, no
-provider is called.
+## Device UI regression checks
+
+Use the isolated test package so fixture resets never affect a real app's
+settings, keys or sessions:
+
+```sh
+cargo test -p pi_android -p gpui_android --lib --features pi_android/ui-test
+python3 crates/pi_android/scripts/build_apk.py --ui-test
+adb install -r dist/pi-ui-test.apk
+python3 crates/pi_android/scripts/test_device.py --serial DEVICE --output /tmp/pi-phone-screens
+python3 crates/pi_android/scripts/test_interactions.py --serial DEVICE --output /tmp/pi-phone-interactions
+adb shell am start -n dev.pi.android.uitest/dev.pi.gpui.GpuiActivity \
+  -a android.intent.action.VIEW -d pi://preview/long-input
+```
+
+The **Pi UI tests** app is `dev.pi.android.uitest`; it can also connect normally.
+Fixture links are compiled only with `ui-test`. This separate APK is debuggable
+so the test runner can read app-private fixture telemetry via `run-as`; normal
+release APKs are not. The telemetry contains routes, bounds and character/image
+counts, never credentials or prompt contents, and is disabled for real sessions.
+Screenshots require visual
+inspection: the script checks process survival and crash logs, not appearance.
+`test_interactions.py` waits for settled layouts and asserts typing, model search,
+thinking selection, long Unicode edits, Stop, actual system-picker image import,
+image preview/send, scrollbars, drawer/sheet drags, confirmed swipe deletion,
+completed activity details, long tool/reply scrolling and project selection.
+It saves screenshots and a JSON report. Use `--case input`, `--case picker`,
+`--case models`, etc. to repeat a case. The picker case supports English AOSP
+DocumentsUI and Xiaomi's picker; it creates a uniquely named synthetic PNG and
+removes only that generated device file afterward. The local evidence is kept.
+The `--case ime` test taps real Gboard keys to exercise composition, deletion
+and switching fields. It expects English portrait Gboard with four rows and
+no extra number row or toolbar; other layouts can run the remaining cases
+without changing the phone's keyboard settings.
+Fixture sessions are paused intentionally. Restart the app
+or use Connect → sample sessions to try animated sample runs.
+
+Check short/empty/multiline drafts, switching from a populated field to an
+empty field, long-paste editing and scrolling, send with the keyboard open,
+back from New session, drawer/sheet scrims, completed activity expansion,
+tool-output scrolling, and reading earlier text while updates arrive.
+
+`test_ssh.py` runs `live::tests::a_durable_session_runs_over_ssh` through a
+temporary loopback-only OpenSSH server, a separate authorized-keys file and
+the faux-only durable runner. It verifies model/folder discovery before a
+session exists, prompts, image bytes reaching the provider, follow-ups, a
+second watcher, host-key rejection and deletion that keeps project files.
+It never changes the account's SSH service, real authorized keys or provider
+configuration; detached test daemons and temporary keys are cleaned up.
+The Rust test refuses keys/projects outside this harness's temporary folder.
+
+```sh
+python3 crates/pi_android/scripts/test_ssh.py \
+  --helper target/release/pi-desktop-remote \
+  --runner artifacts/durable/pi-desktop-durable-fixture \
+  --output /tmp/pi-ssh-tests
+```
+
+Build the helper and the standalone `backend/durable/test/fixture.ts` runner
+first. The helper can be the production build: the test endpoint explicitly
+sets the isolated state directory and faux runner; no real provider is called.
+
+The backend's ignored `images_survive_queue_cancellation_completion_and_reconnection`
+test exercises a real SQLite durable session with a faux provider: actual image
+bytes, exact queued-message cancellation, image references/retrieval, reconnect,
+duplicate admission and changed-payload collision rejection. Set
+`PI_DESKTOP_TEST_DURABLE_RUNNER` to the compiled `backend/durable/test/fixture.ts`
+runner and run `cargo test -p pi_remote --test durable images_survive_queue -- --ignored`.
 
 ## Layout
 

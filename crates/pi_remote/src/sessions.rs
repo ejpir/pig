@@ -87,6 +87,9 @@ pub(crate) fn list(root: &Path) -> Result<Value> {
         else {
             continue;
         };
+        if root.join(format!("{key}.deleted.json")).exists() {
+            continue;
+        }
         let Ok(identity) = fs::read(entry.path())
             .map_err(anyhow::Error::from)
             .and_then(|bytes| Ok(serde_json::from_slice::<Value>(&bytes)?))

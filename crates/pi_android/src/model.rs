@@ -121,6 +121,18 @@ pub struct Stage {
     pub diff: Vec<DiffLine>,
     pub added: u32,
     pub removed: u32,
+    /// Each observed tool call, including its full command and output.
+    pub tools: Vec<ToolActivity>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolActivity {
+    pub id: String,
+    pub name: String,
+    pub target: String,
+    pub output: String,
+    pub finished: bool,
+    pub failed: bool,
 }
 
 impl Stage {
@@ -133,6 +145,7 @@ impl Stage {
             diff: Vec::new(),
             added: 0,
             removed: 0,
+            tools: Vec::new(),
         }
     }
 
@@ -206,6 +219,20 @@ pub struct Summary {
     /// Pi's closing words, shown as a serif headline.
     pub headline: String,
     pub body: String,
+    /// The original Markdown, kept intact for rendering and copying.
+    pub source: Option<String>,
+}
+
+impl Summary {
+    pub fn text(&self) -> String {
+        self.source.clone().unwrap_or_else(|| {
+            if self.body.is_empty() {
+                self.headline.clone()
+            } else {
+                format!("{}\n\n{}", self.headline, self.body)
+            }
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

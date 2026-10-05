@@ -9,17 +9,24 @@
 mod alerts;
 mod app;
 mod assets;
+mod attachments;
 mod composer;
 mod demo;
 mod live;
+mod message;
 mod model;
+mod motion;
 mod prefs;
 mod preview;
 mod projection;
+mod projects;
+mod prompt;
 mod remote;
 mod screens;
+mod scroll;
 mod ssh;
 mod store;
+mod testing;
 mod text_area;
 mod theme;
 mod ui;
@@ -33,6 +40,8 @@ use std::path::PathBuf;
 
 /// Fonts and key bindings; call once before opening the window.
 pub fn init(cx: &mut App) {
+    #[cfg(feature = "ui-test")]
+    cx.set_global(testing::State::default());
     if let Err(error) = assets::load_fonts(cx) {
         log::error!("Could not load the fonts: {error:#}");
     }
@@ -48,6 +57,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("home", Home, context),
         KeyBinding::new("end", End, context),
         KeyBinding::new("enter", Enter, context),
+        KeyBinding::new("shift-enter", Newline, context),
         KeyBinding::new("ctrl-v", Paste, context),
         KeyBinding::new("ctrl-a", SelectAll, context),
         KeyBinding::new("ctrl-c", CopySelection, context),

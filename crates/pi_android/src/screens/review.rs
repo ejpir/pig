@@ -21,6 +21,9 @@ impl PhoneApp {
     ) -> AnyElement {
         let colors = theme(cx);
         let scroll = self.scroll(Route::Review(id));
+        let (model, thinking) = self.model_settings(cx);
+        self.review
+            .update(cx, |composer, _| composer.set_model_label(model, thinking));
         // Removing the lines chip from the draft lets go of the lines.
         let attached = self
             .review
@@ -37,6 +40,14 @@ impl PhoneApp {
         let Some(session) = self.store.as_ref().and_then(|store| store.session(id)) else {
             return div().into_any_element();
         };
+        let stopping = self
+            .store
+            .as_ref()
+            .and_then(|store| store.live.as_ref())
+            .is_some_and(|live| live.is_stopping(id));
+        self.review.update(cx, |composer, _| {
+            composer.set_running(session.state.is_running(), stopping)
+        });
         let computer = self
             .store
             .as_ref()

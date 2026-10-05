@@ -6,7 +6,7 @@ use crate::{
     theme::theme,
     ui::{self, icon},
 };
-use gpui::{Context, Window, div, prelude::*, px};
+use gpui::{Context, Focusable, Window, div, prelude::*, px};
 
 /// Starting points: what they put in the draft, and a command they use.
 const STARTERS: [(&str, Option<&str>); 3] = [
@@ -18,11 +18,29 @@ const STARTERS: [(&str, Option<&str>); 3] = [
 impl PhoneApp {
     pub(crate) fn start_screen(
         &mut self,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = theme(cx);
+        let keyboard =
+            window.viewport_size().height - window.fully_visible_bounds().bottom() > px(120.);
         let scroll = self.scroll(Route::Start);
+        let visible_height = window.fully_visible_bounds().size.height;
+        let resized = self.start_visible_height.replace(visible_height) != Some(visible_height);
+        let focused = self
+            .start
+            .read(cx)
+            .area
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        let can_use_starter = !focused && self.start.read(cx).area.read(cx).is_empty();
+        if keyboard && resized && focused {
+            // Keep the same content during the IME animation. Only scroll the
+            // minimum needed to keep the complete composer (including Send)
+            // visible, and stop following once the keyboard settles.
+            scroll.scroll_to_item(1);
+        }
         let live = self.store.as_ref().is_some_and(|store| !store.is_sample());
         let computer = self
             .store
@@ -44,15 +62,15 @@ impl PhoneApp {
             "New session",
             None,
             &colors,
-        )
-        .child(
+        );
+        let project_picker = div().px(px(16.)).pb(px(8.)).flex().child(
             ui::chip(
                 "project",
                 Some("folder"),
                 format!("{project} · {computer}"),
                 &colors,
             )
-            .mr(px(12.))
+            .max_w_full()
             .child(icon("chev_d", 14., colors.muted))
             .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Project, cx))),
         );
@@ -62,6 +80,7 @@ impl PhoneApp {
             let draft = command.map_or_else(|| text.to_string(), |command| format!("{command} "));
             div()
                 .id(("starter", index))
+                .debug_selector(move || format!("starter-{index}").into())
                 .h(px(52.))
                 .flex()
                 .items_center()
@@ -73,12 +92,18 @@ impl PhoneApp {
                 .child(div().flex_1().min_w_0().truncate().child(*text))
                 .children(command.map(|command| ui::mono(command, 12.).text_color(colors.muted)))
                 .child(icon("chev_r", 16., colors.muted))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.start.update(cx, |composer, cx| {
-                        composer.set_text(&draft, cx);
-                        composer.focus(window, cx);
-                    });
-                }))
+                .when(!can_use_starter, |row| row.opacity(0.55))
+                .when(can_use_starter, |row| {
+                    row.on_click(cx.listener(move |this, _, window, cx| {
+                        if !this.start.read(cx).area.read(cx).is_empty() {
+                            return;
+                        }
+                        this.start.update(cx, |composer, cx| {
+                            composer.set_text(&draft, cx);
+                            composer.focus(window, cx);
+                        });
+                    }))
+                })
         });
         div()
             .flex_1()
@@ -86,34 +111,36 @@ impl PhoneApp {
             .flex()
             .flex_col()
             .child(appbar)
+            .child(project_picker)
             .child(
-                scroll_area("start", &scroll).child(
+                scroll_area("start", &scroll)
+                    .child(
+                        div()
+                            .px(px(20.))
+                            .pt(px(28.))
+                            .child(heading("What should we change?", 32.))
+                            .child(
+                                ui::hint("Start with the task. Bring in files and details as you need them.", &colors)
+                                    .mt(px(10.))
+                                    .text_size(px(15.)),
+                            ),
+                    )
+                    .child(div().mt(px(22.)).child(self.start.clone()))
+                    .child(
+                        ui::hint(
+                            if live {
+                                "Name files by their path in the project; Pi reads them on the computer."
+                            } else {
+                                "Type / for commands or @ to reference a project file."
+                            },
+                            &colors,
+                        )
+                            .px(px(24.))
+                            .mt(px(10.)),
+                    )
+                    .child(
                     div()
                         .pb(px(20.))
-                        .child(
-                            div()
-                                .px(px(20.))
-                                .pt(px(28.))
-                                .child(heading("What should we change?", 32.))
-                                .child(
-                                    ui::hint("Start with the task. Bring in files and details as you need them.", &colors)
-                                        .mt(px(10.))
-                                        .text_size(px(15.)),
-                                ),
-                        )
-                        .child(div().mt(px(22.)).child(self.start.clone()))
-                        .child(
-                            ui::hint(
-                                if live {
-                                    "Name files by their path in the project; Pi reads them on the computer."
-                                } else {
-                                    "Type / for commands or @ to include a file."
-                                },
-                                &colors,
-                            )
-                                .px(px(24.))
-                                .mt(px(10.)),
-                        )
                         .child(
                             div()
                                 .px(px(20.))
@@ -134,6 +161,9 @@ impl PhoneApp {
                                                 .child(ui::label("Project", &colors))
                                                 .child(
                                                     ui::mono(format!("{folder} on {computer}"), 12.5)
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .truncate()
                                                         .text_color(colors.muted),
                                                 ),
                                         )

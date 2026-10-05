@@ -6,6 +6,7 @@ use pi_core::{
 };
 use serde_json::{Value, json};
 use std::{
+    cell::RefCell,
     io::{BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
@@ -64,7 +65,56 @@ fn wrong_platform_runner_is_rejected_before_publishing_an_endpoint_or_starting_p
 struct Bridge {
     process: Child,
     input: Option<ChildStdin>,
-    records: mpsc::Receiver<Value>,
+    records: RecordInbox,
+}
+
+/// Responses and committed snapshots are independently scheduled. Waiting for
+/// an acknowledgement must not discard the snapshot that arrived just before
+/// it, especially when no further state changes until the test releases a tool.
+struct RecordInbox {
+    received: mpsc::Receiver<Value>,
+    pending: RefCell<Vec<Value>>,
+}
+impl RecordInbox {
+    fn new(received: mpsc::Receiver<Value>) -> Self {
+        Self {
+            received,
+            pending: RefCell::new(Vec::new()),
+        }
+    }
+
+    #[track_caller]
+    fn until(&self, condition: impl Fn(&Value) -> bool) -> Value {
+        let found = self.pending.borrow().iter().position(&condition);
+        if let Some(index) = found {
+            return self.pending.borrow_mut().remove(index);
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let record = self
+                .received
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("Timed out or durable bridge closed");
+            if condition(&record) {
+                return record;
+            }
+            self.pending.borrow_mut().push(record);
+        }
+    }
+}
+
+#[test]
+fn an_acknowledgement_wait_keeps_the_committed_snapshot_that_preceded_it() {
+    let (sender, receiver) = mpsc::channel();
+    let inbox = RecordInbox::new(receiver);
+    let snapshot = json!({"type":"remote_snapshot","data":{"queued_submissions":["1","2"]}});
+    sender.send(snapshot.clone()).unwrap();
+    sender
+        .send(json!({"type":"response","id":"enqueue","success":true}))
+        .unwrap();
+    drop(sender);
+    assert_eq!(inbox.until(|r| r["id"] == "enqueue")["success"], true);
+    assert_eq!(inbox.until(|r| r["type"] == "remote_snapshot"), snapshot);
 }
 impl Bridge {
     fn new(root: &Path, target: &SshTarget) -> Self {
@@ -98,7 +148,7 @@ impl Bridge {
         let mut bridge = Self {
             process,
             input,
-            records,
+            records: RecordInbox::new(records),
         };
         bridge.send(target.attach_record());
         bridge
@@ -107,17 +157,9 @@ impl Bridge {
         writeln!(self.input.as_mut().unwrap(), "{record}").unwrap();
         self.input.as_mut().unwrap().flush().unwrap();
     }
+    #[track_caller]
     fn until(&self, condition: impl Fn(&Value) -> bool) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            let record = self
-                .records
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .expect("Timed out or durable bridge closed");
-            if condition(&record) {
-                return record;
-            }
-        }
+        self.records.until(condition)
     }
     fn snapshot(&self) -> Value {
         self.until(|record| record["type"] == "remote_snapshot")
@@ -130,6 +172,7 @@ impl Bridge {
         loop {
             match self
                 .records
+                .received
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             {
                 Ok(_) => {}
@@ -151,6 +194,130 @@ impl Drop for Bridge {
     }
 }
 struct Cleanup(PathBuf, String);
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn images_survive_queue_cancellation_completion_and_reconnection() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut target =
+        SshTarget::new("test".into(), directory.path().to_string_lossy().into()).unwrap();
+    target.backend = RemoteBackend::Durable;
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+    bridge
+        .send(json!({"type":"prompt","id":"work","message":"safe","requestId":"image-test-work"}));
+    assert_eq!(bridge.response("work")["success"], true);
+    bridge.until(|r| r["type"] == "remote_snapshot" && r["data"]["run"] == "Running");
+    let image = json!({"type":"image","mimeType":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=="});
+    let image_prompt = json!({"type":"prompt","id":"image","message":"inspect","images":[image],"requestId":"image-test-photo","streamingBehavior":"followUp"});
+    bridge.send(image_prompt.clone());
+    assert_eq!(bridge.response("image")["success"], true);
+    bridge.send(json!({"type":"prompt","id":"remove","message":"cancel only this","requestId":"image-test-remove","streamingBehavior":"followUp"}));
+    assert_eq!(bridge.response("remove")["success"], true);
+    let queued = bridge.until(|r| {
+        r["type"] == "remote_snapshot"
+            && r["data"]["queued_submissions"]
+                .as_array()
+                .is_some_and(|items| items.len() == 2)
+    });
+    let cancel = queued["data"]["queued_submissions"][1].clone();
+    bridge.send(json!({"type":"cancel_submission","id":"cancel","submissionId":cancel}));
+    let cancelled = bridge.response("cancel");
+    assert_eq!(cancelled["success"], true, "{cancelled}");
+    std::fs::write(directory.path().join("release"), "go").unwrap();
+    let finished = bridge.until(|r| {
+        r["type"] == "remote_snapshot"
+            && r["data"]["run"] == "Idle"
+            && r["data"]["messages"]
+                .to_string()
+                .contains("Received 1 image(s)")
+    });
+    let messages = finished["data"]["messages"].as_array().unwrap();
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m["role"] == "user" && m["content"] == "cancel only this")
+    );
+    let reference = messages
+        .iter()
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .find(|part| part["type"] == "image")
+        .unwrap();
+    assert_eq!(
+        reference["data"], "",
+        "streamed frames don't duplicate image bytes"
+    );
+    let image_id = reference["imageId"].clone();
+    bridge.send(json!({"type":"get_image","id":"original","imageId":image_id}));
+    assert_eq!(bridge.response("original")["data"]["image"], image);
+    bridge.detach();
+    let mut reconnected = Bridge::new(directory.path(), &target);
+    let restored = reconnected.snapshot();
+    assert!(
+        restored["data"]["messages"]
+            .to_string()
+            .contains("Received 1 image(s)")
+    );
+    reconnected.send(image_prompt.clone());
+    assert_eq!(reconnected.response("image")["data"]["duplicate"], true);
+    let mut collision = image_prompt;
+    collision["images"] = json!([]);
+    collision["id"] = json!("collision");
+    reconnected.send(collision);
+    assert_eq!(reconnected.response("collision")["success"], false);
+}
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn confirmed_deletion_removes_history_but_keeps_project_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut target =
+        SshTarget::new("test".into(), directory.path().to_string_lossy().into()).unwrap();
+    target.backend = RemoteBackend::Durable;
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let keep = directory.path().join("project.txt");
+    std::fs::write(&keep, "project survives").unwrap();
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+    bridge
+        .send(json!({"type":"remote_delete_session","id":"wrong","confirmKey":"another-session"}));
+    assert_eq!(bridge.response("wrong")["success"], false);
+    bridge.send(json!({"type":"prompt","id":"run","message":"safe","requestId":"delete-test-run"}));
+    assert_eq!(bridge.response("run")["success"], true);
+    bridge.until(|r| r["type"] == "remote_snapshot" && r["data"]["run"] == "Running");
+    bridge.send(json!({"type":"remote_delete_session","id":"busy","confirmKey":target.key}));
+    assert_eq!(bridge.response("busy")["success"], false);
+    assert!(directory.path().join("durable").join(&target.key).exists());
+    std::fs::write(directory.path().join("release"), "go").unwrap();
+    bridge.until(|r| {
+        r["type"] == "remote_snapshot"
+            && r["data"]["run"] == "Idle"
+            && r["data"]["messages"]
+                .as_array()
+                .is_some_and(|messages| messages.len() >= 2)
+    });
+    bridge.send(json!({"type":"remote_delete_session","id":"delete","confirmKey":target.key}));
+    let response = bridge.response("delete");
+    assert_eq!(response["success"], true, "{response}");
+    bridge.closed();
+    assert!(!directory.path().join("durable").join(&target.key).exists());
+    assert_eq!(std::fs::read_to_string(keep).unwrap(), "project survives");
+    let listing = Command::new(env!("CARGO_BIN_EXE_pi-desktop-remote"))
+        .arg("sessions")
+        .env("PI_DESKTOP_REMOTE_STATE_DIR", directory.path())
+        .output()
+        .unwrap();
+    let listing: Value = serde_json::from_slice(&listing.stdout).unwrap();
+    assert!(listing["sessions"].as_array().unwrap().is_empty());
+    let restart = Command::new(env!("CARGO_BIN_EXE_pi-desktop-remote"))
+        .args(["daemon", &serde_json::to_string(&target).unwrap()])
+        .env("PI_DESKTOP_REMOTE_STATE_DIR", directory.path())
+        .output()
+        .unwrap();
+    assert!(!restart.status.success());
+    assert!(String::from_utf8_lossy(&restart.stderr).contains("permanently deleted"));
+}
 impl Drop for Cleanup {
     fn drop(&mut self) {
         if let Ok(bytes) = std::fs::read(self.0.join("1").join(format!("{}.json", self.1)))

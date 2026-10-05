@@ -16,12 +16,13 @@ use gpui::{
     DispatchPhase, Element, ElementId, ElementInputHandler, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, LayoutId,
     LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point,
-    SharedString, Style, TextInputAction, TextInputConfiguration, TextRun, TouchDragEvent,
-    TouchPhase, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
-    prelude::*, px, relative, size,
+    ScrollWheelEvent, SharedString, Style, TextInputAction, TextInputConfiguration, TextRun,
+    TouchDragEvent, TouchPhase, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div,
+    fill, point, prelude::*, px, relative, size,
 };
 use gpui_android::activity;
 use std::{ops::Range, rc::Rc};
+use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
     text_area,
@@ -35,6 +36,7 @@ actions!(
         Home,
         End,
         Enter,
+        Newline,
         Paste,
         SelectAll,
         CopySelection,
@@ -96,6 +98,9 @@ pub struct TextArea {
     layout: Option<Layout>,
     bounds: Option<Bounds<Pixels>>,
     scroll: Pixels,
+    scroll_x: Pixels,
+    /// Reveal after editing or moving the caret, not after a user's scroll.
+    reveal_caret: bool,
     /// The bar with Cut, Copy and Paste, after a long press or a double tap.
     menu: bool,
     /// The word a long press started on; dragging extends the selection from it.
@@ -141,6 +146,8 @@ impl TextArea {
             layout: None,
             bounds: None,
             scroll: px(0.),
+            scroll_x: px(0.),
+            reveal_caret: true,
             menu: false,
             anchor: None,
             dragging: None,
@@ -175,13 +182,16 @@ impl TextArea {
         self.placeholder = placeholder.into();
     }
 
+    pub fn set_max_lines(&mut self, lines: usize) {
+        self.max_lines = lines.max(1);
+    }
+
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
-        self.content = text.into();
-        if !self.multiline {
-            self.content = self.content.replace('\n', " ");
-        }
+        self.content = normalize_input(&text.into(), self.multiline);
         self.selection = self.content.len()..self.content.len();
         self.marked = None;
+        self.menu = false;
+        self.reveal_caret = true;
         cx.emit(TextAreaEvent::Changed);
         cx.notify();
     }
@@ -192,6 +202,9 @@ impl TextArea {
         self.selection = 0..0;
         self.marked = None;
         self.scroll = px(0.);
+        self.scroll_x = px(0.);
+        self.menu = false;
+        self.reveal_caret = true;
         cx.emit(TextAreaEvent::Changed);
         cx.notify();
         text
@@ -218,10 +231,13 @@ impl TextArea {
     /// Replaces `range` with `text` and puts the caret after it.
     pub fn replace(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
         let range = range.start.min(self.content.len())..range.end.min(self.content.len());
-        self.content.replace_range(range.clone(), text);
+        let text = normalize_input(text, self.multiline);
+        self.content.replace_range(range.clone(), &text);
         let caret = range.start + text.len();
         self.selection = caret..caret;
         self.marked = None;
+        self.menu = false;
+        self.reveal_caret = true;
         cx.emit(TextAreaEvent::Changed);
         cx.notify();
     }
@@ -241,6 +257,7 @@ impl TextArea {
     /// word the field no longer has, which it then types again at the caret.
     fn select(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.selection = range;
+        self.reveal_caret = true;
         cx.notify();
     }
 
@@ -256,7 +273,7 @@ impl TextArea {
         match (&self.layout, &self.bounds) {
             (Some(layout), Some(bounds)) if !self.content.is_empty() => {
                 layout.offset_for_position(point(
-                    position.x - bounds.left(),
+                    position.x - bounds.left() + self.scroll_x,
                     position.y - bounds.top() + self.scroll,
                 ))
             }
@@ -397,16 +414,16 @@ impl TextArea {
 
     fn previous_boundary(&self, offset: usize) -> usize {
         self.content[..offset]
-            .char_indices()
+            .grapheme_indices(true)
             .next_back()
             .map_or(0, |(index, _)| index)
     }
 
     fn next_boundary(&self, offset: usize) -> usize {
         self.content[offset..]
-            .chars()
+            .graphemes(true)
             .next()
-            .map_or(offset, |character| offset + character.len_utf8())
+            .map_or(offset, |grapheme| offset + grapheme.len())
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -480,8 +497,7 @@ impl TextArea {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.selection = 0..self.content.len();
-        cx.notify();
+        self.select(0..self.content.len(), cx);
     }
 
     fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
@@ -489,6 +505,41 @@ impl TextArea {
             self.edit_selection("\n", window, cx);
         } else {
             cx.emit(TextAreaEvent::Submit);
+        }
+    }
+
+    fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.multiline {
+            self.edit_selection("\n", window, cx);
+        }
+    }
+
+    fn scroll_text(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let (Some(layout), Some(bounds)) = (&self.layout, self.bounds) else {
+            return;
+        };
+        let delta = event.delta.pixel_delta(layout.line_height);
+        let (offset, maximum, delta) = if self.multiline {
+            (
+                &mut self.scroll,
+                layout.height() - bounds.size.height,
+                delta.y,
+            )
+        } else {
+            (
+                &mut self.scroll_x,
+                layout.width() - bounds.size.width + px(2.),
+                if delta.x == px(0.) { delta.y } else { delta.x },
+            )
+        };
+        let next = (*offset - delta).max(px(0.)).min(maximum.max(px(0.)));
+        if next != *offset {
+            *offset = next;
+            self.reveal_caret = false;
+            self.menu = false;
+            self.mouse_anchor = None;
+            cx.stop_propagation();
+            cx.notify();
         }
     }
 
@@ -511,6 +562,7 @@ impl TextArea {
     ) {
         let focused = self.focus.is_focused(window);
         window.focus(&self.focus, cx);
+        window.request_virtual_keyboard();
         let offset = self.offset_at(event.position);
         if event.click_count >= 2 && !self.content.is_empty() {
             self.select(self.word_at(offset), cx);
@@ -539,7 +591,7 @@ impl TextArea {
         } else {
             layout.position_for_offset(self.selection.start)
         };
-        let x = bounds.left() + caret.x;
+        let x = bounds.left() + caret.x - self.scroll_x;
         let top = bounds.top() + caret.y - self.scroll;
         (position.x - x).abs() <= px(16.)
             && top - px(8.) <= position.y
@@ -607,7 +659,7 @@ impl TextArea {
             )
         };
         let center = if start.y == end.y {
-            (start.x + end.x) / 2.
+            (start.x + end.x) / 2. - self.scroll_x
         } else {
             bounds.size.width / 2.
         };
@@ -687,7 +739,8 @@ impl TextArea {
     }
 
     fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.utf16_to_byte(range.start)..self.utf16_to_byte(range.end)
+        self.utf16_to_byte(range.start.min(range.end))
+            ..self.utf16_to_byte(range.start.max(range.end))
     }
 
     fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
@@ -756,6 +809,15 @@ impl TextArea {
     }
 }
 
+fn normalize_input(text: &str, multiline: bool) -> String {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if multiline {
+        text
+    } else {
+        text.replace(['\n', '\u{2028}', '\u{2029}'], " ")
+    }
+}
+
 /// The byte offset of a UTF-16 offset into `text`, clamped to its end.
 fn utf8_offset(text: &str, offset_utf16: usize) -> usize {
     let mut units = 0;
@@ -817,15 +879,12 @@ impl EntityInputHandler for TextArea {
     ) {
         self.menu = false;
         let range = self.replaced_range(range_utf16);
-        let text = if self.multiline {
-            text.to_owned()
-        } else {
-            text.replace('\n', " ")
-        };
+        let text = normalize_input(text, self.multiline);
         self.content.replace_range(range.clone(), &text);
         let caret = range.start + text.len();
         self.selection = caret..caret;
         self.marked = None;
+        self.reveal_caret = true;
         cx.emit(TextAreaEvent::Changed);
         cx.notify();
     }
@@ -840,16 +899,18 @@ impl EntityInputHandler for TextArea {
     ) {
         self.menu = false;
         let range = self.replaced_range(range_utf16);
-        self.content.replace_range(range.clone(), text);
+        let text = normalize_input(text, self.multiline);
+        self.content.replace_range(range.clone(), &text);
         self.marked = (!text.is_empty()).then(|| range.start..range.start + text.len());
         // The selection is relative to the start of the new text.
         self.selection = match selection_utf16 {
             Some(selection) => {
-                range.start + utf8_offset(text, selection.start)
-                    ..range.start + utf8_offset(text, selection.end)
+                range.start + utf8_offset(&text, selection.start.min(selection.end))
+                    ..range.start + utf8_offset(&text, selection.start.max(selection.end))
             }
             None => range.start + text.len()..range.start + text.len(),
         };
+        self.reveal_caret = true;
         cx.emit(TextAreaEvent::Changed);
         cx.notify();
     }
@@ -860,8 +921,7 @@ impl EntityInputHandler for TextArea {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.selection = self.range_from_utf16(&range_utf16);
-        cx.notify();
+        self.select(self.range_from_utf16(&range_utf16), cx);
     }
 
     fn text_length_utf16(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
@@ -889,12 +949,17 @@ impl EntityInputHandler for TextArea {
     ) -> Option<Bounds<Pixels>> {
         let layout = self.layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
-        let origin = point(bounds.left(), bounds.top() - self.scroll);
+        let origin = point(bounds.left() - self.scroll_x, bounds.top() - self.scroll);
         let start = layout.position_for_offset(range.start);
         let end = layout.position_for_offset(range.end);
+        let (left, right) = if start.y == end.y {
+            (start.x, end.x.max(start.x + px(1.)))
+        } else {
+            (px(0.), bounds.size.width)
+        };
         Some(Bounds::from_corners(
-            origin + start,
-            origin + point(end.x, end.y + layout.line_height),
+            origin + point(left, start.y),
+            origin + point(right, end.y + layout.line_height),
         ))
     }
 
@@ -907,7 +972,7 @@ impl EntityInputHandler for TextArea {
         let bounds = self.bounds?;
         let layout = self.layout.as_ref()?;
         let local = gpui::point(
-            point.x - bounds.left(),
+            point.x - bounds.left() + self.scroll_x,
             point.y - bounds.top() + self.scroll,
         );
         Some(self.byte_to_utf16(layout.offset_for_position(local)))
@@ -941,12 +1006,14 @@ impl Render for TextArea {
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::enter))
+            .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::paste_text))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::scroll_text))
             // A press anywhere but the bar closes it.
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
                 let on_bar = this
@@ -1007,6 +1074,13 @@ impl Layout {
             .max(self.line_height)
     }
 
+    fn width(&self) -> Pixels {
+        self.lines
+            .iter()
+            .map(|(_, line)| line.size(self.line_height).width)
+            .fold(px(0.), Pixels::max)
+    }
+
     fn position_for_offset(&self, offset: usize) -> Point<Pixels> {
         let mut top = px(0.);
         for (start, line) in self.lines.iter() {
@@ -1019,6 +1093,41 @@ impl Layout {
             top += self.row_height(line);
         }
         point(px(0.), top)
+    }
+
+    /// Geometry for a half-open text span, with downstream affinity at wraps.
+    /// Caret positions intentionally use upstream affinity; using them for a
+    /// token would draw an empty pill at the end of the preceding visual row.
+    fn span_bounds(&self, range: Range<usize>) -> Vec<Bounds<Pixels>> {
+        let mut bounds = Vec::new();
+        let mut top = px(0.);
+        for (offset, line) in self.lines.iter() {
+            let mut start = 0;
+            for (row, end) in line
+                .wrap_boundaries
+                .iter()
+                .map(|boundary| {
+                    line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
+                })
+                .chain([line.len()])
+                .enumerate()
+            {
+                let from = range.start.saturating_sub(*offset).max(start);
+                let to = range.end.saturating_sub(*offset).min(end);
+                if from < to {
+                    let base = line.unwrapped_layout.x_for_index(start);
+                    let left = line.unwrapped_layout.x_for_index(from) - base;
+                    let right = line.unwrapped_layout.x_for_index(to) - base;
+                    bounds.push(Bounds::new(
+                        point(left, top + self.line_height * row),
+                        size(right - left, self.line_height),
+                    ));
+                }
+                start = end;
+            }
+            top += self.row_height(line);
+        }
+        bounds
     }
 
     fn offset_for_position(&self, position: Point<Pixels>) -> usize {
@@ -1047,8 +1156,10 @@ struct TextBody {
 struct Prepaint {
     layout: Layout,
     scroll: Pixels,
+    scroll_x: Pixels,
     caret: Option<PaintQuad>,
     selection: Vec<PaintQuad>,
+    mentions: Vec<PaintQuad>,
     /// The text, for long presses.
     hitbox: Hitbox,
     /// The selection's handles: where each points, and where a finger takes it.
@@ -1097,7 +1208,8 @@ impl Element for TextBody {
                 });
                 let area = area.read(cx);
                 let (text, runs) = area.display(style.color, colors.muted, style.font());
-                let layout = Layout::shape(text, &runs, font_size, line_height, width, window);
+                let wrap = if area.multiline { width } else { None };
+                let layout = Layout::shape(text, &runs, font_size, line_height, wrap, window);
                 let height = layout.height().min(line_height * area.max_lines as f32);
                 size(width.unwrap_or_default(), height)
             });
@@ -1124,7 +1236,7 @@ impl Element for TextBody {
             &runs,
             font_size,
             line_height,
-            Some(bounds.size.width),
+            area.multiline.then_some(bounds.size.width),
             window,
         );
         let empty = area.content.is_empty();
@@ -1141,15 +1253,33 @@ impl Element for TextBody {
         };
         // Keep the caret in view when the text is taller than the field.
         let mut scroll = area.scroll;
-        if end.y < scroll {
-            scroll = end.y;
-        } else if end.y + line_height > scroll + bounds.size.height {
-            scroll = end.y + line_height - bounds.size.height;
+        let reveal = area.reveal_caret || area.bounds.is_none_or(|old| old.size != bounds.size);
+        if reveal {
+            if end.y < scroll {
+                scroll = end.y;
+            } else if end.y + line_height > scroll + bounds.size.height {
+                scroll = end.y + line_height - bounds.size.height;
+            }
         }
         scroll = scroll
             .max(px(0.))
             .min((layout.height() - bounds.size.height).max(px(0.)));
-        let origin = point(bounds.left(), bounds.top() - scroll);
+        let mut scroll_x = if area.multiline {
+            px(0.)
+        } else {
+            area.scroll_x
+        };
+        if reveal && !area.multiline {
+            if end.x < scroll_x {
+                scroll_x = end.x;
+            } else if end.x + px(2.) > scroll_x + bounds.size.width {
+                scroll_x = end.x + px(2.) - bounds.size.width;
+            }
+        }
+        scroll_x = scroll_x
+            .max(px(0.))
+            .min((layout.width() + px(2.) - bounds.size.width).max(px(0.)));
+        let origin = point(bounds.left() - scroll_x, bounds.top() - scroll);
         let caret = selection.is_empty().then(|| {
             fill(
                 Bounds::new(origin + end, size(px(2.), line_height)),
@@ -1157,6 +1287,25 @@ impl Element for TextBody {
             )
         });
         let highlight = colors.accent.opacity(0.25);
+        let mut mentions = Vec::new();
+        if area.multiline {
+            for range in mention_ranges(&area.content) {
+                for span in layout.span_bounds(range) {
+                    let rect = Bounds::new(origin + span.origin, span.size);
+                    if rect.size.width > px(0.)
+                        && rect.bottom() > bounds.top()
+                        && rect.top() < bounds.bottom()
+                    {
+                        mentions.push(
+                            fill(rect, colors.selected)
+                                .corner_radii(px(4.))
+                                .border_widths(px(1.))
+                                .border_color(colors.accent.opacity(0.5)),
+                        );
+                    }
+                }
+            }
+        }
         let mut quads = Vec::new();
         if !selection.is_empty() {
             if start.y == end.y {
@@ -1220,8 +1369,10 @@ impl Element for TextBody {
         Prepaint {
             layout,
             scroll,
+            scroll_x,
             caret,
             selection: quads,
+            mentions,
             hitbox,
             handles,
         }
@@ -1245,13 +1396,23 @@ impl Element for TextBody {
         );
         let layout = &prepaint.layout;
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for quad in prepaint.mentions.drain(..) {
+                window.paint_quad(quad);
+            }
             for quad in prepaint.selection.drain(..) {
                 window.paint_quad(quad);
             }
             let mut top = bounds.top() - prepaint.scroll;
             for (_, line) in layout.lines.iter() {
+                if top > bounds.bottom() {
+                    break;
+                }
+                if top + layout.row_height(line) < bounds.top() {
+                    top += layout.row_height(line);
+                    continue;
+                }
                 line.paint(
-                    point(bounds.left(), top),
+                    point(bounds.left() - prepaint.scroll_x, top),
                     layout.line_height,
                     gpui::TextAlign::Left,
                     None,
@@ -1265,6 +1426,15 @@ impl Element for TextBody {
                 && let Some(caret) = prepaint.caret.take()
             {
                 window.paint_quad(caret);
+            }
+            if let Some(geometry) = crate::scroll::Geometry::new(
+                bounds,
+                layout.height() - bounds.size.height,
+                -prepaint.scroll,
+            ) {
+                window.paint_quad(
+                    fill(geometry.thumb, theme(cx).muted.opacity(0.65)).corner_radii(px(2.)),
+                );
             }
         });
         let accent = theme(cx).accent;
@@ -1292,6 +1462,8 @@ impl Element for TextBody {
             area.layout = Some(layout);
             area.bounds = Some(bounds);
             area.scroll = scroll;
+            area.scroll_x = prepaint.scroll_x;
+            area.reveal_caret = false;
         });
     }
 }
@@ -1345,10 +1517,62 @@ impl TextBody {
     }
 }
 
+/// Mention decoration is derived from the actual text, including paste and IME
+/// replacements. It cannot get out of sync with a separate chip/hidden payload.
+fn mention_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    let mut previous = None;
+    while let Some((start, ch)) = chars.next() {
+        if ch == '@' && previous.is_none_or(|ch: char| ch.is_whitespace() || "([{ ".contains(ch)) {
+            let mut end = start + 1;
+            if chars.peek().is_some_and(|(_, ch)| *ch == '"') {
+                chars.next();
+                for (index, ch) in chars.by_ref() {
+                    if ch == '\n' {
+                        break;
+                    }
+                    end = index + ch.len_utf8();
+                    if ch == '"' {
+                        break;
+                    }
+                }
+            } else {
+                while let Some(&(index, ch)) = chars.peek() {
+                    if ch.is_whitespace() || ",;:)]}\"".contains(ch) {
+                        break;
+                    }
+                    chars.next();
+                    end = index + ch.len_utf8();
+                }
+            }
+            if end > start + 1 {
+                ranges.push(start..end);
+            }
+        }
+        previous = Some(ch);
+    }
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn mentions_have_exact_unicode_safe_ranges_without_marking_email() {
+        let text = "Read @src/main.rs and @\"my folder/中文.rs\"; email user@example.com, then (@README.md).";
+        let mentions = mention_ranges(text)
+            .into_iter()
+            .map(|range| &text[range])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            mentions,
+            ["@src/main.rs", "@\"my folder/中文.rs\"", "@README.md"]
+        );
+        assert!(mention_ranges("email@test.com @ ").is_empty());
+    }
 
     #[gpui::test]
     fn the_token_being_typed_is_found(cx: &mut TestAppContext) {
@@ -1447,6 +1671,104 @@ mod tests {
         area.update(cx, |area, cx| {
             area.set_text("nick@studio-mac\n.local", cx);
             assert_eq!(area.text(), "nick@studio-mac .local");
+        });
+    }
+
+    #[gpui::test]
+    fn single_line_input_scrolls_horizontally_and_reveals_home(cx: &mut TestAppContext) {
+        crate::theme::install_for_tests(cx);
+        let (area, cx) = cx.add_window_view(|_, cx| {
+            TextArea::single_line("", TextInputConfiguration::default(), cx)
+        });
+        cx.simulate_resize(size(px(240.), px(400.)));
+        area.update(cx, |area, cx| {
+            area.set_text("user@very-long-computer-name.example.com/".repeat(15), cx)
+        });
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| {
+            let layout = area.layout.as_ref().unwrap();
+            assert_eq!(layout.height(), layout.line_height);
+            assert_eq!(area.scroll, px(0.));
+            assert!(area.scroll_x > px(0.));
+        });
+        area.update(cx, |area, cx| area.move_to(0, cx));
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| assert_eq!(area.scroll_x, px(0.)));
+    }
+
+    #[gpui::test]
+    fn unicode_editing_preserves_graphemes_and_utf16_ranges(cx: &mut TestAppContext) {
+        crate::theme::install_for_tests(cx);
+        let (area, cx) = cx.add_window_view(|_, cx| TextArea::multiline("", 4, cx));
+        for grapheme in ["e\u{301}", "👩🏽‍💻", "🇩🇪", "中"] {
+            cx.update(|window, cx| {
+                area.update(cx, |area, cx| {
+                    area.set_text(format!("before {grapheme}"), cx);
+                    area.backspace(&Backspace, window, cx);
+                    assert_eq!(area.text(), "before ");
+                    area.insert(grapheme, cx);
+                    let utf16 = area.range_to_utf16(&(7..area.content.len()));
+                    assert_eq!(area.range_from_utf16(&utf16), 7..area.content.len());
+                    area.set_selected_text_range(utf16, window, cx);
+                    area.replace_text_in_range(None, "after", window, cx);
+                    assert_eq!(area.text(), "before after");
+                })
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn paste_and_composition_normalize_line_endings(cx: &mut TestAppContext) {
+        crate::theme::install_for_tests(cx);
+        let (area, cx) = cx.add_window_view(|_, cx| {
+            TextArea::single_line("", TextInputConfiguration::default(), cx)
+        });
+        cx.update(|window, cx| {
+            area.update(cx, |area, cx| {
+                area.paste(
+                    ClipboardItem::new_string("one\r\ntwo\rthree\nfour".into()),
+                    window,
+                    cx,
+                );
+                assert_eq!(area.text(), "one two three four");
+                area.select(0..area.content.len(), cx);
+                area.replace_and_mark_text_in_range(None, "中文\r\ntext", None, window, cx);
+                assert_eq!(area.text(), "中文 text");
+                assert!(area.content.is_char_boundary(area.selection.end));
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn long_drafts_can_scroll_without_moving_the_caret(cx: &mut TestAppContext) {
+        crate::theme::install_for_tests(cx);
+        let (area, cx) = cx.add_window_view(|_, cx| TextArea::multiline("", 4, cx));
+        cx.simulate_resize(size(px(280.), px(500.)));
+        area.update(cx, |area, cx| {
+            area.set_text("A long line of text for editing.\n".repeat(80), cx)
+        });
+        cx.run_until_parked();
+        let (before, caret, bounds) = area.read_with(cx, |area, _| {
+            (area.scroll, area.selection.clone(), area.bounds.unwrap())
+        });
+        assert!(before > px(0.));
+        cx.simulate_event(ScrollWheelEvent {
+            position: bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(60.))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| {
+            assert!(
+                area.scroll < before,
+                "the viewport must follow the scroll gesture"
+            );
+            assert_eq!(area.selection, caret);
+        });
+        area.update(cx, |area, cx| area.insert("tail", cx));
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| {
+            assert!(area.scroll >= before, "editing reveals the caret again")
         });
     }
 }

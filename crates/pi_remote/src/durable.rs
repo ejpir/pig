@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use std::{path::PathBuf, time::Duration};
 
 #[cfg(unix)]
-fn storage_dir(target: &SshTarget) -> Result<PathBuf> {
+pub(crate) fn storage_dir(target: &SshTarget) -> Result<PathBuf> {
     let root = std::env::var_os("PI_DESKTOP_REMOTE_STATE_DIR")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".pi/desktop")))
@@ -70,6 +70,16 @@ fn program() -> Result<PathBuf> {
     anyhow::bail!(
         "This helper has no bundled durable runner. Build with bundled-durable or set PI_DESKTOP_DURABLE_RUNNER on the SSH host. Stock Pi was not started."
     )
+}
+
+pub fn models() -> Result<()> {
+    let status = std::process::Command::new(program()?)
+        .arg("--list-models")
+        .stdin(std::process::Stdio::null())
+        .status()
+        .context("Could not read the computer's model catalog")?;
+    ensure!(status.success(), "Model catalog discovery failed");
+    Ok(())
 }
 
 pub fn launch(target: &SshTarget, cwd: PathBuf) -> Result<Launch> {
@@ -274,6 +284,21 @@ pub fn project(record: &Value, previous: &Session, target: &SshTarget) -> Result
                 Some("followUp") => model.follow_up.push(content),
                 _ => {}
             }
+        }
+        // IDs follow the same display order, without rebuilding any queued
+        // payloads (which may include image data the wire projection omits).
+        for mode in ["steer", "followUp"] {
+            model.queued_submissions.extend(
+                items
+                    .iter()
+                    .filter(|item| item["mode"] == mode)
+                    .filter_map(|item| {
+                        item["id"]
+                            .as_u64()
+                            .map(|id| id.to_string())
+                            .or_else(|| item["id"].as_str().map(str::to_owned))
+                    }),
+            );
         }
     }
     for bucket in ["models", "tools"] {

@@ -92,6 +92,9 @@ pub struct Session {
     pub tools: Vec<Tool>,
     pub steering: Vec<String>,
     pub follow_up: Vec<String>,
+    /// Stable durable submission IDs, ordered like steering then follow_up.
+    #[serde(default)]
+    pub queued_submissions: Vec<String>,
     pub saved: Vec<SavedSession>,
     pub available_models: Vec<crate::protocol::Model>,
     pub models_loaded: bool,

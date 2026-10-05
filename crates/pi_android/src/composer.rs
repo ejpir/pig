@@ -14,7 +14,7 @@ use gpui::{
 };
 use std::sync::Arc;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Attachment {
     Image {
         name: String,
@@ -23,6 +23,7 @@ pub enum Attachment {
     File {
         name: String,
         size: String,
+        contents: String,
     },
     /// Lines chosen in a review: "lines 211–212".
     Lines(String),
@@ -41,20 +42,15 @@ impl Attachment {
 pub enum ComposerEvent {
     Send {
         text: String,
-        attachments: Vec<String>,
+        attachments: Vec<Attachment>,
     },
     /// The paperclip: the app offers files and the clipboard.
     Attach,
-    /// The model chip: the app offers models and thinking levels.
+    /// Independent controls, shared by new sessions, follow-ups and reviews.
     ChooseModel,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Layout {
-    /// The landing's composer: tools on their own row.
-    Full,
-    /// A follow-up docked at the bottom: one row.
-    Compact,
+    ChooseThinking,
+    Stop,
+    PreviewImage(usize),
 }
 
 /// Files the `@` suggestions offer, as on the computer's project.
@@ -84,7 +80,13 @@ type Suggestion = (String, String, &'static str);
 pub struct Composer {
     pub area: Entity<TextArea>,
     attachments: Vec<Attachment>,
-    layout: Layout,
+    /// A session's actual model, instead of the default for new sessions.
+    model_label: Option<String>,
+    thinking_label: Option<String>,
+    running: bool,
+    stopping: bool,
+    imports: usize,
+    import_generation: u64,
     /// What `@` offers: the files a session touched; `None` for the sample's
     /// files and commands.
     files: Option<Vec<String>>,
@@ -94,9 +96,8 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
-    pub fn new(placeholder: &str, layout: Layout, cx: &mut Context<Self>) -> Self {
-        let lines = if layout == Layout::Full { 8 } else { 5 };
-        let area = cx.new(|cx| TextArea::multiline(placeholder.to_owned(), lines, cx));
+    pub fn new(placeholder: &str, cx: &mut Context<Self>) -> Self {
+        let area = cx.new(|cx| TextArea::multiline(placeholder.to_owned(), 8, cx));
         let subscription = cx.subscribe(&area, |this, _, event: &TextAreaEvent, cx| match event {
             TextAreaEvent::Submit => this.send(cx),
             TextAreaEvent::Changed => cx.notify(),
@@ -104,7 +105,12 @@ impl Composer {
         Self {
             area,
             attachments: Vec::new(),
-            layout,
+            model_label: None,
+            thinking_label: None,
+            running: false,
+            stopping: false,
+            imports: 0,
+            import_generation: 0,
             files: None,
             _area: subscription,
         }
@@ -113,6 +119,16 @@ impl Composer {
     /// The files `@` offers, or `None` for the sample's files and commands.
     pub fn use_files(&mut self, files: Option<Vec<String>>) {
         self.files = files;
+    }
+
+    pub fn set_model_label(&mut self, model: String, thinking: String) {
+        self.model_label = Some(model);
+        self.thinking_label = Some(thinking);
+    }
+
+    pub fn set_running(&mut self, running: bool, stopping: bool) {
+        self.running = running;
+        self.stopping = stopping;
     }
 
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -128,6 +144,84 @@ impl Composer {
         cx.notify();
     }
 
+    pub fn try_attach(
+        &mut self,
+        attachment: Attachment,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.attachments.len() >= 8 {
+            return Err("Attach up to eight files per message.".into());
+        }
+        if matches!(attachment, Attachment::Image { .. })
+            && self
+                .attachments
+                .iter()
+                .filter(|a| matches!(a, Attachment::Image { .. }))
+                .count()
+                >= crate::attachments::MAX_IMAGES
+        {
+            return Err("Attach up to four images per message.".into());
+        }
+        self.attach(attachment, cx);
+        Ok(())
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.import_generation += 1;
+        self.imports = 0;
+        self.area.update(cx, |area, cx| {
+            area.take(cx);
+        });
+        self.attachments.clear();
+        cx.notify();
+    }
+
+    pub fn restore_prompt(
+        &mut self,
+        prompt: &crate::prompt::Prompt,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        use base64::Engine;
+        if self.can_send(cx) || self.imports > 0 {
+            return Err("Send or clear your current draft before recovering this message.".into());
+        }
+        let attachments = prompt
+            .images
+            .iter()
+            .enumerate()
+            .map(|(index, content)| {
+                let format = gpui::ImageFormat::from_mime_type(&content.mime_type)
+                    .ok_or("Unsupported stored image type")?;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&content.data)
+                    .map_err(|_| "Could not read the stored image")?;
+                Ok(Attachment::Image {
+                    name: format!("Recovered image {}", index + 1),
+                    image: Arc::new(Image::from_bytes(format, bytes)),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        self.set_text(&prompt.message, cx);
+        self.attachments = attachments;
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn begin_import(&mut self, cx: &mut Context<Self>) -> u64 {
+        self.imports += 1;
+        cx.notify();
+        self.import_generation
+    }
+
+    pub fn finish_import(&mut self, generation: u64, cx: &mut Context<Self>) -> bool {
+        if generation != self.import_generation {
+            return false;
+        }
+        self.imports = self.imports.saturating_sub(1);
+        cx.notify();
+        true
+    }
+
     /// Replaces the review lines attached, if any.
     pub fn set_lines(&mut self, lines: Option<String>, cx: &mut Context<Self>) {
         self.attachments
@@ -139,7 +233,7 @@ impl Composer {
     }
 
     pub fn can_send(&self, cx: &App) -> bool {
-        !self.area.read(cx).is_empty() || !self.attachments.is_empty()
+        self.imports == 0 && (!self.area.read(cx).is_empty() || !self.attachments.is_empty())
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -150,8 +244,10 @@ impl Composer {
         if !self.can_send(cx) {
             return;
         }
-        let text = self.area.update(cx, |area, cx| area.take(cx));
-        let attachments = self.attachments.drain(..).map(|a| a.label()).collect();
+        // The app clears only after accepting the complete payload. Validation
+        // or connection errors must leave text AND images ready to retry.
+        let text = self.area.read(cx).text().to_owned();
+        let attachments = self.attachments.clone();
         cx.emit(ComposerEvent::Send {
             text: text.trim().to_owned(),
             attachments,
@@ -178,7 +274,12 @@ impl Composer {
                     } else {
                         "file"
                     };
-                    (file.to_string(), format!("@{file} "), glyph)
+                    let mention = if file.chars().any(char::is_whitespace) {
+                        format!("@\"{file}\" ")
+                    } else {
+                        format!("@{file} ")
+                    };
+                    (file.to_string(), mention, glyph)
                 })
                 .collect();
             let title = if word.is_empty() {
@@ -228,15 +329,22 @@ impl Composer {
 }
 
 impl Render for Composer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = theme(cx);
         let prefs = cx.global::<Prefs>().clone();
         let can_send = self.can_send(cx);
         let suggestions = self.suggestions(cx);
         let area = self.area.clone();
+        // Leave room for the conversation and Send even with a tall keyboard
+        // or in landscape. The rest of a long draft scrolls inside the field.
+        let lines = (f32::from(window.fully_visible_bounds().size.height) * 0.3 / 22.) as usize;
+        area.update(cx, |area, _| area.set_max_lines(lines.clamp(2, 8)));
         let send = div()
             .id("send")
-            .size(px(40.))
+            .relative()
+            .child(crate::testing::probe("send"))
+            .debug_selector(|| "send".into())
+            .size(px(48.))
             .flex_none()
             .flex()
             .items_center()
@@ -261,7 +369,7 @@ impl Render for Composer {
                     .on_click(cx.listener(|this, _, _, cx| this.send(cx)))
             });
         let clip = ui::tap("attach", "clip", &colors)
-            .size(px(40.))
+            .size(px(48.))
             .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Attach)));
         let attachments = (!self.attachments.is_empty()).then(|| {
             div()
@@ -276,38 +384,51 @@ impl Render for Composer {
                         .enumerate()
                         .map(|(index, attachment)| {
                             let remove = cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
                                 this.attachments.remove(index);
                                 cx.notify();
                             });
                             match attachment {
                                 Attachment::Image { image, .. } => div()
-                                    .id(("attachment", index))
-                                    .relative()
-                                    .size(px(56.))
                                     .flex_none()
-                                    .child(
-                                        img(image.clone())
-                                            .size(px(56.))
-                                            .rounded(px(10.))
-                                            .object_fit(gpui::ObjectFit::Cover),
-                                    )
+                                    .flex()
+                                    .items_center()
+                                    .p(px(2.))
+                                    .rounded(px(12.))
+                                    .bg(colors.raised)
                                     .child(
                                         div()
-                                            .id(("remove", index))
-                                            .absolute()
-                                            .top(px(-6.))
-                                            .right(px(-6.))
-                                            .size(px(22.))
-                                            .rounded_full()
-                                            .bg(colors.text)
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(icon("x", 12., colors.canvas))
+                                            .id(("attachment", index))
+                                            .debug_selector(move || {
+                                                format!("attachment-{index}").into()
+                                            })
+                                            .relative()
+                                            .size(px(56.))
+                                            .child(crate::testing::probe(format!(
+                                                "attachment-{index}"
+                                            )))
+                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                cx.emit(ComposerEvent::PreviewImage(index))
+                                            }))
+                                            .child(
+                                                img(image.clone())
+                                                    .size(px(56.))
+                                                    .rounded(px(10.))
+                                                    .object_fit(gpui::ObjectFit::Cover),
+                                            ),
+                                    )
+                                    // Separate targets: increasing the remove hit area must
+                                    // never cover the image's preview target.
+                                    .child(
+                                        ui::tap(("remove-attachment", index), "x", &colors)
+                                            .debug_selector(move || {
+                                                format!("remove-attachment-{index}").into()
+                                            })
+                                            .size(px(44.))
                                             .on_click(remove),
                                     )
                                     .into_any_element(),
-                                Attachment::File { name, size } => ui::chip(
+                                Attachment::File { name, size, .. } => ui::chip(
                                     ("attachment", index),
                                     Some("file"),
                                     name.clone(),
@@ -374,73 +495,135 @@ impl Render for Composer {
         // app, which also takes focus on a press, from taking it back.
         let focus_area = cx.listener(|this, _, window, cx| {
             this.focus(window, cx);
+            window.request_virtual_keyboard();
             window.prevent_default();
         });
-        let body = match self.layout {
-            Layout::Full => div()
-                .flex()
-                .flex_col()
-                .pl(px(16.))
-                .pr(px(8.))
-                .pt(px(12.))
-                .pb(px(8.))
-                .children(attachments)
-                .child(div().min_h(px(48.)).pr(px(8.)).child(area))
-                .child(
-                    div()
-                        .mt(px(6.))
-                        .ml(px(-8.))
-                        .flex()
-                        .items_center()
-                        .gap(px(2.))
-                        .child(clip)
-                        // Durable sessions have no commands to start.
-                        .when(self.files.is_none(), |row| {
-                            row.child(ui::tap("command", "slash", &colors).size(px(40.)).on_click(
-                                cx.listener(|this, _, window, cx| this.start_command(window, cx)),
+        let body = div()
+            .flex()
+            .flex_col()
+            .pl(px(16.))
+            .pr(px(8.))
+            .pt(px(12.))
+            .pb(px(8.))
+            .children(attachments)
+            .child(
+                div()
+                    .id("draft-box")
+                    .debug_selector(|| "composer-draft".into())
+                    .relative()
+                    .child(crate::testing::probe("draft"))
+                    .min_h(px(48.))
+                    .pr(px(8.))
+                    .on_mouse_down(MouseButton::Left, focus_area)
+                    .child(area),
+            )
+            .child(
+                div()
+                    .mt(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .id("model")
+                            .relative()
+                            .child(crate::testing::probe("composer-model"))
+                            .debug_selector(|| "composer-model".into())
+                            .h(px(44.))
+                            .flex_1()
+                            .min_w_0()
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .rounded(px(10.))
+                            .bg(colors.raised)
+                            .text_size(px(13.))
+                            .text_color(colors.secondary)
+                            .active(|style| style.bg(colors.selected))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .child(self.model_label.clone().unwrap_or(prefs.model)),
+                            )
+                            .child(icon("chev_d", 14., colors.muted))
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::ChooseModel)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("thinking")
+                            .relative()
+                            .child(crate::testing::probe("composer-thinking"))
+                            .debug_selector(|| "composer-thinking".into())
+                            .h(px(44.))
+                            .flex_none()
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .rounded(px(10.))
+                            .bg(colors.raised)
+                            .text_size(px(13.))
+                            .text_color(colors.secondary)
+                            .child(format!(
+                                "Think: {}",
+                                self.thinking_label.clone().unwrap_or(prefs.thinking)
                             ))
-                        })
-                        .child(
-                            div()
-                                .id("model")
-                                .h(px(40.))
-                                .px(px(8.))
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .rounded_full()
-                                .text_size(px(13.))
-                                .text_color(colors.secondary)
-                                .active(|style| style.bg(colors.selected))
-                                .child(format!("{} · {}", prefs.model, prefs.thinking))
-                                .child(icon("chev_d", 14., colors.muted))
-                                .on_click(
-                                    cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::ChooseModel)),
-                                ),
+                            .child(icon("chev_d", 14., colors.muted))
+                            .active(|style| style.bg(colors.selected))
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::ChooseThinking)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(4.))
+                    .ml(px(-8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .child(clip)
+                    // Durable sessions have no commands to start.
+                    .when(self.files.is_none(), |row| {
+                        row.child(ui::tap("command", "slash", &colors).size(px(40.)).on_click(
+                            cx.listener(|this, _, window, cx| this.start_command(window, cx)),
+                        ))
+                    })
+                    .child(div().flex_1().when(self.imports > 0, |space| {
+                        space.child(ui::hint("Preparing…", &colors))
+                    }))
+                    .when(self.running, |row| {
+                        row.child(
+                            ui::button(
+                                "stop",
+                                ui::Button::Quiet,
+                                Some("stop"),
+                                if self.stopping { "Stopping…" } else { "Stop" },
+                                true,
+                                &colors,
+                            )
+                            .debug_selector(|| "composer-stop".into())
+                            .h(px(48.))
+                            .text_color(colors.coral)
+                            .when(self.stopping, |button| button.opacity(0.5))
+                            .when(!self.stopping, |button| {
+                                button.on_click(
+                                    cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Stop)),
+                                )
+                            }),
                         )
-                        .child(div().flex_1())
-                        .child(send),
-                ),
-            Layout::Compact => div()
-                .flex()
-                .flex_col()
-                .pl(px(16.))
-                .pr(px(6.))
-                .py(px(6.))
-                .children(attachments.map(|row| row.pt(px(6.)).pb(px(2.))))
-                .child(
-                    div()
-                        .flex()
-                        .items_end()
-                        .gap(px(2.))
-                        .child(div().flex_1().min_w_0().py(px(10.)).child(area))
-                        .child(clip)
-                        .child(send),
-                ),
-        };
+                    })
+                    .child(send),
+            );
         div().flex().flex_col().children(strip).child(
             div()
                 .id("composer")
+                .occlude()
                 .mx(px(12.))
                 .bg(colors.composer)
                 .border_1()
@@ -456,7 +639,6 @@ impl Render for Composer {
                         composer.rounded(px(20.))
                     }
                 })
-                .on_mouse_down(MouseButton::Left, focus_area)
                 .child(body),
         )
     }

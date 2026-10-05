@@ -27,6 +27,10 @@ faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
   const lastUser = transcript.messages.findLastIndex((message) => message.role === "user");
   const message = transcript.messages[lastUser];
   const text = message?.role === "user" ? message.content : "";
+  if (Array.isArray(text)) {
+    const images = text.filter((part) => part.type === "image");
+    return fauxAssistantMessage(`Received ${images.length} image(s): ${images.map((part) => `${part.mimeType}:${Buffer.from(part.data, "base64").length}`).join(", ")}`);
+  }
   const after = transcript.messages.slice(lastUser + 1);
   if (text === "safe" || text === "unsafe") {
     if (!after.some((message) => message.role === "toolResult")) {

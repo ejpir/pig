@@ -9,6 +9,7 @@
 use crate::{
     model::{Answer, SessionId},
     projection,
+    prompt::Prompt,
     remote::{self, Helper, Listed},
     ssh::{self, Connection},
 };
@@ -17,30 +18,36 @@ use pi_core::{
     ssh::{RemoteBackend, SshTarget},
 };
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Something that happened on the computer, for the store to apply.
 pub enum Update {
     /// A session's pipe opened; commands can go in.
-    Opened(async_channel::Sender<Value>),
-    Record(Value),
+    Opened(u64, async_channel::Sender<Value>),
+    Record(u64, Value),
     /// The pipe closed, with the reason.
-    Ended(String),
+    Ended(u64, String),
     /// A fresh listing of the computer's sessions.
     Listed(Result<Vec<Listed>, String>),
+    ModelCatalog(Result<Vec<pi_core::protocol::Model>, String>),
 }
 
 /// What a request was for, to act on its response.
 enum Request {
     Prompt(String),
     Models,
+    AvailableModels,
     SetModel,
+    SetThinking(String),
+    InitialThinkingLevels(String),
+    Stop,
     /// Its failure doesn't matter: a model without thinking levels refuses one.
     Quiet,
     Other,
 }
 
 struct Watch {
+    generation: u64,
     target: SshTarget,
     pi: Pi,
     input: Option<async_channel::Sender<Value>>,
@@ -49,13 +56,22 @@ struct Watch {
     /// Whether commands may go: the state arrived and a model is chosen.
     ready: bool,
     /// Prompts typed on the phone that Pi hasn't taken yet.
-    outbox: Vec<String>,
+    outbox: Vec<Prompt>,
+    /// Rejected payloads remain recoverable, including images. They never retry
+    /// automatically or make the session look as though it is still running.
+    failed: Vec<FailedPrompt>,
     sent: HashMap<String, Request>,
     /// Pi's open questions, oldest first.
     dialogs: Vec<Value>,
     ended: Option<String>,
     /// When the phone began watching, in seconds since 1970.
     since: u64,
+}
+
+#[derive(Clone)]
+pub struct FailedPrompt {
+    pub prompt: Prompt,
+    pub error: String,
 }
 
 fn seconds_now() -> u64 {
@@ -68,16 +84,38 @@ impl Watch {
     fn new(target: SshTarget) -> Self {
         let pi = Pi::new(target.cwd.clone().into());
         Self {
+            generation: 1,
             target,
             pi,
             input: None,
             current: false,
             ready: false,
             outbox: Vec::new(),
+            failed: Vec::new(),
             sent: HashMap::new(),
             dialogs: Vec::new(),
             ended: None,
             since: seconds_now(),
+        }
+    }
+
+    fn reset_transport(&mut self) {
+        self.generation += 1;
+        self.input = None;
+        self.current = false;
+        self.ready = false;
+        self.ended = None;
+        // Requests on the old pipe cannot be acknowledged by the new pipe.
+        // Prompts remain in the outbox with their stable admission identities.
+        self.sent.clear();
+    }
+
+    fn accepts(&self, update: &Update) -> bool {
+        match update {
+            Update::Opened(generation, _)
+            | Update::Record(generation, _)
+            | Update::Ended(generation, _) => *generation == self.generation,
+            Update::Listed(_) | Update::ModelCatalog(_) => false,
         }
     }
 }
@@ -98,6 +136,7 @@ pub struct Live {
     watches: HashMap<SessionId, Watch>,
     listed: HashMap<SessionId, Listed>,
     keys: HashMap<String, SessionId>,
+    deleted: HashSet<String>,
     next_id: u32,
     /// The model new sessions start with, by name or id, as the phone's settings say.
     pub model: String,
@@ -105,6 +144,8 @@ pub struct Live {
     pub thinking: String,
     /// What the computer offers, from the first session that reported it.
     pub models: Vec<pi_core::protocol::Model>,
+    pub models_loading: bool,
+    pub models_error: Option<String>,
 }
 
 fn request_id() -> String {
@@ -123,10 +164,13 @@ impl Live {
             watches: HashMap::new(),
             listed: HashMap::new(),
             keys: HashMap::new(),
+            deleted: HashSet::new(),
             next_id: 1,
             model,
             thinking: String::new(),
             models: Vec::new(),
+            models_loading: false,
+            models_error: None,
         }
     }
 
@@ -155,7 +199,26 @@ impl Live {
         });
     }
 
-    fn attach(&self, id: SessionId, target: SshTarget) {
+    pub fn refresh_models(&mut self) {
+        if self.models_loading {
+            return;
+        }
+        self.models_loading = true;
+        self.models_error = None;
+        let (connection, helper, sender) = (
+            self.connection.clone(),
+            self.helper.clone(),
+            self.sender.clone(),
+        );
+        ssh::spawn(async move {
+            let models = remote::models(&connection, &helper)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = sender.send((None, Update::ModelCatalog(models))).await;
+        });
+    }
+
+    fn attach(&self, id: SessionId, target: SshTarget, generation: u64) {
         let (connection, helper, sender) = (
             self.connection.clone(),
             self.helper.clone(),
@@ -166,13 +229,13 @@ impl Live {
                 Ok(pipe) => pipe,
                 Err(error) => {
                     let _ = sender
-                        .send((Some(id), Update::Ended(format!("{error:#}"))))
+                        .send((Some(id), Update::Ended(generation, format!("{error:#}"))))
                         .await;
                     return;
                 }
             };
             if sender
-                .send((Some(id), Update::Opened(pipe.input.clone())))
+                .send((Some(id), Update::Opened(generation, pipe.input.clone())))
                 .await
                 .is_err()
             {
@@ -180,7 +243,7 @@ impl Live {
             }
             while let Ok(record) = pipe.records.recv().await {
                 if sender
-                    .send((Some(id), Update::Record(record)))
+                    .send((Some(id), Update::Record(generation, record)))
                     .await
                     .is_err()
                 {
@@ -188,7 +251,9 @@ impl Live {
                 }
             }
             let reason = pipe.ended.recv().await.unwrap_or_default();
-            let _ = sender.send((Some(id), Update::Ended(reason))).await;
+            let _ = sender
+                .send((Some(id), Update::Ended(generation, reason)))
+                .await;
         });
     }
 
@@ -216,16 +281,29 @@ impl Live {
             .watches
             .remove(&id)
             .unwrap_or_else(|| Watch::new(target.clone()));
-        watch.input = None;
-        watch.current = false;
-        watch.ready = false;
-        watch.ended = None;
+        watch.reset_transport();
+        let generation = watch.generation;
         self.watches.insert(id, watch);
-        self.attach(id, target);
+        self.attach(id, target, generation);
     }
 
     pub fn is_watched(&self, id: SessionId) -> bool {
         self.watches.contains_key(&id)
+    }
+
+    pub fn target(&self, id: SessionId) -> Option<SshTarget> {
+        self.watches
+            .get(&id)
+            .map(|watch| watch.target.clone())
+            .or_else(|| remote::listed_target(&self.host, self.listed.get(&id)?).ok())
+    }
+
+    pub fn remove(&mut self, id: SessionId) {
+        if let Some(target) = self.target(id) {
+            self.deleted.insert(target.key);
+        }
+        self.watches.remove(&id);
+        self.listed.remove(&id);
     }
 
     /// Picks the connection back up after it dropped: watched sessions attach again.
@@ -242,23 +320,35 @@ impl Live {
     }
 
     /// A new durable session in `folder`, starting with `prompt`.
-    pub fn start(&mut self, folder: &str, prompt: String) -> Result<SessionId, String> {
+    pub fn start(&mut self, folder: &str, prompt: Prompt) -> Result<SessionId, String> {
+        if !prompt.images.is_empty() && !self.helper.images {
+            return Err(
+                "Update the computer's helper to send images. Your draft has been kept.".into(),
+            );
+        }
+        if !prompt.images.is_empty()
+            && choose_model(&self.models, &self.model)
+                .is_some_and(|model| !model.input.iter().any(|kind| kind == "image"))
+        {
+            return Err("This model does not accept images. Choose a vision-capable model.".into());
+        }
         let target =
             remote::new_target(&self.host, folder).map_err(|error| format!("{error:#}"))?;
         let id = self.id_for(&target.key.clone());
         let mut watch = Watch::new(target.clone());
         watch.outbox.push(prompt);
+        let generation = watch.generation;
         self.watches.insert(id, watch);
-        self.attach(id, target);
+        self.attach(id, target, generation);
         Ok(id)
     }
 
     fn send(watch: &mut Watch, mut record: Value, request: Request) {
         let id = request_id();
         record["id"] = json!(id);
-        if let Request::Prompt(_) = request {
+        if let Request::Prompt(request_id) = &request {
             // Durable sessions admit each prompt once, by this id.
-            record["requestId"] = json!(id);
+            record["requestId"] = json!(request_id);
         }
         if let Some(input) = &watch.input
             && input.try_send(record).is_ok()
@@ -268,50 +358,244 @@ impl Live {
     }
 
     fn flush(watch: &mut Watch) {
-        if !watch.ready || watch.input.is_none() {
+        if !watch.ready
+            || watch.input.is_none()
+            || watch.sent.values().any(|request| {
+                matches!(
+                    request,
+                    Request::SetModel
+                        | Request::SetThinking(_)
+                        | Request::InitialThinkingLevels(_)
+                        | Request::Stop
+                )
+            })
+        {
             return;
         }
-        let pending: Vec<String> = watch
+        let pending: Vec<Prompt> = watch
             .outbox
             .iter()
             .filter(|prompt| {
                 !watch
                     .sent
                     .values()
-                    .any(|request| matches!(request, Request::Prompt(sent) if sent == *prompt))
+                    .any(|request| matches!(request, Request::Prompt(sent) if *sent == prompt.request_id))
             })
             .cloned()
             .collect();
         for prompt in pending {
-            let mut record = json!({"type": "prompt", "message": prompt});
-            if watch.pi.busy() || !watch.sent.is_empty() {
+            let mut record =
+                json!({"type": "prompt", "message": prompt.message, "images":prompt.images});
+            if watch.pi.busy()
+                || watch
+                    .sent
+                    .values()
+                    .any(|request| matches!(request, Request::Prompt(_)))
+            {
                 record["streamingBehavior"] = json!("followUp");
             }
-            Self::send(watch, record, Request::Prompt(prompt));
+            Self::send(watch, record, Request::Prompt(prompt.request_id));
         }
     }
 
     /// A prompt for a session: it runs now, or follows the current run.
-    pub fn prompt(&mut self, id: SessionId, prompt: String) {
+    pub fn prompt(&mut self, id: SessionId, prompt: Prompt) -> Result<(), String> {
         self.watch(id);
+        if !prompt.images.is_empty() {
+            if let Some(watch) = self.watches.get(&id)
+                && watch.target.backend == RemoteBackend::Durable
+            {
+                let pi_core::session::BackendInfo::Found(info) = &watch.pi.backend else {
+                    return Err(
+                        "Wait for the session to report image support before sending.".into(),
+                    );
+                };
+                if !info["features"].as_array().is_some_and(|features| {
+                    features.iter().any(|feature| feature == "image_prompts")
+                }) {
+                    return Err("This session is running an older helper without image support. Start a new session with the updated helper; your draft is kept.".into());
+                }
+            }
+            let model = self
+                .current_model(id)
+                .ok_or("Wait for the session's model to load before sending images.")?;
+            if !model.input.iter().any(|kind| kind == "image") {
+                return Err(
+                    "This model does not accept images. Choose a vision-capable model.".into(),
+                );
+            }
+        }
         if let Some(watch) = self.watches.get_mut(&id) {
             watch.outbox.push(prompt);
             Self::flush(watch);
+            Ok(())
+        } else {
+            Err("This session is no longer available.".into())
         }
     }
 
-    pub fn stop(&mut self, id: SessionId) {
-        if let Some(watch) = self.watches.get_mut(&id) {
-            watch.outbox.clear();
-            Self::send(watch, json!({"type": "abort"}), Request::Other);
-        }
-    }
-
-    /// Drops one queued follow-up: Pi clears its queue, and the rest go back in.
-    pub fn unqueue(&mut self, id: SessionId, index: usize) {
-        let Some(watch) = self.watches.get_mut(&id) else {
-            return;
+    pub fn model_settings(&self, id: SessionId) -> Option<(String, String)> {
+        let watch = self.watches.get(&id)?;
+        let model = watch.pi.state.model.as_ref()?;
+        let thinking = match watch.pi.state.thinking_level.as_str() {
+            "off" | "" => "Off",
+            "minimal" => "Minimal",
+            "low" => "Low",
+            "medium" => "Medium",
+            "high" => "High",
+            "xhigh" => "Max",
+            other => other,
         };
+        Some((
+            model.name.clone().unwrap_or_else(|| model.id.clone()),
+            thinking.to_owned(),
+        ))
+    }
+
+    pub fn current_model(&self, id: SessionId) -> Option<&pi_core::protocol::Model> {
+        self.watches.get(&id)?.pi.state.model.as_ref()
+    }
+
+    pub fn thinking_levels(&self, id: SessionId) -> Option<Vec<String>> {
+        let watch = self.watches.get(&id)?;
+        if watch.pi.thinking_levels.is_empty() {
+            return self
+                .current_model(id)
+                .filter(|model| model.reasoning == Some(false))
+                .map(|_| vec!["Off".into()]);
+        }
+        Some(
+            watch
+                .pi
+                .thinking_levels
+                .iter()
+                .map(|level| thinking_label(level).to_owned())
+                .collect(),
+        )
+    }
+
+    pub fn is_stopping(&self, id: SessionId) -> bool {
+        self.watches.get(&id).is_some_and(|watch| {
+            watch
+                .sent
+                .values()
+                .any(|request| matches!(request, Request::Stop))
+        })
+    }
+
+    pub fn failed_prompts(&self, id: SessionId) -> &[FailedPrompt] {
+        self.watches
+            .get(&id)
+            .map_or(&[], |watch| watch.failed.as_slice())
+    }
+
+    pub fn recover_prompt(&mut self, id: SessionId, request_id: &str) -> Option<Prompt> {
+        let watch = self.watches.get_mut(&id)?;
+        let index = watch
+            .failed
+            .iter()
+            .position(|failed| failed.prompt.request_id == request_id)?;
+        Some(watch.failed.remove(index).prompt)
+    }
+
+    fn hold_failed(watch: &mut Watch, error: &str) {
+        for prompt in std::mem::take(&mut watch.outbox) {
+            if watch
+                .sent
+                .values()
+                .any(|request| matches!(request, Request::Prompt(id) if *id == prompt.request_id))
+            {
+                // This payload may already be admitted. Wait for its receipt;
+                // never offer a second admission after a configuration error.
+                watch.outbox.push(prompt);
+            } else {
+                watch.failed.push(FailedPrompt {
+                    prompt,
+                    error: error.to_owned(),
+                });
+            }
+        }
+        if watch.pi.messages.is_empty() {
+            watch.pi.error = Some(error.to_owned());
+        }
+    }
+
+    pub fn set_model(
+        &mut self,
+        id: SessionId,
+        provider: &str,
+        model_id: &str,
+    ) -> Result<(), String> {
+        if !self
+            .models
+            .iter()
+            .any(|model| model.provider == provider && model.id == model_id)
+        {
+            return Err("This model is no longer available on the computer.".into());
+        }
+        let watch = self
+            .watches
+            .get_mut(&id)
+            .ok_or("Wait for this session to connect.")?;
+        Self::configure(
+            watch,
+            json!({"type":"set_model", "provider":provider, "modelId":model_id}),
+            Request::SetModel,
+        )
+    }
+
+    pub fn set_thinking(&mut self, id: SessionId, shown: &str) -> Result<(), String> {
+        let level = thinking_level(shown).ok_or("Unknown thinking level.")?;
+        let watch = self
+            .watches
+            .get_mut(&id)
+            .ok_or("Wait for this session to connect.")?;
+        Self::configure(
+            watch,
+            json!({"type":"set_thinking_level", "level":level}),
+            Request::SetThinking(level.into()),
+        )
+    }
+
+    fn configure(watch: &mut Watch, record: Value, request: Request) -> Result<(), String> {
+        if !watch.current || watch.input.as_ref().is_none_or(|input| input.is_closed()) {
+            return Err("Reconnect to the computer before changing this session's model.".into());
+        }
+        Self::send(watch, record, request);
+        Ok(())
+    }
+
+    pub fn stop(&mut self, id: SessionId) -> Result<(), String> {
+        let watch = self
+            .watches
+            .get_mut(&id)
+            .ok_or("Wait for this session to connect before stopping it.")?;
+        if !watch.current || watch.input.as_ref().is_none_or(|input| input.is_closed()) {
+            return Err("Reconnect to the computer before stopping this session.".into());
+        }
+        if watch
+            .sent
+            .values()
+            .any(|request| matches!(request, Request::Stop))
+        {
+            return Ok(());
+        }
+        watch.outbox.clear();
+        // Stop must not immediately run a previously queued follow-up.
+        Self::send(watch, json!({"type": "clear_queue"}), Request::Other);
+        Self::send(watch, json!({"type": "abort"}), Request::Stop);
+        Ok(())
+    }
+
+    /// Cancels one durable submission without touching any other payload.
+    pub fn unqueue(&mut self, id: SessionId, index: usize) -> Result<(), String> {
+        let Some(watch) = self.watches.get_mut(&id) else {
+            return Err("Session is not connected.".into());
+        };
+        Self::cancel_queued(watch, index)
+    }
+
+    fn cancel_queued(watch: &mut Watch, index: usize) -> Result<(), String> {
         let queued: Vec<String> = watch
             .pi
             .steering
@@ -327,17 +611,19 @@ impl Live {
                 .saturating_sub(usize::from(!watch.pi.busy()));
             if local < unsent {
                 let at = watch.outbox.len() - unsent + local;
+                if watch.sent.values().any(|request| matches!(request, Request::Prompt(request_id) if *request_id == watch.outbox[at].request_id)) {
+                    return Err("This prompt is being delivered. Wait for its queue confirmation, then remove it.".into());
+                }
                 watch.outbox.remove(at);
             }
-            return;
+            return Ok(());
         }
-        Self::send(watch, json!({"type": "clear_queue"}), Request::Other);
-        for (position, prompt) in queued.into_iter().enumerate() {
-            if position != index {
-                watch.outbox.push(prompt);
-            }
-        }
-        Self::flush(watch);
+        let submission = watch.pi.queued_submissions.get(index).ok_or("This helper cannot remove one queued prompt safely. Update the helper or use Stop to clear all queued work.")?.clone();
+        Self::configure(
+            watch,
+            json!({"type":"cancel_submission", "submissionId":submission}),
+            Request::Other,
+        )
     }
 
     pub fn answer(&mut self, id: SessionId, answer: Answer) {
@@ -360,6 +646,17 @@ impl Live {
         update: Update,
     ) -> (Vec<SessionId>, Option<Problem>) {
         let Some(id) = id else {
+            if let Update::ModelCatalog(models) = update {
+                self.models_loading = false;
+                match models {
+                    Ok(models) => {
+                        self.models = models;
+                        self.models_error = None;
+                    }
+                    Err(error) => self.models_error = Some(error),
+                }
+                return (Vec::new(), None);
+            }
             let Update::Listed(listed) = update else {
                 return (Vec::new(), None);
             };
@@ -374,13 +671,29 @@ impl Live {
                 ),
             };
         };
+        if !self
+            .watches
+            .get(&id)
+            .is_some_and(|watch| watch.accepts(&update))
+        {
+            return (Vec::new(), None);
+        }
+        if let Update::Record(_, record) = &update
+            && record["type"] == "remote_session_deleted"
+            && self
+                .target(id)
+                .is_some_and(|target| record["key"] == target.key)
+        {
+            self.remove(id);
+            return (vec![id], None);
+        }
         let Some(watch) = self.watches.get_mut(&id) else {
             return (Vec::new(), None);
         };
         let mut problem = None;
         match update {
-            Update::Opened(input) => watch.input = Some(input),
-            Update::Ended(reason) => {
+            Update::Opened(_, input) => watch.input = Some(input),
+            Update::Ended(_, reason) => {
                 watch.input = None;
                 watch.ready = false;
                 if watch.ended.is_none() {
@@ -388,7 +701,7 @@ impl Live {
                     watch.ended = Some(reason);
                 }
             }
-            Update::Record(record) => {
+            Update::Record(_, record) => {
                 problem = Self::record(
                     watch,
                     &record,
@@ -401,7 +714,7 @@ impl Live {
                     text,
                 });
             }
-            Update::Listed(_) => {}
+            Update::Listed(_) | Update::ModelCatalog(_) => {}
         }
         (vec![id], problem)
     }
@@ -439,6 +752,18 @@ impl Live {
             } else {
                 watch.ready = true;
                 Self::flush(watch);
+                // Opening an existing session must populate its follow-up picker
+                // without replacing the session's model with the phone's default.
+                Self::send(
+                    watch,
+                    json!({"type":"get_available_models"}),
+                    Request::AvailableModels,
+                );
+                Self::send(
+                    watch,
+                    json!({"type":"get_available_thinking_levels"}),
+                    Request::Quiet,
+                );
             }
         }
         if kind != "response" {
@@ -452,25 +777,44 @@ impl Live {
             .to_owned();
         match request {
             Request::Prompt(prompt) => {
-                watch.outbox.retain(|queued| *queued != prompt);
-                failed.then(|| {
-                    if watch.pi.messages.is_empty() {
-                        watch.pi.error = Some(error.clone());
+                if let Some(index) = watch
+                    .outbox
+                    .iter()
+                    .position(|queued| queued.request_id == prompt)
+                {
+                    let prompt = watch.outbox.remove(index);
+                    if failed {
+                        watch.failed.push(FailedPrompt {
+                            prompt,
+                            error: error.clone(),
+                        });
                     }
-                    error
-                })
+                }
+                if failed && watch.pi.messages.is_empty() {
+                    watch.pi.error = Some(error.clone());
+                }
+                failed.then_some(error)
             }
-            Request::Models => {
+            Request::Models | Request::AvailableModels => {
+                let initial = matches!(request, Request::Models);
+                if failed {
+                    if initial {
+                        Self::hold_failed(watch, &error);
+                    }
+                    return Some(error);
+                }
                 if let Ok(available) = serde_json::from_value::<Vec<pi_core::protocol::Model>>(
                     record["data"]["models"].clone(),
                 ) {
                     *models = available;
                 }
+                if !initial {
+                    return None;
+                }
                 let Some(model) = choose_model(models, wanted) else {
                     let text =
                         "No model is set up for durable sessions on the computer.".to_owned();
-                    watch.outbox.clear();
-                    watch.pi.error = Some(text.clone());
+                    Self::hold_failed(watch, &text);
                     return Some(text);
                 };
                 let record =
@@ -479,15 +823,81 @@ impl Live {
                 if let Some(level) = thinking_level(thinking) {
                     Self::send(
                         watch,
-                        json!({"type": "set_thinking_level", "level": level}),
-                        Request::Quiet,
+                        json!({"type": "get_available_thinking_levels"}),
+                        Request::InitialThinkingLevels(level.into()),
                     );
                 }
                 None
             }
             Request::SetModel => {
-                watch.ready = true;
-                Self::flush(watch);
+                watch.ready = !failed;
+                if failed {
+                    Self::hold_failed(watch, &error);
+                }
+                if !failed {
+                    watch.pi.thinking_levels.clear();
+                    // New sessions already requested this as part of their startup
+                    // transaction; existing sessions refresh for the new model.
+                    if !watch
+                        .sent
+                        .values()
+                        .any(|request| matches!(request, Request::InitialThinkingLevels(_)))
+                    {
+                        Self::send(
+                            watch,
+                            json!({"type":"get_available_thinking_levels"}),
+                            Request::Quiet,
+                        );
+                    }
+                    Self::flush(watch);
+                }
+                failed.then_some(error)
+            }
+            Request::SetThinking(level) => {
+                if !failed {
+                    watch.ready = true;
+                    watch.pi.state.thinking_level = level;
+                    Self::flush(watch);
+                } else {
+                    watch.ready = false;
+                    Self::hold_failed(watch, &error);
+                }
+                failed.then_some(error)
+            }
+            Request::InitialThinkingLevels(wanted) => {
+                if failed || watch.pi.thinking_levels.is_empty() {
+                    watch.ready = false;
+                    let error = if failed {
+                        error
+                    } else {
+                        "The computer did not report thinking levels for this model.".into()
+                    };
+                    Self::hold_failed(watch, &error);
+                    return Some(error);
+                }
+                let levels = &watch.pi.thinking_levels;
+                let supported = ["off", "minimal", "low", "medium", "high", "xhigh"];
+                let wanted_index = supported
+                    .iter()
+                    .position(|level| *level == wanted)
+                    .unwrap_or(0);
+                let level = supported[..=wanted_index]
+                    .iter()
+                    .rev()
+                    .find(|level| levels.iter().any(|supported| supported == **level))
+                    .map(|level| (*level).to_owned())
+                    .unwrap_or_else(|| levels[0].clone());
+                Self::send(
+                    watch,
+                    json!({"type":"set_thinking_level", "level":level}),
+                    Request::SetThinking(level),
+                );
+                None
+            }
+            Request::Stop => {
+                if !failed {
+                    Self::send(watch, json!({"type":"get_state"}), Request::Quiet);
+                }
                 failed.then_some(error)
             }
             Request::Quiet => None,
@@ -499,6 +909,9 @@ impl Live {
     fn listed(&mut self, listed: Vec<Listed>) -> Vec<SessionId> {
         let mut ids = Vec::new();
         for session in listed {
+            if self.deleted.contains(&session.key) {
+                continue;
+            }
             let id = self.id_for(&session.key);
             let running = session.running;
             self.listed.insert(id, session);
@@ -522,7 +935,7 @@ impl Live {
                     cwd: &watch.target.cwd,
                     folder: self.helper.short(&watch.target.cwd),
                     question: watch.dialogs.first().and_then(projection::question),
-                    outbox: &watch.outbox,
+                    outbox: &watch.outbox.iter().map(Prompt::label).collect::<Vec<_>>(),
                     key: &watch.target.key,
                 },
             ));
@@ -574,6 +987,7 @@ impl Live {
 fn thinking_level(shown: &str) -> Option<&'static str> {
     Some(match shown {
         "Off" => "off",
+        "Minimal" => "minimal",
         "Low" => "low",
         "Medium" => "medium",
         "High" => "high",
@@ -582,11 +996,29 @@ fn thinking_level(shown: &str) -> Option<&'static str> {
     })
 }
 
+fn thinking_label(level: &str) -> &str {
+    match level {
+        "off" => "Off",
+        "minimal" => "Minimal",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "Max",
+        other => other,
+    }
+}
+
 /// The model the settings name, by name or id, else the first offered.
 fn choose_model<'a>(
     models: &'a [pi_core::protocol::Model],
     wanted: &str,
 ) -> Option<&'a pi_core::protocol::Model> {
+    if wanted.contains('/') {
+        // Explicit selections must never silently choose a different provider.
+        return models
+            .iter()
+            .find(|model| format!("{}/{}", model.provider, model.id) == wanted);
+    }
     let wanted = wanted.to_lowercase();
     let words: Vec<&str> = wanted.split_whitespace().collect();
     models
@@ -617,6 +1049,86 @@ mod tests {
     }
 
     #[test]
+    fn obsolete_pipes_cannot_overwrite_new_state_or_close_the_replacement_connection() {
+        let (mut watch, _) = watch();
+        let old = watch.generation;
+        watch.reset_transport();
+        assert!(!watch.accepts(&Update::Record(
+            old,
+            json!({"type":"remote_session_deleted"})
+        )));
+        assert!(!watch.accepts(&Update::Ended(old, "old socket closed".into())));
+        assert!(watch.accepts(&Update::Record(
+            watch.generation,
+            json!({"type":"remote_snapshot"})
+        )));
+    }
+
+    #[test]
+    fn reconnect_retries_the_entire_unacknowledged_payload_once_with_its_original_identity() {
+        let (mut watch, first_pipe) = watch();
+        watch.ready = true;
+        let prompt = Prompt::new(
+            "same text".into(),
+            vec![pi_core::protocol::ImageContent::new(
+                "aW1hZ2U=".into(),
+                "image/png",
+            )],
+        );
+        watch.outbox.push(prompt.clone());
+        Live::flush(&mut watch);
+        let first = first_pipe.try_recv().unwrap();
+        Live::flush(&mut watch);
+        assert!(
+            first_pipe.try_recv().is_err(),
+            "no duplicate request on one pipe"
+        );
+        watch.reset_transport();
+        let (input, next_pipe) = async_channel::unbounded();
+        watch.input = Some(input);
+        watch.ready = true;
+        Live::flush(&mut watch);
+        let retry = next_pipe.try_recv().unwrap();
+        assert_eq!(first["requestId"], retry["requestId"]);
+        assert_ne!(first["id"], retry["id"]);
+        assert_eq!(retry["images"], first["images"]);
+        assert_eq!(retry["message"], first["message"]);
+        let error = json!({"type":"response","id":retry["id"],"command":"prompt","success":false,"error":"Unsupported model"});
+        Live::record(&mut watch, &error, "", "", &mut Vec::new());
+        assert!(watch.outbox.is_empty());
+        assert_eq!(watch.failed[0].prompt, prompt);
+        Live::flush(&mut watch);
+        assert!(
+            next_pipe.try_recv().is_err(),
+            "a rejection requires user action"
+        );
+    }
+
+    #[test]
+    fn removing_one_queued_prompt_never_rebuilds_other_prompts_or_claims_an_inflight_cancel() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.run = pi_core::session::RunState::Running;
+        watch.pi.follow_up = vec!["first".into(), "second with an image".into()];
+        watch.pi.queued_submissions = vec!["41".into(), "42".into()];
+        Live::cancel_queued(&mut watch, 0).unwrap();
+        let request = sent.try_recv().unwrap();
+        assert_eq!(request["type"], "cancel_submission");
+        assert_eq!(request["submissionId"], "41");
+        assert!(sent.try_recv().is_err());
+        watch.outbox.push("delivering".into());
+        Live::flush(&mut watch);
+        assert_eq!(sent.try_recv().unwrap()["type"], "prompt");
+        assert!(
+            Live::cancel_queued(&mut watch, 2)
+                .unwrap_err()
+                .contains("being delivered")
+        );
+        assert_eq!(watch.outbox.len(), 1);
+    }
+
+    #[test]
     fn the_preferred_model_is_found_by_name_or_id() {
         let models = [
             model("anthropic", "claude-sonnet-5-5", "Claude Sonnet 5.5"),
@@ -636,6 +1148,13 @@ mod tests {
             "anything offered beats nothing"
         );
         assert!(choose_model(&[], "Opus 5.5").is_none());
+        assert_eq!(
+            choose_model(&models, "anthropic/claude-opus-5-5")
+                .unwrap()
+                .id,
+            "claude-opus-5-5"
+        );
+        assert!(choose_model(&models, "missing/claude-opus-5-5").is_none());
     }
 
     fn watch() -> (Watch, async_channel::Receiver<Value>) {
@@ -667,10 +1186,17 @@ mod tests {
         );
         let done = json!({"type":"response","id":set["id"],"command":"set_model","success":true});
         Live::record(&mut watch, &done, "Opus 5.5", "", &mut models);
+        assert_eq!(
+            sent.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
         let prompt = sent.try_recv().unwrap();
         assert_eq!(prompt["type"], "prompt");
         assert_eq!(prompt["message"], "Explain this project");
-        assert_eq!(prompt["requestId"], prompt["id"]);
+        assert_ne!(
+            prompt["requestId"], prompt["id"],
+            "admission identity survives transport retries"
+        );
         assert!(prompt.get("streamingBehavior").is_none());
         let refused = json!({"type":"response","id":prompt["id"],"command":"prompt","success":false,"error":"No API key"});
         assert_eq!(
@@ -678,14 +1204,95 @@ mod tests {
             Some("No API key")
         );
         assert!(watch.outbox.is_empty());
+        assert_eq!(watch.failed.len(), 1);
+        assert_eq!(watch.failed[0].prompt.message, "Explain this project");
         assert_eq!(watch.pi.error.as_deref(), Some("No API key"));
     }
 
-    /// Runs a durable session over real SSH, as the phone does. Needs an SSH
-    /// server with a durable-enabled helper installed for the account, e.g.
-    /// with the faux runner: PI_ANDROID_TEST_SSH=user@host:port,
-    /// PI_ANDROID_TEST_KEYS=its authorized_keys (the phone's key is added),
-    /// PI_ANDROID_TEST_PROJECT=a folder there.
+    #[test]
+    fn an_existing_session_loads_choices_without_changing_its_model() {
+        let (mut watch, sent) = watch();
+        let mut pi = Pi::new("/Users/nick/repos/pi".into());
+        pi.state.model = Some(model("host", "existing", "Existing model"));
+        let mut models = Vec::new();
+        Live::record(
+            &mut watch,
+            &json!({"type":"remote_snapshot","data":pi}),
+            "Another model",
+            "High",
+            &mut models,
+        );
+        let ask = sent.try_recv().unwrap();
+        assert_eq!(ask["type"], "get_available_models");
+        assert_eq!(
+            sent.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":ask["id"],"command":"get_available_models","success":true,"data":{"models":[{"provider":"host","id":"other"}]}}),
+            "Another model",
+            "High",
+            &mut models,
+        );
+        assert!(
+            sent.try_recv().is_err(),
+            "opening a session must not reconfigure it"
+        );
+        assert_eq!(watch.pi.state.model.as_ref().unwrap().id, "existing");
+        assert_eq!(models.len(), 1);
+    }
+
+    #[test]
+    fn follow_ups_wait_for_model_confirmation_and_failed_changes_do_not_send() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        Live::configure(
+            &mut watch,
+            json!({"type":"set_model","provider":"host","modelId":"next"}),
+            Request::SetModel,
+        )
+        .unwrap();
+        let set = sent.try_recv().unwrap();
+        watch.outbox.push("Use the chosen model".into());
+        Live::flush(&mut watch);
+        assert!(sent.try_recv().is_err());
+        let mut models = Vec::new();
+        assert!(Live::record(&mut watch, &json!({"type":"response","id":set["id"],"command":"set_model","success":false,"error":"Unavailable"}), "", "", &mut models).is_some());
+        assert!(sent.try_recv().is_err());
+        assert!(watch.outbox.is_empty());
+        assert_eq!(
+            watch.failed.len(),
+            1,
+            "keep the rejected prompt for explicit recovery"
+        );
+        Live::configure(
+            &mut watch,
+            json!({"type":"set_model","provider":"host","modelId":"next"}),
+            Request::SetModel,
+        )
+        .unwrap();
+        let set = sent.try_recv().unwrap();
+        // Explicit user recovery resubmits the full payload, never a label.
+        watch.outbox.push(watch.failed.remove(0).prompt);
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":set["id"],"command":"set_model","success":true,"data":{"provider":"host","id":"next"}}),
+            "",
+            "",
+            &mut models,
+        );
+        assert_eq!(
+            sent.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
+        assert_eq!(sent.try_recv().unwrap()["type"], "prompt");
+        assert_eq!(watch.pi.state.model.as_ref().unwrap().id, "next");
+    }
+
+    /// Runs against the disposable SSH endpoint owned by scripts/test_ssh.py.
+    /// Refuses a real account's keys or project before writing anything.
     #[test]
     #[ignore = "needs an SSH server; set PI_ANDROID_TEST_SSH, PI_ANDROID_TEST_KEYS and PI_ANDROID_TEST_PROJECT"]
     fn a_durable_session_runs_over_ssh() {
@@ -694,12 +1301,27 @@ mod tests {
         let variable = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("set {name}"));
         let address = ssh::Address::parse(&variable("PI_ANDROID_TEST_SSH")).unwrap();
         let project = variable("PI_ANDROID_TEST_PROJECT");
-        let dir = std::env::temp_dir().join(format!("pi-android-e2e-{}", std::process::id()));
-        let identity = ssh::Identity::load_or_create(&dir.join("id_ed25519")).unwrap();
         let keys = variable("PI_ANDROID_TEST_KEYS");
-        let mut authorized = std::fs::read_to_string(&keys).unwrap_or_default();
-        authorized.push_str(&format!("{}\n", identity.public_line()));
-        std::fs::write(&keys, authorized).unwrap();
+        let keys = std::path::Path::new(&keys).canonicalize().unwrap();
+        let directory = keys.parent().unwrap();
+        assert!(
+            directory
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("pi-ssh-regression-"),
+            "Use scripts/test_ssh.py; never an account's real authorized_keys"
+        );
+        assert_eq!(
+            std::path::Path::new(&project).canonicalize().unwrap(),
+            directory.join("project")
+        );
+        assert!(
+            std::fs::read(&keys).unwrap().is_empty(),
+            "The isolated authorized_keys must start empty"
+        );
+        let identity = ssh::Identity::load_or_create(&directory.join("client/id_ed25519")).unwrap();
+        std::fs::write(&keys, format!("{}\n", identity.public_line())).unwrap();
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -723,6 +1345,11 @@ mod tests {
             );
             let helper = remote::find(&connection).await.unwrap();
             assert!(helper.path.ends_with("/pi-desktop-remote"), "{helper:?}");
+            assert!(remote::sessions(&connection, &helper).await.unwrap().is_empty());
+            assert!(remote::models(&connection, &helper).await.unwrap().iter().any(|model| model.provider == "faux"));
+            let directory = remote::directories(&connection, &helper, &project, false).await.unwrap();
+            assert_eq!(directory.path, project);
+            assert!(remote::sessions(&connection, &helper).await.unwrap().is_empty(), "catalog and folder browsing must not create a session");
             let mut live = Live::new(
                 connection.clone(),
                 helper.clone(),
@@ -768,12 +1395,20 @@ mod tests {
                 "the model was chosen"
             );
 
-            live.prompt(id, "and again".into());
+            live.prompt(id, "and again".into()).unwrap();
             let again = until(&mut live, &|s| s.state == State::Done && s.turns.len() == 2).await;
             assert_eq!(
                 again.turns[1].summary.as_ref().unwrap().headline,
                 "Finished: and again"
             );
+
+            let image = pi_core::protocol::ImageContent::new(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==".into(),
+                "image/png",
+            );
+            live.prompt(id, Prompt::new(String::new(), vec![image])).unwrap();
+            let with_image = until(&mut live, &|s| s.state == State::Done && s.turns.len() == 3).await;
+            assert_eq!(with_image.turns[2].summary.as_ref().unwrap().headline, "Received 1 image(s): image/png:70");
 
             let listed = remote::sessions(&connection, &helper).await.unwrap();
             let key = live.watches[&id].target.key.clone();
@@ -788,7 +1423,7 @@ mod tests {
             // A second phone attaches to the same session and sees it all.
             let mut other = Live::new(
                 connection.clone(),
-                helper,
+                helper.clone(),
                 address.to_string(),
                 "faux".into(),
             );
@@ -798,7 +1433,7 @@ mod tests {
                 .find(|twin| other.listed[twin].key == key)
                 .unwrap();
             let deadline = Instant::now() + Duration::from_secs(30);
-            while other.session(twin).unwrap().turns.len() < 2 {
+            while other.session(twin).unwrap().turns.len() < 3 {
                 assert!(Instant::now() < deadline);
                 let update = tokio::time::timeout(Duration::from_secs(30), other.updates.recv())
                     .await
@@ -807,8 +1442,11 @@ mod tests {
                 other.apply(update.0, update.1);
             }
             assert_eq!(other.session(twin).unwrap().title, "hello from the phone");
+            let target = live.watches[&id].target.clone();
+            remote::delete(&connection, &helper, &target).await.unwrap();
+            assert!(remote::sessions(&connection, &helper).await.unwrap().is_empty());
+            assert!(std::path::Path::new(&project).is_dir(), "deletion keeps the project folder");
         });
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

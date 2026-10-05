@@ -111,6 +111,12 @@ fn spawn_daemon(target: &SshTarget) -> Result<()> {
     Ok(())
 }
 fn attach(target: &SshTarget) -> Result<TcpStream> {
+    ensure!(
+        !root()?
+            .join(format!("{}.deleted.json", target.key))
+            .exists(),
+        "This session was permanently deleted"
+    );
     let path = root()?.join(format!("{}.json", target.key));
     let attempt = || -> Result<TcpStream> {
         let endpoint: Endpoint = serde_json::from_slice(&fs::read(&path)?)?;
@@ -318,6 +324,10 @@ pub fn daemon(target: SshTarget) -> Result<()> {
         Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
         Err(error) => return Err(error.into()),
     }
+    ensure!(
+        !root.join(format!("{}.deleted.json", target.key)).exists(),
+        "This session was permanently deleted"
+    );
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let endpoint = Endpoint {
         port: listener.local_addr()?.port(),
@@ -369,12 +379,11 @@ pub fn daemon(target: SshTarget) -> Result<()> {
         listener,
         &endpoint,
         &target,
-        &backend,
+        backend,
         Session::new(cwd),
         &path,
     );
     let _ = fs::remove_file(path);
-    drop(backend);
     drop(lock);
     result
 }
@@ -382,7 +391,7 @@ fn run(
     listener: TcpListener,
     endpoint: &Endpoint,
     target: &SshTarget,
-    backend: &RpcClient,
+    backend: RpcClient,
     mut model: Session,
     path: &std::path::Path,
 ) -> Result<()> {
@@ -449,6 +458,74 @@ fn run(
                 let Some(attached) = clients.get(&connection) else {
                     continue;
                 };
+                if record["type"] == "remote_delete_session" {
+                    let id = record["id"].as_str().unwrap_or("");
+                    if record["confirmKey"].as_str() != Some(&target.key) {
+                        attached.send(failure(
+                            id,
+                            "remote_delete_session",
+                            "Session confirmation does not match",
+                        ));
+                        continue;
+                    }
+                    if model.busy() || !requests.is_empty() || !bootstrap.is_empty() {
+                        attached.send(failure(
+                            id,
+                            "remote_delete_session",
+                            "Stop the session and wait for pending operations before deleting it",
+                        ));
+                        continue;
+                    }
+                    #[cfg(unix)]
+                    {
+                        let run = root()?;
+                        let storage = crate::durable::storage_dir(target)?;
+                        if let Err(error) = crate::deletion::validate(target, &run, &storage) {
+                            attached.send(failure(
+                                id,
+                                "remote_delete_session",
+                                &format!("{error:#}"),
+                            ));
+                            continue;
+                        }
+                        drop(backend); // Waits for the whole writer process tree to exit.
+                        let result = crate::deletion::remove(target, &run, &storage);
+                        match &result {
+                            Ok(()) => {
+                                attached.send(reply(
+                                    id,
+                                    "remote_delete_session",
+                                    json!({"key":target.key}),
+                                ));
+                                for other in clients.values() {
+                                    other.send(
+                                        json!({"type":"remote_session_deleted", "key":target.key}),
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                attached.send(failure(
+                                    id,
+                                    "remote_delete_session",
+                                    &format!("{error:#}"),
+                                ));
+                            }
+                        }
+                        for other in clients.values() {
+                            other.output.close();
+                        }
+                        return result;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        attached.send(failure(
+                            id,
+                            "remote_delete_session",
+                            "Permanent deletion requires a Unix SSH host",
+                        ));
+                        continue;
+                    }
+                }
                 if record["type"] == "remote_shutdown" {
                     let id = record["id"].as_str().unwrap_or("");
                     if model.busy() {

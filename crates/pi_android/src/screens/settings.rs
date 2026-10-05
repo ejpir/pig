@@ -184,7 +184,7 @@ impl PhoneApp {
             true,
             "Return sends",
             Some(if prefs.return_sends {
-                "On: return sends, the button adds nothing"
+                "Return or the send button sends. Shift+Return adds a line."
             } else {
                 "Off: return adds a line, send with the button"
             }),

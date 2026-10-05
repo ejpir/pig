@@ -209,6 +209,7 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
             }
             Beat::Summary(headline, body) => {
                 session.turn_mut().summary = Some(Summary {
+                    source: None,
                     headline: headline.into(),
                     body: body.into(),
                 })
@@ -673,6 +674,7 @@ fn mistral(id: SessionId) -> Session {
         session,
         "14:02",
         Summary {
+            source: None,
             headline: "Mistral's thinking now shows as thinking, not as the answer.".into(),
             body: "Text inside its reasoning markers becomes a thinking block. Tests cover \
                    streamed and complete responses."
@@ -699,6 +701,7 @@ fn kimi(id: SessionId) -> Session {
         session,
         "11:40",
         Summary {
+            source: None,
             headline: "Kimi K3 is the default because it is the newest with tool calls.".into(),
             body: "The default lives in models.ts and only applies when a provider offers \
                    several Kimi models."
@@ -783,7 +786,9 @@ mod tests {
     #[test]
     fn follow_ups_wait_for_the_run_then_start() {
         let mut store = store();
-        store.send(SessionId(3), "Also cap the minimap".into(), Vec::new());
+        store
+            .send(SessionId(3), "Also cap the minimap".into(), Vec::new())
+            .unwrap();
         assert_eq!(store.session(SessionId(3)).unwrap().queued.len(), 1);
         store.tick(Duration::from_secs(45));
         let session = store.session(SessionId(3)).unwrap();
@@ -795,7 +800,7 @@ mod tests {
     #[test]
     fn stopping_ends_the_run() {
         let mut store = store();
-        store.stop(SessionId(2));
+        store.stop(SessionId(2)).unwrap();
         let session = store.session(SessionId(2)).unwrap();
         assert_eq!(session.state, State::Stopped);
         assert_eq!(session.status_line(), "stopped by you");

@@ -7,10 +7,12 @@
 
 use crate::{
     alerts::{self, Link},
-    composer::{Attachment, Composer, ComposerEvent, Layout},
+    composer::{Attachment, Composer, ComposerEvent},
     live::{Live, Update},
     model::{Answer, Computer, SessionId, State},
+    motion::SwipeMotion,
     prefs::Prefs,
+    projects::ProjectBrowser,
     remote,
     ssh::{self, Address, Connection, Identity},
     store::{Event, Store},
@@ -18,16 +20,16 @@ use crate::{
     theme::{Appearance, SANS, Theme, theme},
 };
 use gpui::{
-    Animation, AnimationExt, App, Context, Edges, Entity, FocusHandle, Focusable, Image,
-    ImageFormat, PathPromptOptions, Pixels, ScrollHandle, SharedString, Subscription, Task,
-    TextInputAction, TextInputConfiguration, Window, WindowAppearance, WindowVisibility, actions,
-    div, ease_out_quint, prelude::*, px, relative,
+    App, Context, Edges, Entity, FocusHandle, Focusable, PathPromptOptions, Pixels, ScrollHandle,
+    SharedString, Subscription, Task, TextInputAction, TextInputConfiguration, Window,
+    WindowAppearance, WindowVisibility, actions, div, prelude::*, px, relative,
 };
 use gpui_android::activity;
 use std::{
+    cell::Cell,
     collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -37,6 +39,7 @@ actions!(pi_android, [GoBack]);
 pub enum Route {
     Connect,
     Sessions,
+    Projects,
     Start,
     Thread(SessionId),
     Review(SessionId),
@@ -57,16 +60,32 @@ pub enum Sheet {
     Details(SessionId),
     Attach(Target),
     Model,
+    Thinking,
     Project,
     More(SessionId),
     Models,
     Resources,
+    Activity(SessionId, usize, usize),
+    Delete(SessionId),
+    Image(Target, usize),
 }
 
 pub struct PhoneApp {
     pub(crate) store: Option<Store>,
     pub(crate) routes: Vec<Route>,
     pub(crate) sheet: Option<Sheet>,
+    pub(crate) drawer_open: bool,
+    pub(crate) swiping_session: Option<(SessionId, SwipeMotion)>,
+    pub(crate) deleting_session: Option<SessionId>,
+    pub(crate) drawer_motion: SwipeMotion,
+    pub(crate) sheet_motion: SwipeMotion,
+    pub(crate) closing_sheet: Option<Sheet>,
+    sheet_height: Rc<Cell<Pixels>>,
+    pub(crate) sheet_scroll: ScrollHandle,
+    pub(crate) drawer_scroll: ScrollHandle,
+    pub(crate) expanded_turns: HashMap<(SessionId, usize), bool>,
+    /// A sheet transition gives focus back to the app once, before its fields can focus.
+    sheet_focus_pending: bool,
     /// The answer picked in the question sheet; sent only with Answer.
     pub(crate) choice: Option<Answer>,
     /// Open disclosures in the details sheet.
@@ -82,7 +101,7 @@ pub struct PhoneApp {
     /// The computer turned down the phone's key on the last try.
     pub(crate) key_refused: bool,
     /// Where the key and settings live.
-    data_dir: PathBuf,
+    pub(crate) data_dir: PathBuf,
     /// A project folder typed into the project sheet.
     pub(crate) folder: Entity<TextArea>,
     reconnecting: bool,
@@ -91,16 +110,23 @@ pub struct PhoneApp {
     /// Carries what the computer sends into the store.
     _pump: Option<Task<()>>,
     pub(crate) search: Entity<TextArea>,
+    pub(crate) model_search: Entity<TextArea>,
+    /// Only populated by the isolated preview harness.
+    pub(crate) preview_models: Vec<pi_core::protocol::Model>,
     pub(crate) searching: bool,
     pub(crate) start: Entity<Composer>,
+    pub(crate) start_visible_height: Option<gpui::Pixels>,
     pub(crate) project: usize,
+    pub(crate) project_browser: ProjectBrowser,
     pub(crate) threads: HashMap<SessionId, Entity<Composer>>,
+    /// Sample sessions have their own model selection, just like live sessions.
+    sample_models: HashMap<SessionId, (String, String)>,
     pub(crate) review: Entity<Composer>,
     pub(crate) review_file: usize,
     /// Tapped review lines, as (hunk, line) of the shown file.
     pub(crate) review_lines: BTreeSet<(usize, usize)>,
     scrolls: HashMap<Route, ScrollHandle>,
-    prefs_path: Option<PathBuf>,
+    pub(crate) prefs_path: Option<PathBuf>,
     visible: bool,
     /// The text of the working notification, while one is shown.
     working_posted: Option<String>,
@@ -138,6 +164,18 @@ impl PhoneApp {
                 cx,
             )
         });
+        let model_search = cx.new(|cx| {
+            TextArea::single_line(
+                "Search models or providers",
+                TextInputConfiguration {
+                    autocorrect: false,
+                    autocapitalize: gpui::Autocapitalize::None,
+                    suggestions: false,
+                    input_action: TextInputAction::Search,
+                },
+                cx,
+            )
+        });
         let folder = cx.new(|cx| {
             TextArea::single_line(
                 "/Users/you/repos/app",
@@ -150,8 +188,8 @@ impl PhoneApp {
                 cx,
             )
         });
-        let start = cx.new(|cx| Composer::new("Describe the change…", Layout::Full, cx));
-        let review = cx.new(|cx| Composer::new("Ask for a revision…", Layout::Compact, cx));
+        let start = cx.new(|cx| Composer::new("Describe the change…", cx));
+        let review = cx.new(|cx| Composer::new("Ask for a revision…", cx));
         let subscriptions = vec![
             cx.subscribe_in(&address, window, |this, _, event, window, cx| match event {
                 TextAreaEvent::Submit => this.connect(window, cx),
@@ -161,6 +199,12 @@ impl PhoneApp {
                 }
             }),
             cx.subscribe(&search, |_, _, _: &TextAreaEvent, cx| cx.notify()),
+            cx.subscribe(&model_search, |this, _, event: &TextAreaEvent, cx| {
+                if *event == TextAreaEvent::Changed {
+                    this.sheet_scroll.set_offset(gpui::Point::default());
+                }
+                cx.notify();
+            }),
             cx.subscribe_in(&folder, window, |this, _, event, window, cx| {
                 if *event == TextAreaEvent::Submit {
                     this.add_folder(window, cx);
@@ -206,6 +250,17 @@ impl PhoneApp {
             store: None,
             routes: vec![Route::Connect],
             sheet: None,
+            drawer_open: false,
+            swiping_session: None,
+            deleting_session: None,
+            drawer_motion: SwipeMotion::at(1.),
+            sheet_motion: SwipeMotion::at(1.),
+            closing_sheet: None,
+            sheet_height: Rc::new(Cell::new(px(0.))),
+            sheet_scroll: ScrollHandle::new(),
+            drawer_scroll: ScrollHandle::new(),
+            expanded_turns: HashMap::new(),
+            sheet_focus_pending: false,
             choice: None,
             expanded: HashSet::new(),
             notice: None,
@@ -223,10 +278,15 @@ impl PhoneApp {
             last_reconnect: Instant::now(),
             _pump: None,
             search,
+            model_search,
+            preview_models: Vec::new(),
             searching: false,
             start,
+            start_visible_height: None,
             project: 0,
+            project_browser: ProjectBrowser::default(),
             threads: HashMap::new(),
+            sample_models: HashMap::new(),
             review,
             review_file: 0,
             review_lines: BTreeSet::new(),
@@ -260,6 +320,19 @@ impl PhoneApp {
 
     pub(crate) fn scroll(&mut self, route: Route) -> ScrollHandle {
         self.scrolls.entry(route).or_default().clone()
+    }
+
+    /// Follow content updates only while the reader is at the bottom. Doing
+    /// this in render would also undo upward swipes and activity expansion.
+    fn keep_latest_in_view(&mut self) {
+        if let Route::Thread(_) = self.route() {
+            let scroll = self.scroll(self.route());
+            if scroll.bounds().size.height > px(0.)
+                && scroll.max_offset().y + scroll.offset().y <= px(2.)
+            {
+                scroll.scroll_to_bottom();
+            }
+        }
     }
 
     pub(crate) fn prefs<'a>(&self, cx: &'a App) -> &'a Prefs {
@@ -322,12 +395,17 @@ impl PhoneApp {
         if let Some(store) = &mut self.store {
             store.watch(id);
         }
+        if !self.scrolls.contains_key(&Route::Thread(id)) {
+            self.scroll(Route::Thread(id)).scroll_to_bottom();
+        }
         self.routes = vec![Route::Sessions, Route::Thread(id)];
         self.entered(window, cx);
     }
 
     fn entered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sheet = None;
+        self.swiping_session = None;
+        self.close_drawer(cx);
+        self.close_sheet(cx);
         self.searching = false;
         window.dismiss_virtual_keyboard();
         window.focus(&self.focus, cx);
@@ -349,21 +427,161 @@ impl PhoneApp {
     }
 
     pub(crate) fn open_sheet(&mut self, sheet: Sheet, cx: &mut Context<Self>) {
+        self.drawer_open = false;
+        self.drawer_motion = SwipeMotion::at(1.);
+        self.closing_sheet = None;
+        self.sheet_motion.settle(0.);
+        self.sheet_scroll = ScrollHandle::new();
+        if sheet == Sheet::Model {
+            self.model_search
+                .update(cx, |area, cx| area.set_text("", cx));
+        }
         if let Sheet::Question(_) = sheet {
             self.choice = None;
         }
         self.sheet = Some(sheet);
+        if sheet == Sheet::Project
+            && self.project_browser.directory.is_none()
+            && !self.project_browser.loading
+        {
+            self.browse_projects(None, cx);
+        }
+        self.sheet_focus_pending = true;
         cx.notify();
     }
 
     pub(crate) fn close_sheet(&mut self, cx: &mut Context<Self>) {
-        self.sheet = None;
+        if let Some(sheet) = self.sheet.take() {
+            self.closing_sheet = Some(sheet);
+            self.sheet_motion.settle(1.);
+        }
+        self.sheet_focus_pending = true;
         cx.notify();
+    }
+
+    pub(crate) fn close_drawer(&mut self, cx: &mut Context<Self>) {
+        if self.drawer_open {
+            self.drawer_open = false;
+            self.drawer_motion.settle(1.);
+            cx.notify();
+        }
+    }
+
+    fn animate_panels(&mut self, window: &Window, cx: &Context<Self>) {
+        let now = Instant::now();
+        let reduced = cx.reduce_motion();
+        self.drawer_motion.tick(now, reduced);
+        self.sheet_motion.tick(now, reduced);
+        if self.sheet.is_none() && !self.sheet_motion.animating() {
+            self.closing_sheet = None;
+        }
+        if let Some((_, motion)) = &mut self.swiping_session {
+            motion.tick(now, reduced);
+            if !motion.dragging() && !motion.animating() {
+                self.swiping_session = None;
+            }
+        }
+        if self.drawer_motion.animating()
+            || self.sheet_motion.animating()
+            || self
+                .swiping_session
+                .as_ref()
+                .is_some_and(|(_, motion)| motion.animating())
+        {
+            window.request_animation_frame();
+        }
+    }
+
+    /// Capture dismissal for the gesture's lifetime, not the moving panel's
+    /// hitbox. Moving a panel away from the starting finger must not lose the
+    /// remaining events. Sheet content gets normal scrolling until its top.
+    pub(crate) fn dismiss_gesture(&self, drawer: bool, cx: &Context<Self>) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let sheet_height = self.sheet_height.clone();
+        gpui::canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                if !drawer {
+                    sheet_height.set(bounds.size.height);
+                }
+                window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, _, cx| {
+                    if phase != gpui::DispatchPhase::Capture {
+                        return;
+                    }
+                    let _ = view.update(cx, |this, cx| {
+                        if (drawer && !this.drawer_open) || (!drawer && this.sheet.is_none()) {
+                            return;
+                        }
+                        let delta = event.delta.pixel_delta(px(20.));
+                        let (along, across) = if drawer {
+                            (-delta.x, delta.y)
+                        } else {
+                            (delta.y, delta.x)
+                        };
+                        let motion = if drawer {
+                            &mut this.drawer_motion
+                        } else {
+                            &mut this.sheet_motion
+                        };
+                        let extent = if drawer {
+                            bounds.size.width
+                        } else {
+                            bounds.size.height
+                        }
+                        .max(px(1.));
+                        if event.touch_phase == gpui::TouchPhase::Started {
+                            if !bounds.contains(&event.position)
+                                || along <= px(0.)
+                                || along.abs() < across.abs()
+                                || (!drawer
+                                    && this.sheet_scroll.max_offset().y > px(1.)
+                                    && this.sheet_scroll.bounds().contains(&event.position)
+                                    && event.position.x
+                                        >= this.sheet_scroll.bounds().right() - px(18.))
+                                || (!drawer
+                                    && event.position.y > bounds.top() + px(36.)
+                                    && this.sheet_scroll.offset().y < px(-1.))
+                            {
+                                return;
+                            }
+                            motion.begin_drag();
+                        }
+                        if !motion.dragging() {
+                            return;
+                        }
+                        cx.stop_propagation();
+                        motion.drag_by(along / extent);
+                        if event.touch_phase == gpui::TouchPhase::Cancelled {
+                            motion.settle(0.);
+                        } else if event.touch_phase == gpui::TouchPhase::Ended {
+                            let close = extent * motion.position() > px(85.).min(extent * 0.4);
+                            if !close {
+                                motion.settle(0.);
+                            } else if drawer {
+                                this.close_drawer(cx);
+                            } else {
+                                this.close_sheet(cx);
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
     }
 
     /// One step back; false when there is nothing to go back to.
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.sheet.take().is_some() {
+        if self.drawer_open {
+            self.close_drawer(cx);
+            return true;
+        }
+        if self.sheet.is_some() {
+            self.close_sheet(cx);
+            window.dismiss_virtual_keyboard();
+            window.focus(&self.focus, cx);
             cx.notify();
             return true;
         }
@@ -418,13 +636,20 @@ impl PhoneApp {
 
     /// The sample sessions, for trying the app without a computer.
     pub(crate) fn open_store(&mut self, address: &str) {
+        self.project_browser.clear();
+        self.project = 0;
         self.store = Some(Store::sample(Computer::from_address(address)));
         self.routes = vec![Route::Sessions];
         self.threads.clear();
+        self.sample_models.clear();
+        self.swiping_session = None;
+        self.deleting_session = None;
+        self.scrolls.clear();
         self._pump = None;
     }
 
     pub(crate) fn open_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.paused = false;
         let typed = self.address.read(cx).text().trim().to_owned();
         let address = if typed.is_empty() {
             "you@studio-mac.local".to_owned()
@@ -513,14 +738,27 @@ impl PhoneApp {
     ) {
         let fingerprint = connection.fingerprint.clone();
         let prefs = self.prefs(cx);
-        let mut live = Live::new(connection, helper, address.to_string(), prefs.model.clone());
+        let wanted = prefs
+            .model_provider
+            .as_ref()
+            .zip(prefs.model_id.as_ref())
+            .map(|(provider, id)| format!("{provider}/{id}"))
+            .unwrap_or_else(|| prefs.model.clone());
+        let mut live = Live::new(connection, helper, address.to_string(), wanted);
         live.thinking = prefs.thinking.clone();
+        live.refresh_models();
         let mut computer = Computer::from_address(&address.to_string());
         computer.pi_version = None;
         let mut store = Store::live(computer, live);
         store.apply(vec![(None, Update::Listed(Ok(listed)))]);
+        self.project = prefs
+            .projects
+            .get(&address.to_string())
+            .map(|path| store.add_project(path))
+            .unwrap_or(0);
+        self.project_browser.clear();
         self.store = Some(store);
-        self.routes = vec![Route::Sessions];
+        self.routes = vec![Route::Sessions, Route::Projects];
         self.threads.clear();
         self.start
             .update(cx, |start, _| start.use_files(Some(Vec::new())));
@@ -534,6 +772,7 @@ impl PhoneApp {
         self.start_pump(cx);
         activity::request_notification_permission();
         self.entered(window, cx);
+        self.browse_projects(None, cx);
     }
 
     /// Carries the computer's updates into the store as they come.
@@ -563,6 +802,7 @@ impl PhoneApp {
     }
 
     fn take_updates(&mut self, batch: Vec<(Option<SessionId>, Update)>, cx: &mut Context<Self>) {
+        self.keep_latest_in_view();
         let Some(store) = &mut self.store else {
             return;
         };
@@ -615,12 +855,75 @@ impl PhoneApp {
         .detach();
     }
 
-    /// The model new sessions start with.
-    pub(crate) fn choose_model(&mut self, name: String, cx: &mut Context<Self>) {
-        if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
-            live.model = name.clone();
+    pub(crate) fn model_session(&self) -> Option<SessionId> {
+        match self.route() {
+            Route::Thread(id) | Route::Review(id) => Some(id),
+            _ => None,
         }
-        self.update_prefs(cx, |prefs| prefs.model = name);
+    }
+
+    /// The current session's confirmed model, or defaults on New session.
+    pub(crate) fn model_settings(&self, cx: &App) -> (String, String) {
+        if let Some(id) = self.model_session() {
+            if let Some(live) = self.store.as_ref().and_then(|store| store.live.as_ref()) {
+                return live
+                    .model_settings(id)
+                    .unwrap_or_else(|| ("Loading model…".into(), "…".into()));
+            }
+            if let Some(settings) = self.sample_models.get(&id) {
+                return settings.clone();
+            }
+        }
+        let prefs = self.prefs(cx);
+        (prefs.model.clone(), prefs.thinking.clone())
+    }
+
+    pub(crate) fn choose_model(
+        &mut self,
+        name: String,
+        provider: String,
+        model_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.model_session() {
+            let (_, thinking) = self.model_settings(cx);
+            if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
+                if let Err(error) = live.set_model(id, &provider, &model_id) {
+                    self.notify_user(error, cx);
+                }
+            } else {
+                self.sample_models.insert(id, (name, thinking));
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
+            live.model = format!("{provider}/{model_id}");
+        }
+        self.update_prefs(cx, |prefs| {
+            prefs.model = name;
+            prefs.model_provider = Some(provider);
+            prefs.model_id = Some(model_id);
+        });
+    }
+
+    pub(crate) fn choose_thinking(&mut self, level: &str, cx: &mut Context<Self>) {
+        if let Some(id) = self.model_session() {
+            let (model, _) = self.model_settings(cx);
+            if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
+                if let Err(error) = live.set_thinking(id, level) {
+                    self.notify_user(error, cx);
+                }
+            } else {
+                self.sample_models.insert(id, (model, level.to_owned()));
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
+            live.thinking = level.to_owned();
+        }
+        self.update_prefs(cx, |prefs| prefs.thinking = level.to_owned());
     }
 
     /// Leaves the computer: back to Connect, its host key forgotten.
@@ -630,6 +933,7 @@ impl PhoneApp {
             .as_ref()
             .map(|store| store.computer.address.clone());
         self.store = None;
+        self.project_browser.clear();
         self._pump = None;
         self.threads.clear();
         self.update_prefs(cx, |prefs| {
@@ -643,35 +947,41 @@ impl PhoneApp {
         self.entered(window, cx);
     }
 
-    /// The folder typed into the project sheet becomes the project.
+    /// A manually entered path is opened and checked by the remote browser.
     pub(crate) fn add_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let path = self
-            .folder
-            .read(cx)
-            .text()
-            .trim()
-            .trim_end_matches('/')
-            .to_owned();
+        let mut path = self.folder.read(cx).text().trim().to_owned();
+        if let Some(home) = self
+            .store
+            .as_ref()
+            .and_then(|store| store.live.as_ref())
+            .map(|live| &live.helper.home)
+        {
+            if path == "~" {
+                path = home.clone();
+            } else if let Some(rest) = path.strip_prefix("~/") {
+                path = format!("{home}/{rest}");
+            }
+        }
         if !path.starts_with('/') {
             self.notify_user("Type the folder's full path, starting with /", cx);
             return;
         }
-        if let Some(store) = &mut self.store {
-            self.project = store.add_project(&path);
-        }
-        self.folder.update(cx, |field, cx| {
-            field.take(cx);
-        });
         window.dismiss_virtual_keyboard();
-        self.close_sheet(cx);
+        window.focus(&self.focus, cx);
+        self.browse_projects(Some(path), cx);
     }
 
     // Sample sessions and notifications
 
     fn tick(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "ui-test")]
+        self.write_fixture_state(cx);
         let now = Instant::now();
         let elapsed = now - self.last_tick;
         self.last_tick = now;
+        if !self.paused {
+            self.keep_latest_in_view();
+        }
         let Some(store) = self.store.as_mut().filter(|_| !self.paused) else {
             return;
         };
@@ -720,6 +1030,7 @@ impl PhoneApp {
         };
         let computer = store.computer.name.clone();
         match event {
+            Event::Deleted(id) => self.finish_deletion(id, cx),
             Event::NeedsYou(id) => {
                 if self.viewing(id) {
                     if self.sheet.is_none() {
@@ -787,6 +1098,39 @@ impl PhoneApp {
 
     /// A `pi://` link from a notification.
     pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "ui-test")]
+        if url == "pi://test-state" && self.paused {
+            // Only fixture mode exposes diagnostics, and only lengths/state:
+            // never prompt contents, clipboard data, addresses or credentials.
+            let session = match self.route() {
+                Route::Thread(id) | Route::Review(id) => {
+                    self.store.as_ref().and_then(|s| s.session(id))
+                }
+                _ => None,
+            };
+            log::info!(
+                "ui-test-state {}",
+                serde_json::json!({
+                    "route": format!("{:?}", self.route()),
+                    "routes": self.routes.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>(),
+                    "drawer": self.drawer_open,
+                    "sheet": self.sheet.map(|s| format!("{s:?}")),
+                    "start_chars": self.start.read(cx).area.read(cx).text().chars().count(),
+                    "search_chars": self.search.read(cx).text().chars().count(),
+                    "prompt_chars": session.and_then(|s| s.turns.last()).map(|t| t.prompt.chars().count()),
+                    "reply_chars": session.and_then(|s| s.turns.last()).and_then(|t| t.summary.as_ref()).map(|s| s.text().chars().count()),
+                    "turns": session.map(|s| s.turns.len()),
+                })
+            );
+            return;
+        }
+        #[cfg(feature = "ui-test")]
+        if let Some(name) = url.strip_prefix("pi://preview/") {
+            if crate::SCREENS.contains(&name) {
+                self.preview(name, window, cx);
+            }
+            return;
+        }
         let Some(link) = Link::parse(url) else {
             log::warn!("Ignoring the link {url}");
             return;
@@ -830,6 +1174,7 @@ impl PhoneApp {
         self.close_sheet(cx);
         // "Tell Pi why in the next message."
         if choice == Answer::Deny {
+            self.sheet_focus_pending = false;
             let composer = self.thread_composer(id, window, cx);
             let area = composer.read(cx).area.clone();
             let focus = area.read(cx).focus_handle(cx);
@@ -838,12 +1183,118 @@ impl PhoneApp {
     }
 
     pub(crate) fn stop(&mut self, id: SessionId, cx: &mut Context<Self>) {
-        if let Some(store) = &mut self.store {
-            store.stop(id);
+        let Some(store) = &mut self.store else { return };
+        let live = store.live.is_some();
+        if let Err(error) = store.stop(id) {
+            self.notify_user(error, cx);
+            return;
         }
         activity::cancel_notification(alerts::question_id(id));
         self.close_sheet(cx);
-        self.notify_user("Stopped", cx);
+        self.notify_user(if live { "Stop requested…" } else { "Stopped" }, cx);
+    }
+
+    /// Only called by the destructive button in the confirmation sheet.
+    pub(crate) fn delete_session(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        if self.deleting_session.is_some() {
+            return;
+        }
+        let Some(store) = &self.store else { return };
+        if store
+            .session(id)
+            .is_none_or(|session| session.state.is_running())
+        {
+            self.notify_user("Stop the session before deleting it.", cx);
+            return;
+        }
+        let Some(live) = &store.live else {
+            if let Some(store) = &mut self.store {
+                store.remove(id);
+            }
+            self.finish_deletion(id, cx);
+            return;
+        };
+        let Some(target) = live.target(id) else {
+            return;
+        };
+        let (connection, helper, key) = (
+            live.connection.clone(),
+            live.helper.clone(),
+            target.key.clone(),
+        );
+        let (send, receive) = async_channel::bounded(1);
+        self.deleting_session = Some(id);
+        ssh::spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                remote::delete(&connection, &helper, &target),
+            )
+            .await
+            .map_err(|_| "Deletion wasn't confirmed in time. Refresh before retrying.".to_owned())
+            .and_then(|result| result.map_err(|error| format!("{error:#}")));
+            let _ = send.send(result).await;
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receive.recv().await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                // The user may have changed computers while the request ran.
+                let same = this
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.live.as_ref())
+                    .and_then(|live| live.target(id))
+                    .is_some_and(|target| target.key == key);
+                if !same {
+                    return;
+                }
+                this.deleting_session = None;
+                match result {
+                    Ok(()) => {
+                        if let Some(store) = &mut this.store {
+                            store.remove(id);
+                        }
+                        this.finish_deletion(id, cx);
+                    }
+                    Err(error) => {
+                        this.notify_user(error, cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_deletion(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        self.deleting_session = None;
+        self.swiping_session = None;
+        self.threads.remove(&id);
+        self.sample_models.remove(&id);
+        self.expanded_turns.retain(|(session, _), _| *session != id);
+        self.scrolls.remove(&Route::Thread(id));
+        self.scrolls.remove(&Route::Review(id));
+        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) if *session == id));
+        if self.sheet == Some(Sheet::Delete(id)) {
+            self.close_sheet(cx);
+        }
+        activity::cancel_notification(alerts::question_id(id));
+        activity::cancel_notification(alerts::finished_id(id));
+        self.notify_user(
+            if self
+                .store
+                .as_ref()
+                .is_some_and(|store| store.live.is_some())
+            {
+                "Session permanently deleted. Project files were kept."
+            } else {
+                "Sample session removed. No computer files were changed."
+            },
+            cx,
+        );
     }
 
     pub(crate) fn open_review(
@@ -869,7 +1320,7 @@ impl PhoneApp {
         if let Some(composer) = self.threads.get(&id) {
             return composer.clone();
         }
-        let composer = cx.new(|cx| Composer::new("Ask a follow-up…", Layout::Compact, cx));
+        let composer = cx.new(|cx| Composer::new("Ask a follow-up…", cx));
         // A live session offers the files Pi touched in it.
         let files = self
             .store
@@ -941,36 +1392,61 @@ impl PhoneApp {
         match event {
             ComposerEvent::Attach => self.open_sheet(Sheet::Attach(target), cx),
             ComposerEvent::ChooseModel => self.open_sheet(Sheet::Model, cx),
+            ComposerEvent::ChooseThinking => self.open_sheet(Sheet::Thinking, cx),
+            ComposerEvent::PreviewImage(index) => self.open_sheet(Sheet::Image(target, *index), cx),
+            ComposerEvent::Stop => {
+                let id = match target {
+                    Target::Thread(id) => Some(id),
+                    Target::Review => self.model_session(),
+                    Target::Start => None,
+                };
+                if let Some(id) = id {
+                    self.stop(id, cx);
+                }
+            }
             ComposerEvent::Send { text, attachments } => {
                 let route = self.route();
                 let Some(store) = &mut self.store else {
                     return;
                 };
-                match target {
-                    Target::Start => {
-                        let (text, dropped) = live_text(store, text, attachments, None);
-                        match store.start(self.project, text, attachments.clone()) {
-                            Ok(id) => self.show_session(id, window, cx),
-                            Err(error) => self.notify_user(error, cx),
-                        }
-                        if dropped {
-                            self.notify_user(
-                                "Only the text went: files from the phone can't be sent yet",
-                                cx,
-                            );
-                        }
+                let file = if let Route::Review(id) = route {
+                    store
+                        .session(id)
+                        .and_then(|session| session.files.get(self.review_file))
+                        .map(|file| file.path.clone())
+                } else {
+                    None
+                };
+                let prompt = match prompt_for(text, attachments, file.as_deref()) {
+                    Ok(prompt) => prompt,
+                    Err(error) => {
+                        self.notify_user(error, cx);
+                        return;
                     }
+                };
+                let labels: Vec<String> = attachments.iter().map(Attachment::label).collect();
+                match target {
+                    Target::Start => match store.start(self.project, prompt, labels) {
+                        Ok(id) => {
+                            self.start.update(cx, |composer, cx| composer.clear(cx));
+                            self.show_session(id, window, cx);
+                        }
+                        Err(error) => self.notify_user(error, cx),
+                    },
                     Target::Thread(id) => {
                         let running = store.session(id).is_some_and(|s| s.state.is_running());
-                        let (text, dropped) = live_text(store, text, attachments, None);
-                        store.send(id, text, attachments.clone());
+                        if let Err(error) = store.send(id, prompt, labels) {
+                            self.notify_user(error, cx);
+                            return;
+                        }
+                        if let Some(composer) = self.composer(target) {
+                            composer.update(cx, |composer, cx| composer.clear(cx));
+                        }
+                        if !running {
+                            self.scroll(Route::Thread(id)).scroll_to_bottom();
+                        }
                         window.dismiss_virtual_keyboard();
-                        if dropped {
-                            self.notify_user(
-                                "Only the text went: files from the phone can't be sent yet",
-                                cx,
-                            );
-                        } else if running {
+                        if running {
                             self.notify_user("Queued for when this run ends", cx);
                         }
                     }
@@ -978,12 +1454,11 @@ impl PhoneApp {
                         let Route::Review(id) = route else {
                             return;
                         };
-                        let file = store
-                            .session(id)
-                            .and_then(|session| session.files.get(self.review_file))
-                            .map(|file| file.path.clone());
-                        let (text, _) = live_text(store, text, attachments, file.as_deref());
-                        store.send(id, text, attachments.clone());
+                        if let Err(error) = store.send(id, prompt, labels) {
+                            self.notify_user(error, cx);
+                            return;
+                        }
+                        self.review.update(cx, |composer, cx| composer.clear(cx));
                         self.review_lines.clear();
                         self.routes.pop();
                         self.entered(window, cx);
@@ -995,12 +1470,50 @@ impl PhoneApp {
         }
     }
 
+    pub(crate) fn recover_prompt(
+        &mut self,
+        id: SessionId,
+        request_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let failed = self
+            .store
+            .as_ref()
+            .and_then(|store| store.live.as_ref())
+            .and_then(|live| {
+                live.failed_prompts(id)
+                    .iter()
+                    .find(|failed| failed.prompt.request_id == request_id)
+            })
+            .cloned();
+        let Some(failed) = failed else {
+            return;
+        };
+        let composer = self.thread_composer(id, window, cx);
+        match composer.update(cx, |composer, cx| {
+            composer.restore_prompt(&failed.prompt, cx)
+        }) {
+            Ok(()) => {
+                if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
+                    live.recover_prompt(id, request_id);
+                }
+                self.notify_user(
+                    "Message and images restored. Review the model and send when ready.",
+                    cx,
+                );
+            }
+            Err(error) => self.notify_user(error, cx),
+        }
+    }
+
     /// Adds files from Android's picker to a composer.
     pub(crate) fn attach_files(&mut self, target: Target, cx: &mut Context<Self>) {
         self.close_sheet(cx);
         let Some(composer) = self.composer(target) else {
             return;
         };
+        let generation = composer.update(cx, |composer, cx| composer.begin_import(cx));
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1009,14 +1522,38 @@ impl PhoneApp {
         });
         cx.spawn(async move |this, cx| {
             let picked = picked.await;
-            this.update(cx, |this, cx| match picked {
-                Ok(Ok(Some(paths))) => composer.update(cx, |composer, cx| {
-                    for path in paths {
-                        composer.attach(attachment_for(&path), cx);
+            let imported = match picked {
+                Ok(Ok(Some(paths))) => Some(
+                    cx.background_executor()
+                        .spawn(async move {
+                            paths
+                                .iter()
+                                .map(|path| crate::attachments::load(path))
+                                .collect::<Vec<_>>()
+                        })
+                        .await,
+                ),
+                Ok(Ok(None)) | Err(_) => None,
+                Ok(Err(error)) => Some(vec![Err(format!("{error:#}"))]),
+            };
+            this.update(cx, |this, cx| {
+                if !composer.update(cx, |composer, cx| composer.finish_import(generation, cx)) {
+                    return;
+                }
+                if let Some(imported) = imported {
+                    for attachment in imported {
+                        match attachment {
+                            Ok(attachment) => {
+                                if let Err(error) = composer
+                                    .update(cx, |composer, cx| composer.try_attach(attachment, cx))
+                                {
+                                    this.notify_user(error, cx);
+                                }
+                            }
+                            Err(error) => this.notify_user(error, cx),
+                        }
                     }
-                }),
-                Ok(Ok(None)) | Err(_) => {}
-                Ok(Err(error)) => this.notify_user(format!("{error:#}"), cx),
+                }
             })
             .ok();
         })
@@ -1038,16 +1575,35 @@ impl PhoneApp {
             _ => None,
         });
         match (image, item.text()) {
-            (Some(image), _) => composer.update(cx, |composer, cx| {
-                let name = format!("Pasted image.{}", image.format.extension());
-                composer.attach(
-                    Attachment::Image {
-                        name,
-                        image: Arc::new(image),
-                    },
-                    cx,
-                );
-            }),
+            (Some(image), _) => {
+                let generation = composer.update(cx, |composer, cx| composer.begin_import(cx));
+                cx.spawn(async move |this, cx| {
+                    let attachment = cx
+                        .background_executor()
+                        .spawn(async move {
+                            crate::attachments::prepare_image(
+                                format!("Pasted image.{}", image.format.extension()),
+                                &image.bytes,
+                            )
+                        })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        if !composer
+                            .update(cx, |composer, cx| composer.finish_import(generation, cx))
+                        {
+                            return;
+                        }
+                        let result = attachment.and_then(|attachment| {
+                            composer.update(cx, |composer, cx| composer.try_attach(attachment, cx))
+                        });
+                        if let Err(error) = result {
+                            this.notify_user(error, cx);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
             (None, Some(text)) => composer.update(cx, |composer, cx| {
                 composer.area.update(cx, |area, cx| area.insert(&text, cx));
             }),
@@ -1073,60 +1629,42 @@ impl PhoneApp {
     }
 }
 
-/// What a live session is sent for a draft: the text, with reviewed lines
-/// named in it. Files and images from the phone don't go yet; the flag says
-/// some were left out.
-fn live_text(
-    store: &Store,
+/// Encode the complete draft. No attachment may silently become just a label.
+fn prompt_for(
     text: &str,
-    attachments: &[String],
+    attachments: &[Attachment],
     file: Option<&str>,
-) -> (String, bool) {
-    if store.is_sample() {
-        return (text.to_owned(), false);
-    }
+) -> Result<crate::prompt::Prompt, String> {
+    use base64::Engine;
     let mut message = text.to_owned();
-    let mut dropped = false;
+    let mut images = Vec::new();
     for attachment in attachments {
-        match (attachment.starts_with("line"), file) {
-            (true, Some(file)) => message = format!("About {attachment} of {file}: {message}"),
-            _ => dropped = true,
+        match attachment {
+            Attachment::Image { image, .. } => {
+                if image.bytes.len() > crate::attachments::MAX_IMAGE_BYTES {
+                    return Err(
+                        "Image exceeds the upload limit. Remove it and select it again.".into(),
+                    );
+                }
+                images.push(pi_core::protocol::ImageContent::new(
+                    base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+                    image.format.mime_type(),
+                ));
+            }
+            Attachment::File { name, contents, .. } => message.push_str(&format!(
+                "\n\nAttached text file: {name}\n{contents}\nEnd of attached file: {name}"
+            )),
+            Attachment::Lines(lines) => {
+                let file =
+                    file.ok_or("Choose the reviewed file again before sending selected lines.")?;
+                message = format!("About {lines} of {file}: {message}");
+            }
         }
     }
-    (message, dropped)
-}
-
-/// A picked file as an attachment: images show as thumbnails.
-fn attachment_for(path: &Path) -> Attachment {
-    let name = path.file_name().map_or_else(
-        || path.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    let bytes = std::fs::metadata(path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
-    let format = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .and_then(|extension| {
-            ImageFormat::from_mime_type(&format!(
-                "image/{}",
-                extension.to_lowercase().replace("jpg", "jpeg")
-            ))
-        });
-    if let Some(format) = format
-        && bytes < 20_000_000
-        && let Ok(data) = std::fs::read(path)
-    {
-        return Attachment::Image {
-            name,
-            image: Arc::new(Image::from_bytes(format, data)),
-        };
+    if images.len() > crate::attachments::MAX_IMAGES {
+        return Err("Attach up to four images per message.".into());
     }
-    Attachment::File {
-        name,
-        size: size_label(bytes),
-    }
+    Ok(crate::prompt::Prompt::new(message, images))
 }
 
 pub(crate) fn size_label(bytes: u64) -> String {
@@ -1139,18 +1677,44 @@ pub(crate) fn size_label(bytes: u64) -> String {
 
 impl Render for PhoneApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "ui-test")]
+        if cx.has_global::<crate::testing::State>() {
+            let state = cx.global_mut::<crate::testing::State>();
+            state.scale = window.scale_factor();
+            state.viewport = [
+                window.viewport_size().width.into(),
+                window.viewport_size().height.into(),
+            ];
+            state.pointer = [
+                window.mouse_position().x.into(),
+                window.mouse_position().y.into(),
+            ];
+        }
+        self.animate_panels(window, cx);
+        if std::mem::take(&mut self.sheet_focus_pending) {
+            window.dismiss_virtual_keyboard();
+            window.focus(&self.focus, cx);
+        }
         let colors = theme(cx);
         let insets = Self::insets(window);
         let screen = match self.route() {
             Route::Connect => self.connect_screen(window, cx).into_any_element(),
             Route::Sessions => self.sessions_screen(window, cx).into_any_element(),
+            Route::Projects => self.projects_screen(window, cx).into_any_element(),
             Route::Start => self.start_screen(window, cx).into_any_element(),
             Route::Thread(id) => self.thread_screen(id, window, cx),
             Route::Review(id) => self.review_screen(id, window, cx),
             Route::Settings => self.settings_screen(window, cx).into_any_element(),
         };
-        let sheet = self.sheet.map(|sheet| {
+        let sheet = self.sheet.or(self.closing_sheet).map(|sheet| {
             let content = self.sheet_content(sheet, window, cx);
+            let progress = self.sheet_motion.position();
+            let height = self.sheet_height.get();
+            let sheet_drag = if height > px(0.) {
+                height
+            } else {
+                window.viewport_size().height
+            } * progress;
             div()
                 .absolute()
                 .inset_0()
@@ -1160,15 +1724,21 @@ impl Render for PhoneApp {
                 .child(
                     div()
                         .id("scrim")
+                        .occlude()
                         .absolute()
                         .inset_0()
                         .bg(colors.scrim)
+                        .opacity(1. - progress)
                         .on_click(cx.listener(|this, _, _, cx| this.close_sheet(cx))),
                 )
                 .child(
                     div()
                         .id("sheet")
+                        .debug_selector(|| "bottom-sheet".into())
                         .relative()
+                        .child(crate::testing::probe("bottom-sheet"))
+                        .top(sheet_drag)
+                        .when(self.sheet.is_none(), |sheet| sheet.min_h(height))
                         .occlude()
                         .max_h(window.viewport_size().height - insets.top - px(24.))
                         .flex()
@@ -1198,16 +1768,21 @@ impl Render for PhoneApp {
                                 .bg(colors.line_strong),
                         )
                         .child(content)
-                        .with_animation(
-                            SharedString::from(format!("sheet-{sheet:?}")),
-                            Animation::new(Duration::from_millis(220))
-                                .with_easing(ease_out_quint()),
-                            |sheet, delta| {
-                                sheet.top(px(48. * (1. - delta))).opacity(0.4 + 0.6 * delta)
-                            },
-                        ),
+                        .child(self.dismiss_gesture(false, cx)),
                 )
+                // Keep the exiting panel mounted and occluding until it is offscreen.
+                .when(self.sheet.is_none(), |overlay| {
+                    overlay.child(
+                        div()
+                            .id("closing-sheet-blocker")
+                            .absolute()
+                            .inset_0()
+                            .occlude(),
+                    )
+                })
         });
+        let drawer =
+            (self.drawer_open || self.drawer_motion.animating()).then(|| self.drawer(window, cx));
         let notice = self.notice.clone().map(|notice| {
             div()
                 .absolute()
@@ -1251,6 +1826,7 @@ impl Render for PhoneApp {
                     .child(screen),
             )
             .children(sheet)
+            .children(drawer)
             .children(notice)
     }
 }

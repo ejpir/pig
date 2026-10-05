@@ -87,6 +87,11 @@ pub(crate) struct Mirror {
     next_push: i32,
     /// Pushes not yet acknowledged: id, document offset, state.
     pending: VecDeque<(i32, usize, ImeState)>,
+    /// The new field must replace Java's previous field, even when empty.
+    reset_pending: bool,
+    /// A draft replacement (suggestion, paste, Send) must not be patched with
+    /// an old composing word while its Java update is still in flight.
+    app_edit_pending: bool,
 }
 
 impl Mirror {
@@ -95,6 +100,7 @@ impl Mirror {
         *self = Self {
             seq: self.seq,
             next_push: self.next_push,
+            reset_pending: true,
             ..Self::default()
         };
     }
@@ -102,15 +108,28 @@ impl Mirror {
     /// The keyboard reported its state. Returns the edits that bring the
     /// document in line; none when the report acknowledges push `push_id`.
     pub fn reported(&mut self, seq: i32, push_id: i32, state: ImeState) -> Vec<Edit> {
+        if seq <= self.seq {
+            return Vec::new();
+        }
         self.seq = seq;
         if push_id != 0 {
-            while let Some((id, start, _)) = self.pending.pop_front() {
-                if id == push_id {
-                    self.start = start;
-                    break;
-                }
+            let acknowledged = self.pending.iter().find(|(id, _, _)| *id == push_id);
+            if let Some((_, start, _)) = acknowledged {
+                self.start = *start;
+                self.state = state;
+                self.reset_pending = false;
+                self.app_edit_pending = false;
             }
-            self.state = state;
+            // Any other push used the previous sequence and will be rejected.
+            // An acknowledgement from a field we left must never replace this one.
+            self.pending.clear();
+            return Vec::new();
+        }
+        self.pending.clear();
+        if self.reset_pending || self.app_edit_pending {
+            // A closing input connection can report its composing word after
+            // focus moved. Resend the new field using this sequence instead.
+            self.reset_pending = true;
             return Vec::new();
         }
         let edits = diff(&self.state, &state, self.start);
@@ -141,6 +160,10 @@ impl Mirror {
     /// a push when the keyboard's mirror differs and the same state is not
     /// already on its way.
     pub fn sync(&mut self, app: AppText, keyed: bool) -> Option<Push> {
+        // Moving the bounded context around a long draft isn't a draft
+        // replacement. In-flight typing against the old, still valid context
+        // must be applied before retrying the rebase, not discarded.
+        let rebase = self.same_document_context(&app);
         let len = len16(&app.text);
         let relative = |range: &Range<usize>| {
             range.start.saturating_sub(app.start).min(len)
@@ -155,7 +178,7 @@ impl Mirror {
                 .map(relative),
             text: app.text,
         };
-        if app.start == self.start && state == self.state {
+        if !self.reset_pending && app.start == self.start && state == self.state {
             return None;
         }
         if self
@@ -166,14 +189,30 @@ impl Mirror {
             return None;
         }
         self.next_push += 1;
+        self.app_edit_pending |= !keyed && !rebase;
         self.pending
             .push_back((self.next_push, app.start, state.clone()));
         Some(Push {
             basis: self.seq,
             id: self.next_push,
             state,
-            restart: !keyed,
+            restart: self.reset_pending || !keyed,
         })
+    }
+
+    fn same_document_context(&self, app: &AppText) -> bool {
+        let shift = |range: &Range<usize>| self.start + range.start..self.start + range.end;
+        if app.selection != shift(&self.state.selection)
+            || app.marked != self.state.composing.as_ref().map(shift)
+        {
+            return false;
+        }
+        let old: Vec<_> = self.state.text.encode_utf16().collect();
+        let new: Vec<_> = app.text.encode_utf16().collect();
+        let from = self.start.max(app.start);
+        let to = (self.start + old.len()).min(app.start + new.len());
+        from < to
+            && old[from - self.start..to - self.start] == new[from - app.start..to - app.start]
     }
 }
 
@@ -511,6 +550,140 @@ mod tests {
         assert!(
             !push.restart,
             "the keyboard sent the key, and may be repeating it"
+        );
+    }
+
+    #[test]
+    fn stale_composition_cannot_append_to_a_replaced_draft() {
+        let mut mirror = mirror("Explain this projec", 18);
+        let draft = AppText {
+            text: "My own task".into(),
+            start: 0,
+            selection: 11..11,
+            marked: None,
+        };
+        let first = mirror.sync(draft.clone(), false).unwrap();
+        assert!(
+            mirror
+                .reported(2, 0, state("Explain this project", 20..20, Some(13..20)))
+                .is_empty()
+        );
+        let retry = mirror.sync(draft.clone(), false).unwrap();
+        assert_ne!(retry.id, first.id);
+        assert_eq!(retry.basis, 2);
+        assert!(mirror.reported(3, retry.id, retry.state).is_empty());
+        assert!(mirror.sync(draft, false).is_none());
+        assert_eq!(
+            mirror.reported(4, 0, state("My own task!", 12..12, None)),
+            vec![Edit::Replace {
+                range: 11..11,
+                text: "!".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn typing_in_flight_during_a_long_draft_rebase_is_not_lost() {
+        let mut mirror = mirror(&"x".repeat(4000), 3900);
+        mirror
+            .sync(
+                AppText {
+                    text: "x".repeat(4000),
+                    start: 1900,
+                    selection: 3900..3900,
+                    marked: None,
+                },
+                false,
+            )
+            .unwrap();
+        let typed = format!("{}!{}", "x".repeat(3900), "x".repeat(100));
+        assert_eq!(
+            mirror.reported(2, 0, state(&typed, 3901..3901, None)),
+            vec![Edit::Replace {
+                range: 3900..3900,
+                text: "!".into(),
+            }]
+        );
+        let retry = mirror
+            .sync(
+                AppText {
+                    text: format!("{}!{}", "x".repeat(2000), "x".repeat(2000)),
+                    start: 1900,
+                    selection: 3901..3901,
+                    marked: None,
+                },
+                false,
+            )
+            .unwrap();
+        assert_eq!(retry.basis, 2);
+        mirror.reported(3, retry.id, retry.state);
+        assert_eq!(mirror.start, 1900);
+    }
+
+    #[test]
+    fn an_empty_new_field_clears_the_previous_keyboard_text() {
+        let mut mirror = mirror("previous draft", 14);
+        mirror.reset();
+        let app = AppText {
+            text: String::new(),
+            start: 0,
+            selection: 0..0,
+            marked: None,
+        };
+        let push = mirror
+            .sync(app.clone(), false)
+            .expect("empty field still needs a reset");
+        assert!(push.restart);
+        assert!(push.state.text.is_empty());
+        assert!(
+            mirror
+                .reported(2, 0, state("previous draft!", 15..15, None))
+                .is_empty()
+        );
+        let retry = mirror
+            .sync(app.clone(), false)
+            .expect("retry after the stale report");
+        assert_eq!(retry.basis, 2);
+        mirror.reported(3, retry.id, retry.state);
+        assert!(mirror.sync(app, false).is_none());
+        assert_eq!(
+            mirror.reported(4, 0, state("hi", 2..2, None)),
+            [Edit::Replace {
+                range: 0..0,
+                text: "hi".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn stale_acknowledgements_cannot_restore_a_previous_field() {
+        let mut mirror = mirror("old", 3);
+        let old = mirror
+            .sync(
+                AppText {
+                    text: "old!".into(),
+                    start: 0,
+                    selection: 4..4,
+                    marked: None,
+                },
+                false,
+            )
+            .unwrap();
+        mirror.reset();
+        let new = AppText {
+            text: "new".into(),
+            start: 0,
+            selection: 3..3,
+            marked: None,
+        };
+        mirror.sync(new.clone(), false).unwrap();
+        assert!(mirror.reported(2, old.id, old.state).is_empty());
+        let retry = mirror.sync(new, false).expect("new field wins");
+        assert_eq!(retry.state.text, "new");
+        assert!(
+            mirror
+                .reported(1, 0, state("out of order", 12..12, None))
+                .is_empty()
         );
     }
 

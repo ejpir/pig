@@ -17,6 +17,7 @@ pub struct Helper {
     pub path: String,
     /// The computer account's home, to show folders as `~/…`.
     pub home: String,
+    pub images: bool,
 }
 
 impl Helper {
@@ -60,6 +61,7 @@ pub fn choose(listing: &str) -> Result<Helper> {
             return Ok(Helper {
                 path: path.to_owned(),
                 home,
+                images: capabilities["imagePrompts"] == true,
             });
         }
     }
@@ -118,12 +120,119 @@ pub async fn sessions(connection: &Connection, helper: &Helper) -> Result<Vec<Li
     parse_sessions(&output.stdout)
 }
 
+pub async fn models(
+    connection: &Connection,
+    helper: &Helper,
+) -> Result<Vec<pi_core::protocol::Model>> {
+    let output = connection.run(helper.command("models")?).await?;
+    if output.status != Some(0) {
+        if output.stderr.contains("Usage:") {
+            bail!(
+                "Update the computer's helper to choose a model before starting your first session."
+            );
+        }
+        bail!("Could not load models: {}", output.stderr.trim());
+    }
+    let catalog: Value = serde_json::from_str(&output.stdout)?;
+    if catalog["version"] != 1 {
+        bail!("Unsupported model catalog format");
+    }
+    Ok(serde_json::from_value(catalog["models"].clone())?)
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Directory {
+    pub version: u32,
+    pub path: String,
+    pub parent: Option<String>,
+    pub entries: Vec<Folder>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Folder {
+    pub name: String,
+    pub path: String,
+    pub project: bool,
+}
+
+pub fn parse_directory(output: &str) -> Result<Directory> {
+    let listing: Directory = serde_json::from_str(output.trim())?;
+    if listing.version != 1 || !listing.path.starts_with('/') || listing.entries.len() > 512 {
+        bail!("The helper returned an unsupported folder listing");
+    }
+    Ok(listing)
+}
+
+pub async fn directories(
+    connection: &Connection,
+    helper: &Helper,
+    path: &str,
+    show_hidden: bool,
+) -> Result<Directory> {
+    let command = helper.command(&format!(
+        "directories --path {}{}",
+        quote(path)?,
+        if show_hidden { " --show-hidden" } else { "" }
+    ))?;
+    let output = connection.run(command).await?;
+    if output.status != Some(0) {
+        if output.stderr.contains("Usage:") {
+            bail!(
+                "Update Pi Desktop's remote helper to browse folders. Existing projects remain available."
+            );
+        }
+        bail!("Could not open this folder: {}", output.stderr.trim());
+    }
+    parse_directory(&output.stdout)
+}
+
 /// Attaches to a session, starting its daemon if it isn't up. Records from
 /// the session arrive on the pipe; commands go into it.
 pub async fn attach(connection: &Connection, helper: &Helper, target: &SshTarget) -> Result<Pipe> {
     let pipe = connection.pipe(helper.command("connect --stdio")?).await?;
     pipe.input.send(target.attach_record()).await?;
     Ok(pipe)
+}
+
+/// A separate short-lived attachment keeps deletion independent of the UI's
+/// watch. The helper validates the exact key and refuses an active writer.
+pub async fn delete(connection: &Connection, helper: &Helper, target: &SshTarget) -> Result<()> {
+    target.validate()?;
+    let pipe = attach(connection, helper, target).await?;
+    let id = format!("phone-delete-{:016x}", rand::random::<u64>());
+    let mut sent = false;
+    while let Ok(record) = pipe.records.recv().await {
+        if record["type"] == "remote_error" {
+            bail!(
+                "{}",
+                record["error"]
+                    .as_str()
+                    .unwrap_or("The computer refused deletion")
+            );
+        }
+        if record["type"] == "remote_snapshot" && !sent {
+            pipe.input.send(serde_json::json!({"type":"remote_delete_session", "id":id, "confirmKey":target.key})).await?;
+            sent = true;
+        }
+        if record["type"] == "response" && record["id"] == id {
+            if record["success"] == true && record["data"]["key"] == target.key {
+                return Ok(());
+            }
+            let error = record["error"]
+                .as_str()
+                .unwrap_or("The computer refused deletion");
+            if error.contains("unknown variant") {
+                bail!(
+                    "Update Pi Desktop's remote helper on the computer to enable session deletion. Nothing was deleted."
+                );
+            }
+            bail!("{error}");
+        }
+    }
+    bail!(
+        "The connection closed before deletion was confirmed. Refresh sessions before trying again."
+    )
 }
 
 /// The identity a new durable session is started with.
@@ -149,6 +258,24 @@ pub fn listed_target(host: &str, listed: &Listed) -> Result<SshTarget> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_listings_are_versioned_and_preserve_unicode_and_spaces() {
+        let listing = parse_directory(r#"{"version":1,"path":"/Users/me/my repos","parent":"/Users/me","entries":[{"name":"café's project","path":"/Users/me/my repos/café's project","project":true}],"truncated":false}"#).unwrap();
+        assert_eq!(listing.entries[0].name, "café's project");
+        assert!(
+            parse_directory(
+                r#"{"version":2,"path":"/","parent":null,"entries":[],"truncated":false}"#
+            )
+            .is_err()
+        );
+        assert!(
+            parse_directory(
+                r#"{"version":1,"path":"relative","parent":null,"entries":[],"truncated":false}"#
+            )
+            .is_err()
+        );
+    }
 
     const DURABLE: &str =
         r#"{"pi":true,"durable":true,"durableExperimental":true,"watchers":true,"sessions":true}"#;

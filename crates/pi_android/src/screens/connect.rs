@@ -168,9 +168,10 @@ impl PhoneApp {
                             ui::tile_box(44., 12., colors.accent, &colors).child(icon("pi", 22., colors.accent)),
                         )
                         .child(heading("Where does Pi run?", 30.).mt(px(20.)))
+                        .child(ui::label("Step 1 of 2 · Connect a computer", &colors).mt(px(12.)))
                         .child(
                             ui::hint(
-                                "Pi works on your computer or a server. This phone follows its sessions, answers its questions and reviews its changes. The work goes on while the phone is away.",
+                                "Connect over SSH first. Next, choose a project from folders on the computer—no path needed here. Its sessions keep working while the phone is away.",
                                 &colors,
                             )
                             .mt(px(10.))

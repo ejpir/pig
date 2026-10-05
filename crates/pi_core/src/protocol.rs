@@ -23,6 +23,16 @@ pub enum Command {
     /// The tools pi currently declares to the model; `get_state` does not report them.
     GetActiveTools,
     GetMessages,
+    /// Durable image bytes, retrieved only on demand from this session.
+    GetImage {
+        #[serde(rename = "imageId")]
+        image_id: String,
+    },
+    /// Cancels exactly one queued durable submission, retaining other payloads.
+    CancelSubmission {
+        #[serde(rename = "submissionId")]
+        submission_id: String,
+    },
     GetEntries,
     /// Every `custom` entry of one type, from all branches.
     GetCustomEntries {
@@ -207,6 +217,8 @@ impl Command {
             | Self::Reload => Route::Extension,
             Self::GetState
             | Self::GetMessages
+            | Self::GetImage { .. }
+            | Self::CancelSubmission { .. }
             | Self::GetEntries
             | Self::Fork { cwd: None, .. }
             | Self::SetAutoCompaction { .. }
@@ -253,6 +265,8 @@ impl Command {
             Self::GetState => "get_state",
             Self::GetActiveTools => "get_active_tools",
             Self::GetMessages => "get_messages",
+            Self::GetImage { .. } => "get_image",
+            Self::CancelSubmission { .. } => "cancel_submission",
             Self::GetEntries => "get_entries",
             Self::GetSettings => "get_settings",
             Self::NavigateTree { .. } => "navigate_tree",

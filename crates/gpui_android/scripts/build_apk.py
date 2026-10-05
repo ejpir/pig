@@ -43,6 +43,7 @@ class App:
     cargo: list  # cargo build arguments that build the library
     output: str  # the library's folder under target/<triple>/<profile>
     permissions: tuple = ()
+    debuggable: bool = False  # permits read-only run-as fixture telemetry, independent of Rust optimization
 
 
 TOUCH = App(
@@ -302,9 +303,10 @@ def build(app, debug, out):
              "--output", scratch, *sorted(classes.rglob("*.class"))])
         unsigned = scratch / "unsigned.apk"
         with zipfile.ZipFile(unsigned, "w", zipfile.ZIP_DEFLATED) as apk:
-            apk.writestr("AndroidManifest.xml", encode_xml(manifest(app, debuggable=debug)))
+            apk.writestr("AndroidManifest.xml", encode_xml(manifest(app, debuggable=debug or app.debuggable)))
             apk.write(scratch / "classes.dex", "classes.dex")
             apk.write(library, f"lib/arm64-v8a/lib{app.library}.so")
+            apk.write(CRATE / "assets/fonts/OFL.txt", "assets/licenses/NotoEmoji-OFL.txt")
         out.parent.mkdir(parents=True, exist_ok=True)
         run(["java", "-jar", apksigner, "sign", "--ks", debug_keystore(), "--ks-pass", "pass:android",
              "--min-sdk-version", MIN_SDK, "--out", out, unsigned])

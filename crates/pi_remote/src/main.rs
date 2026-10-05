@@ -1,4 +1,6 @@
 //! Headless SSH helper. The stdio bridge is disposable; the detached daemon owns Pi.
+mod deletion;
+mod directories;
 mod durable;
 mod executable;
 mod files;
@@ -25,7 +27,7 @@ fn main() -> Result<()> {
         ),
         Some("--capabilities") => println!(
             "{}",
-            serde_json::json!({"pi":true,"durable":cfg!(unix),"durableExperimental":true,"watchers":true,"sessions":true})
+            serde_json::json!({"pi":true,"durable":cfg!(unix),"durableExperimental":true,"watchers":true,"sessions":true,"directories":true,"deleteSessions":cfg!(unix),"imagePrompts":cfg!(feature = "bundled-durable")})
         ),
         Some("--licenses") => {
             println!(
@@ -63,13 +65,27 @@ fn main() -> Result<()> {
         }
         Some("connect") if args.next().as_deref() == Some("--stdio") => server::connect()?,
         Some("sessions") => sessions::print()?,
+        Some("models") => {
+            anyhow::ensure!(args.next().is_none(), "Unexpected models argument");
+            durable::models()?;
+        }
+        Some("directories") if args.next().as_deref() == Some("--path") => {
+            let path = args.next().context("directories needs a path")?;
+            let show_hidden = match args.next().as_deref() {
+                None => false,
+                Some("--show-hidden") => true,
+                _ => bail!("Unknown directories option"),
+            };
+            anyhow::ensure!(args.next().is_none(), "Unexpected directories argument");
+            directories::print(&path, show_hidden)?;
+        }
         Some("files") if args.next().as_deref() == Some("--stdio") => files::serve()?,
         Some("daemon") => {
             let target = serde_json::from_str(&args.next().context("daemon needs a target")?)?;
             server::daemon(target)?;
         }
         _ => bail!(
-            "Usage: pi-desktop-remote connect --stdio | files --stdio | sessions | pi [ARGS] | --version | --licenses"
+            "Usage: pi-desktop-remote connect --stdio | files --stdio | sessions | models | directories --path PATH [--show-hidden] | pi [ARGS] | --version | --licenses"
         ),
     }
     Ok(())

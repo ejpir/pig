@@ -4,13 +4,12 @@
 
 use crate::{
     app::{PhoneApp, Route, Sheet, Target},
-    model::{Session, SessionId},
+    model::{Reference, Session, SessionId},
     theme::{MONO, Theme, theme},
     ui::{self, Button, icon},
 };
 use gpui::{
-    AnyElement, Context, Div, Focusable, FontWeight, SharedString, Window, div, prelude::*, px,
-    relative,
+    AnyElement, Context, Div, FontWeight, SharedString, Window, div, prelude::*, px, relative,
 };
 
 const MODELS: [(&str, &str); 4] = [
@@ -20,35 +19,115 @@ const MODELS: [(&str, &str); 4] = [
     ("Haiku 4.5", "Anthropic · the fastest"),
 ];
 
-const THINKING: [&str; 5] = ["Off", "Low", "Medium", "High", "Max"];
+const THINKING: [&str; 6] = ["Off", "Minimal", "Low", "Medium", "High", "Max"];
 
 /// What a row of the More sheet does.
 type Action = Box<dyn Fn(&mut PhoneApp, &mut Window, &mut Context<PhoneApp>)>;
+
+fn model_matches(query: &str, name: &str, provider: &str, id: &str) -> bool {
+    let searchable = format!("{name} {provider} {id}").to_lowercase();
+    query
+        .split_whitespace()
+        .all(|word| searchable.contains(word))
+}
 
 impl PhoneApp {
     pub(crate) fn sheet_content(
         &mut self,
         sheet: Sheet,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = theme(cx);
+        // Search stays in place even when hundreds of models are offered.
+        if sheet == Sheet::Model {
+            return self.model_sheet(&colors, cx).into_any_element();
+        }
         let content = match sheet {
             Sheet::Question(id) => self.question_sheet(id, &colors, cx),
             Sheet::Details(id) => self.details_sheet(id, &colors, cx),
             Sheet::Attach(target) => self.attach_sheet(target, &colors, cx),
             Sheet::Model => self.model_sheet(&colors, cx),
+            Sheet::Thinking => self.thinking_sheet(&colors, cx),
             Sheet::Project => self.project_sheet(&colors, cx),
             Sheet::More(id) => self.more_sheet(id, &colors, cx),
             Sheet::Models => self.models_sheet(&colors, cx),
             Sheet::Resources => self.resources_sheet(&colors, cx),
+            Sheet::Activity(id, turn, stage) => self.activity_sheet(id, turn, stage, &colors, cx),
+            Sheet::Delete(id) => self.delete_sheet(id, &colors, cx),
+            Sheet::Image(target, index) => {
+                let attachment = self
+                    .composer(target)
+                    .and_then(|composer| composer.read(cx).attachments().get(index).cloned());
+                if let Some(crate::composer::Attachment::Image { name, image }) = attachment {
+                    div()
+                        .child(ui::hint(name, &colors).mb(px(12.)))
+                        .child(gpui::img(image).w_full().h(window.fully_visible_bounds().size.height * 0.55).object_fit(gpui::ObjectFit::Contain))
+                        .child(ui::hint("Included with your next message. Images are resized to fit the upload limit.", &colors).mt(px(12.)))
+                } else {
+                    div()
+                }
+            }
+        };
+        // Every sheet keeps its identity and explicit close action visible,
+        // independently of the scroll position of long output or lists.
+        let header = match sheet {
+            Sheet::Question(id) if self.session(id).and_then(|s| s.question.as_ref()).is_some() => {
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(ui::badge("Needs you", colors.wait, colors.amber, &colors))
+                    .child(
+                        ui::tap("close-sheet", "x", &colors)
+                            .mr(px(-12.))
+                            .on_click(cx.listener(|this, _, _, cx| this.close_sheet(cx))),
+                    )
+            }
+            _ => {
+                let title: SharedString = match sheet {
+                    Sheet::Question(_) => "Already answered".into(),
+                    Sheet::Details(_) => "Details".into(),
+                    Sheet::Attach(_) => "Add to the message".into(),
+                    Sheet::Model => "Choose model".into(),
+                    Sheet::Thinking => "Thinking level".into(),
+                    Sheet::Project => format!("Projects on {}", self.computer_name()).into(),
+                    Sheet::More(id) => self
+                        .session(id)
+                        .map_or_else(|| "Session".into(), |s| s.title.clone().into()),
+                    Sheet::Models => format!("Models on {}", self.computer_name()).into(),
+                    Sheet::Resources => format!("Resources on {}", self.computer_name()).into(),
+                    Sheet::Activity(id, turn, stage) => self
+                        .session(id)
+                        .and_then(|s| s.turns.get(turn))
+                        .and_then(|t| t.stages.get(stage))
+                        .map_or("Activity", |s| s.kind.name(s.status))
+                        .into(),
+                    Sheet::Delete(_) => "Delete session?".into(),
+                    Sheet::Image(_, _) => "Attached image".into(),
+                };
+                self.sheet_title(title, &colors, cx)
+            }
         };
         div()
-            .id("sheet-body")
+            .flex()
+            .flex_col()
             .min_h_0()
-            .overflow_y_scroll()
-            .px(px(20.))
-            .child(content)
+            .child(
+                header
+                    .flex_none()
+                    .px(px(20.))
+                    .debug_selector(|| "sheet-header".into()),
+            )
+            .child(
+                crate::scroll::vertical(
+                    SharedString::from(format!("sheet-body-{sheet:?}")),
+                    &self.sheet_scroll,
+                )
+                .min_h_0()
+                .px(px(20.))
+                .child(content),
+            )
             .into_any_element()
     }
 
@@ -56,21 +135,232 @@ impl PhoneApp {
         self.store.as_ref()?.session(id)
     }
 
+    fn delete_sheet(&self, id: SessionId, colors: &Theme, cx: &Context<Self>) -> Div {
+        let Some(session) = self.session(id) else {
+            return div();
+        };
+        let running = session.state.is_running();
+        let deleting = self.deleting_session == Some(id);
+        div().pb(px(8.))
+            .child(ui::card(colors).p(px(14.)).my(px(12.))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(session.title.clone()))
+                .child(ui::hint(format!("{} · {}", session.project, self.computer_name()), colors).mt(px(4.))))
+            .child(ui::hint(
+                if self.live() {
+                    "Permanently deletes this session's conversation and execution history from the computer. This cannot be undone. Project files and edits are kept."
+                } else {
+                    "Removes this sample conversation. No files on your computer are affected."
+                }, colors))
+            .when(running, |body| body.child(ui::hint("This session is still running. Stop it before deleting its history.", colors).mt(px(12.)).text_color(colors.coral)))
+            .child(div().flex().gap(px(12.)).mt(px(20.))
+                .child(ui::button("cancel-delete", Button::Plain, None, "Cancel", false, colors)
+                    .flex_1().on_click(cx.listener(|this, _, _, cx| this.close_sheet(cx))))
+                .child(ui::button("confirm-delete", Button::Primary, Some("trash"), if deleting { "Deleting…" } else { "Delete" }, false, colors)
+                    .debug_selector(|| "confirm-delete".into())
+                    .flex_1().min_w_0().bg(colors.coral).border_color(colors.coral)
+                    .when(running || deleting, |button| button.opacity(0.45))
+                    .when(!running && !deleting, |button| button.on_click(cx.listener(move |this, _, _, cx| this.delete_session(id, cx))))))
+    }
+
+    fn activity_sheet(
+        &self,
+        id: SessionId,
+        turn_index: usize,
+        stage_index: usize,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let Some(session) = self.session(id) else {
+            return div();
+        };
+        let Some(stage) = session
+            .turns
+            .get(turn_index)
+            .and_then(|turn| turn.stages.get(stage_index))
+        else {
+            return div();
+        };
+        div()
+            .pb(px(12.))
+            .min_w_0()
+            .child(
+                ui::hint(
+                    format!(
+                        "Turn {} · {} · {}",
+                        turn_index + 1,
+                        session.project,
+                        self.computer_name()
+                    ),
+                    colors,
+                )
+                .mb(px(12.)),
+            )
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .child(stage.what.clone())
+                    .mb(px(12.)),
+            )
+            .children(
+                stage
+                    .references
+                    .iter()
+                    .enumerate()
+                    .map(|(index, reference)| {
+                        let (glyph, target) = match reference {
+                            Reference::File(path) => ("file", path),
+                            Reference::Search(query) => ("search", query),
+                        };
+                        let file = session
+                            .files
+                            .iter()
+                            .position(|file| file.path == *target || file.name() == target);
+                        let copied = target.clone();
+                        ui::row(("activity-reference", index), index == 0, colors)
+                            .child(icon(glyph, 18., colors.muted))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(ui::mono(target.clone(), 12.5)),
+                            )
+                            .child(
+                                ui::button(
+                                    ("open-reference", index),
+                                    Button::Quiet,
+                                    None,
+                                    if file.is_some() { "Review" } else { "Copy" },
+                                    true,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        if let Some(file) = file {
+                                            this.open_review(id, file, window, cx);
+                                        } else {
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                                copied.clone(),
+                                            ));
+                                            this.notify_user("Copied", cx);
+                                        }
+                                    },
+                                )),
+                            )
+                    }),
+            )
+            .children(stage.tools.iter().enumerate().map(|(index, tool)| {
+                let target = tool.target.clone();
+                let output = tool.output.clone();
+                let status = if tool.failed {
+                    "Failed"
+                } else if tool.finished {
+                    "Finished"
+                } else {
+                    "Running…"
+                };
+                ui::card(colors)
+                    .mt(px(12.))
+                    .p(px(14.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(ui::label(tool.name.clone(), colors).flex_1())
+                            .child(ui::hint(status, colors).text_color(if tool.failed {
+                                colors.coral
+                            } else {
+                                colors.muted
+                            })),
+                    )
+                    .child(ui::mono(tool.target.clone(), 12.5).mt(px(8.)))
+                    .child(
+                        ui::button(
+                            ("copy-command", index),
+                            Button::Quiet,
+                            Some("copy"),
+                            "Copy",
+                            true,
+                            colors,
+                        )
+                        .h(px(48.))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(target.clone()));
+                            this.notify_user("Copied", cx);
+                        })),
+                    )
+                    .when(!tool.output.is_empty(), |card| {
+                        card.child(ui::label("Output", colors).mt(px(8.)))
+                            .child(
+                                ui::mono(tool.output.clone(), 12.)
+                                    .mt(px(6.))
+                                    .line_height(relative(1.5)),
+                            )
+                            .child(
+                                ui::button(
+                                    ("copy-output", index),
+                                    Button::Quiet,
+                                    Some("copy"),
+                                    "Copy output",
+                                    true,
+                                    colors,
+                                )
+                                .h(px(48.))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            output.clone(),
+                                        ));
+                                        this.notify_user("Copied output", cx);
+                                    },
+                                )),
+                            )
+                    })
+                    .when(tool.output.is_empty(), |card| {
+                        card.child(ui::hint(
+                            if tool.finished {
+                                "No output was recorded."
+                            } else {
+                                "Waiting for output…"
+                            },
+                            colors,
+                        ))
+                    })
+            }))
+            .when(
+                stage.tools.is_empty() && stage.references.is_empty(),
+                |body| body.child(ui::hint("No tool calls recorded for this stage.", colors)),
+            )
+    }
+
     /// The models to offer, with a detail: the computer's once a session
     /// reported them, the sample's otherwise.
-    fn offered_models(&self) -> Vec<(String, String)> {
+    fn offered_models(&self) -> Vec<(String, String, String)> {
+        if self.paused && !self.preview_models.is_empty() {
+            return self
+                .preview_models
+                .iter()
+                .map(|model| {
+                    (
+                        model.name.clone().unwrap_or_else(|| model.id.clone()),
+                        model.provider.clone(),
+                        model.id.clone(),
+                    )
+                })
+                .collect();
+        }
         match self.store.as_ref().and_then(|store| store.live.as_ref()) {
             Some(live) => live
                 .models
                 .iter()
                 .map(|model| {
                     let name = model.name.clone().unwrap_or_else(|| model.id.clone());
-                    (name, model.provider.clone())
+                    (name, model.provider.clone(), model.id.clone())
                 })
                 .collect(),
             None => MODELS
                 .iter()
-                .map(|(name, detail)| (name.to_string(), detail.to_string()))
+                .map(|(name, detail)| (name.to_string(), detail.to_string(), name.to_string()))
                 .collect(),
         }
     }
@@ -117,12 +407,9 @@ impl PhoneApp {
             .session(id)
             .and_then(|session| session.question.as_ref())
         else {
-            return div()
-                .pb(px(8.))
-                .child(self.sheet_title("Already answered", colors, cx))
-                .child(
-                    ui::hint("This question was answered, or the run ended.", colors).mt(px(4.)),
-                );
+            return div().pb(px(8.)).child(
+                ui::hint("This question was answered, or the run ended.", colors).mt(px(4.)),
+            );
         };
         let choices = question.choices.iter().enumerate().map(|(index, choice)| {
             let on = self.choice == Some(choice.answer);
@@ -177,11 +464,6 @@ impl PhoneApp {
             .pb(px(10.))
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .child(ui::badge("Needs you", colors.wait, colors.amber, colors)),
-            )
             .child(
                 div()
                     .mt(px(10.))
@@ -265,7 +547,6 @@ impl PhoneApp {
         let session_file = details.session_file.clone();
         div()
             .pb(px(8.))
-            .child(self.sheet_title("Details", colors, cx))
             .child(ui::label("Context", colors).mt(px(8.)))
             .child(
                 div()
@@ -291,6 +572,12 @@ impl PhoneApp {
                 ),
             )
             .child(ui::hint("Auto-compaction is on.", colors).mt(px(8.)))
+            .child(ui::label("Run history", colors).mt(px(20.)).mb(px(8.)))
+            .children(session.turns.iter().enumerate().map(|(index, turn)| {
+                div().id(("details-turn", index)).mb(px(8.))
+                    .child(ui::label(format!("Turn {} · {}", index + 1, turn.at), colors))
+                    .child(self.turn_activity(id, index, turn, false, colors, cx))
+            }))
             .child(
                 ui::card(colors)
                     .mt(px(18.))
@@ -370,183 +657,200 @@ impl PhoneApp {
     }
 
     fn attach_sheet(&self, target: Target, colors: &Theme, cx: &Context<Self>) -> Div {
-        div()
-            .pb(px(8.))
-            .child(self.sheet_title("Add to the message", colors, cx))
-            .child(
-                ui::card(colors)
-                    .mt(px(8.))
-                    .child(
-                        ui::row("choose-files", true, colors)
-                            .child(icon("file", 20., colors.muted))
-                            .child(ui::row_text(
-                                "Choose files",
-                                Some("Photos, documents and logs on this phone".into()),
-                                colors,
-                            ))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.attach_files(target, cx)),
-                            ),
-                    )
-                    .child(
-                        ui::row("paste", false, colors)
-                            .child(icon("copy", 20., colors.muted))
-                            .child(ui::row_text(
-                                "Paste",
-                                Some("An image or text from the clipboard".into()),
-                                colors,
-                            ))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.paste_into(target, cx)),
-                            ),
-                    ),
-            )
+        div().pb(px(8.)).child(
+            ui::card(colors)
+                .mt(px(8.))
+                .child(
+                    ui::row("choose-files", true, colors)
+                        .child(icon("file", 20., colors.muted))
+                        .child(ui::row_text(
+                            "Choose files",
+                            Some("Images, code and UTF-8 text files".into()),
+                            colors,
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| this.attach_files(target, cx))),
+                )
+                .child(
+                    ui::row("paste", false, colors)
+                        .child(icon("copy", 20., colors.muted))
+                        .child(ui::row_text(
+                            "Paste",
+                            Some("An image or text from the clipboard".into()),
+                            colors,
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| this.paste_into(target, cx))),
+                ),
+        )
     }
 
     fn model_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
-        let prefs = self.prefs(cx);
+        let (selected_model, _) = self.model_settings(cx);
         let offered = self.offered_models();
         let unknown = offered.is_empty();
+        let catalog = self.store.as_ref().and_then(|store| store.live.as_ref());
+        let catalog_note = catalog.map(|live| {
+            if live.models_loading { "Loading models from your computer…".to_owned() }
+            else { live.models_error.clone().unwrap_or_else(|| "No models are configured yet. Sign in to a provider on the computer, then reload.".into()) }
+        });
+        let can_reload = catalog.is_some_and(|live| !live.models_loading);
+        let query = self.model_search.read(cx).text().to_lowercase();
+        let total = offered.len();
+        let offered: Vec<_> = offered
+            .into_iter()
+            .filter(|(name, provider, id)| model_matches(&query, name, provider, id))
+            .collect();
+        let count = offered.len();
+        let selected_identity = self
+            .store
+            .as_ref()
+            .and_then(|store| store.live.as_ref())
+            .and_then(|live| self.model_session().and_then(|id| live.current_model(id)))
+            .map(|model| (model.provider.clone(), model.id.clone()))
+            .or_else(|| {
+                self.model_session()
+                    .is_none()
+                    .then(|| {
+                        let prefs = self.prefs(cx);
+                        prefs.model_provider.clone().zip(prefs.model_id.clone())
+                    })
+                    .flatten()
+            });
         let models = offered
             .into_iter()
             .enumerate()
-            .map(|(index, (name, detail))| {
-                let on = prefs.model == name;
+            .map(|(index, (name, detail, model_id))| {
+                let on = selected_identity
+                    .as_ref()
+                    .map_or(selected_model == name, |(provider, id)| {
+                        *provider == detail && *id == model_id
+                    });
+                let provider = detail.clone();
                 ui::row(("model", index), index == 0, colors)
-                    .child(ui::row_text(name.clone(), Some(detail.into()), colors))
-                    .when(on, |row| row.child(icon("check", 20., colors.accent)))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.choose_model(name.clone(), cx)),
-                    )
-            });
-        let levels = THINKING.iter().enumerate().map(|(index, level)| {
-            let on = prefs.thinking == *level;
-            ui::chip(("thinking", index), None, *level, colors)
-                .when(on, |chip| {
-                    chip.bg(colors.selected)
-                        .border_color(colors.selected)
-                        .text_color(colors.text)
-                        .font_weight(FontWeight::SEMIBOLD)
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.update_prefs(cx, |prefs| prefs.thinking = level.to_string());
-                    if let Some(live) = this.store.as_mut().and_then(|store| store.live.as_mut()) {
-                        live.thinking = level.to_string();
-                    }
-                }))
-        });
-        div()
-            .pb(px(8.))
-            .child(self.sheet_title("Model", colors, cx))
-            .when(unknown, |sheet| {
-                sheet.child(
-                    ui::hint(
-                        format!(
-                            "{}'s models show once a session there has started.",
-                            self.computer_name()
-                        ),
+                    .debug_selector(move || format!("model-choice-{index}").into())
+                    .child(ui::row_text(
+                        name.clone(),
+                        Some(format!("{detail} · {model_id}").into()),
                         colors,
+                    ))
+                    .when(on, |row| row.child(icon("check", 20., colors.accent)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.choose_model(name.clone(), provider.clone(), model_id.clone(), cx);
+                        this.close_sheet(cx);
+                    }))
+            });
+        div()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .child(
+                div()
+                    .px(px(20.))
+                    .flex_none()
+                    .child(self.sheet_title("Choose model", colors, cx))
+                    .child(ui::hint(
+                        if self.model_session().is_some() {
+                            "For follow-ups in this session."
+                        } else {
+                            "Default for new sessions."
+                        },
+                        colors,
+                    ))
+                    .child(
+                        ui::card(colors).my(px(10.)).px(px(12.)).py(px(14.)).child(
+                            div()
+                                .relative()
+                                .child(crate::testing::probe("model-search"))
+                                .debug_selector(|| "model-search".into())
+                                .child(self.model_search.clone()),
+                        ),
                     )
-                    .mt(px(8.))
-                    .mx(px(4.)),
-                )
-            })
-            .when(!unknown, |sheet| {
-                sheet.child(ui::card(colors).mt(px(8.)).children(models))
-            })
-            .child(
-                ui::label("Thinking", colors)
-                    .mt(px(18.))
-                    .mb(px(8.))
-                    .mx(px(4.)),
-            )
-            .child(div().flex().flex_wrap().gap(px(8.)).children(levels))
-            .child(
-                ui::hint(
-                    format!(
-                        "Models and sign-ins come from Pi on {}.",
-                        self.computer_name()
-                    ),
-                    colors,
-                )
-                .mt(px(14.))
-                .mx(px(4.)),
+                    .child(ui::hint(format!("{count} of {total} models"), colors).mb(px(8.))),
             )
             .child(
-                ui::button("done", Button::Primary, None, "Done", false, colors)
-                    .mt(px(16.))
-                    .w_full()
-                    .on_click(cx.listener(|this, _, _, cx| this.close_sheet(cx))),
+                crate::scroll::vertical("model-list", &self.sheet_scroll)
+                    .min_h_0()
+                    .px(px(20.))
+                    .pb(px(8.))
+                    .when(unknown, |list| {
+                        list.child(ui::hint(
+                            catalog_note.unwrap_or_else(|| "No models available.".into()),
+                            colors,
+                        ))
+                        .when(can_reload, |list| {
+                            list.child(
+                                ui::button(
+                                    "reload-models",
+                                    Button::Plain,
+                                    None,
+                                    "Reload models",
+                                    false,
+                                    colors,
+                                )
+                                .my(px(12.))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        if let Some(live) = this
+                                            .store
+                                            .as_mut()
+                                            .and_then(|store| store.live.as_mut())
+                                        {
+                                            live.refresh_models();
+                                        }
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                        })
+                    })
+                    .when(!unknown && count == 0, |list| {
+                        list.child(
+                            ui::hint(
+                                "No matching models. Try a model name, provider, or ID.",
+                                colors,
+                            )
+                            .py(px(20.)),
+                        )
+                    })
+                    .when(count > 0, |list| {
+                        list.child(ui::card(colors).children(models))
+                    }),
             )
     }
 
-    fn project_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
-        let computer = self.computer_name();
-        let projects = self
+    fn thinking_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
+        let (model, selected) = self.model_settings(cx);
+        let levels = self
             .store
             .as_ref()
-            .map(|store| store.projects.clone())
-            .unwrap_or_default();
-        let live = self.store.as_ref().is_some_and(|store| !store.is_sample());
-        let field = div()
-            .id("folder")
-            .mt(px(8.))
-            .h(px(48.))
-            .px(px(14.))
-            .flex()
-            .items_center()
-            .rounded(px(12.))
-            .border_1()
-            .border_color(colors.line_strong)
-            .bg(colors.canvas)
-            .child(div().flex_1().min_w_0().child(self.folder.clone()))
-            .on_click(cx.listener(|this, _, window, cx| {
-                let focus = this.folder.read(cx).focus_handle(cx);
-                window.focus(&focus, cx);
-            }));
-        div()
-            .pb(px(8.))
-            .child(self.sheet_title(format!("Projects on {computer}"), colors, cx))
-            .when(projects.is_empty(), |sheet| {
-                sheet.child(
-                    ui::hint(
-                        "No sessions on this computer yet. Type a project folder below.",
-                        colors,
-                    )
-                    .mt(px(8.))
-                    .mx(px(4.)),
-                )
-            })
-            .when(!projects.is_empty(), |sheet| {
-                sheet.child(ui::card(colors).mt(px(8.)).children(
-                    projects.into_iter().enumerate().map(|(index, project)| {
-                        ui::row(("project", index), index == 0, colors)
-                            .child(icon("folder", 20., colors.muted))
-                            .child(ui::row_text(
-                                project.name,
-                                Some(project.folder.into()),
-                                colors,
-                            ))
-                            .when(self.project == index, |row| {
-                                row.child(icon("check", 20., colors.accent))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.project = index;
-                                this.close_sheet(cx);
-                            }))
-                    }),
-                ))
-            })
-            .when(live, |sheet| {
-                sheet
-                    .child(ui::label("Another folder", colors).mt(px(18.)).mx(px(4.)))
-                    .child(field)
-                    .child(
-                        ui::hint(format!("Its full path on {computer}."), colors)
-                            .mt(px(6.))
-                            .mx(px(4.)),
-                    )
-            })
+            .and_then(|store| store.live.as_ref())
+            .and_then(|live| self.model_session().and_then(|id| live.thinking_levels(id)))
+            .unwrap_or_else(|| THINKING.iter().map(|level| (*level).to_owned()).collect());
+        div().pb(px(8.))
+            .child(ui::hint(format!("Reasoning effort for {model}"), colors).mb(px(12.)))
+            .child(ui::card(colors).children(levels.into_iter().enumerate().map(|(index, level)| {
+                let detail = match level.as_str() {
+                    "Off" => "No extra reasoning",
+                    "Minimal" => "A little reasoning, quickest replies",
+                    "Low" => "Fast, light reasoning",
+                    "Medium" => "Balanced speed and depth",
+                    "High" => "More thorough reasoning",
+                    _ => "Deepest reasoning; takes longer",
+                };
+                ui::row(("thinking", index), index == 0, colors)
+                    .debug_selector(move || format!("thinking-choice-{index}").into())
+                    .min_h(px(56.))
+                    .child(ui::row_text(level.clone(), Some(detail.into()), colors))
+                    .when(selected == level, |row| row.child(icon("check", 20., colors.accent)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.choose_thinking(&level, cx);
+                        this.close_sheet(cx);
+                    }))
+            })))
+            .child(ui::hint("Higher effort can use more tokens and take longer. Available levels depend on the model.", colors).mt(px(12.)))
+    }
+
+    fn project_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
+        div().pb(px(8.)).child(self.project_picker(colors, cx))
     }
 
     fn more_sheet(&self, id: SessionId, colors: &Theme, cx: &Context<Self>) -> Div {
@@ -560,7 +864,7 @@ impl PhoneApp {
         let summary = session
             .turn()
             .and_then(|turn| turn.summary.as_ref())
-            .map(|summary| format!("{}\n\n{}", summary.headline, summary.body));
+            .map(|summary| summary.text());
         let reviewing = self.route() == Route::Review(id);
         let mut rows: Vec<(&'static str, &'static str, gpui::Hsla, Action)> = vec![(
             "copy",
@@ -571,9 +875,9 @@ impl PhoneApp {
         if let Some(summary) = summary {
             rows.push((
                 "copy",
-                "Copy the summary",
+                "Copy the reply",
                 colors.muted,
-                Box::new(move |this, _, cx| this.copy(summary.clone(), "the summary", cx)),
+                Box::new(move |this, _, cx| this.copy(summary.clone(), "the reply", cx)),
             ));
         }
         if !session.files.is_empty() && !reviewing {
@@ -592,40 +896,40 @@ impl PhoneApp {
                 Box::new(move |this, _, cx| this.stop(id, cx)),
             ));
         }
-        div()
-            .pb(px(8.))
-            .child(self.sheet_title(session.title.clone(), colors, cx))
-            .child(
-                ui::card(colors)
-                    .mt(px(8.))
-                    .children(rows.into_iter().enumerate().map(
-                        |(index, (glyph, text, color, action))| {
-                            ui::row(("action", index), index == 0, colors)
-                                .child(icon(glyph, 20., color))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(px(15.))
-                                        .when(glyph == "stop", |text| text.text_color(colors.coral))
-                                        .child(text),
-                                )
-                                .on_click(
-                                    cx.listener(move |this, _, window, cx| {
-                                        action(this, window, cx)
-                                    }),
-                                )
-                        },
-                    )),
-            )
+        rows.push((
+            "trash",
+            "Delete session…",
+            colors.coral,
+            Box::new(move |this, _, cx| this.open_sheet(Sheet::Delete(id), cx)),
+        ));
+        div().pb(px(8.)).child(
+            ui::card(colors)
+                .mt(px(8.))
+                .children(rows.into_iter().enumerate().map(
+                    |(index, (glyph, text, color, action))| {
+                        ui::row(("action", index), index == 0, colors)
+                            .child(icon(glyph, 20., color))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(15.))
+                                    .when(glyph == "stop", |text| text.text_color(colors.coral))
+                                    .child(text),
+                            )
+                            .on_click(
+                                cx.listener(move |this, _, window, cx| action(this, window, cx)),
+                            )
+                    },
+                )),
+        )
     }
 
-    fn models_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
+    fn models_sheet(&self, colors: &Theme, _: &Context<Self>) -> Div {
         let computer = self.computer_name();
         div()
             .pb(px(8.))
-            .child(self.sheet_title(format!("Models on {computer}"), colors, cx))
             .child(ui::card(colors).mt(px(8.)).children(self.offered_models().into_iter().enumerate().map(
-                |(index, (name, detail))| {
+                |(index, (name, detail, _))| {
                     ui::row(("known-model", index), index == 0, colors)
                         .child(icon("spark", 20., colors.muted))
                         .child(ui::row_text(name, Some(detail.into()), colors))
@@ -634,7 +938,7 @@ impl PhoneApp {
             .child(
                 ui::hint(
                     if self.live() {
-                        format!("What durable sessions on {computer} can use; they show once a session there has started. Sign-ins stay on {computer}.")
+                        format!("Models available on {computer}, loaded before starting a session. Sign-ins stay on {computer}.")
                     } else {
                         format!("A sample list. Sign-ins stay on {computer}: change them in Pi Desktop or Pi’s settings there.")
                     },
@@ -645,8 +949,7 @@ impl PhoneApp {
             )
     }
 
-    fn resources_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
-        let computer = self.computer_name();
+    fn resources_sheet(&self, colors: &Theme, _: &Context<Self>) -> Div {
         let resources = [
             ("file", "AGENTS.md", "Context · ~/repos/pi"),
             ("slash", "/fix-tests", "Prompt"),
@@ -657,7 +960,6 @@ impl PhoneApp {
         if self.live() {
             return div()
                 .pb(px(8.))
-                .child(self.sheet_title(format!("Resources on {computer}"), colors, cx))
                 .child(
                     ui::hint(
                         "Durable sessions don't load Pi's extensions, skills or prompt templates yet, so there is nothing to list.",
@@ -669,7 +971,6 @@ impl PhoneApp {
         }
         div()
             .pb(px(8.))
-            .child(self.sheet_title(format!("Resources on {computer}"), colors, cx))
             .child(
                 ui::card(colors)
                     .mt(px(8.))

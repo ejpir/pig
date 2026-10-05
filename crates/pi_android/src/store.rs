@@ -14,6 +14,7 @@ use std::{collections::HashMap, time::Duration};
 pub enum Event {
     NeedsYou(SessionId),
     Finished(SessionId),
+    Deleted(SessionId),
     /// Something went wrong, in a session or with the computer.
     Problem(Option<SessionId>, String),
 }
@@ -96,6 +97,14 @@ impl Store {
 
     pub fn session(&self, id: SessionId) -> Option<&Session> {
         self.sessions.iter().find(|session| session.id == id)
+    }
+
+    pub fn remove(&mut self, id: SessionId) {
+        if let Some(live) = &mut self.live {
+            live.remove(id);
+        }
+        self.sessions.retain(|session| session.id != id);
+        self.recency.remove(&id);
     }
 
     fn session_mut(&mut self, id: SessionId) -> Option<&mut Session> {
@@ -195,6 +204,10 @@ impl Store {
             return Vec::new();
         };
         let Some(session) = live.session(id) else {
+            if self.session(id).is_some() {
+                self.remove(id);
+                return vec![Event::Deleted(id)];
+            }
             return Vec::new();
         };
         let recency = live.recency(id);
@@ -219,17 +232,14 @@ impl Store {
         let Some(live) = &self.live else {
             return;
         };
-        let mut projects: Vec<Project> = live
-            .folders()
-            .iter()
-            .map(|path| Project::new(path, live.helper.short(path)))
-            .collect();
-        for project in std::mem::take(&mut self.projects) {
-            if !projects.iter().any(|known| known.path == project.path) {
-                projects.push(project);
+        // Keep stable indices: a background session refresh must not silently
+        // change the project selected in an unsent composer.
+        for path in live.folders() {
+            if !self.projects.iter().any(|known| known.path == path) {
+                self.projects
+                    .push(Project::new(&path, live.helper.short(&path)));
             }
         }
-        self.projects = projects;
     }
 
     /// A folder typed on the phone, offered from now on.
@@ -274,20 +284,20 @@ impl Store {
         }
     }
 
-    pub fn stop(&mut self, id: SessionId) {
+    pub fn stop(&mut self, id: SessionId) -> Result<(), String> {
         if let Some(live) = &mut self.live {
-            live.stop(id);
-            return;
+            return live.stop(id);
         }
         let Some(session) = self.session_mut(id) else {
-            return;
+            return Err("This session is no longer available.".into());
         };
         if !session.state.is_running() {
-            return;
+            return Ok(());
         }
         session.state = State::Stopped;
         session.question = None;
         session.script = None;
+        session.queued.clear();
         session.activity = "Stopped".into();
         session.finished_at = Some(clock_now());
         for stage in &mut session.turn_mut().stages {
@@ -296,36 +306,44 @@ impl Store {
                 stage.what = "Stopped".into();
             }
         }
+        Ok(())
     }
 
     /// A follow-up: queued while the session runs, started when it is idle.
-    pub fn send(&mut self, id: SessionId, prompt: String, attachments: Vec<String>) {
+    pub fn send(
+        &mut self,
+        id: SessionId,
+        prompt: crate::prompt::Prompt,
+        attachments: Vec<String>,
+    ) -> Result<(), String> {
         if let Some(live) = &mut self.live {
-            live.prompt(id, prompt);
+            live.prompt(id, prompt)?;
             self.reproject(id);
-            return;
+            return Ok(());
         }
         let Some(session) = self.session_mut(id) else {
-            return;
+            return Err("This session is no longer available.".into());
         };
         if session.state.is_running() {
-            session.queued.push(prompt);
-            return;
+            session.queued.push(prompt.label());
+            return Ok(());
         }
-        demo::begin_turn(session, prompt, attachments);
+        demo::begin_turn(session, prompt.message, attachments);
+        Ok(())
     }
 
-    pub fn unqueue(&mut self, id: SessionId, index: usize) {
+    pub fn unqueue(&mut self, id: SessionId, index: usize) -> Result<(), String> {
         if let Some(live) = &mut self.live {
-            live.unqueue(id, index);
+            live.unqueue(id, index)?;
             self.reproject(id);
-            return;
+            return Ok(());
         }
         if let Some(session) = self.session_mut(id)
             && index < session.queued.len()
         {
             session.queued.remove(index);
         }
+        Ok(())
     }
 
     fn start_queued(&mut self, id: SessionId) {
@@ -342,7 +360,7 @@ impl Store {
     pub fn start(
         &mut self,
         project: usize,
-        prompt: String,
+        prompt: crate::prompt::Prompt,
         attachments: Vec<String>,
     ) -> Result<SessionId, String> {
         if let Some(live) = &mut self.live {
@@ -356,7 +374,7 @@ impl Store {
         let id = SessionId(self.next_id);
         self.next_id += 1;
         self.sessions
-            .push(demo::new_session(id, project, prompt, attachments));
+            .push(demo::new_session(id, project, prompt.message, attachments));
         Ok(id)
     }
 }

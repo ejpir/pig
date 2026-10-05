@@ -26,6 +26,7 @@ import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowInsetsAnimation;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.view.inputmethod.BaseInputConnection;
 import android.webkit.MimeTypeMap;
 import android.view.inputmethod.EditorInfo;
@@ -39,6 +40,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A NativeActivity with what Android offers only to Java: the on-screen keyboard,
@@ -96,6 +98,8 @@ public class GpuiActivity extends NativeActivity {
     private int imeOptions = EditorInfo.IME_ACTION_NONE;
     private InputMethodManager inputMethods;
     private EditorView editor;
+    // A queued show must not resurrect an editor after navigation dismissed it.
+    private final AtomicInteger keyboardRequest = new AtomicInteger();
 
     /** File picks in progress, by request code: whether each saves. UI thread only. */
     private final Map<Integer, Boolean> picks = new HashMap<>();
@@ -112,6 +116,12 @@ public class GpuiActivity extends NativeActivity {
         // methods above. NativeActivity loads it again, which returns the same library.
         System.loadLibrary(libraryName());
         super.onCreate(savedInstanceState);
+        // GPUI owns IME avoidance using animated insets. Replacing only the
+        // visibility bits would restore Android's default adjustPan, moving
+        // the native input coordinates separately from our rendered surface.
+        getWindow().setSoftInputMode(
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
+                        | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
         Files.clearPicked(this);
         if (savedInstanceState == null) {
             openIntent(getIntent());
@@ -248,9 +258,20 @@ public class GpuiActivity extends NativeActivity {
     }
 
     public void showKeyboard() {
+        int request = keyboardRequest.incrementAndGet();
         runOnUiThread(
                 () -> {
+                    if (request != keyboardRequest.get() || !hasWindowFocus()) {
+                        return;
+                    }
+                    editor.setFocusableInTouchMode(true);
                     editor.requestFocus();
+                    // Several logical GPUI fields share this one Android View.
+                    // Android can coalesce its blur/refocus and otherwise keep
+                    // serving the retired connection from the previous field.
+                    if (currentConnection == null || !currentConnection.active) {
+                        inputMethods.restartInput(editor);
+                    }
                     // Unlike InputMethodManager.showSoftInput, this waits for the input
                     // connection the focus change starts.
                     WindowInsetsController controller = editor.getWindowInsetsController();
@@ -263,14 +284,23 @@ public class GpuiActivity extends NativeActivity {
     }
 
     public void hideKeyboard() {
+        int request = keyboardRequest.incrementAndGet();
         runOnUiThread(
                 () -> {
+                    if (request != keyboardRequest.get()) {
+                        return;
+                    }
                     WindowInsetsController controller = editor.getWindowInsetsController();
                     if (controller != null) {
                         controller.hide(WindowInsets.Type.ime());
                     } else {
                         inputMethods.hideSoftInputFromWindow(editor.getWindowToken(), 0);
                     }
+                    if (currentConnection != null) {
+                        currentConnection.retire();
+                    }
+                    editor.clearFocus();
+                    editor.setFocusable(false);
                 });
     }
 
@@ -283,7 +313,7 @@ public class GpuiActivity extends NativeActivity {
                     }
                     this.inputType = inputType;
                     this.imeOptions = imeOptions;
-                    inputMethods.restartInput(editor);
+                    restartEditor();
                 });
     }
 
@@ -309,9 +339,13 @@ public class GpuiActivity extends NativeActivity {
                     if (basis != seq) {
                         return;
                     }
+                    // Retired connections can still receive queued keyboard edits.
+                    // Invalidate them BEFORE replacing the shared text, so an old
+                    // composing word cannot be inserted into a new draft.
+                    if (restart && currentConnection != null) {
+                        currentConnection.retire();
+                    }
                     boolean changed = !text.contentEquals(mirror);
-                    int oldComposingStart = BaseInputConnection.getComposingSpanStart(mirror);
-                    int oldComposingEnd = BaseInputConnection.getComposingSpanEnd(mirror);
                     if (changed) {
                         mirror.replace(0, mirror.length(), text);
                     }
@@ -326,17 +360,24 @@ public class GpuiActivity extends NativeActivity {
                                 clamp(composingEnd, length),
                                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE | Spanned.SPAN_COMPOSING);
                     }
-                    boolean composingChanged =
-                            oldComposingStart != BaseInputConnection.getComposingSpanStart(mirror)
-                                    || oldComposingEnd
-                                            != BaseInputConnection.getComposingSpanEnd(mirror);
-                    if ((changed || composingChanged) && restart) {
-                        inputMethods.restartInput(editor);
+                    report(pushId);
+                    if (restart) {
+                        restartEditor();
                     } else {
                         updateSelection();
                     }
-                    report(pushId);
                 });
+    }
+
+    private Connection currentConnection;
+
+    private void restartEditor() {
+        if (currentConnection != null) {
+            currentConnection.retire();
+        }
+        if (editor.hasFocus()) {
+            inputMethods.restartInput(editor);
+        }
     }
 
     private static int clamp(int offset, int length) {
@@ -625,8 +666,8 @@ public class GpuiActivity extends NativeActivity {
     private final class EditorView extends View {
         EditorView() {
             super(GpuiActivity.this);
-            setFocusable(true);
-            setFocusableInTouchMode(true);
+            // Only explicitly activated GPUI fields should own an IME editor.
+            setFocusable(false);
         }
 
         @Override
@@ -644,29 +685,43 @@ public class GpuiActivity extends NativeActivity {
             info.initialSelStart = Selection.getSelectionStart(mirror);
             info.initialSelEnd = Selection.getSelectionEnd(mirror);
             info.setInitialSurroundingText(mirror);
-            return new Connection(this);
+            if (currentConnection != null) {
+                currentConnection.retire();
+            }
+            currentConnection = new Connection(this);
+            return currentConnection;
         }
     }
 
     /** Lets {@link BaseInputConnection} edit the mirror, and reports each batch. */
     private final class Connection extends BaseInputConnection {
+        private boolean active = true;
+
+        void retire() {
+            active = false;
+            batchDepth = 0;
+            edited = false;
+        }
+
         Connection(View view) {
             super(view, true);
         }
 
         @Override
         public Editable getEditable() {
-            return mirror;
+            return active ? mirror : null;
         }
 
         @Override
         public boolean beginBatchEdit() {
+            if (!active) return false;
             batchDepth++;
             return true;
         }
 
         @Override
         public boolean endBatchEdit() {
+            if (!active) return false;
             if (batchDepth > 0) {
                 batchDepth--;
             }
@@ -676,9 +731,11 @@ public class GpuiActivity extends NativeActivity {
 
         @Override
         public void closeConnection() {
+            if (!active) return;
             super.closeConnection();
             batchDepth = 0;
             flush();
+            active = false;
         }
 
         private boolean edit(boolean result) {
@@ -689,41 +746,49 @@ public class GpuiActivity extends NativeActivity {
 
         @Override
         public boolean commitText(CharSequence text, int newCursorPosition) {
+            if (!active) return false;
             return edit(super.commitText(text, newCursorPosition));
         }
 
         @Override
         public boolean setComposingText(CharSequence text, int newCursorPosition) {
+            if (!active) return false;
             return edit(super.setComposingText(text, newCursorPosition));
         }
 
         @Override
         public boolean setComposingRegion(int start, int end) {
+            if (!active) return false;
             return edit(super.setComposingRegion(start, end));
         }
 
         @Override
         public boolean finishComposingText() {
+            if (!active) return false;
             return edit(super.finishComposingText());
         }
 
         @Override
         public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+            if (!active) return false;
             return edit(super.deleteSurroundingText(beforeLength, afterLength));
         }
 
         @Override
         public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
+            if (!active) return false;
             return edit(super.deleteSurroundingTextInCodePoints(beforeLength, afterLength));
         }
 
         @Override
         public boolean setSelection(int start, int end) {
+            if (!active) return false;
             return edit(super.setSelection(start, end));
         }
 
         @Override
         public boolean performEditorAction(int action) {
+            if (!active) return false;
             if (nativeReady) {
                 nativeEditorAction(action);
             }

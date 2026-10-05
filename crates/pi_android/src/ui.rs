@@ -7,9 +7,22 @@ use crate::{
     theme::{MONO, SERIF, Theme},
 };
 use gpui::{
-    AnyElement, Div, ElementId, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
-    Stateful, Styled, Svg, div, prelude::*, px, relative, svg,
+    Animation, AnimationExt, AnyElement, Div, ElementId, FontWeight, Hsla, IntoElement,
+    ParentElement, SharedString, Stateful, Styled, Svg, div, prelude::*, px, relative, svg,
 };
+
+pub fn working_indicator(colors: &Theme) -> impl IntoElement {
+    div()
+        .size(px(10.))
+        .flex_none()
+        .rounded_full()
+        .bg(colors.read)
+        .with_animation(
+            "working-pulse",
+            Animation::new(std::time::Duration::from_millis(1400)).repeat(),
+            |dot, delta| dot.opacity(0.4 + 0.6 * (delta * std::f32::consts::PI).sin()),
+        )
+}
 
 pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
     svg()
@@ -21,8 +34,12 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
 
 /// A 48 dp round touch target around a 20 dp icon.
 pub fn tap(id: impl Into<ElementId>, glyph: &str, colors: &Theme) -> Stateful<Div> {
+    let id = id.into();
+    let probe = crate::testing::probe(format!("{id:?}"));
     div()
         .id(id)
+        .relative()
+        .child(probe)
         .size(px(48.))
         .flex_none()
         .flex()
@@ -121,6 +138,8 @@ pub fn button(
     small: bool,
     colors: &Theme,
 ) -> Stateful<Div> {
+    let id = id.into();
+    let probe = crate::testing::probe(format!("{id:?}"));
     let (background, foreground, border) = match kind {
         Button::Primary => (colors.accent, colors.on_accent, colors.accent),
         Button::Plain => (colors.chip, colors.text, colors.line),
@@ -136,6 +155,8 @@ pub fn button(
     };
     div()
         .id(id)
+        .relative()
+        .child(probe)
         .h(px(if small { 40. } else { 48. }))
         .px(px(if small { 16. } else { 20. }))
         .flex()
@@ -171,12 +192,18 @@ pub fn chip(
     text: impl Into<SharedString>,
     colors: &Theme,
 ) -> Stateful<Div> {
+    let id = id.into();
+    let probe = crate::testing::probe(format!("{id:?}"));
     div()
         .id(id)
+        .relative()
+        .child(probe)
         .h(px(32.))
         .px(px(12.))
         .flex()
         .flex_none()
+        .max_w_full()
+        .min_w_0()
         .items_center()
         .gap(px(6.))
         .rounded_full()
@@ -188,7 +215,7 @@ pub fn chip(
         .whitespace_nowrap()
         .active(|style| style.bg(colors.selected))
         .children(glyph.map(|glyph| icon(glyph, 14., colors.muted)))
-        .child(text.into())
+        .child(div().min_w_0().truncate().child(text.into()))
 }
 
 pub fn card(colors: &Theme) -> Div {
@@ -202,8 +229,12 @@ pub fn card(colors: &Theme) -> Div {
 
 /// A row in a card: at least 56 dp, separated from the one above.
 pub fn row(id: impl Into<ElementId>, first: bool, colors: &Theme) -> Stateful<Div> {
+    let id = id.into();
+    let probe = crate::testing::probe(format!("{id:?}"));
     div()
         .id(id)
+        .relative()
+        .child(probe)
         .min_h(px(56.))
         .px(px(16.))
         .py(px(8.))

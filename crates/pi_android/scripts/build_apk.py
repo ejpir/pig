@@ -25,4 +25,12 @@ PI = build_apk.App(
 )
 
 if __name__ == "__main__":
-    build_apk.main(PI, "pi.apk")
+    if "--ui-test" in sys.argv:
+        sys.argv.remove("--ui-test")
+        PI.package = "dev.pi.android.uitest"
+        PI.label = "Pi UI tests"
+        PI.debuggable = True
+        PI.cargo += ["--features", "ui-test"]
+        build_apk.main(PI, "pi-ui-test.apk")
+    else:
+        build_apk.main(PI, "pi.apk")

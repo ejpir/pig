@@ -103,8 +103,6 @@ macro_rules! with_callback {
 
 /// How far a touch may travel and still count as a tap that shows the keyboard.
 const TAP_SLOP: f64 = 8.;
-/// How far outside a text input a tap still shows the keyboard for it.
-const TAP_MARGIN: Pixels = px(16.);
 
 pub(crate) struct WindowState {
     pub handle: AnyWindowHandle,
@@ -133,6 +131,8 @@ pub(crate) struct WindowState {
     tapped: Cell<Option<Point<Pixels>>>,
     /// Whether a text input has focus.
     text_focus: Cell<bool>,
+    /// Fulfilled after drawing and synchronizing the newly focused field.
+    keyboard_requested: Cell<bool>,
     mirror: RefCell<Mirror>,
     /// A key changed the text since the last sync.
     keyed: Cell<bool>,
@@ -182,6 +182,7 @@ impl WindowState {
             tap: Cell::new(None),
             tapped: Cell::new(None),
             text_focus: Cell::new(false),
+            keyboard_requested: Cell::new(false),
             keyed: Cell::new(false),
             mirror: RefCell::default(),
             back_enabled: Cell::new(false),
@@ -372,6 +373,7 @@ impl WindowState {
                 force_render: false,
             }
         ));
+        self.settle_after_frame();
     }
 
     pub fn touch(&self, events: Vec<TouchEvent>) {
@@ -408,6 +410,7 @@ impl WindowState {
             // already reported focus; `settle` shows the keyboard for it.
             if tapped.is_some() {
                 self.tapped.set(tapped);
+                self.clock.request();
             }
         }
     }
@@ -498,21 +501,34 @@ impl WindowState {
     /// After GPUI handled a turn of events: show the keyboard for a tapped text
     /// input, and send the app's text to the keyboard when it changed.
     pub fn settle(&self) {
-        if let Some(position) = self.tapped.take()
-            && self.text_focus.get()
-        {
-            // Tapping a button while a field has focus must not bring back a
-            // keyboard the user dismissed.
-            let on_input = self
-                .with_input_handler(|handler| handler.element_bounds())
-                .flatten()
-                .is_none_or(|bounds| bounds.dilate(TAP_MARGIN).contains(&position));
-            if on_input {
-                self.java.show_keyboard();
-            }
-        }
+        // Queue the current field before asking Android to create its input
+        // connection, so a newly focused empty field never inherits old text.
         if self.text_focus.get() {
             self.sync_ime();
+        }
+    }
+
+    fn settle_after_frame(&self) {
+        // A looper turn is not necessarily a draw. Keep activation pending until
+        // GPUI has painted the new focused input handler, including taps in the
+        // composer's padding outside the glyph bounds.
+        self.settle();
+        let tapped = self.tapped.take();
+        let requested = self.keyboard_requested.take();
+        if self.text_focus.get() {
+            // Tapping a button while a field has focus must not bring back a
+            // keyboard the user dismissed.
+            let bounds = self
+                .with_input_handler(|handler| handler.element_bounds())
+                .flatten();
+            let on_input = tapped
+                .zip(bounds)
+                .is_some_and(|(position, bounds)| bounds.contains(&position));
+            // Unknown bounds are not an input hit. A newly mounted field must
+            // not inherit the tap that opened its screen or sheet.
+            if requested || on_input {
+                self.java.show_keyboard();
+            }
         }
     }
 
@@ -773,10 +789,13 @@ impl PlatformWindow for AndroidWindow {
     }
 
     fn show_soft_keyboard(&self) {
-        self.0.java.show_keyboard();
+        self.0.keyboard_requested.set(true);
+        self.0.clock.request();
     }
 
     fn hide_soft_keyboard(&self) {
+        self.0.keyboard_requested.set(false);
+        self.0.tapped.set(None);
         self.0.java.hide_keyboard();
     }
 
@@ -789,6 +808,7 @@ impl PlatformWindow for AndroidWindow {
                 self.0.mirror.borrow_mut().reset();
             }
             TextInputStateChange::FocusLost => {
+                self.0.keyboard_requested.set(false);
                 self.0.text_focus.set(false);
                 self.0.mirror.borrow_mut().reset();
                 self.0.java.hide_keyboard();

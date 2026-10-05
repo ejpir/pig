@@ -23,7 +23,11 @@ pub struct Prefs {
     /// Each computer's host key fingerprint, kept the first time the phone
     /// connects; a different one later is refused.
     pub host_keys: BTreeMap<String, String>,
+    /// Last explicitly chosen project per computer, independent of list order.
+    pub projects: BTreeMap<String, String>,
     pub model: String,
+    pub model_provider: Option<String>,
+    pub model_id: Option<String>,
     pub thinking: String,
 }
 
@@ -40,7 +44,10 @@ impl Default for Prefs {
             computer: None,
             sample: false,
             host_keys: BTreeMap::new(),
+            projects: BTreeMap::new(),
             model: "Opus 5.5".into(),
+            model_provider: None,
+            model_id: None,
             thinking: "High".into(),
         }
     }

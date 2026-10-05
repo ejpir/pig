@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Pi on an Android phone: follow sessions, answer questions, review changes and start work."
 
+[features]
+# Deterministic sample screens for the separate device-test APK.
+ui-test = []
+
 # The cdylib is what GpuiActivity loads (`libpi_android.so`); build the APK with
 # scripts/build_apk.py. The views compile on any host for tests and previews.
 [lib]
@@ -17,11 +21,14 @@ path = "examples/preview.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 async-channel.workspace = true
 gpui.workspace = true
 gpui_android = { path = "../gpui_android" }
 libc = "0.2"
 log = "0.4"
+pulldown-cmark = { version = "0.13", default-features = false }
 pi_core = { path = "../pi_core" }
 # The SSH key; the same rand as russh's ssh-key.
 rand = "0.10"
@@ -30,6 +37,7 @@ russh = { version = "0.64", default-features = false, features = ["ring", "flate
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+unicode-segmentation = "1.12"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
