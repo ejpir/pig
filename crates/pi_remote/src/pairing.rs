@@ -145,13 +145,7 @@ pub fn pair(arguments: &[String]) -> Result<()> {
         println!("{url}");
     } else {
         println!("\nPair this computer with Pi on Android\n");
-        println!(
-            "{}",
-            QrCode::new(url.as_bytes())?
-                .render::<unicode::Dense1x2>()
-                .quiet_zone(true)
-                .build()
-        );
+        println!("{}", terminal_qr(&url)?);
         println!(
             "Open Pi → Scan computer. This code expires in {} seconds.\n",
             options.lifetime
@@ -390,6 +384,17 @@ fn host_keys(port: u16) -> Result<Vec<String>> {
     Ok(fingerprints.into_iter().collect())
 }
 
+/// Unicode block glyphs normally inherit the terminal theme, which reverses
+/// the QR on a dark terminal. Explicit ANSI foreground/background colors keep
+/// the machine-readable symbol black on white on either theme.
+fn terminal_qr(value: &str) -> Result<String> {
+    let image = QrCode::new(value.as_bytes())?
+        .render::<unicode::Dense1x2>()
+        .quiet_zone(true)
+        .build();
+    Ok(format!("\x1b[30;47m{image}\x1b[0m"))
+}
+
 fn local_hosts() -> Vec<String> {
     let mut hosts = Vec::new();
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0")
@@ -624,6 +629,14 @@ mod tests {
             "\"exec '/tmp/Pi Desktop/helper' gateway phone\""
         );
         assert!(forced_command("bad\npath", &[]).is_err());
+    }
+
+    #[test]
+    fn terminal_qr_forces_standard_black_on_white_colors() {
+        let rendered = terminal_qr("pi://pair/v1#test").unwrap();
+        assert!(rendered.starts_with("\x1b[30;47m"));
+        assert!(rendered.ends_with("\x1b[0m"));
+        assert!(rendered.contains('█'));
     }
 
     #[test]

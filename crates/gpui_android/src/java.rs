@@ -588,7 +588,7 @@ pub extern "system" fn Java_dev_pi_gpui_PairScannerActivity_nativeDecodeQr<'call
         if source.len() < needed {
             return Ok(());
         }
-        let image = if stride == width {
+        let mut image = if stride == width {
             source[..width * height].to_vec()
         } else {
             let mut packed = Vec::with_capacity(width * height);
@@ -598,7 +598,7 @@ pub extern "system" fn Java_dev_pi_gpui_PairScannerActivity_nativeDecodeQr<'call
             }
             packed
         };
-        if let Some(text) = crate::qr::decode(width, height, &image) {
+        if let Some(text) = crate::qr::decode(width, height, &mut image) {
             result = JString::from_str(env, &text)?.into_raw();
         }
         Ok(())
