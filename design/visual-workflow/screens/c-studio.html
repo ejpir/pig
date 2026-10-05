@@ -1,0 +1,111 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>C · Studio</title>
+<link rel="stylesheet" href="mock.css">
+<style>
+  /* Window background: WindowBackgroundAppearance::Blurred / Mica. The OS blurs the desktop;
+     the mock stands that in with a soft two-layer gradient. */
+  body { background: linear-gradient(160deg, #1d2a3d, #0e1219); }
+  body::before { content: ""; position: fixed; inset: 0; background: linear-gradient(60deg, rgba(64,104,140,.35), rgba(120,84,140,.15)); }
+  .win { position: relative; }
+  .titlebar { background: transparent; border: 0; color: #aab3bf; }
+  .footer { background: transparent; border: 0; color: #8d97a4; }
+  .sidebar { background: rgba(13,17,22,.42); border: 0; }
+  .sb-row { color: #c7ccd3; }
+  .sb-row.sel { background: rgba(255,255,255,.08); box-shadow: inset 0 1px 0 rgba(255,255,255,.05); }
+  .main { margin: 0 10px 0 0; border-radius: 12px; background: var(--canvas); overflow: hidden; position: relative;
+    box-shadow: 0 24px 60px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.06), inset 0 1px 0 rgba(255,255,255,.05); }
+  /* Ambient state: a 2px line along the sheet's top edge, hue = run state (animated sweep). */
+  .ambient { position: absolute; left: 0; right: 0; top: 0; height: 2px; background: linear-gradient(90deg, transparent, var(--h-read)); }
+  .ambient::after { content: ""; position: absolute; left: 0; width: 55%; height: 2px; background: linear-gradient(90deg, var(--h-read), transparent); }
+
+  .tabs { border: 0; height: 56px; align-items: center; }
+  .seg { display: flex; gap: 2px; padding: 3px; border-radius: 9px; background: var(--deep); box-shadow: inset 0 1px 2px rgba(0,0,0,.35); }
+  .seg span { height: 28px; padding: 0 14px; border-radius: 7px; display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .seg span.on { background: var(--raised); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.06); }
+  .seg .n { font-size: 11px; padding: 0 5px; border-radius: 8px; background: color-mix(in srgb, var(--h-edit) 22%, transparent); color: var(--h-edit); }
+
+  .scroll { flex: 1; padding: 6px 32px 0; overflow: hidden; }
+  .measure { max-width: 940px; }
+  .you { margin-left: auto; max-width: 620px; padding: 12px 16px; border-radius: 14px 14px 4px 14px; font-size: 14px; line-height: 21px;
+    background: linear-gradient(180deg, #2a3546, #232d3b); box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 4px 14px rgba(0,0,0,.25); color: var(--secondary); }
+  .meta { font-size: 11px; color: var(--muted); text-align: right; margin: 0 4px 6px; }
+
+  .acts { display: flex; gap: 8px; margin: 22px 0 18px; }
+  .act { display: flex; align-items: center; gap: 9px; height: 40px; padding: 0 12px 0 6px; border-radius: 10px; background: var(--panel);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 0 0 1px var(--line); font-size: 12.5px; color: var(--secondary); }
+  .tile { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; color: #fff;
+    background: linear-gradient(160deg, color-mix(in srgb, var(--hue) 100%, #fff 18%), color-mix(in srgb, var(--hue) 70%, #000)); box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 2px 6px color-mix(in srgb, var(--hue) 35%, transparent); }
+  .tile .ico { width: 15px; height: 15px; }
+  .act .mono { font-size: 11.5px; color: var(--muted); }
+
+  h2 { font-family: var(--serif); font-style: italic; font-weight: 400; font-size: 30px; letter-spacing: -.01em; color: #f3efe9; margin-bottom: 8px; }
+  .lede { font-size: 14.5px; line-height: 23px; color: var(--secondary); max-width: 720px; }
+
+  .ftiles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 18px; }
+  .ft { position: relative; border-radius: 12px; padding: 14px 16px; background: linear-gradient(180deg, #212a36, #1b222c);
+    box-shadow: 0 0 0 1px var(--line), inset 0 1px 0 rgba(255,255,255,.05), 0 8px 24px rgba(0,0,0,.22); display: flex; gap: 14px; align-items: center; }
+  .badge { width: 38px; height: 44px; border-radius: 6px 12px 6px 6px; background: linear-gradient(180deg, #3d6fb0, #2b5591); display: grid; place-items: end center; padding-bottom: 6px;
+    font-family: var(--mono); font-size: 11px; color: #e4eefb; box-shadow: inset 0 1px 0 rgba(255,255,255,.25); }
+  .ft .nm { font-weight: 600; font-size: 14px; color: var(--text); } .ft .pth { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .spark { display: flex; align-items: end; gap: 2px; height: 22px; }
+  .spark i { width: 4px; border-radius: 1px; background: var(--green); display: block; } .spark i.r { background: var(--coral); }
+
+  .run { margin-top: 16px; border-radius: 12px; overflow: hidden; background: #121821; box-shadow: 0 0 0 1px color-mix(in srgb, var(--h-read) 35%, var(--line)), 0 10px 30px color-mix(in srgb, var(--h-read) 12%, transparent); }
+  .run .hd { height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 14px; background: linear-gradient(90deg, color-mix(in srgb, var(--h-read) 16%, transparent), transparent); }
+  .run .hd .mono { font-size: 12.5px; color: var(--text); }
+  .run .out { padding: 8px 16px 12px; font-family: var(--mono); font-size: 12px; line-height: 21px; color: var(--plain); }
+  .spin { width: 14px; height: 14px; border-radius: 7px; border: 2px solid color-mix(in srgb, var(--h-read) 25%, transparent); border-top-color: var(--h-read); }
+
+  .dock { margin: 14px 24px 18px; padding: 1px; border-radius: 14px; background: linear-gradient(120deg, color-mix(in srgb, var(--h-read) 85%, transparent), rgba(255,255,255,.08));
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--h-read) 10%, transparent), 0 18px 40px rgba(0,0,0,.45); }
+  .dock .in { border-radius: 13px; background: linear-gradient(180deg, #232c38, #1d252f); padding: 10px 12px 10px 16px; }
+  .dock .top { display: flex; align-items: center; gap: 10px; height: 26px; font-size: 12px; color: var(--muted); }
+  .dock .top b { color: var(--h-read); font-weight: 600; }
+  .dock .txt { font-size: 14.5px; color: var(--text); padding: 8px 0 12px; }
+  .dock .tools { display: flex; align-items: center; gap: 8px; }
+  .gbtn { height: 32px; padding: 0 16px; border-radius: 8px; display: inline-flex; align-items: center; gap: 6px; font-weight: 600; color: #0e141b;
+    background: linear-gradient(180deg, #a9c8e2, #7fa6c9); box-shadow: inset 0 1px 0 rgba(255,255,255,.45), 0 2px 8px rgba(127,166,201,.35); }
+  .gbtn.ghost { background: rgba(255,255,255,.05); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); font-weight: 400; }
+  .qrow { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; margin: 0 -4px 6px; border-radius: 8px; background: color-mix(in srgb, var(--h-wait) 9%, transparent); color: var(--secondary); font-size: 12.5px; }
+  .qrow b { color: var(--h-wait); font-size: 11px; letter-spacing: .05em; }
+</style></head>
+<body class="dark" data-status="working" data-footer="Working · 2 observed edits · $0.41 · 31% context">
+<main class="main">
+  <div class="ambient"></div>
+  <div class="tabs"><div class="seg"><span class="on">Thread</span><span>Changes <span class="n">2</span></span></div><span class="sp"></span><span class="branch" style="background:var(--deep)">pi / main</span></div>
+  <div class="scroll"><div class="measure">
+    <div class="meta">You · 10:24</div>
+    <div class="you">OpenCode returns empty thinking signatures. Accept them there, keep Anthropic strict, and add a regression test without a live API key.</div>
+
+    <div class="acts">
+      <div class="act" style="--hue:#3d8fbd"><span class="tile"><i data-i="eye" data-w="2"></i></span>Read <span class="mono">openai-completions.ts</span></div>
+      <div class="act" style="--hue:#7c68c8"><span class="tile"><i data-i="search" data-w="2"></i></span>Grep <span class="mono">"signature"</span></div>
+      <div class="act" style="--hue:#c47a2c"><span class="tile"><i data-i="pencil" data-w="2"></i></span>Edited <span class="mono">2 files</span></div>
+      <div class="act" style="--hue:#4b6f95"><span class="tile"><i data-i="term" data-w="2"></i></span>Ran <span class="mono">npm run check</span></div>
+    </div>
+
+    <h2>One narrow fix. One regression test.</h2>
+    <p class="lede">Empty signatures are now accepted for OpenCode models only; the Anthropic path still throws. The test mocks the provider, so no API key is needed.</p>
+
+    <div class="ftiles">
+      <div class="ft"><div class="badge">TS</div><div class="grow"><div class="nm">openai-completions.ts</div><div class="pth">packages/ai/src/providers</div></div>
+        <div class="col" style="align-items:end;gap:6px"><span class="mono" style="font-size:12px"><span class="add">+3</span> <span class="rem">−1</span></span><span class="spark"><i style="height:30%"></i><i style="height:60%"></i><i class="r" style="height:40%"></i><i style="height:20%"></i></span></div><i data-i="chev-r" class="muted"></i></div>
+      <div class="ft"><div class="badge" style="background:linear-gradient(180deg,#3f8a64,#2c6b4b)">TS</div><div class="grow"><div class="nm">openai-completions.test.ts</div><div class="pth">packages/ai/test · new cases</div></div>
+        <div class="col" style="align-items:end;gap:6px"><span class="mono add" style="font-size:12px">+24</span><span class="spark"><i style="height:40%"></i><i style="height:100%"></i><i style="height:80%"></i><i style="height:90%"></i><i style="height:50%"></i></span></div><i data-i="chev-r" class="muted"></i></div>
+    </div>
+
+    <div class="run">
+      <div class="hd"><span class="spin"></span><span class="mono">npm run check</span><span class="muted" style="font-size:12px">2 of 3 · 0:42</span><span class="grow"></span><i data-i="expand" class="muted"></i></div>
+      <div class="out"><div><span class="add">✓</span> TypeScript</div><div><span class="add">✓</span> Provider regression tests <span class="muted">· 12 passed</span></div><div class="muted">  Checking the remaining workspace packages…</div></div>
+    </div>
+  </div></div>
+
+  <div class="dock"><div class="in">
+    <div class="qrow"><b>NEXT</b>Also cover the streaming path with a mock provider.<span class="grow"></span><i data-i="x" class="muted"></i></div>
+    <div class="top"><span class="spin" style="width:10px;height:10px"></span><b>Working</b>Checking the workspace · 0:42<span class="grow"></span><span class="gbtn ghost" style="height:26px;padding:0 10px;font-size:12px"><i data-i="stop"></i>Stop</span></div>
+    <div class="txt">Add a release note once checks finish</div>
+    <div class="tools"><i data-i="clip" class="muted"></i><span class="chip"><i data-i="spark"></i>Claude Opus</span><span class="chip" style="color:var(--amber)">● High</span><span class="grow"></span><span class="gbtn ghost">Steer now</span><span class="gbtn">Queue follow-up ↵</span></div>
+  </div></div>
+</main>
+<script src="shell.js"></script><script src="icons.js"></script>
+</body></html>

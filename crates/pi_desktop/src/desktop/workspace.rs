@@ -12,7 +12,11 @@ pub use close::CloseTarget;
 pub struct SessionId(pub u64);
 
 /// The saved-session row for an open session, once pi has named its file.
-fn saved_session(model: &Session) -> Option<SavedSession> {
+fn saved_session(controller: &SessionController) -> Option<SavedSession> {
+    if controller.is_remote() {
+        return None;
+    }
+    let model = controller.model();
     let path = model.state.session_file.clone()?;
     Some(SavedSession {
         id: model
@@ -82,6 +86,22 @@ impl WorkspaceController {
     pub fn is_demo(&self) -> bool {
         self.demo
     }
+    pub fn selected_is_remote(&self, cx: &App) -> bool {
+        let Some(project) = &self.selected_project else {
+            return false;
+        };
+        if project.to_string_lossy().starts_with("ssh://") {
+            return true;
+        }
+        self.tabs.iter().any(|tab| {
+            tab.controller
+                .read(cx)
+                .remote_target()
+                .is_some_and(|target| target.identity() == *project)
+        }) || crate::prefs::remote_sessions(cx)
+            .iter()
+            .any(|target| target.identity() == *project)
+    }
     pub fn active_tab_opt(&self) -> Option<&SessionTab> {
         self.tab(self.active)
     }
@@ -95,6 +115,59 @@ impl WorkspaceController {
         &mut self,
         cwd: PathBuf,
         saved: Option<SavedSession>,
+        cx: &mut Context<Self>,
+    ) -> SessionId {
+        self.open_with(cwd, saved, None, cx)
+    }
+    pub fn forget_remote_session(
+        &mut self,
+        target: &pi_core::ssh::SshTarget,
+        cx: &mut Context<Self>,
+    ) {
+        if self.demo {
+            return;
+        }
+        crate::prefs::forget_remote_session(cx, target);
+        cx.emit(WorkspaceEvent::Navigation);
+    }
+    pub fn open_remote(
+        &mut self,
+        target: pi_core::ssh::SshTarget,
+        cx: &mut Context<Self>,
+    ) -> SessionId {
+        if self.demo {
+            if let Some(controller) = self.active_tab_opt().map(|tab| tab.controller.clone()) {
+                controller.update(cx, |controller, cx| {
+                    controller.notice("SSH is disabled in the offline demo.", cx)
+                });
+            }
+            return self.active;
+        }
+        if let Some(id) = self.tabs.iter().find_map(|tab| {
+            tab.controller
+                .read(cx)
+                .remote_target()
+                .filter(|remote| {
+                    remote.host == target.host
+                        && remote.key == target.key
+                        && remote.cwd == target.cwd
+                        && remote.backend == target.backend
+                })
+                .map(|_| tab.id)
+        }) {
+            self.select(id, cx);
+            if let Some(controller) = self.tab(id).map(|tab| tab.controller.clone()) {
+                controller.update(cx, |controller, cx| controller.connect_remote(cx));
+            }
+            return id;
+        }
+        self.open_with(target.identity(), None, Some(target), cx)
+    }
+    fn open_with(
+        &mut self,
+        cwd: PathBuf,
+        saved: Option<SavedSession>,
+        remote: Option<pi_core::ssh::SshTarget>,
         cx: &mut Context<Self>,
     ) -> SessionId {
         self.removed_projects.remove(&cwd);
@@ -112,11 +185,16 @@ impl WorkspaceController {
         let first = self.next_id == 0;
         let id = SessionId(self.next_id);
         self.next_id += 1;
-        let controller = cx.new(|cx| SessionController::new(cwd, saved, self.demo, first, cx));
+        let controller = cx.new(|cx| match remote {
+            Some(target) => SessionController::new_remote(target, cx),
+            None => SessionController::new(cwd, saved, self.demo, first, cx),
+        });
         let draft = if self.demo
             && first
-            && controller.read(cx).model().state.session_id.as_deref() != Some("demo-workspace")
-        {
+            && !matches!(
+                controller.read(cx).model().state.session_id.as_deref(),
+                Some("demo-workspace" | "demo-workbench")
+            ) {
             "Run the qwen provider tests too once check passes"
         } else {
             ""
@@ -243,10 +321,11 @@ impl WorkspaceController {
             .tabs
             .iter()
             .map(|tab| {
-                let model = tab.controller.read(cx).model();
+                let controller = tab.controller.read(cx);
                 crate::prefs::OpenSession {
-                    cwd: model.cwd.clone(),
-                    saved: saved_session(model),
+                    cwd: controller.model().cwd.clone(),
+                    saved: saved_session(controller),
+                    remote: controller.remote_target().cloned(),
                 }
             })
             .collect();

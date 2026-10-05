@@ -11,6 +11,8 @@ pub enum InspectorPage {
     Changes(Entity<super::changes::ChangesView>),
     Context(Entity<super::context::ContextView>),
     Files(Entity<super::files::FilesView>),
+    /// Where the open file's observed edits came from.
+    FileDetails(Entity<super::files::FilesView>),
     Diagnostics(Entity<super::diagnostics::DiagnosticsView>),
 }
 pub struct InspectorView {
@@ -20,6 +22,8 @@ pub struct InspectorView {
     page_subscription: Option<gpui::Subscription>,
     controller: Entity<SessionController>,
     scroll: ScrollHandle,
+    /// Open disclosures; kept while the view lives.
+    open: std::collections::HashSet<&'static str>,
     _subscription: gpui::Subscription,
     #[cfg(test)]
     pub renders: usize,
@@ -38,6 +42,7 @@ impl InspectorView {
             page_subscription: None,
             controller,
             scroll: ScrollHandle::new(),
+            open: Default::default(),
             _subscription: subscription,
             #[cfg(test)]
             renders: 0,
@@ -109,7 +114,9 @@ impl InspectorView {
             InspectorPage::Tree(view) => Some(cx.observe(view, |_, _, cx| cx.notify())),
             InspectorPage::Changes(view) => Some(cx.observe(view, |_, _, cx| cx.notify())),
             InspectorPage::Context(view) => Some(cx.observe(view, |_, _, cx| cx.notify())),
-            InspectorPage::Files(view) => Some(cx.observe(view, |_, _, cx| cx.notify())),
+            InspectorPage::Files(view) | InspectorPage::FileDetails(view) => {
+                Some(cx.observe(view, |_, _, cx| cx.notify()))
+            }
             InspectorPage::Diagnostics(view) => Some(cx.observe(view, |_, _, cx| cx.notify())),
         };
         self.page = page;
@@ -202,29 +209,182 @@ impl InspectorView {
             .child(divider(theme).mt(px(8.)))
             .children(self.prompt_mentions(cx, theme));
         if new {
-            panel.child(self.before_start(cx, theme))
-        } else {
-            panel
-                .child(self.history(cx, theme))
-                .child(divider(theme))
-                .child(context(model, theme))
-                .child(divider(theme))
-                .child(self.active_tools(cx, theme))
-                .child(divider(theme))
-                .child(usage(model, theme))
-                .child(self.session_file(cx, theme))
-                .when(!model.extension_status.is_empty(), |panel| {
-                    panel
-                        .child(divider(theme))
-                        .child(section("EXTENSION STATUS", "", theme).mt(px(10.)))
-                        .children(
-                            model
-                                .extension_status
-                                .iter()
-                                .map(|(key, value)| note(format!("{key} · {value}"), theme)),
-                        )
-                })
+            return panel.child(self.before_start(cx, theme));
         }
+        // What matters now first; detail and technical explanation on request.
+        let records = controller.jj().records.len();
+        let recording = controller.jj().project.is_some();
+        let tools = model.state.active_tools.as_ref().map(|tools| tools.len());
+        let extensions = model.extension_status.len();
+        panel
+            .child(context(model, theme))
+            .child(
+                pair(
+                    "Session cost",
+                    model
+                        .stats
+                        .cost
+                        .map(|c| format!("${c:.2}"))
+                        .unwrap_or_else(|| "—".into()),
+                    theme,
+                )
+                .mt(px(10.)),
+            )
+            .child(pair(
+                "Observed edits",
+                controller.change_count().to_string(),
+                theme,
+            ))
+            .child(divider(theme).mb(px(4.)))
+            .child(
+                self.disclosure(
+                    "usage",
+                    "Usage details",
+                    None,
+                    "inspector-usage",
+                    self.open
+                        .contains("usage")
+                        .then(|| usage_rows(model, theme).into_any_element()),
+                    cx,
+                    theme,
+                ),
+            )
+            .child(
+                self.disclosure(
+                    "tools",
+                    "Tools",
+                    Some(tools.map_or("Not reported".into(), |n| format!("{n} active"))),
+                    "inspector-active-tools",
+                    self.open
+                        .contains("tools")
+                        .then(|| self.active_tools(cx, theme).into_any_element()),
+                    cx,
+                    theme,
+                ),
+            )
+            .child(
+                self.disclosure(
+                    "history",
+                    "File history",
+                    Some(if records > 0 {
+                        format!(
+                            "{records} recorded turn{}",
+                            if records == 1 { "" } else { "s" }
+                        )
+                    } else if recording {
+                        "jj · nothing yet".into()
+                    } else {
+                        "Not recording".into()
+                    }),
+                    "inspector-file-history",
+                    self.open
+                        .contains("history")
+                        .then(|| self.history(cx, theme).into_any_element()),
+                    cx,
+                    theme,
+                ),
+            )
+            // Safety stays visible: an unavailable undo is never implied.
+            .when(records == 0, |panel| {
+                panel.child(
+                    note("No snapshots; past edits cannot be restored.", theme)
+                        .debug_selector(|| "inspector-no-snapshots".into())
+                        .pl(px(20.))
+                        .mb(px(4.)),
+                )
+            })
+            .child(divider(theme).mb(px(4.)))
+            .child(
+                self.disclosure(
+                    "file",
+                    "Session file",
+                    None,
+                    "inspector-session-file",
+                    self.open
+                        .contains("file")
+                        .then(|| self.session_file(cx, theme).into_any_element()),
+                    cx,
+                    theme,
+                ),
+            )
+            .when(extensions > 0, |panel| {
+                panel.child(self.disclosure(
+                    "extensions",
+                    "Extensions",
+                    Some(format!("{extensions} status")),
+                    "inspector-extensions",
+                    self.open.contains("extensions").then(|| {
+                        v_flex()
+                            .children(
+                                model
+                                    .extension_status
+                                    .iter()
+                                    .map(|(key, value)| note(format!("{key} · {value}"), theme)),
+                            )
+                            .into_any_element()
+                    }),
+                    cx,
+                    theme,
+                ))
+            })
+    }
+
+    /// A row that opens to show one kind of detail; `body` is given when open.
+    #[allow(clippy::too_many_arguments)]
+    fn disclosure(
+        &self,
+        key: &'static str,
+        title: &'static str,
+        value: Option<String>,
+        selector: &'static str,
+        body: Option<AnyElement>,
+        cx: &Context<Self>,
+        theme: Theme,
+    ) -> Div {
+        let open = body.is_some();
+        v_flex()
+            .debug_selector(move || selector.into())
+            .child(
+                h_flex()
+                    .id(SharedString::from(format!("{selector}-toggle")))
+                    .debug_selector(move || format!("{selector}-toggle"))
+                    .role(gpui::Role::Button)
+                    .aria_expanded(open)
+                    .h(px(34.))
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .child(
+                        icon(
+                            if open {
+                                "chevron_down"
+                            } else {
+                                "chevron_right"
+                            },
+                            theme.muted,
+                        )
+                        .size(px(12.)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(13.))
+                            .text_color(theme.text)
+                            .child(title),
+                    )
+                    .children(value.map(|value| {
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.muted)
+                            .child(value)
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.open.remove(key) {
+                            this.open.insert(key);
+                        }
+                        cx.notify();
+                    })),
+            )
+            .children(body.map(|body| div().pl(px(20.)).pb(px(8.)).child(body)))
     }
 
     fn before_start(&self, cx: &Context<Self>, theme: Theme) -> Div {
@@ -264,7 +424,23 @@ impl InspectorView {
                 theme,
             ))
             .child(divider(theme))
-            .child(self.active_tools(cx, theme))
+            .child(
+                v_flex()
+                    .debug_selector(|| "inspector-active-tools".into())
+                    .child(
+                        section(
+                            "Tools",
+                            &model
+                                .state
+                                .active_tools
+                                .as_ref()
+                                .map_or("not reported".into(), |t| format!("{} active", t.len())),
+                            theme,
+                        )
+                        .mt(px(12.)),
+                    )
+                    .child(self.active_tools(cx, theme)),
+            )
             .child(divider(theme))
             .child(section("PROJECT", "", theme).mt(px(12.)))
             .child(
@@ -288,12 +464,7 @@ impl InspectorView {
 
     fn active_tools(&self, cx: &Context<Self>, theme: Theme) -> Div {
         let tools = self.controller.read(cx).model().state.active_tools.as_ref();
-        let hint = tools
-            .map(|tools| format!("{} active", tools.len()))
-            .unwrap_or_else(|| "not reported".into());
-        let mut panel = v_flex()
-            .debug_selector(|| "inspector-active-tools".into())
-            .child(section("TOOLS", &hint, theme).mt(px(12.)));
+        let mut panel = v_flex().debug_selector(|| "inspector-active-tools-list".into());
         let Some(tools) = tools else {
             return panel.child(
                 note("Pi has not reported its active tools.", theme)
@@ -348,20 +519,9 @@ impl InspectorView {
         let enabled = controller.jj().project.is_some() && controller.jj_idle();
         let mut body = v_flex()
             .debug_selector(|| "inspector-history".into())
-            .child(
-                section(
-                    "HISTORY",
-                    if records.is_empty() {
-                        "not recorded"
-                    } else if controller.is_demo() {
-                        "sample · jj"
-                    } else {
-                        "jj"
-                    },
-                    theme,
-                )
-                .mt(px(16.)),
-            );
+            .when(controller.is_demo() && !records.is_empty(), |body| {
+                body.child(note("Sample jj history", theme))
+            });
         if records.is_empty() {
             body = body.child(note(if controller.jj().project.is_some() {
                 "No recorded turns for this session. jj records new turns; it cannot reconstruct older edits."
@@ -475,33 +635,25 @@ impl InspectorView {
             .state
             .session_file
             .as_deref();
-        v_flex()
-            .child(divider(theme))
-            .child(section("SESSION FILE", "", theme).mt(px(12.)))
-            .child(
-                h_flex()
-                    .h(px(24.))
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .font_family(MONO)
-                            .text_size(px(10.5))
-                            .truncate()
-                            .child(
-                                path.map(short_path)
-                                    .unwrap_or_else(|| "No path reported yet".into()),
-                            ),
-                    )
-                    .when(path.is_some(), |v| {
-                        v.child(
-                            icon_button(
-                                "copy-session-path",
-                                "copy",
-                                "Copy session file path",
-                                theme,
-                            )
+        v_flex().child(
+            h_flex()
+                .h(px(24.))
+                .gap(px(4.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(MONO)
+                        .text_size(px(10.5))
+                        .truncate()
+                        .child(
+                            path.map(short_path)
+                                .unwrap_or_else(|| "No path reported yet".into()),
+                        ),
+                )
+                .when(path.is_some(), |v| {
+                    v.child(
+                        icon_button("copy-session-path", "copy", "Copy session file path", theme)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(path) =
                                     &this.controller.read(cx).model().state.session_file
@@ -509,9 +661,9 @@ impl InspectorView {
                                     cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
                                 }
                             })),
-                        )
-                    }),
-            )
+                    )
+                }),
+        )
     }
 }
 
@@ -535,27 +687,22 @@ fn metadata_pair(name: &str, value: &str, theme: Theme) -> Div {
 fn context(model: &Session, theme: Theme) -> Div {
     let usage = model.stats.context_usage.as_ref();
     let percent = usage.and_then(|u| u.percent);
+    let compaction = if model.state.auto_compaction_enabled {
+        "auto-compaction on"
+    } else {
+        "auto-compaction off"
+    };
     v_flex()
-        .child(
-            section(
-                "CONTEXT",
-                if model.state.auto_compaction_enabled {
-                    "auto-compact on"
-                } else {
-                    "auto-compact off"
-                },
-                theme,
-            )
-            .mt(px(12.)),
-        )
+        .debug_selector(|| "inspector-context".into())
+        .child(label("Context", theme).mt(px(14.)))
         .child(
             h_flex()
-                .h(px(30.))
+                .h(px(36.))
                 .gap(px(7.))
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(20.))
+                        .text_size(px(26.))
                         .child(
                             usage
                                 .and_then(|u| u.tokens)
@@ -564,27 +711,27 @@ fn context(model: &Session, theme: Theme) -> Div {
                         ),
                 )
                 .child(
-                    div().text_color(theme.muted).child(
+                    div().text_size(px(12.5)).text_color(theme.muted).child(
                         usage
                             .map(|u| format!("/ {} tokens", count(u.context_window)))
                             .unwrap_or_else(|| "Not reported yet".into()),
                     ),
                 ),
         )
-        .child(div().h(px(6.)).rounded(px(3.)).bg(theme.track).child(
+        .child(div().h(px(5.)).rounded(px(3.)).bg(theme.track).child(
             div().h_full().rounded(px(3.)).bg(theme.accent).w(relative(
                 (percent.unwrap_or(0.).clamp(0., 100.) / 100.) as f32,
             )),
         ))
         .child(
             div()
-                .mt(px(4.))
-                .text_size(px(11.))
-                .text_color(theme.faint)
+                .mt(px(6.))
+                .text_size(px(12.))
+                .text_color(theme.muted)
                 .child(
                     percent
-                        .map(|p| format!("{p:.0}% of window"))
-                        .unwrap_or_else(|| "Waiting for usage from Pi".into()),
+                        .map(|p| format!("{p:.0}% used · {compaction}"))
+                        .unwrap_or_else(|| format!("Waiting for usage from Pi · {compaction}")),
                 ),
         )
 }
@@ -633,11 +780,9 @@ fn cache_reuse(tokens: &pi_core::protocol::Tokens) -> Option<f64> {
     let total = tokens.input as f64 + tokens.cache_read as f64 + tokens.cache_write as f64;
     (total > 0.).then(|| 100. * tokens.cache_read as f64 / total)
 }
-pub(super) fn usage(model: &Session, theme: Theme) -> Div {
+fn usage_rows(model: &Session, theme: Theme) -> Div {
     let tokens = &model.stats.tokens;
     v_flex()
-        .debug_selector(|| "inspector-usage".into())
-        .child(section("USAGE", "this session", theme).mt(px(12.)))
         .child(pair("Input", count(tokens.input), theme))
         .child(pair("Output", count(tokens.output), theme))
         .child(pair("Cache read", count(tokens.cache_read), theme))
@@ -678,6 +823,7 @@ impl Render for InspectorView {
             InspectorPage::Changes(view) => view.update(cx, |v, cx| v.inspector(window, cx)),
             InspectorPage::Context(view) => view.update(cx, |v, cx| v.inspector(window, cx)),
             InspectorPage::Files(view) => view.update(cx, |v, cx| v.inspector(window, cx)),
+            InspectorPage::FileDetails(view) => view.update(cx, |v, cx| v.details(window, cx)),
             InspectorPage::Diagnostics(view) => view.into_any_element(),
         };
         div()

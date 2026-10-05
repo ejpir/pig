@@ -26,6 +26,7 @@ actions!(
     [
         Submit,
         FollowUp,
+        Steer,
         Stop,
         NewSession,
         OpenFolder,
@@ -40,6 +41,7 @@ actions!(
         NextChoice,
         Complete,
         ToggleTerminal,
+        ToggleFollow,
         Quit
     ]
 );
@@ -52,6 +54,7 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", Submit, Some("Desktop")),
         KeyBinding::new("alt-enter", FollowUp, Some("Desktop")),
+        KeyBinding::new("secondary-enter", Steer, Some("Desktop")),
         KeyBinding::new("escape", Stop, Some("Desktop")),
         KeyBinding::new("secondary-n", NewSession, Some("Desktop")),
         KeyBinding::new("secondary-o", OpenFolder, Some("Desktop")),
@@ -68,6 +71,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-`", ToggleTerminal, Some("Desktop")),
         // VS Code's panel shortcut; backtick is a dead key on many layouts.
         KeyBinding::new("secondary-j", ToggleTerminal, Some("Desktop")),
+        KeyBinding::new("ctrl-shift-f", ToggleFollow, Some("Desktop")),
         KeyBinding::new("secondary-q", Quit, None),
     ]);
     new_session::init(cx);
@@ -80,8 +84,8 @@ enum Pane {
     Inspector,
 }
 const HEADER_HEIGHT: Pixels = px(36.);
-const SIDEBAR_WIDTH: Pixels = px(208.);
-const INSPECTOR_WIDTH: Pixels = px(328.);
+const SIDEBAR_WIDTH: Pixels = px(216.);
+const INSPECTOR_WIDTH: Pixels = px(320.);
 #[derive(Clone, Copy, PartialEq)]
 struct Layout {
     show_sidebar: bool,
@@ -105,7 +109,12 @@ pub struct Desktop {
     welcome: Entity<welcome::WelcomeView>,
     layout: Layout,
     resizing: Option<Pane>,
+    /// The inspector drawer on narrow windows takes focus when opened, so
+    /// Escape closes it; closing returns focus to the work.
+    drawer_focus: gpui::FocusHandle,
+    focus_drawer: bool,
     focus_selected: bool,
+    focus_view: bool,
     new_session_requested: bool,
     /// App views, made when first shown.
     sessions_view: Option<Entity<app_views::SessionsView>>,
@@ -120,8 +129,31 @@ pub struct Desktop {
 impl Desktop {
     /// Opens `sessions`, a folder with an optional saved session each, and shows
     /// the one at `active`.
+    #[cfg(test)]
     pub fn new(
         sessions: Vec<(PathBuf, Option<SavedSession>)>,
+        active: usize,
+        demo: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_targets(
+            sessions
+                .into_iter()
+                .map(|(cwd, saved)| crate::prefs::OpenSession {
+                    cwd,
+                    saved,
+                    remote: None,
+                })
+                .collect(),
+            active,
+            demo,
+            window,
+            cx,
+        )
+    }
+    pub fn new_with_targets(
+        sessions: Vec<crate::prefs::OpenSession>,
         active: usize,
         demo: bool,
         window: &mut Window,
@@ -131,17 +163,20 @@ impl Desktop {
         workspace.update(cx, |workspace, cx| {
             let ids: Vec<_> = sessions
                 .into_iter()
-                .map(|(cwd, saved)| workspace.open(cwd, saved, cx))
+                .map(|session| match session.remote {
+                    Some(target) => workspace.open_remote(target, cx),
+                    None => workspace.open(session.cwd, session.saved, cx),
+                })
                 .collect();
             if let Some(id) = ids.get(active) {
                 workspace.select(*id, cx);
             }
         });
         let sidebar = cx.new(|cx| SidebarView::new(workspace.clone(), cx));
-        let search = sidebar.read(cx).search.clone();
+        let search = cx.new(|cx| TextInput::new("Search sessions and actions…", cx).compact());
         let layout = Layout {
             show_sidebar: true,
-            inspector: true,
+            inspector: false,
             inspector_requested: false,
             sidebar_width: SIDEBAR_WIDTH,
             inspector_width: INSPECTOR_WIDTH,
@@ -161,16 +196,10 @@ impl Desktop {
                     this.focus_selected = true;
                     cx.notify();
                 }
-                if matches!(event, WorkspaceEvent::View | WorkspaceEvent::Selection(_)) {
-                    // The header's search filters the app view shown, else the sidebar.
-                    let placeholder = match this.workspace.read(cx).view {
-                        Some(app_views::AppView::Settings) => "Search settings",
-                        Some(app_views::AppView::Models) => "Search models",
-                        Some(app_views::AppView::Resources) => "Search resources",
-                        _ => "Search sessions",
-                    };
-                    let search = this.sidebar.read(cx).search.clone();
-                    search.update(cx, |search, cx| search.set_placeholder(placeholder, cx));
+                // An app view replaces the focused session; its own filter takes
+                // focus, so keys keep reaching the window's shortcuts.
+                if matches!(event, WorkspaceEvent::View) && this.workspace.read(cx).view.is_some() {
+                    this.focus_view = true;
                     cx.notify();
                 }
             }),
@@ -198,7 +227,10 @@ impl Desktop {
             welcome,
             layout,
             resizing: None,
+            drawer_focus: cx.focus_handle(),
+            focus_drawer: false,
             focus_selected: false,
+            focus_view: false,
             new_session_requested: false,
             sessions_view: None,
             settings_view: None,
@@ -225,6 +257,68 @@ impl Desktop {
         let problem_card = crate::prefs::flag(cx, "editor.problemCard", None);
         pi_editor::set_preferences(pi_editor::Preferences { problem_card }, cx);
     }
+    fn close_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout.inspector = false;
+        self.layout.inspector_requested = false;
+        self.sync_header(cx);
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+    /// An inspector, docked beside the work or as a drawer over it.
+    fn inspector_pane(
+        &self,
+        content: AnyElement,
+        drawer: bool,
+        cx: &mut Context<Self>,
+        theme: Theme,
+    ) -> AnyElement {
+        if !drawer {
+            return div()
+                .relative()
+                .w(self.layout.inspector_width)
+                .h_full()
+                .flex_shrink_0()
+                .bg(theme.panel)
+                .border_l_1()
+                .border_color(theme.edge)
+                .child(content)
+                .child(self.resize_handle(Pane::Inspector, cx, theme))
+                .into_any_element();
+        }
+        div()
+            .id("inspector-drawer")
+            .debug_selector(|| "inspector-drawer".into())
+            .key_context("InspectorDrawer")
+            .track_focus(&self.drawer_focus)
+            .occlude()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(self.layout.inspector_width.min(px(360.)))
+            .bg(theme.panel)
+            .border_l_1()
+            .border_color(theme.edge)
+            .shadow(vec![
+                gpui::BoxShadow::new(
+                    px(-8.),
+                    px(0.),
+                    gpui::black().opacity(if theme.light { 0.08 } else { 0.35 }),
+                )
+                .blur_radius(px(24.)),
+            ])
+            .on_action(cx.listener(|this, _: &Stop, window, cx| this.close_drawer(window, cx)))
+            .child(content)
+            .child(
+                div().absolute().top(px(12.)).right(px(12.)).child(
+                    icon_button("close-inspector-drawer", "close", "Close details", theme)
+                        .debug_selector(|| "close-inspector-drawer".into())
+                        .tooltip(ui::Tooltip::text("Close details  Esc"))
+                        .on_click(cx.listener(|this, _, window, cx| this.close_drawer(window, cx))),
+                ),
+            )
+            .into_any_element()
+    }
     fn focus_composer(&self, window: &mut Window, cx: &mut App) {
         if let Some(tab) = self.workspace.read(cx).active_tab_opt() {
             let view = tab.view.clone();
@@ -245,7 +339,8 @@ impl Desktop {
     }
     fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
         self.layout.inspector = !self.layout.inspector;
-        self.layout.inspector_requested = false;
+        self.layout.inspector_requested = self.layout.inspector;
+        self.focus_drawer = self.layout.inspector;
         self.resizing = None;
         self.sync_header(cx);
         cx.notify();
@@ -328,15 +423,42 @@ impl Render for Desktop {
             .as_ref()
             .map(|session| session.read(cx).inspector.clone());
         let show_inspector = self.layout.show_inspector(window.viewport_size().width);
+        let sidebar = if self.layout.show_sidebar {
+            self.layout.sidebar_width
+        } else {
+            px(0.)
+        };
+        // Dock only while the work keeps about 720px; on narrower windows a
+        // requested inspector is a drawer over the work, so no action disappears
+        // and nothing is squeezed.
+        let drawer = show_inspector
+            && window.viewport_size().width - sidebar - self.layout.inspector_width < px(720.);
+        if std::mem::take(&mut self.focus_drawer) && drawer {
+            self.drawer_focus.focus(window, cx);
+        }
+        let work_width = window.viewport_size().width
+            - sidebar
+            - if show_inspector && !drawer {
+                self.layout.inspector_width
+            } else {
+                px(0.)
+            };
+        if let Some(session) = &session {
+            let changes = session.read(cx).file_changes.clone();
+            changes.update(cx, |view, cx| view.set_width(work_width, cx));
+        }
         // An app view takes the middle column and the inspector.
-        let search = self.sidebar.read(cx).search.clone();
         let app_view = match self.workspace.read(cx).view {
             Some(app_views::AppView::Sessions) => {
                 let workspace = self.workspace.clone();
                 let view = self
                     .sessions_view
                     .get_or_insert_with(|| {
-                        cx.new(|cx| app_views::SessionsView::new(workspace, search, cx))
+                        cx.new(|cx| {
+                            let search =
+                                cx.new(|cx| TextInput::new("Find a session…", cx).compact());
+                            app_views::SessionsView::new(workspace, search, cx)
+                        })
                     })
                     .clone();
                 let details = view.update(cx, |view, cx| view.inspector(cx));
@@ -347,7 +469,11 @@ impl Render for Desktop {
                 let view = self
                     .settings_view
                     .get_or_insert_with(|| {
-                        cx.new(|cx| app_views::SettingsView::new(workspace, search, cx))
+                        cx.new(|cx| {
+                            let search =
+                                cx.new(|cx| TextInput::new("Find a setting…", cx).compact());
+                            app_views::SettingsView::new(workspace, search, cx)
+                        })
                     })
                     .clone();
                 let details = view.update(cx, |view, cx| view.inspector(cx));
@@ -361,6 +487,17 @@ impl Render for Desktop {
                 };
                 let workspace = self.workspace.clone();
                 let screen = slot.get_or_insert_with(|| {
+                    let search = cx.new(|cx| {
+                        TextInput::new(
+                            if kind == app_views::AppView::Models {
+                                "Find a model…"
+                            } else {
+                                "Find a resource…"
+                            },
+                            cx,
+                        )
+                        .compact()
+                    });
                     app_views::CatalogScreen::new(workspace, search, kind, cx)
                 });
                 Some((
@@ -370,6 +507,30 @@ impl Render for Desktop {
             }
             None => None,
         };
+        if std::mem::take(&mut self.focus_view) && !window.has_active_prompt() {
+            let search = match self.workspace.read(cx).view {
+                Some(app_views::AppView::Sessions) => self
+                    .sessions_view
+                    .as_ref()
+                    .map(|v| v.read(cx).search_input()),
+                Some(app_views::AppView::Settings) => self
+                    .settings_view
+                    .as_ref()
+                    .map(|v| v.read(cx).search_input()),
+                Some(app_views::AppView::Models) => self
+                    .models_view
+                    .as_ref()
+                    .map(|screen| screen.search_input(cx)),
+                Some(app_views::AppView::Resources) => self
+                    .resources_view
+                    .as_ref()
+                    .map(|screen| screen.search_input(cx)),
+                None => None,
+            };
+            if let Some(search) = search {
+                search.focus_handle(cx).focus(window, cx);
+            }
+        }
         v_flex()
             .id("desktop")
             .key_context("Desktop")
@@ -438,10 +599,42 @@ impl Render for Desktop {
                     composer.update(cx, |composer, cx| composer.toggle_composer(window, cx));
                 }
             }))
+            .on_action(cx.listener(|this, _: &ToggleFollow, _, cx| {
+                if let Some(tab) = this.workspace.read(cx).active_tab_opt() {
+                    let view = tab.view.clone();
+                    view.update(cx, |view, cx| view.toggle_follow(cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 if let Some(tab) = this.workspace.read(cx).active_tab_opt() {
                     let view = tab.view.clone();
                     view.update(cx, |view, cx| view.toggle_terminal(window, cx));
+                }
+            }))
+            // Global search is a list: arrows move, Enter opens. Elsewhere these
+            // keys belong to whatever has focus.
+            .on_action(cx.listener(|this, _: &PreviousChoice, window, cx| {
+                if this.header.read(cx).search_focused(window, cx) {
+                    this.header
+                        .update(cx, |header, cx| header.move_selection(-1, cx));
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NextChoice, window, cx| {
+                if this.header.read(cx).search_focused(window, cx) {
+                    this.header
+                        .update(cx, |header, cx| header.move_selection(1, cx));
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Submit, window, cx| {
+                if this.header.read(cx).search_focused(window, cx) {
+                    this.header
+                        .update(cx, |header, cx| header.open_selected(window, cx));
+                } else {
+                    cx.propagate();
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
@@ -449,8 +642,7 @@ impl Render for Desktop {
                     .update(cx, |header, cx| header.focus_search(window, cx));
             }))
             .on_action(cx.listener(|this, _: &Stop, window, cx| {
-                let search = this.sidebar.read(cx).search.clone();
-                if search.focus_handle(cx).is_focused(window) {
+                if this.header.read(cx).search_focused(window, cx) {
                     this.header
                         .update(cx, |header, cx| header.dismiss_search(cx));
                     this.focus_composer(window, cx);
@@ -469,6 +661,7 @@ impl Render for Desktop {
             )
             .child(
                 h_flex()
+                    .relative()
                     .items_stretch()
                     .flex_1()
                     .min_h_0()
@@ -491,18 +684,7 @@ impl Render for Desktop {
                     .when_some(app_view, |row, (view, details)| {
                         row.child(div().flex_1().min_w_0().h_full().child(view))
                             .when(show_inspector, |row| {
-                                row.child(
-                                    div()
-                                        .relative()
-                                        .w(self.layout.inspector_width)
-                                        .h_full()
-                                        .flex_shrink_0()
-                                        .bg(theme.panel)
-                                        .border_l_1()
-                                        .border_color(theme.edge)
-                                        .child(details)
-                                        .child(self.resize_handle(Pane::Inspector, cx, theme)),
-                                )
+                                row.child(self.inspector_pane(details, drawer, cx, theme))
                             })
                     })
                     .when(self.workspace.read(cx).view.is_none(), |row| {
@@ -516,16 +698,14 @@ impl Render for Desktop {
                             .filter(|_| show_inspector && self.workspace.read(cx).view.is_none()),
                         |row, inspector| {
                             row.child(
-                                div()
-                                    .relative()
-                                    .w(self.layout.inspector_width)
-                                    .h_full()
-                                    .flex_shrink_0()
-                                    .child(
-                                        inspector
-                                            .cached(gpui::StyleRefinement::default().size_full()),
-                                    )
-                                    .child(self.resize_handle(Pane::Inspector, cx, theme)),
+                                self.inspector_pane(
+                                    inspector
+                                        .cached(gpui::StyleRefinement::default().size_full())
+                                        .into_any_element(),
+                                    drawer,
+                                    cx,
+                                    theme,
+                                ),
                             )
                         },
                     ),
@@ -562,9 +742,11 @@ mod composer;
 mod context;
 mod demo;
 mod diagnostics;
+mod diff;
 mod diff_preview;
 mod extension_dialogs;
 mod files;
+mod follow;
 mod inspector;
 mod jj;
 mod landing;

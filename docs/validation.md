@@ -56,7 +56,7 @@ cargo clippy --locked -p pi-desktop --features bundled-backend \
 
 Build the desktop before captures. Linux probes use Xvfb and software Vulkan; they are not browser or SVG renders. Clipboard checks require the real `/usr/bin/xclip`, not a host-clipboard shim.
 
-CI capture scripts isolate desktop preferences as well as HOME/XDG state. The first-screen probe explicitly starts in Evening, then toggles to Moonstone; it does not depend on the OS theme. OCR uses enlarged copies, while palette and geometry checks retain the original pixels. Tool headers are located from rendered text, and the new-session probe completes the chooser before checking the landing page.
+CI capture scripts isolate desktop preferences as well as HOME/XDG state. The first-screen probe explicitly starts in Evening, then toggles to Moonstone; it does not depend on the OS theme. OCR uses enlarged copies, while palette and geometry checks retain the original pixels. Tool headers are located from rendered text, and the new-session probe completes the chooser before checking the landing page. Details are closed on first launch and captured separately after an explicit request. `compare-thread-study.py` now compares the approved workbench proposal's warm surfaces and fluid composer gutters, not the superseded inspector-first study. Different viewport sizes, transcript content, status colors and neutral borders are disclosed rather than asserted as pixel-identical.
 
 ```sh
 cargo build --locked -p pi-desktop
@@ -69,7 +69,8 @@ Run additional scripts with the same Xvfb invocation:
 
 | Script in `scripts/` | Checks |
 | --- | --- |
-| `capture-tool-selection.sh` | Mouse selection, keyboard/context-menu copy and original tool content |
+| `capture-workbench.py --binary /path/to/pi-desktop` | Thread light/dark/wide, changed files, split review, explicit revision attachment, compact unified fallback and clean quit; labelled demo data, no sample checks executed |
+| `capture-tool-selection.sh` | Native mouse selection and keyboard copy from expanded edit detail |
 | `capture-session-close.sh` | Cancel-default close, process cleanup and retained projects/conversations |
 | `capture-file-actions.sh` | No overwrite, containment, dirty-buffer guards, rename and Trash |
 | `capture-diagnostic-hover.sh` | Deterministic local LSP diagnostics, quick fix and prompt handoff |

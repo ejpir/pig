@@ -52,6 +52,7 @@ fn run_metrics_stay_in_the_small_footer_without_a_banner_or_session_leak(cx: &mu
 #[gpui::test]
 fn tool_inventory_uses_current_metadata_and_preserves_original_details(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
+    show_inspector(&desktop, &mut cx);
     let id = open(&desktop, "/demo/tool-metadata", None, &mut cx);
     let a = tab(&desktop, id, &cx);
     let description = format!(

@@ -238,6 +238,17 @@ impl FilesView {
         let enabled = self.mutation_enabled();
         h_flex()
             .gap(px(3.))
+            .when(self.remote.is_some(), |toolbar| {
+                toolbar.child(
+                    icon_button(
+                        "refresh-remote-files",
+                        "refresh",
+                        "Refresh remote files / reconnect",
+                        theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.load_browser(cx))),
+                )
+            })
             .child(
                 div()
                     .flex_1()

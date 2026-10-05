@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>07 · Review</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  .files { display: flex; gap: 8px; padding: 2px 16px 12px; overflow: hidden; }
+  .hunk { font-family: var(--mono); font-size: 11.5px; color: var(--faint); padding: 6px 12px; background: var(--panel); }
+  .code { font-size: 12.5px; line-height: 22px; }
+  .bar { margin: 0 12px 10px; border-radius: 20px; background: var(--composer); border: 1px solid var(--line-strong); padding: 10px 10px 10px 14px; }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="appbar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="title"><b>Changes</b><span>Qwen signatures · 2 files</span></div>
+      <span class="tap"><i data-i="dots"></i></span>
+    </div>
+    <div class="files">
+      <span class="chip on"><i data-i="file" class="xs"></i>openai-completions.ts<span class="mono add">+3</span><span class="mono del">−1</span></span>
+      <span class="chip"><i data-i="file" class="xs"></i>qwen.test.ts<span class="mono add">+18</span></span>
+    </div>
+    <div class="hint" style="padding:0 20px 10px">Edits Pi made in this session, already on studio-mac. Tap a line to ask about it.</div>
+    <div class="scroll" style="padding:0 12px">
+      <div class="card" style="overflow:hidden;border-radius:14px">
+        <div class="row" style="padding:10px 12px;gap:8px;border-bottom:1px solid var(--line)">
+          <span class="mono grow ell" style="font-size:12px;color:var(--secondary)">packages/ai/src/providers/openai-completions.ts</span>
+        </div>
+        <div class="hunk">@@ 204,13 · readThinking</div>
+        <div class="code" style="padding:2px 0">
+          <div class="l"><span class="ln">204</span><span><span class="k">export function</span> readThinking(blocks, model) {</span></div>
+          <div class="l"><span class="ln">205</span><span>  <span class="k">const</span> signatures: string[] = [];</span></div>
+          <div class="l"><span class="ln">206</span><span>  <span class="k">for</span> (<span class="k">const</span> block <span class="k">of</span> blocks) {</span></div>
+          <div class="l"><span class="ln">207</span><span>    <span class="k">if</span> (block.type !== <span class="s">"thinking"</span>)</span></div>
+          <div class="l"><span class="ln">208</span><span>      <span class="k">continue</span>;</span></div>
+          <div class="l"><span class="ln">209</span><span>    <span class="k">const</span> signature =</span></div>
+          <div class="l"><span class="ln">210</span><span>      block.signature;</span></div>
+          <div class="l del sel"><span class="ln">211</span><span>    <span class="k">if</span> (!signature) {</span></div>
+          <div class="l add sel"><span class="ln">211</span><span>    <span class="k">if</span> (!signature &amp;&amp;</span></div>
+          <div class="l add sel"><span class="ln">212</span><span>        isAnthropic(model)) {</span></div>
+          <div class="l add"><span class="ln">213</span><span>      <span class="k">throw new</span> Error(</span></div>
+          <div class="l"><span class="ln">214</span><span>        <span class="s">"Missing signature"</span>);</span></div>
+          <div class="l"><span class="ln">215</span><span>    }</span></div>
+          <div class="l"><span class="ln">216</span><span>    signatures.push(signature ?? <span class="s">""</span>);</span></div>
+          <div class="l"><span class="ln">217</span><span>  }</span></div>
+          <div class="l"><span class="ln">218</span><span>  <span class="k">return</span> signatures;</span></div>
+          <div class="l"><span class="ln">219</span><span>}</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="bar" style="margin-top:10px">
+      <div class="row gap8">
+        <span class="chip on" style="height:28px"><i data-i="file" class="xs"></i>lines 211–212<i data-i="x" class="xs"></i></span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="grow" style="font-size:15px">Also accept it for DeepSeek<span class="caret"></span></span>
+        <span class="send"><i data-i="send"></i></span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="phone.js"></script>
+</body></html>

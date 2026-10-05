@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A quieter Pi Desktop — visual review</title>
+  <style>
+    @font-face { font-family: Plex; src: url('../../assets/fonts/IBMPlexSans-Regular.ttf'); }
+    @font-face { font-family: Plex; src: url('../../assets/fonts/IBMPlexSans-SemiBold.ttf'); font-weight: 600; }
+    :root { color-scheme: light; --ink: #252f3d; --paper: #faf9f7; --muted: #6b645d; --line: #ded8d1; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.65 Plex, system-ui, sans-serif; }
+    main { max-width: 1680px; margin: auto; padding: 48px 32px 80px; }
+    h1, h2 { font-family: Georgia, 'DejaVu Serif', serif; font-style: italic; font-weight: 400; line-height: 1.25; }
+    h1 { font-size: clamp(32px, 4vw, 52px); margin: 12px 0 20px; }
+    h2 { font-size: 28px; margin: 0 0 12px; }
+    p { max-width: 880px; }
+    .eyebrow, figcaption, .note { color: var(--muted); font-size: 13px; }
+    .eyebrow { letter-spacing: .07em; text-transform: uppercase; }
+    .intro { font-size: 18px; max-width: 850px; }
+    a { color: #4b607c; text-underline-offset: 4px; }
+    a:focus-visible, summary:focus-visible { outline: 2px solid #81766b; outline-offset: 4px; }
+    nav { display: flex; flex-wrap: wrap; gap: 10px 24px; margin: 28px 0; }
+    .principles { max-width: 1000px; padding: 20px 24px; background: #f2efeb; border-radius: 8px; }
+    .principles ol { margin: 0; padding-left: 20px; }
+    section { padding-top: 48px; margin-top: 40px; border-top: 1px solid var(--line); }
+    .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 24px; align-items: start; }
+    figure { margin: 0; min-width: 0; }
+    figure .label { font-weight: 600; margin: 0 0 10px; }
+    img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 4px; }
+    figcaption { margin-top: 8px; }
+    .evidence { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin-top: 24px; }
+    summary { cursor: pointer; font-weight: 600; padding: 16px 0; }
+    .all { columns: 3; padding-left: 20px; }
+    .all li { padding: 4px 0; break-inside: avoid; }
+    .measured { max-width: 1424px; }
+    footer { margin-top: 64px; color: var(--muted); }
+    @media (max-width: 1000px) { .compare { grid-template-columns: 1fr; } .evidence { grid-template-columns: 1fr 1fr; } .all { columns: 2; } }
+    @media (max-width: 600px) { main { padding: 28px 16px; } .evidence { grid-template-columns: 1fr; } .all { columns: 1; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Pi Desktop · visual review · 1 October 2026 · df8a946</div>
+    <h1>A quieter workbench.</h1>
+    <p class="intro">More readable, less repetitive, still unmistakably Pi. Keep the warm surfaces, editorial titles and compact chrome. Let the conversation—not the metadata—set the hierarchy.</p>
+    <p><strong>26 real GPUI captures. 18 proposed screens. No production UI changes.</strong><br>
+      Actual screenshots were taken under Xvfb with isolated offline data. Proposed screens are static design studies, not implemented behavior. Click any image for its full resolution.</p>
+    <p><strong>Start here: <a href="../desktop-streamline-study.svg">the complete 18-screen SVG</a></strong> · <a href="all-screens.html">Browse every proposed screen</a> · <a href="overview.png">Full-sheet preview</a></p>
+    <p class="note">The comparisons below highlight five changes; the full SVG also includes Sessions, Resources, Changes, Tree, Context, both search states, both New Session forms, Appearance and the idle state.</p>
+    <nav aria-label="Review sections">
+      <a href="README.md">Full review &amp; implementation priorities</a>
+      <a href="#thread">Thread</a><a href="#dark">Dark</a><a href="#wide">Wide</a>
+      <a href="#settings">Settings</a><a href="#compact">Compact</a><a href="#evidence">Evidence</a>
+    </nav>
+    <div class="principles">
+      <ol>
+        <li><strong>Readable, not faint:</strong> 12px supporting text; higher contrast; fewer tiny capitals.</li>
+        <li><strong>Available at every width:</strong> requested details become a drawer, never a missing action.</li>
+        <li><strong>One thing in one place:</strong> deduplicate open sessions, status and inspector metadata.</li>
+        <li><strong>Useful width:</strong> shared gutters and fluid work surfaces; constrain prose, not tools or the composer.</li>
+        <li><strong>Predictable search:</strong> global palette and local filtering must not share hidden state.</li>
+      </ol>
+    </div>
+  </header>
+
+  <section id="thread">
+    <h2>01 · Keep the character. Reduce the noise.</h2>
+    <p>One selected session, legible navigation, one live activity description and a quieter inspector. Same four title-bar icons. Keep explicit Steer, Follow-up and Stop actions.</p>
+    <div class="compare">
+      <figure><div class="label">Actual · 1344 × 740</div><a href="captures/01-thread-light.png"><img src="captures/01-thread-light.png" alt="Actual light-theme Thread with duplicated selected session and dense inspector"></a><figcaption>208px sidebar · 808px middle · 328px inspector. Supporting labels are often only 10px.</figcaption></figure>
+      <figure><div class="label">Proposed · 1344 × 740</div><a href="concepts/thread-light.png"><img src="concepts/thread-light.png" alt="Proposed light Thread with larger text, single session entry and inspector disclosures"></a><figcaption>216px sidebar · 808px middle · 320px inspector. 30px actions, 32px rows and shared 24px content gutters. <a href="concepts/thread-light.svg">SVG</a></figcaption></figure>
+    </div>
+  </section>
+
+  <section id="dark">
+    <h2>02 · Dark, but not washed out.</h2>
+    <p>Retain Evening’s ink-blue surfaces. Make selected rows neutral charcoal rather than blue, and lift meaningful secondary text above decorative faint colors.</p>
+    <div class="compare">
+      <figure><div class="label">Actual · Evening</div><a href="captures/02-thread-dark.png"><img loading="lazy" src="captures/02-thread-dark.png" alt="Actual dark Thread"></a><figcaption>Current faint text on the inspector panel: approximately 3.69:1 contrast.</figcaption></figure>
+      <figure><div class="label">Proposed · Evening</div><a href="concepts/thread-dark.png"><img loading="lazy" src="concepts/thread-dark.png" alt="Proposed dark Thread with neutral selection and readable supporting text"></a><figcaption>Proposed secondary text on that panel: approximately 5.84:1. These are flat-color calculations, not a complete accessibility certification. <a href="concepts/thread-dark.svg">SVG</a></figcaption></figure>
+    </div>
+  </section>
+
+  <section id="wide">
+    <h2>03 · Use the width. Keep prose readable.</h2>
+    <p>The initial centered 760px column wasted 256px of usable width and was inconsistent with the other views. Revised: use the same 24px gutters everywhere, keep read-only prose comfortably narrow, and let tool output, diffs and the composer fill the work area. No additional panel is needed.</p>
+    <div class="compare">
+      <figure><div class="label">Actual · 1600 × 900</div><a href="captures/10-thread-wide.png"><img loading="lazy" src="captures/10-thread-wide.png" alt="Actual wide Thread with long lines and very wide composer"></a><figcaption>The middle pane grows to 1064px; user card and composer approach 1020px.</figcaption></figure>
+      <figure><div class="label">Proposed · 1600 × 900 · expanded tool</div><a href="concepts/thread-wide.png"><img loading="lazy" src="concepts/thread-wide.png" alt="Proposed wide Thread with left-aligned prose, full-width inline diff and composer"></a><figcaption>1016px usable work area. The Edit tool is explicitly expanded to illustrate useful space—not automatically opened by resizing. The idle composer follows the same fluid layout. <a href="concepts/thread-wide.svg">SVG</a></figcaption></figure>
+    </div>
+  </section>
+
+  <section id="settings">
+    <h2>04 · Explain a setting next to its control.</h2>
+    <p>Four simultaneous columns make a simple setting feel technical. Keep the categories, put useful descriptions inline, and make JSON keys and provenance optional detail. Keep user/project scope visible.</p>
+    <div class="compare">
+      <figure><div class="label">Actual · Settings</div><a href="captures/19-settings.png"><img loading="lazy" src="captures/19-settings.png" alt="Actual Settings with app sidebar, category rail, settings list and inspector"></a><figcaption>JSON keys are always visible while explanations live in a distant inspector. Seven thinking-level choices squeeze the row.</figcaption></figure>
+      <figure><div class="label">Proposed · Settings</div><a href="concepts/settings.png"><img loading="lazy" src="concepts/settings.png" alt="Proposed Settings with inline descriptions, local search and advanced disclosure"></a><figcaption>Common controls first; technical details on demand. No settings removed, and no unsupported features added. <a href="concepts/settings.svg">SVG</a></figcaption></figure>
+    </div>
+  </section>
+
+  <section id="compact">
+    <h2>05 · Hide a panel, not its capabilities.</h2>
+    <p>At 1000px, the current inspector stays hidden even after toggling it. The proposal overlays requested details instead of adding another squeezed column. Keep the primary action visible; inspection must never apply a model change.</p>
+    <div class="compare">
+      <figure><div class="label">Actual · Models · 1000 × 680</div><a href="captures/24-models-compact.png"><img loading="lazy" src="captures/24-models-compact.png" alt="Actual narrow Models screen without inspector or use-model actions"></a><figcaption>Selection remains, but “Use in this session” and the model details are not visible.</figcaption></figure>
+      <figure><div class="label">Proposed · requested details · 1000 × 680</div><a href="concepts/compact-models.png"><img loading="lazy" src="concepts/compact-models.png" alt="Proposed compact Models with an overlay drawer and fixed action footer"></a><figcaption>360px overlay, scrollable body, close/Escape and focus restoration. The table is covered, not compressed. <a href="concepts/compact-models.svg">SVG</a></figcaption></figure>
+    </div>
+  </section>
+
+  <section id="evidence">
+    <h2>Measured, not guessed.</h2>
+    <p>These are actual app captures. Dimension annotations below were added to a copy; the original remains untouched. The review also checked missing-data states, both dialog variants and the minimum window size.</p>
+    <figure class="measured"><a href="measurements.png"><img loading="lazy" src="measurements.png" alt="Annotated actual Thread capture showing 208, 808 and 328 pixel panes and four visual findings"></a><figcaption><a href="measurements.json">Geometry and contrast data</a> · <a href="captures/manifest.json">Capture manifest</a></figcaption></figure>
+    <div class="evidence">
+      <figure><a href="captures/04-search-empty.png"><img loading="lazy" src="captures/04-search-empty.png" alt="Search with no matches and sidebar rows filtered out"></a><figcaption>Search: empty heading and an unexpectedly filtered background.</figcaption></figure>
+      <figure><a href="captures/05-changes.png"><img loading="lazy" src="captures/05-changes.png" alt="Changes with nested file rail and repeated actions"></a><figcaption>Changes: nested columns and repeated restore/undo affordances.</figcaption></figure>
+      <figure><a href="captures/07-context.png"><img loading="lazy" src="captures/07-context.png" alt="Context with three very wide token bars"></a><figcaption>Context: sparse data stretches into large chart slabs.</figcaption></figure>
+      <figure><a href="captures/14-idle-session.png"><img loading="lazy" src="captures/14-idle-session.png" alt="Idle Thread with four resource cards above the composer"></a><figcaption>Idle state: backend metadata competes with starting a conversation.</figcaption></figure>
+      <figure><a href="captures/20-settings-appearance.png"><img loading="lazy" src="captures/20-settings-appearance.png" alt="Appearance Settings with one short row across a four-column layout"></a><figcaption>Appearance: four columns for one setting.</figcaption></figure>
+      <figure><a href="captures/13b-new-worktree-minimum.png"><img loading="lazy" src="captures/13b-new-worktree-minimum.png" alt="Worktree dialog at the 960 by 600 minimum window size"></a><figcaption>Dialog: keep its existing size and fixed footer; refine labels and targets.</figcaption></figure>
+    </div>
+    <details>
+      <summary>All 26 original captures</summary>
+      <ol class="all">
+        <li><a href="captures/01-thread-light.png">Thread · light</a></li>
+        <li><a href="captures/02-thread-dark.png">Thread · dark</a></li>
+        <li><a href="captures/03-search.png">Search palette</a></li>
+        <li><a href="captures/04-search-empty.png">Search · no matches</a></li>
+        <li><a href="captures/05-changes.png">Changes</a></li>
+        <li><a href="captures/06-tree.png">Tree</a></li>
+        <li><a href="captures/07-context.png">Context</a></li>
+        <li><a href="captures/08-new-session.png">New Session</a></li>
+        <li><a href="captures/09-new-worktree.png">New worktree</a></li>
+        <li><a href="captures/10-thread-wide.png">Thread · 1600×900</a></li>
+        <li><a href="captures/11-thread-compact.png">Thread · 1000×680</a></li>
+        <li><a href="captures/12-thread-compact-after-toggle.png">Compact Thread · after inspector toggle</a></li>
+        <li><a href="captures/13-new-session-minimum.png">New Session · 960×600</a></li>
+        <li><a href="captures/13b-new-worktree-minimum.png">Worktree · 960×600</a></li>
+        <li><a href="captures/14-idle-session.png">Idle session</a></li>
+        <li><a href="captures/15-sessions.png">All Sessions</a></li>
+        <li><a href="captures/16-models.png">Models · selected</a></li>
+        <li><a href="captures/17-resources-project.png">Resources · project</a></li>
+        <li><a href="captures/18-resources-skill.png">Resources · selected skill</a></li>
+        <li><a href="captures/19-settings.png">Settings</a></li>
+        <li><a href="captures/20-settings-appearance.png">Settings · appearance</a></li>
+        <li><a href="captures/21-settings-dark.png">Settings · dark</a></li>
+        <li><a href="captures/22-settings-compact.png">Settings · compact</a></li>
+        <li><a href="captures/23-settings-compact-after-toggle.png">Compact Settings · after inspector toggle</a></li>
+        <li><a href="captures/24-models-compact.png">Models · compact</a></li>
+        <li><a href="captures/25-resources-compact.png">Resources · compact</a></li>
+      </ol>
+    </details>
+  </section>
+  <footer>
+    <p>Next: shared readability/targets → compact inspector and search → transcript/sidebar/inspector hierarchy → view-specific polish. Full rationale, source locations and acceptance criteria are in <a href="README.md">the review</a>.</p>
+    <p>Linux/Xvfb evidence only; native macOS/Windows and high-DPI validation remain open. Existing app fonts and licensed icons are reused. No CDN or external services.</p>
+  </footer>
+</main>
+</body>
+</html>

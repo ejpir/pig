@@ -100,16 +100,25 @@ pub struct SettingsView {
     user: [SettingsFile; 2],
     project: [Option<SettingsFile>; 2],
     project_root: Option<PathBuf>,
+    remote_project: bool,
     category: Key,
     selected: Key,
     editing: Option<(Key, Entity<TextInput>)>,
     models_open: bool,
+    /// A long choice list (thinking levels) open as a dropdown.
+    choice_open: Option<Key>,
+    /// JSON keys under each setting, for people who edit the files.
+    show_keys: bool,
+    advanced_open: bool,
     error: Option<String>,
     _load: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl SettingsView {
+    pub fn search_input(&self) -> Entity<TextInput> {
+        self.search.clone()
+    }
     pub fn new(
         workspace: Entity<WorkspaceController>,
         search: Entity<TextInput>,
@@ -130,10 +139,14 @@ impl SettingsView {
             user: Default::default(),
             project: Default::default(),
             project_root: None,
+            remote_project: false,
             category: (Source::Pi, pi_settings::categories()[0]),
             selected: (Source::Pi, "defaultThinkingLevel"),
             editing: None,
             models_open: false,
+            choice_open: None,
+            show_keys: false,
+            advanced_open: false,
             error: None,
             _load: None,
             _subscriptions: subscriptions,
@@ -147,14 +160,21 @@ impl SettingsView {
     pub fn load(&mut self, cx: &mut Context<Self>) {
         let root = self.workspace.read(cx).selected_project.clone();
         self.project_root = root.clone();
+        self.remote_project = self.workspace.read(cx).selected_is_remote(cx);
+        let remote = self.remote_project;
         let desktop_user = crate::prefs::user_path(cx);
         let read = cx.background_executor().spawn(async move {
             let user = [
-                pi_settings::user_path().map(SettingsFile::load),
+                if remote {
+                    Some(SettingsFile::default())
+                } else {
+                    pi_settings::user_path().map(SettingsFile::load)
+                },
                 Some(desktop_user.map(SettingsFile::load).unwrap_or_default()),
             ];
             let project = SOURCES.map(|source| {
                 root.as_deref()
+                    .filter(|_| !remote)
                     .map(|root| SettingsFile::load(source.project_path(root)))
             });
             (user, project)
@@ -185,6 +205,9 @@ impl SettingsView {
     }
 
     fn file(&self, source: Source) -> Option<&SettingsFile> {
+        if self.remote_project && (source == Source::Pi || self.which == Which::Project) {
+            return None;
+        }
         match self.which {
             Which::User => Some(&self.user[source.index()]),
             Which::Project => self.project[source.index()].as_ref(),
@@ -214,6 +237,11 @@ impl SettingsView {
 
     /// Changes one key in the scope's file and writes it; desktop settings apply at once.
     fn write(&mut self, (source, key): Key, value: Option<Value>, cx: &mut Context<Self>) {
+        if self.remote_project && (source == Source::Pi || self.which == Which::Project) {
+            self.error = Some("Remote Pi/project settings are not editable here yet. Use the session's model/thinking controls or edit settings on the SSH host.".into());
+            cx.notify();
+            return;
+        }
         let file = match self.which {
             Which::User => &mut self.user[source.index()],
             Which::Project => match self.project[source.index()].as_mut() {
@@ -371,6 +399,40 @@ impl SettingsView {
                     }))
                     .into_any_element()
             }
+            // Seven thinking levels do not fit a segmented control: a dropdown.
+            Kind::Choice(_) if setting.choices().len() > 4 => {
+                let shown = value
+                    .as_ref()
+                    .map(|choice| source.label(setting, choice))
+                    .unwrap_or_else(|| setting.default_text.to_owned());
+                let color = (source == Source::Pi && key == "defaultThinkingLevel")
+                    .then(|| theme.thinking(&shown));
+                value_chip(keyed("setting-choice", key), theme)
+                    .debug_selector(move || format!("setting-choice-{key}"))
+                    .min_w(px(140.))
+                    .justify_between()
+                    .gap(px(8.))
+                    .when(muted, |chip| chip.text_color(theme.muted))
+                    .child(
+                        h_flex()
+                            .gap(px(7.))
+                            .when_some(color, |row, color| {
+                                row.child(div().size(px(7.)).rounded_full().bg(color))
+                            })
+                            .child(capitalized(&shown)),
+                    )
+                    .child(icon("chevron_down", theme.muted).size(px(11.)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.selected = (source, key);
+                        this.choice_open = if this.choice_open == Some((source, key)) {
+                            None
+                        } else {
+                            Some((source, key))
+                        };
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
             Kind::Choice(_) => segments(
                 setting
                     .choices()
@@ -521,12 +583,12 @@ impl SettingsView {
             .id(keyed("setting-row", key))
             .debug_selector(move || format!("setting-row-{key}"))
             .relative()
-            .min_h(px(50.))
-            .px(px(8.))
-            .gap(px(16.))
+            .min_h(px(64.))
+            .px(px(10.))
+            .gap(px(24.))
             .rounded(px(6.))
             .border_b_1()
-            .border_color(theme.hover)
+            .border_color(theme.line)
             .when(selected, |row| row.bg(theme.hover))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected = (source, key);
@@ -536,27 +598,97 @@ impl SettingsView {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .py(px(7.))
+                    .py(px(10.))
+                    .gap(px(2.))
                     .child(
                         h_flex()
                             .gap(px(8.))
                             .child(
                                 div()
-                                    .text_size(px(13.))
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme.text)
                                     .child(setting.title),
                             )
                             .children(self.badge((source, key), theme)),
                     )
+                    // What it does, inline; the JSON key only on request.
                     .child(
                         div()
-                            .font_family(MONO)
-                            .text_size(px(10.5))
-                            .text_color(theme.faint)
-                            .child(key),
-                    ),
+                            .text_size(px(12.5))
+                            .line_height(px(18.))
+                            .text_color(theme.muted)
+                            .child(summary(setting.description)),
+                    )
+                    .when(self.show_keys, |text| {
+                        text.child(
+                            div()
+                                .font_family(MONO)
+                                .text_size(px(11.))
+                                .text_color(theme.muted)
+                                .child(key),
+                        )
+                    }),
             )
             .child(self.control(source, setting, cx, theme))
+            .when(self.choice_open == Some((source, key)), |row| {
+                row.child(
+                    v_flex()
+                        .id("setting-choices")
+                        .debug_selector(|| "setting-choices".into())
+                        .absolute()
+                        .top(px(52.))
+                        .right(px(10.))
+                        .w(px(180.))
+                        .p(px(4.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(theme.chip_line)
+                        .bg(theme.composer)
+                        .shadow_lg()
+                        .occlude()
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.choice_open = None;
+                            cx.notify();
+                        }))
+                        .children(
+                            setting
+                                .choices()
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, choice)| {
+                                    let label = source.label(setting, &choice);
+                                    let current =
+                                        self.value(source, setting).0.as_ref() == Some(&choice);
+                                    let color = (source == Source::Pi
+                                        && key == "defaultThinkingLevel")
+                                        .then(|| theme.thinking(&label));
+                                    h_flex()
+                                        .id(("setting-choice-option", i))
+                                        .debug_selector(move || format!("setting-{key}-{i}"))
+                                        .h(px(30.))
+                                        .px(px(10.))
+                                        .gap(px(8.))
+                                        .rounded(px(5.))
+                                        .text_size(px(12.5))
+                                        .cursor_pointer()
+                                        .when(current, |row| row.bg(theme.selected))
+                                        .hover(move |row| row.bg(theme.hover))
+                                        .when_some(color, |row, color| {
+                                            row.child(div().size(px(7.)).rounded_full().bg(color))
+                                        })
+                                        .child(div().flex_1().child(capitalized(&label)))
+                                        .when(current, |row| {
+                                            row.child(icon("check", theme.muted).size(px(12.)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.choice_open = None;
+                                            this.write((source, key), Some(choice.clone()), cx)
+                                        }))
+                                }),
+                        ),
+                )
+            })
             .when(
                 self.models_open && source == Source::Pi && key == "defaultModel",
                 |row| {
@@ -611,6 +743,159 @@ impl SettingsView {
                     )
                 },
             )
+    }
+
+    /// The theme as a real choice: a small picture of each, drawn in its own colors.
+    fn theme_cards(
+        &self,
+        source: Source,
+        setting: &'static Setting,
+        cx: &Context<Self>,
+        theme: Theme,
+    ) -> AnyElement {
+        let key = setting.key;
+        let (value, set) = self.value(source, setting);
+        let current = value
+            .as_ref()
+            .and_then(Value::as_str)
+            .unwrap_or("system")
+            .to_owned();
+        let preview = |palette: crate::theme::Theme| {
+            let line = |w: f32| {
+                div()
+                    .h(px(3.))
+                    .w(relative(w))
+                    .rounded(px(2.))
+                    .bg(palette.muted.opacity(0.7))
+            };
+            h_flex()
+                .flex_1()
+                .h_full()
+                .bg(palette.canvas)
+                .child(
+                    v_flex()
+                        .w(relative(0.28))
+                        .h_full()
+                        .p(px(10.))
+                        .gap(px(7.))
+                        .bg(palette.panel)
+                        .child(line(0.8))
+                        .child(line(0.8))
+                        .child(line(0.8)),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .h_full()
+                        .p(px(12.))
+                        .gap(px(7.))
+                        .child(line(0.6))
+                        .child(line(0.85))
+                        .child(line(0.5))
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .h(px(18.))
+                                .rounded(px(3.))
+                                .bg(palette.composer)
+                                .border_1()
+                                .border_color(palette.line),
+                        ),
+                )
+        };
+        let card = |index: usize, choice: &'static str, name: &'static str| {
+            let selected = current == choice;
+            v_flex()
+                .id(("theme-card", index))
+                .debug_selector(move || format!("setting-{key}-{index}"))
+                .role(gpui::Role::RadioButton)
+                .aria_selected(selected)
+                .flex_1()
+                .min_w_0()
+                .p(px(10.))
+                .gap(px(10.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(if selected {
+                    theme.line_strong
+                } else {
+                    theme.line
+                })
+                .bg(if selected { theme.hover } else { theme.canvas })
+                .cursor_pointer()
+                .hover(move |card| card.bg(theme.hover))
+                .child(
+                    h_flex()
+                        .h(px(110.))
+                        .rounded(px(6.))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(theme.line)
+                        .map(|frame| match choice {
+                            "evening" => frame.child(preview(crate::theme::Theme::new(false))),
+                            "moonstone" => frame.child(preview(crate::theme::Theme::new(true))),
+                            _ => frame
+                                .child(preview(crate::theme::Theme::new(true)))
+                                .child(preview(crate::theme::Theme::new(false))),
+                        }),
+                )
+                .child(
+                    h_flex()
+                        .px(px(4.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.5))
+                                .when(selected, |name| name.font_weight(FontWeight::SEMIBOLD))
+                                .child(name),
+                        )
+                        .when(selected, |row| {
+                            row.child(icon("check", theme.muted).size(px(13.)))
+                        }),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.selected = (source, key);
+                    this.write((source, key), Some(json!(choice)), cx)
+                }))
+        };
+        v_flex()
+            .debug_selector(move || format!("setting-row-{key}"))
+            .px(px(10.))
+            .pt(px(6.))
+            .gap(px(14.))
+            .child(
+                h_flex()
+                    .gap(px(14.))
+                    .child(card(0, "system", "System"))
+                    .child(card(1, "evening", "Evening"))
+                    .child(card(2, "moonstone", "Moonstone")),
+            )
+            .child(
+                h_flex()
+                    .gap(px(12.))
+                    .child(div().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child(capitalized(&current)))
+                    .child(div().text_size(px(12.)).text_color(theme.muted).child(if set {
+                        "Changed in user settings"
+                    } else {
+                        "The default"
+                    })),
+            )
+            .child(div().text_size(px(12.5)).line_height(px(19.)).text_color(theme.muted).child(
+                "System follows your operating system's appearance. Ctrl+Shift+T switches themes until the next launch.",
+            ))
+            .when(self.show_keys, |v| {
+                v.child(div().font_family(MONO).text_size(px(11.)).text_color(theme.muted).child(key))
+            })
+            .when(set, |v| {
+                v.child(
+                    h_flex().child(
+                        button("theme-reset", "Reset to System", theme)
+                            .debug_selector(|| "theme-reset".into())
+                            .on_click(cx.listener(move |this, _, _, cx| this.write((source, key), None, cx))),
+                    ),
+                )
+            })
+            .into_any_element()
     }
 
     /// Which pi runs sessions, from the open sessions' `get_backend_info` answers.
@@ -820,8 +1105,7 @@ impl SettingsView {
                     )
                     .when(source == Source::Pi, |buttons| {
                         buttons.child(
-                            button("setting-docs", "[ DOCS ]", theme)
-                                .font_family(MONO)
+                            button("setting-docs", "Pi docs ↗", theme)
                                 .on_click(|_, _, cx| cx.open_url(DOCS)),
                         )
                     }),
@@ -938,6 +1222,10 @@ impl Render for SettingsView {
             None => "Project".into(),
         };
         let rows = self.rows(cx);
+        let (advanced, common): (Vec<_>, Vec<_>) = rows
+            .iter()
+            .copied()
+            .partition(|(_, setting)| !searching && setting.kind == Kind::Json);
         let category_empty = !searching
             && self.category.0 == Source::Desktop
             && self.which == Which::Project
@@ -969,6 +1257,7 @@ impl Render for SettingsView {
             .debug_selector(|| "settings-view".into())
             .size_full()
             .bg(theme.canvas)
+            .when(self.remote_project, |view| view.child(note("SSH project: only desktop user preferences are editable here. Pi/project settings must be edited on the remote host.", theme).p(px(12.))))
             .child(
                 h_flex()
                     .h(px(46.))
@@ -997,15 +1286,7 @@ impl Render for SettingsView {
                         theme,
                     ))
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(MONO)
-                            .text_size(px(10.5))
-                            .text_color(theme.faint)
-                            .child(format!("{changed} changed · {path}")),
-                    )
+                    .child(search_field("settings-search", &self.search, cx, theme))
                     .child(
                         button("open-settings-json", "Open JSON", theme)
                             .debug_selector(|| "open-settings-json".into())
@@ -1054,14 +1335,38 @@ impl Render for SettingsView {
                             .overflow_y_scroll()
                             .px(px(12.))
                             .py(px(10.))
-                            .child(div().px(px(8.)).pb(px(6.)).child(label(
-                                if searching {
-                                    "MATCHING SETTINGS".to_owned()
-                                } else {
-                                    self.category.1.to_uppercase()
-                                },
-                                theme,
-                            )))
+                            // The category in the serif voice, and what its settings are.
+                            .child(
+                                v_flex()
+                                    .px(px(10.))
+                                    .pt(px(14.))
+                                    .pb(px(10.))
+                                    .gap(px(4.))
+                                    .child(
+                                        div()
+                                            .debug_selector(|| "settings-title".into())
+                                            .font_family(SERIF)
+                                            .italic()
+                                            .text_size(px(28.))
+                                            .line_height(px(36.))
+                                            .child(if searching {
+                                                "Matching settings".to_owned()
+                                            } else {
+                                                self.category.1.to_owned()
+                                            }),
+                                    )
+                                    .child(
+                                        div().text_size(px(13.)).text_color(theme.muted).child(
+                                            if searching {
+                                                "Across every category, including advanced settings."
+                                            } else if self.category.0 == Source::Pi {
+                                                "Saved in Pi's settings for new sessions. Running sessions keep theirs."
+                                            } else {
+                                                "Pi Desktop preferences, never read by the agent."
+                                            },
+                                        ),
+                                    ),
+                            )
                             .when(
                                 self.which == Which::Project && self.project_root.is_none(),
                                 |rows| {
@@ -1083,18 +1388,171 @@ impl Render for SettingsView {
                             .when(rows.is_empty() && !category_empty, |list| {
                                 list.child(note("No settings match.", theme).px(px(8.)))
                             })
-                            .children(
-                                rows.into_iter()
-                                    .map(|(source, setting)| self.row(source, setting, cx, theme)),
+                            .children(common.into_iter().map(|(source, setting)| {
+                                if !searching && source == Source::Desktop && setting.key == "appearance.theme" {
+                                    self.theme_cards(source, setting, cx, theme)
+                                } else {
+                                    self.row(source, setting, cx, theme).into_any_element()
+                                }
+                            }))
+                            // Settings edited as JSON wait under Advanced; search shows them.
+                            .when(!advanced.is_empty(), |list| {
+                                let names = advanced
+                                    .iter()
+                                    .map(|(_, setting)| setting.title)
+                                    .collect::<Vec<_>>()
+                                    .join(" · ");
+                                list.child(
+                                    h_flex()
+                                        .id("settings-advanced")
+                                        .debug_selector(|| "settings-advanced".into())
+                                        .role(gpui::Role::Button)
+                                        .aria_expanded(self.advanced_open)
+                                        .h(px(44.))
+                                        .px(px(10.))
+                                        .gap(px(8.))
+                                        .cursor_pointer()
+                                        .child(
+                                            icon(
+                                                if self.advanced_open { "chevron_down" } else { "chevron_right" },
+                                                theme.muted,
+                                            )
+                                            .size(px(12.)),
+                                        )
+                                        .child(div().text_size(px(13.5)).child("Advanced"))
+                                        .child(div().flex_1())
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(px(12.))
+                                                .text_color(theme.muted)
+                                                .child(names),
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.advanced_open = !this.advanced_open;
+                                            cx.notify();
+                                        })),
+                                )
+                                .when(self.advanced_open, |list| {
+                                    list.children(advanced.into_iter().map(|(source, setting)| {
+                                        self.row(source, setting, cx, theme)
+                                    }))
+                                })
+                            })
+                            .child(
+                                h_flex()
+                                    .debug_selector(|| "settings-footer".into())
+                                    .mt(px(14.))
+                                    .px(px(10.))
+                                    .gap(px(12.))
+                                    .text_size(px(12.))
+                                    .text_color(theme.muted)
+                                    .child(
+                                        div().flex_1().min_w_0().truncate().child(format!(
+                                            "{} · {} scope · {changed} changed · {path}",
+                                            sentence_case(source.group()),
+                                            if self.which == Which::User { "user" } else { "project" },
+                                        )),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("settings-show-keys")
+                                            .debug_selector(|| "settings-show-keys".into())
+                                            .flex_shrink_0()
+                                            .text_color(theme.accent)
+                                            .cursor_pointer()
+                                            .child(if self.show_keys { "Hide JSON keys" } else { "Show JSON keys" })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.show_keys = !this.show_keys;
+                                                cx.notify();
+                                            })),
+                                    ),
                             ),
                     ),
             )
     }
 }
 
+/// The first sentence of a schema description, without Markdown code ticks.
+fn summary(description: &str) -> String {
+    let text = description.replace('`', "");
+    match text.find(". ") {
+        Some(end) => text[..=end].to_owned(),
+        None => text,
+    }
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 fn tilde(path: &Path) -> String {
     match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    #[gpui::test]
+    fn remote_settings_cannot_open_or_write_local_project_or_pi_files(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let config = tempfile::tempdir().unwrap();
+        let target = pi_core::ssh::SshTarget::new("dev".into(), "/remote/project".into()).unwrap();
+        let settings = cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(false));
+            cx.set_global(crate::prefs::Prefs::load_from(Some(config.path())));
+            crate::prefs::remember_open_sessions(
+                cx,
+                &[crate::prefs::OpenSession {
+                    cwd: target.identity(),
+                    saved: None,
+                    remote: Some(target.clone()),
+                }],
+                0,
+            );
+            let workspace = cx.new(|_| {
+                let mut workspace = WorkspaceController::new(true);
+                workspace.selected_project = Some(target.identity());
+                workspace
+            });
+            let search = cx.new(|cx| TextInput::new("Search", cx));
+            cx.new(|cx| SettingsView::new(workspace, search, cx))
+        });
+        cx.run_until_parked();
+        settings.update(cx, |settings, cx| {
+            assert!(settings.remote_project);
+            assert!(settings.file(Source::Pi).is_none());
+            settings.open_json(Source::Pi, cx);
+            settings.write(
+                (Source::Pi, "defaultThinkingLevel"),
+                Some(json!("high")),
+                cx,
+            );
+            assert!(
+                settings
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("Remote"))
+            );
+            settings.which = Which::Project;
+            assert!(settings.file(Source::Desktop).is_none());
+            settings.open_json(Source::Desktop, cx);
+            settings.write((Source::Desktop, "jj.tools"), Some(json!(true)), cx);
+            assert!(
+                settings
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("Remote"))
+            );
+        });
     }
 }

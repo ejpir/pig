@@ -170,6 +170,11 @@ impl TextInput {
         self
     }
 
+    pub fn font_size(mut self, size: Pixels) -> Self {
+        self.font_size = size;
+        self
+    }
+
     /// Keeps newlines and wraps, growing to `max_lines` before it scrolls.
     pub fn multiline(mut self, max_lines: usize) -> Self {
         self.max_lines = Some(max_lines);
@@ -184,13 +189,6 @@ impl TextInput {
 
     pub fn content(&self) -> &str {
         &self.content
-    }
-
-    pub fn set_placeholder(&mut self, text: &str, cx: &mut Context<Self>) {
-        if self.placeholder != text {
-            self.placeholder = text.to_owned().into();
-            cx.notify();
-        }
     }
 
     pub fn chips(&self) -> &[Chip] {

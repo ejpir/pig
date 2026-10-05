@@ -1,7 +1,7 @@
 //! App views (design study 02): All Sessions and Settings take the middle column and
 //! the inspector instead of a session. The sidebar's app rows open them; selecting a
-//! session leaves them. They read pi's session list and settings files, and the
-//! header's search field filters them.
+//! session leaves them. They read pi's session list and settings files. Each has
+//! its own filter field in its toolbar, apart from global search.
 mod catalog;
 mod sessions;
 mod settings;
@@ -87,7 +87,7 @@ pub(super) fn segment(
 }
 
 /// An on/off switch.
-fn toggle(id: impl Into<ElementId>, on: bool, theme: Theme) -> Stateful<Div> {
+pub(super) fn toggle(id: impl Into<ElementId>, on: bool, theme: Theme) -> Stateful<Div> {
     div()
         .id(id)
         .role(gpui::Role::Switch)
@@ -159,13 +159,61 @@ fn detail(name: &str, value: impl Into<SharedString>, mono: bool, theme: Theme) 
 }
 
 /// The inspector's big title.
+/// The selected item's name: the serif voice for people's names, mono for
+/// identifiers. Long names get a second line before they truncate.
 fn inspector_title(text: impl Into<SharedString>, serif: bool) -> Div {
     div()
         .when(serif, |title| {
-            title.font_family(SERIF).italic().text_size(px(22.))
+            title
+                .font_family(SERIF)
+                .italic()
+                .text_size(px(26.))
+                .line_height(px(32.))
         })
-        .when(!serif, |title| title.font_family(MONO).text_size(px(18.)))
-        .line_height(px(30.))
-        .truncate()
+        .when(!serif, |title| {
+            title
+                .font_family(MONO)
+                .text_size(px(18.))
+                .line_height(px(28.))
+        })
+        .overflow_hidden()
+        .text_ellipsis()
+        .line_clamp(2)
         .child(text.into())
+}
+
+/// A view's own filter: a small field in its toolbar with a clear action. It
+/// never filters anything outside that view.
+fn search_field(id: &'static str, input: &Entity<TextInput>, cx: &App, theme: Theme) -> Div {
+    let filled = !input.read(cx).content().is_empty();
+    let clear = input.clone();
+    h_flex()
+        .debug_selector(move || id.into())
+        .flex_shrink_0()
+        .w(px(260.))
+        .h(px(30.))
+        .pl(px(10.))
+        .pr(px(4.))
+        .gap(px(8.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme.line)
+        .bg(theme.composer)
+        .child(icon("magnifying_glass", theme.muted).size(px(13.)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(12.5))
+                .child(input.clone()),
+        )
+        .when(filled, |field| {
+            field.child(
+                icon_button((id, 1usize), "close", "Clear search", theme)
+                    .size(px(22.))
+                    .on_click(move |_, _, cx| {
+                        clear.update(cx, |input, cx| input.set_content("", cx))
+                    }),
+            )
+        })
 }

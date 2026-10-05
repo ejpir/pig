@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>10 · Notifications</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  /* Android's notification shade, drawn plainly as context. */
+  .phone { background: linear-gradient(170deg, #2b3546, #121821); color: #eef0f2; }
+  .clock { font-size: 64px; font-weight: 400; letter-spacing: -.02em; margin: 40px 0 0 28px; }
+  .date { font-size: 16px; opacity: .8; margin: 0 0 30px 30px; }
+  .note { margin: 0 12px 8px; padding: 14px 16px 12px; border-radius: 26px; background: #f3f1ee; color: #252f3d; }
+  .note .app { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #665f59; }
+  .note .icon { width: 22px; height: 22px; border-radius: 11px; background: #4b607c; color: #fff; display: flex; align-items: center; justify-content: center; }
+  .note .icon i { width: 14px; height: 14px; }
+  .note .t { font-size: 15px; font-weight: 600; margin-top: 8px; }
+  .note .b { font-size: 14px; color: #3e4753; }
+  .note .actions { display: flex; gap: 8px; margin-top: 12px; }
+  .note .actions span { height: 36px; padding: 0 16px; border-radius: 18px; display: inline-flex; align-items: center; font-size: 14px; font-weight: 600;
+    background: #e3dfd9; color: #252f3d; }
+  .note .actions span.main { background: #4b607c; color: #fff; }
+  .progress { height: 4px; border-radius: 2px; background: #e4ded8; margin-top: 10px; overflow: hidden; }
+  .progress span { display: block; width: 55%; height: 100%; background: #2f7fa8; }
+  .status { color: #eef0f2; }
+  .gesture::after { background: #eef0f2; }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="clock">9:41</div>
+    <div class="date">Sunday, October 4</div>
+
+    <div class="note">
+      <div class="app"><span class="icon"><i data-i="pi"></i></span>Pi · studio-mac · now</div>
+      <div class="t">Qwen signatures needs you</div>
+      <div class="b">Run the provider tests? pnpm test --filter @pi/ai</div>
+      <div class="actions"><span class="main">Allow once</span><span>Open</span></div>
+    </div>
+
+    <div class="note">
+      <div class="app"><span class="icon"><i data-i="pi"></i></span>Pi · studio-mac · 12m</div>
+      <div class="t">Mistral thinking is done</div>
+      <div class="b">3 files changed · checks passed</div>
+      <div class="actions"><span>Review changes</span></div>
+    </div>
+
+    <div class="note">
+      <div class="app"><span class="icon"><i data-i="pi"></i></span>Pi · studio-mac · working</div>
+      <div class="t">2 sessions working</div>
+      <div class="b">Streaming retry is changing files · Gutter blame width is verifying</div>
+      <div class="progress"><span></span></div>
+    </div>
+  </main>
+</div>
+<script src="phone.js"></script>
+</body></html>

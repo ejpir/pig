@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>01 · Connect</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  .step { display: flex; gap: 14px; padding: 16px; }
+  .step + .step { border-top: 1px solid var(--line); }
+  .num { width: 28px; height: 28px; flex: none; border-radius: 14px; display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 600; background: var(--selected); color: var(--secondary); }
+  .num.done { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+  .field { margin-top: 8px; height: 48px; border: 1px solid var(--line-strong); border-radius: 12px; display: flex; align-items: center; padding: 0 14px;
+    font-size: 15px; background: var(--canvas); }
+  .key { margin-top: 8px; border-radius: 12px; background: var(--panel); padding: 10px 12px; font-size: 12px; line-height: 18px; word-break: break-all; color: var(--secondary); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="scroll col" style="padding-top:44px">
+      <span class="tile" style="--hue:var(--accent);width:44px;height:44px;border-radius:12px"><i data-i="pi"></i></span>
+      <h1 class="heading" style="margin-top:20px">Where does Pi run?</h1>
+      <p class="hint" style="font-size:15px;margin-top:10px;line-height:1.5">Pi works on your computer or a server. This phone follows its sessions, answers its questions and reviews its changes. The work goes on while the phone is away.</p>
+
+      <div class="card" style="margin-top:24px">
+        <div class="step">
+          <span class="num done"><i data-i="check" class="xs"></i></span>
+          <div class="grow">
+            <div class="label">Computer</div>
+            <div class="field"><span class="grow">nick@studio-mac.local</span><i data-i="computer" class="sm muted"></i></div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="num">2</span>
+          <div class="grow">
+            <div class="row"><span class="label grow">This phone’s key</span><span class="btn quiet small" style="height:32px;padding:0 4px"><i data-i="copy" class="sm"></i>Copy</span></div>
+            <div class="key mono">ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK7f3qPj… pi-android</div>
+            <div class="hint" style="margin-top:8px">Add it to <span class="mono" style="font-size:12px">~/.ssh/authorized_keys</span> on the computer. The private key never leaves this phone.</div>
+          </div>
+        </div>
+        <div class="step">
+          <span class="num">3</span>
+          <div class="grow">
+            <div class="label">Pi on the computer</div>
+            <div class="hint" style="margin-top:4px">Connecting installs Pi’s helper over SSH if it isn’t there. Sign-ins and settings stay on the computer.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="padding:12px 20px 14px" class="col gap8">
+      <span class="btn primary wide">Connect</span>
+      <span class="btn quiet wide">Scan the QR code from Pi Desktop</span>
+    </div>
+  </main>
+</div>
+<script src="phone.js"></script>
+</body></html>

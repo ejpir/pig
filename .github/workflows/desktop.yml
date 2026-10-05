@@ -51,7 +51,7 @@ jobs:
           key: checks
       # Do not traverse/format the sibling Zed checkout.
       - name: Format
-        run: cargo fmt -p pi_core -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
+        run: cargo fmt -p pi_core -p pi_remote -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
       - name: Rust tests
         run: cargo test --locked --workspace
       # These test-support features must not join the workspace build.
@@ -157,12 +157,42 @@ jobs:
       - name: Built-in pi
         shell: bash
         run: python scripts/fetch_pi.py --platform ${{ matrix.pi }} --out "$RUNNER_TEMP/pi" --notices
+      - uses: oven-sh/setup-bun@v2
+        if: runner.os != 'Windows'
+        with:
+          bun-version: '1.4.2'
+      - name: Durable standalone prototype and crash recovery (no model calls)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd backend/durable
+          npm ci --ignore-scripts
+          npm run check
+          bun test
+          bun run build
+          bun build test/fixture.ts --compile --outfile ../../artifacts/durable/pi-desktop-durable-fixture
+          cd ../..
+          PI_DESKTOP_TEST_DURABLE_RUNNER="$PWD/artifacts/durable/pi-desktop-durable-fixture" \
+            cargo test --locked -p pi_remote --test durable -- --ignored
+          PI_DESKTOP_TEST_DURABLE_PRODUCTION="$PWD/artifacts/durable/pi-desktop-durable" \
+            cargo test --locked -p pi_remote --test durable_auth -- --ignored
+          PI_DESKTOP_DURABLE_BINARY="$PWD/artifacts/durable/pi-desktop-durable" \
+            cargo check --locked -p pi_remote --features bundled-durable
+      - name: Native headless helper tests (no model calls)
+        run: cargo test --locked -p pi_remote
       - name: Native release build
         env:
           PI_DESKTOP_BACKEND_ARCHIVE: ${{ runner.temp }}/pi/pi-${{ matrix.pi }}.tar.gz
-        run: cargo build --locked --release -p pi-desktop --target ${{ matrix.target }} --features bundled-backend
+          PI_DESKTOP_RELEASE_REPOSITORY: ${{ github.repository }}
+        run: cargo build --locked --release -p pi-desktop -p pi_remote --target ${{ matrix.target }} --features pi-desktop/bundled-backend,pi_remote/bundled-backend
       - name: Package only distributable files
         run: python scripts/package_desktop.py --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.binary }} --notices ${{ runner.temp }}/pi/pi-notices.txt
+      - name: Package standalone SSH helper
+        shell: bash
+        run: |
+          suffix=''
+          if [[ '${{ runner.os }}' == 'Windows' ]]; then suffix='.exe'; fi
+          python scripts/package_remote.py --target ${{ matrix.target }} --binary "target/${{ matrix.target }}/release/pi-desktop-remote${suffix}"
       - uses: actions/upload-artifact@v4
         with:
           name: pi-desktop-${{ matrix.name }}
@@ -187,7 +217,7 @@ jobs:
           pattern: pi-desktop-*
           path: ${{ runner.temp }}/release
           merge-multiple: true
-      - name: Verify all four packages and checksum them
+      - name: Verify all four packages and four helpers and checksum them
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python scripts/release_desktop.py --tag "$RELEASE_TAG" --directory "$RUNNER_TEMP/release"

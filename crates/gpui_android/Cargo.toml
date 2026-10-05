@@ -1,0 +1,36 @@
+[package]
+name = "gpui_android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A GPUI platform for Android: activity lifecycle, a wgpu (Vulkan) window, touch and keyboard input."
+
+[lib]
+path = "src/gpui_android.rs"
+
+# The demo app: GpuiActivity loads `libtouch.so` and calls its `android_main`.
+# Build the APK with scripts/build_apk.py.
+[[example]]
+name = "touch"
+path = "examples/touch/main.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+log = "0.4"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+gpui_wgpu = { path = "../../../zed/crates/gpui_wgpu" }
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
+futures = "0.3"
+jni = "0.22"
+memmap2 = "0.9"
+ndk = { version = "0.9", features = ["rwh_06", "nativewindow"] }
+ndk-sys = "0.6"
+raw-window-handle = "0.6"
+uuid = "1"

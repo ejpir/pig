@@ -23,6 +23,8 @@ struct Options {
     cwd: PathBuf,
     /// `--project` was given: open it even when sessions are reopened.
     project: bool,
+    ssh: Option<String>,
+    remote_backend: pi_core::ssh::RemoteBackend,
 }
 
 impl Options {
@@ -32,6 +34,8 @@ impl Options {
             light: false,
             cwd: std::env::current_dir()?,
             project: false,
+            ssh: None,
+            remote_backend: pi_core::ssh::RemoteBackend::Pi,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -40,21 +44,39 @@ impl Options {
                 "--light" => options.light = true,
                 "--project" => {
                     options.cwd =
-                        PathBuf::from(args.next().context("--project needs a directory")?)
-                            .canonicalize()?;
+                        PathBuf::from(args.next().context("--project needs a directory")?);
                     options.project = true;
+                }
+                "--ssh" => options.ssh = Some(args.next().context("--ssh needs a host alias")?),
+                "--remote-backend" => {
+                    options.remote_backend = match args.next().as_deref() {
+                        Some("pi") => pi_core::ssh::RemoteBackend::Pi,
+                        Some("durable") => pi_core::ssh::RemoteBackend::Durable,
+                        _ => bail!("--remote-backend needs pi or durable (experimental)"),
+                    }
                 }
                 "--help" | "-h" => {
                     println!(
-                        "pi-desktop [--demo] [--light] [--project DIR]\n\nNormal mode reopens the sessions open at the last quit, or starts a session in DIR.\nSessions run the pi built into release builds, else pi from PATH, with Pi Desktop's extension.\nFor development, PI_DESKTOP_PI names a pi executable, or PI_DESKTOP_RPC_ENTRY a JavaScript\nentry such as ../pi/packages/coding-agent/dist/cli.js (run with PI_DESKTOP_NODE or node).\n--demo is offline and never starts pi."
+                        "pi-desktop [--demo] [--light] [--project DIR] [--ssh HOST] [--remote-backend pi|durable]\n\n--remote-backend durable selects the experimental durable engine for a NEW SSH session.\n--ssh opens DIR on an SSH host, installing a detached per-user Rust helper.\nSSH uses verified hosts and keys/agent. Remote agents survive disconnects.\n\nNormal mode reopens the sessions open at the last quit, or starts a session in DIR.\nSessions run the pi built into release builds, else pi from PATH, with Pi Desktop's extension.\nFor development, PI_DESKTOP_PI names a pi executable, or PI_DESKTOP_RPC_ENTRY a JavaScript\nentry such as ../pi/packages/coding-agent/dist/cli.js (run with PI_DESKTOP_NODE or node).\n--demo is offline and never starts pi."
                     );
                     std::process::exit(0);
                 }
                 _ => bail!("Unknown option: {arg}"),
             }
         }
-        if !options.cwd.is_dir() {
-            bail!("Project must be a directory");
+        if let Some(host) = &options.ssh {
+            anyhow::ensure!(
+                !options.demo && options.project,
+                "--ssh needs --project REMOTE_DIR and cannot be used with --demo"
+            );
+            pi_core::ssh::SshTarget::new(host.clone(), options.cwd.to_string_lossy().into_owned())?;
+        } else {
+            anyhow::ensure!(
+                options.remote_backend == pi_core::ssh::RemoteBackend::Pi,
+                "--remote-backend durable requires --ssh"
+            );
+            options.cwd = options.cwd.canonicalize()?;
+            anyhow::ensure!(options.cwd.is_dir(), "Project must be a directory");
         }
         Ok(options)
     }
@@ -110,7 +132,15 @@ fn main() -> Result<()> {
                     ..Default::default()
                 },
                 |window, cx| {
-                    cx.new(|cx| desktop::Desktop::new(sessions, active, options.demo, window, cx))
+                    cx.new(|cx| {
+                        desktop::Desktop::new_with_targets(
+                            sessions,
+                            active,
+                            options.demo,
+                            window,
+                            cx,
+                        )
+                    })
                 },
             );
             if let Err(error) = result {
@@ -134,33 +164,52 @@ fn main() -> Result<()> {
 /// The sessions to open and which to show: those open at the last quit when
 /// `general.reopenSessions` is on, and `--project` or the working folder. A
 /// session whose file is gone reopens as a new session in its folder.
-fn startup_sessions(
-    options: &Options,
-    cx: &App,
-) -> (
-    Vec<(PathBuf, Option<pi_core::protocol::SavedSession>)>,
-    usize,
-) {
+fn startup_sessions(options: &Options, cx: &App) -> (Vec<prefs::OpenSession>, usize) {
     let mut sessions = Vec::new();
     let mut active = 0;
     if !options.demo && prefs::flag(cx, "general.reopenSessions", None) {
         let (open, was_active) = cx.global::<prefs::Prefs>().open_sessions();
         for (index, session) in open.into_iter().enumerate() {
-            if !session.cwd.is_dir() {
+            if session.remote.is_none() && !session.cwd.is_dir() {
                 continue;
             }
             if index == was_active {
                 active = sessions.len();
             }
-            let saved = session
-                .saved
-                .filter(|saved| std::path::Path::new(&saved.path).is_file());
-            sessions.push((session.cwd, saved));
+            let saved = if session.remote.is_some() {
+                None
+            } else {
+                session
+                    .saved
+                    .filter(|saved| std::path::Path::new(&saved.path).is_file())
+            };
+            sessions.push(prefs::OpenSession {
+                cwd: session.cwd,
+                saved,
+                remote: session.remote,
+            });
         }
     }
     if options.project || sessions.is_empty() {
         active = sessions.len();
-        sessions.push((options.cwd.clone(), None));
+        let remote = options.ssh.as_ref().map(|host| {
+            let mut target = pi_core::ssh::SshTarget::new(
+                host.clone(),
+                options.cwd.to_string_lossy().into_owned(),
+            )
+            .expect("validated SSH options");
+            target.backend = options.remote_backend;
+            target
+        });
+        let cwd = remote
+            .as_ref()
+            .map(|target| target.identity())
+            .unwrap_or_else(|| options.cwd.clone());
+        sessions.push(prefs::OpenSession {
+            cwd,
+            saved: None,
+            remote,
+        });
     }
     (sessions, active)
 }

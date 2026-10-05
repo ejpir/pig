@@ -1,0 +1,110 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>D · Session map</title>
+<link rel="stylesheet" href="mock.css">
+<style>
+  .split { flex: 1; display: grid; grid-template-columns: 1fr 300px; min-height: 0; }
+  .canvas { position: relative; overflow: hidden; background: var(--canvas); }
+  .canvas > svg.grid { position: absolute; inset: 0; }
+  .edges { position: absolute; inset: 0; }
+  .node { position: absolute; width: 196px; background: var(--composer); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px 10px 14px;
+    box-shadow: 0 1px 2px rgba(37,47,61,.06), 0 6px 16px rgba(37,47,61,.05); overflow: hidden; }
+  .node::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--hue); }
+  .node .h { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 12.5px; }
+  .node .h .t { margin-left: auto; font-family: var(--mono); font-weight: 400; font-size: 10.5px; color: var(--muted); }
+  .node .s { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .node .ic { width: 20px; height: 20px; border-radius: 5px; display: grid; place-items: center; background: color-mix(in srgb, var(--hue) 13%, transparent); color: var(--hue); }
+  .node .ic .ico { width: 12px; height: 12px; }
+  .node.sel { border-color: var(--h-read); box-shadow: 0 0 0 4px color-mix(in srgb, var(--h-read) 16%, transparent), 0 10px 26px color-mix(in srgb, var(--h-read) 18%, transparent); }
+  .node.ghost { opacity: .55; border-style: dashed; box-shadow: none; }
+  .node.future { background: transparent; border: 1.5px dashed var(--line-strong); box-shadow: none; }
+  .node.future::before { display: none; }
+  .node.prompt { width: 210px; background: var(--panel); }
+  .node.prompt p { font-size: 12px; line-height: 17px; color: var(--secondary); margin-top: 6px; }
+  .fnode { position: absolute; height: 30px; display: flex; align-items: center; gap: 7px; padding: 0 10px; border-radius: 15px; background: var(--composer); border: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px; color: var(--secondary); box-shadow: 0 1px 2px rgba(37,47,61,.05); }
+  .lane { position: absolute; left: 24px; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .colh { position: absolute; top: 16px; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .zoom { position: absolute; left: 20px; bottom: 16px; display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: var(--composer); border: 1px solid var(--line); box-shadow: 0 2px 8px rgba(37,47,61,.08); }
+  .zoom span { height: 26px; min-width: 26px; padding: 0 8px; display: grid; place-items: center; font-size: 12px; color: var(--secondary); border-radius: 5px; }
+  .mini { position: absolute; right: 16px; bottom: 16px; width: 150px; height: 84px; border-radius: 8px; background: var(--composer); border: 1px solid var(--line); box-shadow: 0 2px 8px rgba(37,47,61,.08); }
+
+  .detail { border-left: 1px solid var(--line); background: var(--panel); padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+  .detail h3 { font-family: var(--mono); font-size: 14px; font-weight: 400; }
+  .kv { display: grid; grid-template-columns: 90px 1fr; gap: 7px 10px; font-size: 12px; } .kv span:nth-child(odd) { color: var(--muted); }
+  .out { border-radius: 8px; background: var(--composer); border: 1px solid var(--line); padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; line-height: 19px; }
+  .detail .sec { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-top: 6px; }
+
+  .composer-wrap { padding: 10px 24px 14px; border-top: 1px solid var(--line); }
+  .composer { background: var(--composer); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; display: flex; align-items: center; gap: 10px; }
+  .ctx { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: 6px; background: color-mix(in srgb, var(--h-read) 10%, transparent); color: var(--h-read); font-family: var(--mono); font-size: 11px; }
+</style></head>
+<body data-status="working">
+<main class="main">
+  <div class="tabs"><div class="tab">Thread</div><div class="tab">Changes <span class="n">2</span></div><div class="tab on"><i data-i="map"></i>Map</div><span class="sp"></span><span class="chip muted">Turn 3 of 3 <i data-i="chev-d"></i></span><span class="branch">pi / main</span></div>
+  <div class="split">
+    <div class="canvas">
+      <svg class="grid" width="100%" height="100%"><defs><pattern id="g" width="20" height="20" patternUnits="userSpaceOnUse"><rect x="9" y="9" width="2" height="2" rx="1" fill="#ddd7d0"/></pattern></defs><rect width="100%" height="100%" fill="url(#g)"/></svg>
+      <div class="colh" style="left:24px">Ask</div><div class="colh" style="left:268px">Explore</div><div class="colh" style="left:492px">Change</div><div class="colh" style="left:712px">Verify</div>
+
+      <!-- Edges: cubic béziers, PathBuilder::stroke in GPUI. -->
+      <svg class="edges" width="924" height="640" fill="none" stroke-width="1.6">
+        <path d="M234 238 C250 238, 250 110, 268 110" stroke="#2f7fa8" opacity=".55"/>
+        <path d="M234 238 C250 238, 250 190, 268 190" stroke="#6b5ca5" opacity=".55"/>
+        <path d="M234 238 C250 238, 250 270, 268 270" stroke="#2f7fa8" opacity=".55"/>
+        <path d="M464 110 C478 110, 478 150, 492 150" stroke="#b0661a" opacity=".55"/>
+        <path d="M464 190 C478 190, 478 150, 492 150" stroke="#b0661a" opacity=".55"/>
+        <path d="M464 270 C478 270, 478 260, 492 260" stroke="#b0661a" opacity=".55"/>
+        <path d="M688 150 C700 150, 700 210, 712 210" stroke="#2f7fa8" opacity=".7"/>
+        <path d="M688 260 C700 260, 700 210, 712 210" stroke="#2f7fa8" opacity=".7"/>
+        <path d="M810 260 L810 330" stroke="#cbc3bb" stroke-dasharray="4 4"/>
+        <!-- live pulse travelling along the active edge -->
+        <circle cx="700" cy="232" r="4" fill="#2f7fa8"/><circle cx="700" cy="232" r="8" fill="#2f7fa8" opacity=".15"/>
+        <!-- fork: an earlier attempt from the session tree -->
+        <path d="M128 296 C128 440, 200 470, 268 470" stroke="#cbc3bb" stroke-dasharray="5 4"/>
+        <path d="M464 470 L492 470" stroke="#cbc3bb" stroke-dasharray="5 4"/>
+        <!-- file outputs -->
+        <path d="M590 182 L590 196" stroke="#cbc3bb"/><path d="M590 292 L590 306" stroke="#cbc3bb"/>
+      </svg>
+
+      <div class="node prompt" style="left:24px;top:180px;--hue:var(--muted)"><div class="h"><span class="ic"><i data-i="user"></i></span>You<span class="t">10:24</span></div>
+        <p>OpenCode returns empty thinking signatures. Accept them there, keep Anthropic strict…</p></div>
+
+      <div class="node" style="left:268px;top:84px;--hue:var(--h-read)"><div class="h"><span class="ic"><i data-i="eye"></i></span>Read<span class="t">0:02</span></div><div class="s">openai-completions.ts</div></div>
+      <div class="node" style="left:268px;top:164px;--hue:var(--h-search)"><div class="h"><span class="ic"><i data-i="search"></i></span>Grep<span class="t">0:01</span></div><div class="s">"signature" · 6 hits</div></div>
+      <div class="node" style="left:268px;top:244px;--hue:var(--h-read)"><div class="h"><span class="ic"><i data-i="eye"></i></span>Read<span class="t">0:01</span></div><div class="s">anthropic.ts</div></div>
+
+      <div class="node" style="left:492px;top:124px;--hue:var(--h-edit)"><div class="h"><span class="ic"><i data-i="pencil"></i></span>Edit<span class="t"><span class="add">+3</span> <span class="rem">−1</span></span></div><div class="s">guard by provider</div></div>
+      <div class="fnode" style="left:508px;top:196px"><i data-i="file"></i>openai-completions.ts</div>
+      <div class="node" style="left:492px;top:234px;--hue:var(--h-edit)"><div class="h"><span class="ic"><i data-i="pencil"></i></span>Write<span class="t add">+24</span></div><div class="s">mocked-provider test</div></div>
+      <div class="fnode" style="left:500px;top:306px"><i data-i="file"></i>openai-completions.test.ts</div>
+
+      <div class="node sel" style="left:712px;top:184px;width:196px;--hue:var(--h-read)"><div class="h"><span class="ic"><i data-i="term"></i></span>npm run check<span class="t">0:42</span></div><div class="s">2 of 3 · running</div>
+        <div style="height:3px;border-radius:2px;background:var(--line);margin-top:8px"><div style="width:64%;height:3px;border-radius:2px;background:var(--h-read)"></div></div></div>
+      <div class="node future" style="left:712px;top:330px;width:196px"><div class="h" style="color:var(--h-wait)"><i data-i="queue"></i>Queued</div><div class="s" style="font-family:var(--sans);font-size:12px;color:var(--secondary);white-space:normal">Also cover the streaming path with a mock provider.</div></div>
+
+      <div class="node ghost" style="left:268px;top:444px;--hue:var(--line-strong)"><div class="h"><span class="ic"><i data-i="branch"></i></span>Fork · 10:19<span class="t">turn 2</span></div><div class="s">Patch the parser instead</div></div>
+      <div class="node ghost" style="left:492px;top:444px;--hue:var(--line-strong)"><div class="h"><span class="ic"><i data-i="pencil"></i></span>Edit<span class="t">abandoned</span></div><div class="s">thinking-parser.ts</div></div>
+      <div class="lane" style="top:418px;left:268px">Earlier branch · session tree</div>
+
+      <div class="zoom"><span>−</span><span>100%</span><span>+</span><span>Fit</span></div>
+      <div class="mini"><svg width="150" height="84"><g fill="#cbc3bb"><rect x="10" y="34" width="22" height="10" rx="2"/><rect x="42" y="18" width="20" height="6" rx="2"/><rect x="42" y="30" width="20" height="6" rx="2"/><rect x="42" y="42" width="20" height="6" rx="2"/><rect x="74" y="24" width="20" height="7" rx="2"/><rect x="74" y="40" width="20" height="7" rx="2"/><rect x="106" y="32" width="22" height="8" rx="2" fill="#2f7fa8"/><rect x="42" y="64" width="20" height="6" rx="2" opacity=".5"/><rect x="74" y="64" width="20" height="6" rx="2" opacity=".5"/></g><rect x="4" y="6" width="142" height="72" rx="4" fill="none" stroke="#2f7fa8" stroke-width="1.2"/></svg></div>
+    </div>
+
+    <div class="detail">
+      <div class="row" style="gap:8px"><span class="pill" style="font-size:11px;padding:2px 8px;border-radius:10px;background:color-mix(in srgb,var(--h-read) 12%,transparent);color:var(--h-read);font-weight:600">Running</span><span class="muted" style="font-size:12px">Bash · step 7</span></div>
+      <h3>npm run check</h3>
+      <div class="kv"><span>Started</span><span>10:25:12 · 0:42</span><span>Reached from</span><span>2 edits</span><span>Exit</span><span class="muted">pending</span></div>
+      <div class="sec">Output tail</div>
+      <div class="out"><div><span class="add">✓</span> TypeScript</div><div><span class="add">✓</span> Provider regression · 12</div><div class="muted">◌ workspace packages…</div></div>
+      <div class="row" style="gap:8px"><span class="btn"><i data-i="term"></i>Open output</span><span class="btn">Show in thread</span></div>
+      <div class="grow"></div>
+      <div style="font-size:11.5px;line-height:17px;color:var(--muted)">Selecting a node only inspects it. Asking about it attaches it to the draft as context; nothing re-runs.</div>
+    </div>
+  </div>
+  <div class="composer-wrap">
+    <div class="composer"><i data-i="clip" class="muted"></i><span class="ctx"><i data-i="term"></i>npm run check</span><span class="grow" style="font-size:14px">Ask about this step, or queue a follow-up…</span>
+      <span class="chip"><i data-i="spark"></i>Claude Opus · High</span><span class="btn"><i data-i="stop"></i>Stop</span><span class="btn primary">Queue ↵</span></div>
+  </div>
+</main>
+<script src="shell.js"></script><script src="icons.js"></script>
+</body></html>

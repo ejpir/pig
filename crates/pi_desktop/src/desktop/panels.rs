@@ -82,6 +82,7 @@ pub struct DocumentView {
     raw: String,
     code: Option<&'static str>,
     compact: bool,
+    review: bool,
     wrap: Option<bool>,
     subscription: Option<gpui::Subscription>,
 }
@@ -92,6 +93,7 @@ impl DocumentView {
             raw: String::new(),
             code: None,
             compact: false,
+            review: false,
             wrap: None,
             subscription: None,
         };
@@ -102,8 +104,16 @@ impl DocumentView {
         self.compact = true;
         self
     }
+    pub fn review(mut self) -> Self {
+        self.review = true;
+        self
+    }
     pub fn wrapped(mut self) -> Self {
         self.wrap = Some(true);
+        self
+    }
+    pub fn unwrapped(mut self) -> Self {
+        self.wrap = Some(false);
         self
     }
     pub fn is_wrapped(&self) -> bool {
@@ -112,6 +122,11 @@ impl DocumentView {
     pub fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
         self.wrap = Some(!self.is_wrapped());
         cx.notify();
+    }
+    pub fn selected_source(&self, cx: &App) -> Option<String> {
+        self.documents
+            .get("body")
+            .and_then(|document| document.read(cx).selected_source().map(str::to_owned))
     }
     pub fn set(&mut self, raw: String, code: Option<&'static str>, cx: &mut Context<Self>) {
         if self.raw == raw && self.code == code && self.subscription.is_some() {
@@ -165,6 +180,21 @@ impl Render for DocumentView {
             if self.code.is_some() {
                 style.code_block = style.code_block.p(px(0.)).line_height(px(17.5));
             }
+        }
+        if self.review {
+            style.base_text_style.font_size = px(13.).into();
+            style.base_text_style.line_height = px(24.).into();
+            style.container_style = gpui::StyleRefinement::default()
+                .font_family(MONO)
+                .text_size(px(13.))
+                .line_height(px(24.));
+            style.paragraph_line_height = px(24.).into();
+            style.code_block = gpui::StyleRefinement::default()
+                .font_family(MONO)
+                .text_size(px(13.))
+                .line_height(px(24.))
+                .py(px(0.))
+                .bg(gpui::transparent_black());
         }
         if let Some(wrap) = self.wrap {
             style.code_block_overflow_x_scroll = !wrap;

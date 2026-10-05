@@ -66,6 +66,8 @@ fn tool_details_start_collapsed_and_support_drag_keyboard_and_context_menu_copy(
             "BASH_SELECTED",
         ),
     ] {
+        // Edits and the command are separate steps; each opens on its own.
+        expand_activity_for_tool(&a, header.trim_start_matches("tool-header-"), &mut cx);
         let header_bounds = cx.debug_bounds(header).unwrap();
         cx.simulate_click(header_bounds.center(), gpui::Modifiers::default());
         cx.run_until_parked();

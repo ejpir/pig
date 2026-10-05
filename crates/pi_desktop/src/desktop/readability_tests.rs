@@ -19,23 +19,29 @@ fn activity_session(desktop: &Entity<Desktop>, cx: &mut VisualTestContext) -> Ta
 }
 
 #[gpui::test]
-fn completed_activity_collapses_across_messages_and_prose_remains_full_width(
-    cx: &mut TestAppContext,
-) {
+fn completed_activity_collapses_and_only_prose_has_a_reading_measure(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
     let session = activity_session(&desktop, &mut cx);
-    assert!(cx.debug_bounds("working").is_some());
+    assert!(cx.debug_bounds("work-status").is_some());
     assert!(cx.debug_bounds("activity-1-0-passed").is_none());
-    assert!(cx.debug_bounds("tool-header-one").is_some());
+    assert!(cx.debug_bounds("tool-header-one").is_none());
     receive(&session, json!({"type":"agent_settled"}), &mut cx);
     cx.run_until_parked();
     let activity = cx.debug_bounds("activity-1-0").unwrap();
     assert!(cx.debug_bounds("activity-1-0-passed").is_some());
     assert!(cx.debug_bounds("activity-1-0-failed").is_none());
-    assert!(cx.debug_bounds("activity-2-0").is_none());
+    // Reading and running are separate steps on the rail; settled steps collapse
+    // to chips of what they touched.
+    assert!(cx.debug_bounds("activity-2-0-passed").is_some());
+    assert!(cx.debug_bounds("step-chip-one").is_some());
     assert!(cx.debug_bounds("tool-header-one").is_none());
     assert!(cx.debug_bounds("tool-header-two").is_none());
-    assert!(cx.debug_bounds("working").is_none());
+    assert!(cx.debug_bounds("working").is_none()); // no duplicate transcript status
+    assert_eq!(
+        cx.debug_bounds("composer").unwrap().size.height,
+        px(112.),
+        "an empty settled composer stays compact"
+    );
     session.transcript.read_with(&cx, |view, _| {
         assert!(view.documents.get("1:thinking-0").is_none());
         assert!(view.documents.get("tool:two:output").is_none());
@@ -45,28 +51,37 @@ fn completed_activity_collapses_across_messages_and_prose_remains_full_width(
     cx.simulate_click(activity.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert!(cx.debug_bounds("tool-header-one").is_some());
+    assert!(cx.debug_bounds("step-chip-one").is_none());
+    assert!(cx.debug_bounds("tool-header-two").is_none());
+    click("activity-2-0", &mut cx);
     assert!(cx.debug_bounds("tool-header-two").is_some());
     let one = cx.debug_bounds("tool-header-one").unwrap();
     let two = cx.debug_bounds("tool-header-two").unwrap();
     assert!(one.origin.y < two.origin.y);
     cx.simulate_resize(size(px(1600.), px(900.)));
     cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("assistant-prose-3-0").unwrap().size.width > prose.size.width + px(200.)
+    assert_eq!(
+        cx.debug_bounds("assistant-prose-3-0").unwrap().size.width,
+        px(760.)
     );
+    assert_eq!(prose.size.width, px(760.));
+    assert!(cx.debug_bounds("composer").unwrap().size.width > px(1300.));
 }
 
 #[gpui::test]
 fn manual_tool_disclosure_is_not_closed_when_a_run_settles(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
     let session = activity_session(&desktop, &mut cx);
+    let activity = cx.debug_bounds("activity-2-0").unwrap();
+    cx.simulate_click(activity.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
     let tool = cx.debug_bounds("tool-header-two").unwrap();
     cx.simulate_click(tool.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     receive(&session, json!({"type":"agent_settled"}), &mut cx);
     cx.run_until_parked();
     assert!(cx.debug_bounds("tool-details-two").is_some());
-    let activity = cx.debug_bounds("activity-1-0").unwrap();
+    let activity = cx.debug_bounds("activity-2-0").unwrap();
     cx.simulate_click(activity.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert!(cx.debug_bounds("tool-header-two").is_none());
@@ -97,15 +112,19 @@ fn failed_activity_collapses_and_hidden_sessions_do_not_share_disclosures(cx: &m
     );
     receive(&session, json!({"type":"agent_settled"}), &mut cx);
     cx.run_until_parked();
-    assert!(cx.debug_bounds("activity-1-0-failed").is_some());
-    assert!(cx.debug_bounds("activity-1-0-passed").is_none());
+    assert!(cx.debug_bounds("activity-2-0-failed").is_some());
+    assert!(cx.debug_bounds("activity-2-0-passed").is_none());
+    assert!(
+        cx.debug_bounds("activity-1-0-passed").is_some(),
+        "only the failed step"
+    );
     assert!(cx.debug_bounds("tool-header-two").is_none());
     assert!(cx.debug_bounds("assistant-prose-3-0").is_some());
-    let activity = cx.debug_bounds("activity-1-0").unwrap();
-    cx.simulate_click(activity.center(), gpui::Modifiers::default());
-    cx.run_until_parked();
-    let tool = cx.debug_bounds("tool-header-two").unwrap();
-    cx.simulate_click(tool.center(), gpui::Modifiers::default());
+    assert!(cx.debug_bounds("thread-result-issue").is_some());
+    assert!(cx.debug_bounds("work-status").is_none());
+    assert_eq!(cx.debug_bounds("composer").unwrap().size.height, px(112.));
+    let review = cx.debug_bounds("review-failed-tool").unwrap();
+    cx.simulate_click(review.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert!(cx.debug_bounds("tool-details-two").is_some());
     session.controller.read_with(&cx, |controller, _| {
@@ -140,7 +159,7 @@ fn manually_expanded_failure_stays_open_after_settlement(cx: &mut TestAppContext
     receive(&session, json!({"type":"agent_settled"}), &mut cx);
     cx.run_until_parked();
     assert!(cx.debug_bounds("tool-details-two").is_some());
-    assert!(cx.debug_bounds("activity-1-0-failed").is_some());
+    assert!(cx.debug_bounds("activity-2-0-failed").is_some());
 }
 
 #[gpui::test]
@@ -163,9 +182,12 @@ fn changes_wrap_long_lines_and_contain_call_ids_without_changing_raw_copy(cx: &m
     let changes = cx.debug_bounds("tab-changes").unwrap();
     cx.simulate_click(changes.center(), gpui::Modifiers::default());
     cx.run_until_parked();
-    let wrapped = cx.debug_bounds("changes-document").unwrap();
     let call = cx.debug_bounds("change-tool-0").unwrap();
     assert!(call.origin.x + call.size.width <= px(1344.));
+    let mode = cx.debug_bounds("changes-diff-mode").unwrap();
+    cx.simulate_click(mode.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    let wrapped = cx.debug_bounds("changes-document").unwrap();
     let toggle = cx.debug_bounds("changes-wrap").unwrap();
     cx.simulate_click(toggle.center(), gpui::Modifiers::default());
     cx.run_until_parked();
@@ -207,9 +229,7 @@ fn diagnostics_keep_the_error_tail_after_the_banner_is_dismissed(cx: &mut TestAp
 #[gpui::test]
 fn context_details_fit_inside_their_tiles_even_when_narrow(cx: &mut TestAppContext) {
     let (_desktop, mut cx) = setup(cx);
-    let context = cx.debug_bounds("tab-context").unwrap();
-    cx.simulate_click(context.center(), gpui::Modifiers::default());
-    cx.run_until_parked();
+    click("tab-context", &mut cx);
     for width in [1344., 1000.] {
         cx.simulate_resize(size(px(width), px(740.)));
         cx.run_until_parked();

@@ -43,6 +43,10 @@ The desktop extension, `crates/pi_core/extension/pi-desktop.ts`, uses only Pi's 
 
 Pi's release binary is a Bun standalone executable (Bun 1.3.14 for Pi 1.0.0), so it contains the Bun runtime: MIT-licensed, statically linking JavaScriptCore/WebKit (LGPL-2) and the other libraries listed in `licenses/BUN-LICENSE.md` (copied unmodified from Bun's `LICENSE.md` at tag `bun-v1.3.14`; update it when a new Pi release reports another `bunVersion`). That file also explains how to rebuild Bun with a modified JavaScriptCore, as the LGPL requires. The executable is embedded compressed in `pi-desktop` and written to the user's cache folder before it runs.
 
+## Experimental durable runner
+
+`backend/durable` pins `@earendil-works/pi-durable`, `pi-ai`, `chord` and `pi-coding-agent` 1.0.2 (MIT) through its npm lockfile. The coding-agent SDK supplies only the public model/auth runtime and credential locking; the runner does not start its agent or extension host. Its native standalone executable contains Bun 1.4.2; `licenses/DURABLE-BUN-LICENSE.md` is copied unmodified from `oven-sh/bun` tag `bun-v1.4.2`, and covers JavaScriptCore/WebKit relinking and runtime dependencies for this separate version. `backend/durable/build.ts` gathers full installed dependency notices plus the application and matching Bun notices into `artifacts/durable/NOTICES.txt`. `pi_remote` embeds/prints these with the optional `bundled-durable` feature. The faux-only test runner is not shipped. Normal release packaging still selects stock Pi pending the durable compatibility gates.
+
 ## Design
 
 Colors, dimensions, terminology, and screen structure come from the provided `design/` studies. Fixture names, paths, and numbers are explicitly sample data. The SVG/PNG studies are references, not the rendered application.

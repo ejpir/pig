@@ -58,23 +58,44 @@ print(left + (int(row['left']) + int(row['width']) // 2) // 2,
 PY
 }
 # Tool details are intentionally collapsed by default. Capture each expanded view too.
-for tool in 'edit-details Edit' 'bash-details Bash'; do
+for tool in 'edit-details Edit'; do
     read -r name word <<< "$tool"
     read -r x y < <(locate_word "$word" '230,270,1000,555')
     xdotool mousemove --window "$window" "$x" "$y" click 1
     sleep 1
+    # Taller prose/file summaries can put the expanded output below the fold.
+    if [[ "$word" == Bash ]]; then
+        xdotool mousemove --window "$window" 850 430 click --repeat 2 --delay 100 5
+        sleep 0.4
+        read -r x y < <(locate_word "$word" '230,100,1000,510')
+    fi
     import -window "$window" "artifacts/thread-$name.png"
     xdotool mousemove --window "$window" "$x" "$y" click 1
+    if [[ "$word" == Bash ]]; then
+        xdotool mousemove --window "$window" 850 430 click --repeat 4 --delay 100 4
+    fi
     sleep 0.2
 done
-for picker in 'model-picker 370' 'thinking-picker 490' 'commands-picker 276'; do
-    read -r name x <<< "$picker"
-    xdotool mousemove --window "$window" "$x" 678 click 1
+xdotool mousemove --window "$window" 850 430 click --repeat 2 --delay 100 5
+sleep 0.4
+import -window "$window" artifacts/thread-bash-details.png
+xdotool mousemove --window "$window" 850 430 click --repeat 4 --delay 100 4
+sleep 0.3
+for picker in 'model-picker claude-opus-5-5' 'thinking-picker High'; do
+    read -r name word <<< "$picker"
+    read -r x y < <(locate_word "$word" '215,620,700,715')
+    xdotool mousemove --window "$window" "$x" "$y" click 1
     sleep 0.5
     import -window "$window" "artifacts/thread-$name.png"
     xdotool key Escape
     sleep 0.2
 done
+# Usage remains reachable, but details are deliberately closed on first launch.
+xdotool key ctrl+shift+i
+sleep 0.5
+import -window "$window" artifacts/thread-usage.png
+xdotool key ctrl+shift+i
+sleep 0.3
 xdotool key ctrl+a
 xdotool type --clearmodifiers 'Xvfb follow-up validation'
 xdotool key alt+Return

@@ -1,0 +1,32 @@
+{
+  "kind": "static design proposal, not application captures",
+  "source": "real-session layout from the user-provided screenshot",
+  "master": "../thread-polish-mocks.svg",
+  "screens": [
+    {
+      "name": "01-balanced-rail",
+      "size": [
+        1500,
+        820
+      ],
+      "title": "Balanced operational rail"
+    },
+    {
+      "name": "02-grouped-result",
+      "size": [
+        1500,
+        820
+      ],
+      "title": "Grouped result card"
+    },
+    {
+      "name": "03-fluid-ledger",
+      "size": [
+        1500,
+        820
+      ],
+      "title": "Fluid minimal ledger"
+    }
+  ],
+  "selected": "02-grouped-result"
+}

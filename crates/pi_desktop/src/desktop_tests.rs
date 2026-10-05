@@ -15,6 +15,8 @@ mod lifecycle_tests;
 mod projects_shell_tests;
 #[path = "desktop/readability_tests.rs"]
 mod readability_tests;
+#[path = "desktop/ssh_tests.rs"]
+mod ssh_tests;
 #[path = "desktop/status_tools_tests.rs"]
 mod status_tools_tests;
 #[path = "desktop/terminal_tests.rs"]
@@ -23,6 +25,34 @@ mod terminal_tests;
 mod tool_tests;
 #[path = "desktop/view_tests.rs"]
 mod view_tests;
+#[path = "desktop/workbench_tests.rs"]
+mod workbench_tests;
+
+fn click(selector: &'static str, cx: &mut VisualTestContext) {
+    if cx.debug_bounds(selector).is_none() {
+        let menu = if selector.starts_with("nav-") {
+            "settings-tools"
+        } else if matches!(selector, "tab-tree" | "tab-context") {
+            "session-tools"
+        } else {
+            panic!("No control: {selector}")
+        };
+        let bounds = cx.debug_bounds(menu).unwrap();
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+    }
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("No control: {selector}"));
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+}
+fn show_inspector(desktop: &Entity<Desktop>, cx: &mut VisualTestContext) {
+    if !desktop.read_with(cx, |d, _| d.layout.inspector) {
+        desktop.update(cx, |d, cx| d.toggle_inspector(cx));
+        cx.run_until_parked();
+    }
+}
 
 fn setup(cx: &mut TestAppContext) -> (Entity<Desktop>, VisualTestContext) {
     let window = cx.update(|cx| {
@@ -636,28 +666,59 @@ fn clear_queue_does_not_abort_and_search_cannot_submit(cx: &mut TestAppContext) 
 fn sidebar_lists_active_sessions_and_project_scoped_saved_rows(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
     open(&desktop, "/demo/repos/zed", None, &mut cx);
-    assert!(cx.debug_bounds("active-session-0").is_some());
-    assert!(cx.debug_bounds("active-session-1").is_some());
+    assert!(cx.debug_bounds("active-session-0").is_none());
+    assert!(cx.debug_bounds("active-session-1").is_none());
     assert!(cx.debug_bounds("open-session-0").is_some());
     assert!(cx.debug_bounds("open-session-1").is_some());
     assert!(cx.debug_bounds("saved-session-demo-mistral").is_some());
     assert!(cx.debug_bounds("saved-session-demo-zed").is_some());
-    let active_toggle = cx.debug_bounds("sidebar-active-toggle").unwrap();
-    cx.simulate_click(active_toggle.center(), gpui::Modifiers::default());
+    let open_toggle = cx.debug_bounds("sidebar-open-toggle").unwrap();
+    cx.simulate_click(open_toggle.center(), gpui::Modifiers::default());
     cx.run_until_parked();
-    assert!(cx.debug_bounds("active-session-0").is_none());
+    assert!(cx.debug_bounds("open-session-0").is_none());
+    assert!(cx.debug_bounds("saved-session-demo-mistral").is_some());
+    cx.simulate_click(open_toggle.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    let active_project = cx.debug_bounds("project-1").unwrap();
+    let open_origin = cx.debug_bounds("open-session-0").unwrap().origin;
+    cx.simulate_click(active_project.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.debug_bounds("open-session-0").unwrap().origin,
+        open_origin
+    );
+    assert_eq!(cx.debug_bounds("project-1").unwrap(), active_project);
+    assert!(cx.debug_bounds("saved-session-demo-zed").is_none());
+    assert!(cx.debug_bounds("open-session-1").is_some());
+    select(&desktop, 0, &mut cx);
+    select(&desktop, 1, &mut cx);
+    assert!(
+        cx.debug_bounds("saved-session-demo-zed").is_none(),
+        "selecting an open session must not reopen an explicitly collapsed project"
+    );
+    cx.simulate_click(active_project.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(cx.debug_bounds("project-1").unwrap(), active_project);
     let projects_toggle = cx.debug_bounds("sidebar-projects-toggle").unwrap();
+    let open_origin = cx.debug_bounds("open-session-0").unwrap().origin;
     cx.simulate_click(projects_toggle.center(), gpui::Modifiers::default());
     cx.run_until_parked();
+    assert_eq!(
+        cx.debug_bounds("open-session-0").unwrap().origin,
+        open_origin
+    );
     assert!(cx.debug_bounds("saved-session-demo-mistral").is_none());
     cx.simulate_click(projects_toggle.center(), gpui::Modifiers::default());
-    cx.simulate_click(active_toggle.center(), gpui::Modifiers::default());
     cx.run_until_parked();
+    assert_eq!(
+        cx.debug_bounds("open-session-0").unwrap().origin,
+        open_origin
+    );
     let search = desktop.read_with(&cx, |desktop, cx| desktop.sidebar.read(cx).search.clone());
     search.update(&mut cx, |input, cx| input.set_content("signatures", cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("active-session-0").is_some());
-    assert!(cx.debug_bounds("active-session-1").is_none());
+    assert!(cx.debug_bounds("open-session-0").is_some());
+    assert!(cx.debug_bounds("open-session-1").is_none());
     assert!(cx.debug_bounds("saved-session-demo-zed").is_none());
 }
 
@@ -783,6 +844,7 @@ fn ask_pi_to_fix_sends_the_problem_and_shows_the_thread(cx: &mut TestAppContext)
 #[gpui::test]
 fn at_mentions_become_chips_and_pi_gets_paths(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
+    show_inspector(&desktop, &mut cx);
     let id = open(&desktop, "/demo/mentions", None, &mut cx);
     let t = tab(&desktop, id, &cx);
     set_draft(&t, "Compare @op", &mut cx);
@@ -943,9 +1005,8 @@ fn all_sessions_and_settings_open_from_the_sidebar(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
     let saved_count = workspace(&desktop, &cx).read_with(&cx, |workspace, _| workspace.saved.len());
     assert!(saved_count > 1, "the demo lists saved sessions");
-    let nav = cx.debug_bounds("nav-All Sessions").unwrap();
-    cx.simulate_click(nav.center(), gpui::Modifiers::none());
-    cx.run_until_parked();
+    show_inspector(&desktop, &mut cx);
+    click("nav-All Sessions", &mut cx);
     assert!(cx.debug_bounds("all-sessions").is_some());
     assert!(cx.debug_bounds("app-view-title").is_none());
     assert!(cx.debug_bounds("new-session").is_some());
@@ -962,9 +1023,7 @@ fn all_sessions_and_settings_open_from_the_sidebar(cx: &mut TestAppContext) {
     );
     assert_eq!(workspace(&desktop, &cx).read_with(&cx, |w, _| w.view), None);
 
-    let nav = cx.debug_bounds("nav-Settings").unwrap();
-    cx.simulate_click(nav.center(), gpui::Modifiers::none());
-    cx.run_until_parked();
+    click("nav-Settings", &mut cx);
     assert!(cx.debug_bounds("settings-view").is_some());
     assert!(cx.debug_bounds("settings-category-0").is_some());
     assert!(
@@ -987,13 +1046,6 @@ fn desktop_settings_sit_below_pi_and_apply_at_once(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| cx.set_global(crate::prefs::Prefs::load_from(Some(dir.path()))));
     let (_desktop, mut cx) = setup(cx);
-    let click = |selector: &'static str, cx: &mut VisualTestContext| {
-        let bounds = cx
-            .debug_bounds(selector)
-            .unwrap_or_else(|| panic!("{selector}"));
-        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        cx.run_until_parked();
-    };
     click("nav-Settings", &mut cx);
     click("desktop-category-2", &mut cx);
     assert!(cx.debug_bounds("setting-row-jj.offer").is_some());

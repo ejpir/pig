@@ -1,13 +1,14 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::protocol::{
     Command, ImageContent, SavedSession, SessionState, SessionStats, StreamingBehavior,
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RunState {
     #[default]
     Idle,
@@ -27,7 +28,7 @@ impl RunState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tool {
     pub id: String,
     pub name: String,
@@ -50,7 +51,7 @@ impl Tool {
 }
 
 /// A bounded live preview; the SDK's final message remains the history authority.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShellExecution {
     pub id: String,
     pub command: String,
@@ -61,7 +62,7 @@ pub struct ShellExecution {
 }
 
 /// What `get_backend_info` found out about the program running this session.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub enum BackendInfo {
     /// Not asked, or no answer yet.
     #[default]
@@ -74,7 +75,7 @@ pub enum BackendInfo {
     Unsupported,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Session {
     pub cwd: PathBuf,
     pub state: SessionState,
@@ -82,6 +83,7 @@ pub struct Session {
     pub run: RunState,
     pub shell: Option<ShellExecution>,
     pub messages: Vec<Value>,
+    #[serde(skip)]
     pub history: Option<std::sync::Arc<crate::history::History>>,
     pub settings: Option<Value>,
     pub backend: BackendInfo,
@@ -177,6 +179,23 @@ impl Session {
     /// State is driven by session events, never by the prompt acknowledgement.
     pub fn apply(&mut self, record: &Value) -> Result<()> {
         match record["type"].as_str().unwrap_or("") {
+            "remote_snapshot" => {
+                let mut snapshot: Self = serde_json::from_value(record["data"].clone())
+                    .context("invalid remote snapshot")?;
+                anyhow::ensure!(
+                    snapshot.streaming_message.is_none_or(|index| {
+                        snapshot
+                            .messages
+                            .get(index)
+                            .is_some_and(|m| m["role"] == "assistant")
+                    }),
+                    "invalid remote streaming message index"
+                );
+                // Remote filesystem paths are never local project identities.
+                snapshot.cwd = self.cwd.clone();
+                snapshot.saved.clear();
+                *self = snapshot;
+            }
             "response" => self.response(record)?,
             "bash_execution_update" => {
                 if let Some(shell) = &mut self.shell
@@ -420,6 +439,7 @@ impl Session {
                 self.saved = serde_json::from_value(data["sessions"].clone())
                     .context("invalid session list")?
             }
+            "get_messages" if data["remoteSnapshot"] == true => {}
             "get_messages" => {
                 let append = self.shell_snapshot_appends(data);
                 let previous = if append { self.messages.len() } else { 0 };

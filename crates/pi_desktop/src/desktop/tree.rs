@@ -411,7 +411,7 @@ impl TreeView {
             .child(section("MESSAGE","",theme).mt(px(12.)))
             .child(div().id("tree-message-preview").mt(px(6.)).max_h(px(160.)).overflow_y_scroll().px(px(12.)).py(px(8.)).rounded(px(6.)).border_1().border_color(theme.line).bg(theme.canvas).child(self.document.clone()))
             .child(h_flex().mt(px(13.)).h(px(20.)).justify_between().child(label("BRANCH SUMMARY",theme))
-                .child(div().id("view-branch-summary").text_size(px(10.)).font_family(MONO).text_color(if has_summary{theme.accent}else{theme.faint}).when(has_summary,|d|d.cursor_pointer()).child("[ VIEW ]").on_click(cx.listener(move|this,_,_,cx|{if has_summary{this.summary_open = !this.summary_open;cx.notify();}}))))
+                .child(div().id("view-branch-summary").text_size(px(12.)).text_color(if has_summary{theme.accent}else{theme.muted}).when(has_summary,|d|d.cursor_pointer()).child(if !has_summary {"Not recorded"} else if self.summary_open {"Hide"} else {"View"}).on_click(cx.listener(move|this,_,_,cx|{if has_summary{this.summary_open = !this.summary_open;cx.notify();}}))))
             .child(note(summary_note,theme).mt(px(8.)).line_height(px(18.)))
             .when(self.summary_open,|v|v.child(div().id("tree-summary-preview").max_h(px(160.)).overflow_y_scroll().mt(px(8.)).p(px(10.)).bg(theme.canvas).child(self.summary_document.clone())))
             .child(divider(theme).mt(px(10.))).child(section("ACTIONS","",theme).mt(px(12.)))

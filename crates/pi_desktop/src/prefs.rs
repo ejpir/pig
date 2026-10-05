@@ -82,6 +82,7 @@ pub struct OpenSession {
     pub cwd: PathBuf,
     /// `None` for a session that had nothing saved yet.
     pub saved: Option<SavedSession>,
+    pub remote: Option<pi_core::ssh::SshTarget>,
 }
 
 pub struct Prefs {
@@ -152,7 +153,18 @@ impl Prefs {
                     first_message: session["title"].as_str().unwrap_or_default().to_owned(),
                     ..Default::default()
                 });
-                Some(OpenSession { cwd, saved })
+                let remote = session
+                    .get("remote")
+                    .map(|value| serde_json::from_value::<pi_core::ssh::SshTarget>(value.clone()))
+                    .transpose()
+                    .ok()?;
+                if remote
+                    .as_ref()
+                    .is_some_and(|target| target.validate().is_err())
+                {
+                    return None;
+                }
+                Some(OpenSession { cwd, saved, remote })
             })
             .collect::<Vec<_>>();
         let active = self
@@ -325,6 +337,45 @@ pub fn reloaded(cx: &mut App, file: SettingsFile) {
 }
 
 /// Saves the sessions open now, for `general.reopenSessions`.
+pub fn remote_sessions(cx: &App) -> Vec<pi_core::ssh::SshTarget> {
+    cx.try_global::<Prefs>()
+        .and_then(|prefs| prefs.state.get("remoteSessions"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| serde_json::from_value::<pi_core::ssh::SshTarget>(value.clone()).ok())
+        .filter(|target| target.validate().is_ok())
+        .collect()
+}
+
+/// Forget only the desktop shortcut. Never deletes a remote file, aborts work or closes a tab.
+pub fn forget_remote_session(cx: &mut App, target: &pi_core::ssh::SshTarget) {
+    if !cx.has_global::<Prefs>() {
+        return;
+    }
+    cx.update_global::<Prefs, _>(|prefs, cx| {
+        let mut forgotten = prefs
+            .state
+            .get("forgottenRemoteSessions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let marker = json!({"host":target.host, "key":target.key});
+        if !forgotten.contains(&marker) {
+            forgotten.push(marker);
+        }
+        prefs.state.set("forgottenRemoteSessions", json!(forgotten));
+        let mut remote = prefs
+            .state
+            .get("remoteSessions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        remote.retain(|value| value["host"] != target.host || value["key"] != target.key);
+        prefs.remember("remoteSessions", json!(remote), cx);
+    });
+}
+
 pub fn remember_open_sessions(cx: &mut App, sessions: &[OpenSession], active: usize) {
     if !cx.has_global::<Prefs>() {
         return;
@@ -333,6 +384,9 @@ pub fn remember_open_sessions(cx: &mut App, sessions: &[OpenSession], active: us
         .iter()
         .map(|session| {
             let mut entry = json!({ "cwd": session.cwd.to_string_lossy() });
+            if let Some(remote) = &session.remote {
+                entry["remote"] = json!(remote);
+            }
             if let Some(saved) = &session.saved {
                 entry["path"] = json!(saved.path);
                 entry["id"] = json!(saved.id);
@@ -349,6 +403,36 @@ pub fn remember_open_sessions(cx: &mut App, sessions: &[OpenSession], active: us
         return;
     }
     cx.update_global::<Prefs, _>(|prefs, cx| {
+        // Remember detached targets separately so closing a tab does not lose the reconnect identity.
+        let mut remote = prefs
+            .state
+            .get("remoteSessions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let forgotten = prefs
+            .state
+            .get("forgottenRemoteSessions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for session in sessions
+            .iter()
+            .filter_map(|session| session.remote.as_ref())
+        {
+            if forgotten
+                .iter()
+                .any(|value| value["host"] == session.host && value["key"] == session.key)
+            {
+                continue;
+            }
+            remote.retain(|value| value["host"] != session.host || value["key"] != session.key);
+            remote.push(json!(session));
+        }
+        if remote.len() > 100 {
+            remote.drain(..remote.len() - 100);
+        }
+        prefs.state.set("remoteSessions", json!(remote));
         prefs.state.set("openSessions", json!(list));
         prefs.remember("activeSession", json!(active), cx);
     });
@@ -449,6 +533,74 @@ mod tests {
     }
 
     #[gpui::test]
+    fn removed_ssh_shortcuts_stay_removed_while_open_sessions_keep_updating(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let config = tempfile::tempdir().unwrap();
+        let target = pi_core::ssh::SshTarget::new("dev".into(), "/remote/work".into()).unwrap();
+        let other = pi_core::ssh::SshTarget::new("dev".into(), "/remote/work".into()).unwrap();
+        let mut open = vec![
+            OpenSession {
+                cwd: target.identity(),
+                saved: None,
+                remote: Some(target.clone()),
+            },
+            OpenSession {
+                cwd: other.identity(),
+                saved: None,
+                remote: Some(other.clone()),
+            },
+        ];
+        cx.update(|cx| {
+            cx.set_global(Prefs::load_from(Some(config.path())));
+            remember_open_sessions(cx, &open, 0);
+            forget_remote_session(cx, &target);
+            assert_eq!(remote_sessions(cx), vec![other.clone()]);
+            open[0].remote.as_mut().unwrap().session_file = Some("/remote/saved.jsonl".into());
+            remember_open_sessions(cx, &open, 0);
+            assert_eq!(remote_sessions(cx), vec![other.clone()]);
+            assert_eq!(
+                cx.global::<Prefs>().open_sessions().0.len(),
+                2,
+                "removal does not stop or close an open session"
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            cx.set_global(Prefs::load_from(Some(config.path())));
+            assert_eq!(remote_sessions(cx), vec![other]);
+        });
+    }
+
+    #[gpui::test]
+    fn ssh_targets_survive_detach_without_local_saved_file_checks(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let target =
+            pi_core::ssh::SshTarget::new("dev".into(), "/not/a/local/folder".into()).unwrap();
+        cx.update(|cx| {
+            cx.set_global(Prefs::load_from(Some(dir.path())));
+            remember_open_sessions(
+                cx,
+                &[OpenSession {
+                    cwd: target.identity(),
+                    saved: None,
+                    remote: Some(target.clone()),
+                }],
+                0,
+            );
+            assert_eq!(remote_sessions(cx), vec![target.clone()]);
+            remember_open_sessions(cx, &[], 0);
+        });
+        cx.run_until_parked();
+        let reloaded = Prefs::load_from(Some(dir.path()));
+        assert!(reloaded.open_sessions().0.is_empty());
+        cx.update(|cx| {
+            cx.set_global(reloaded);
+            assert_eq!(remote_sessions(cx), vec![target]);
+        });
+    }
+
+    #[gpui::test]
     async fn state_remembers_open_sessions_and_declined_offers(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| cx.set_global(Prefs::load_from(Some(dir.path()))));
@@ -465,10 +617,12 @@ mod tests {
             OpenSession {
                 cwd: root.into(),
                 saved: Some(saved),
+                remote: None,
             },
             OpenSession {
                 cwd: "/repos/other".into(),
                 saved: None,
+                remote: None,
             },
         ];
         cx.update(|cx| {

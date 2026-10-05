@@ -222,11 +222,17 @@ impl ComposerView {
                 v_flex()
                     .id("composer-picker")
                     .absolute()
-                    .bottom(px(47.))
+                    .map(|menu| {
+                        if self.menus_below() {
+                            menu.top(relative(1.)).mt(px(6.))
+                        } else {
+                            menu.bottom(px(47.))
+                        }
+                    })
                     .left(px(if picker == Picker::Thinking {
-                        228.
+                        264.
                     } else {
-                        70.
+                        106.
                     }))
                     .w(px(if picker == Picker::Thinking {
                         210.

@@ -7,7 +7,9 @@ Pi Desktop is a native GPUI application. It embeds Zed's editor, project, Markdo
 | Component | Responsibility |
 | --- | --- |
 | `pi_desktop` | Window, session controllers/views, navigation, preferences and native dialogs |
-| `pi_core` | GPUI-independent session reducer, typed commands and their routing, transport, desktop channel, desktop extension and process ownership |
+| `pi_core` | GPUI-independent session reducer, typed commands and their routing, local/SSH transport, desktop channel, desktop extension and process ownership |
+| `pi_remote` | Cross-platform headless SSH helper: installation target, disposable stdio bridge, detached per-session backend owner, reconnect snapshots and independent file RPC |
+| `backend/durable` | Experimental standalone durable runner: committed execution state, SQLite recovery and a text/coding-tool adapter; not a stock extension host |
 | `pi_editor` | Shared Zed projects/buffers, file operations and editor integration |
 | `pi_lsp_bridge` | Socket answering the desktop extension's language-server and jj requests |
 | `pi_jj` | File-history operations through pinned `jj-lib`; no installed jj CLI required |
@@ -33,15 +35,17 @@ Project selection is independent of session selection. Selecting a project does 
 
 ## RPC and session lifecycle
 
-Each session owns one pi subprocess. `pi_core` handles strict LF-framed UTF-8 JSONL, bounded queues, request correlation and deadlines. Records are limited to 16 MiB; stderr is diagnostic output, never protocol input. Responses must match both request ID and command. A timeout leaves the outcome unknown and never triggers an automatic prompt retry.
+Each local session owns one pi subprocess. SSH sessions own a local bridge; a detached remote helper owns Pi. Remote close/disconnect detaches without aborting, reconnect replaces the projection from a live snapshot, and remote filesystem identities never enter local file services. Remote editors use detached Zed buffers over a separate `files --stdio` helper channel; reads, optimistic revision-checked saves and polling happen on the host, without a local Zed Project/file handle or language server. See [Remote Pi](remote.md) for the protocol, bootstrap and current capability limits.
+
+`pi_core` handles strict LF-framed UTF-8 JSONL, bounded queues, request correlation and deadlines. Records are limited to 16 MiB; stderr is diagnostic output, never protocol input. Responses must match both request ID and command. A timeout leaves the outcome unknown and never triggers an automatic prompt retry.
 
 Submission stays disabled until state, messages, statistics and saved-session bootstrap complete. Resume checks the requested session identity against pi's response. Optional metadata, including the extension's versions and features, is not an identity gate.
 
 - Streaming blocks update by content index; tools are keyed by tool-call ID. History and live events use the same reducer.
-- Prompt acknowledgements report acceptance, not completion. Only `agent_settled` completes a run.
+- Prompt acknowledgements report acceptance, not completion. Stock Pi's `agent_settled` completes a run; the experimental durable backend derives run state from its committed `pi.live` document.
 - Stop clears queued work before aborting and returns recovered text to the originating composer.
 - `!` and `!!` submit explicit SDK-owned shell work, including or excluding output from model context. They do not fabricate agent lifecycle events.
-- Close rechecks running work, drafts, exclusive operations and shared dirty buffers. Closing a tab stops its owned process; it does not delete the project or saved conversation.
+- Close rechecks running work, drafts, exclusive operations and shared dirty buffers. Closing a local tab stops its owned process; closing an SSH tab detaches while the remote agent continues. Neither deletes the project or saved conversation.
 
 Unix subprocesses use isolated process groups; Windows subprocesses use kill-on-close Job Objects. Shutdown closes stdin, then kills and reaps an uncooperative child after a grace period. Descendants are stopped before joining pipe readers.
 
@@ -59,11 +63,11 @@ Presentation preserves original content and copy:
 - Composer and process-list scrollbars use stable gutters. Manual composer scrolling pauses caret following until editing or cursor navigation resumes it.
 - Notifications float above content rather than changing transcript or table geometry.
 
-`@` matching uses Zed's standalone `fuzzy` crate over existing owner snapshots. Background matches are cancellable and guarded by query, range and generation. Files and directories serialize as path references; directories never attach recursive contents. Other mention types serialize explicit text. Image attachments are separate prompt image blocks, with a 20 MB per-image limit.
+`@` matching uses Zed's standalone `fuzzy` crate over existing owner snapshots. Background matches are cancellable and guarded by query, range and generation. Files and directories serialize as path references; directories never attach recursive contents. SSH sessions use the remote file index and preview RPC without entering desktop filesystem or local language-server services. Other mention types serialize explicit text. Image attachments are separate prompt image blocks, with a 20 MB per-image limit.
 
 ## Pi and the desktop extension
 
-Each session runs stock `pi --mode rpc` with the desktop extension, `crates/pi_core/extension/pi-desktop.ts`, which `pi_core` installs into the cache folder and passes with `-e`. Pi performs its own startup: stdout protection, proxy settings, trust, built-in extensions and model scope. The desktop uses no private Pi modules.
+By default, sessions run stock `pi --mode rpc` with the desktop extension, `crates/pi_core/extension/pi-desktop.ts`, which `pi_core` installs into the cache folder and passes with `-e`. Pi performs its own startup: stdout protection, proxy settings, trust, built-in extensions and model scope. The desktop uses no private Pi modules.
 
 Problem: Pi's RPC mode lacks part of what the desktop needs, such as custom entries, active tools, a settings snapshot, labels, a fork into another folder, session listing, sharing, trust details, auth providers and packages. The extension supplies these through Pi's public extension API and package exports.
 
@@ -90,6 +94,18 @@ Accepted consequences of stock Pi:
 - Resources lists only extensions that register tools or commands. Pi exposes no list of loaded extensions.
 - The saved model cycle, and per-model thinking for models other than the current one, apply to new sessions.
 - Radius sharing resolves its token without Pi's five-minute validity margin.
+
+## Experimental durable SSH engine
+
+A new SSH target can opt into `RemoteBackend::Durable`; legacy targets deserialize as stock Pi and an existing key cannot change backend/cwd. SSH setup probes helper capabilities before connecting a durable target. No stock Pi fallback or local-service fallback is allowed.
+
+`pi_remote/src/durable.rs` launches an internal Rust storage owner supervising a standalone Bun runner. On Unix the runner inherits the owner's OS writer-lock descriptor; killing the owner cannot free storage while the runner still writes. All descendants remain in the RPC-owned process group. Independent file services do not change.
+
+The runner reuses stock Pi's public `ModelRuntime` from the pinned 1.0.2 SDK for built-in providers, host-side `auth.json`/OAuth refresh under the existing credential lock, global `models.json` and cached catalogs. It never constructs a stock agent or extension runtime. Model/auth metadata excludes credentials and request headers; catalog refresh is offline/cache-only. Interactive login remains a terminal handoff on the SSH host.
+
+The runner uses pinned pi-durable 1.0.2 and its SQLite adapter with WAL/`synchronous=FULL`. A serialized committed watch supplies transcript, live generation/tool state, inbox and usage; Rust reconstructs a disposable `Session` projection and sends authoritative snapshots. Runner read acknowledgements never overwrite that projection with empty state. Reconnect after process/host failure reopens the same storage and resumes checkpoints; there is no unattended reboot service yet.
+
+Prompt request keys are independent of correlation counters. Admission is acknowledged only after durable commit, same-key explicit retries deduplicate and payload collisions fail. Uncertain submissions are never automatically replayed; the desktop outbox is not crash-persistent yet. Unsafe interrupted tools return errors instead of being automatically repeated. Authentication/resources/stock-extension parity, capabilities UI, migration and native runtime gates precede making this the default. See [the runner walkthrough](../backend/durable/README.md) and [remote scope](remote.md).
 
 ## Built-in pi
 

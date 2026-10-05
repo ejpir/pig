@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>02 · Sessions</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  .section { margin: 18px 4px 8px; }
+  .host { height: 32px; display: inline-flex; align-items: center; gap: 8px; padding: 0 12px 0 10px; border-radius: 16px; background: var(--panel); font-size: 13px; color: var(--secondary); }
+  .fab { position: absolute; right: 16px; bottom: 16px; height: 56px; padding: 0 22px 0 18px; border-radius: 18px; display: flex; align-items: center; gap: 10px;
+    background: var(--accent); color: var(--on-accent); font-size: 15px; font-weight: 600; box-shadow: 0 6px 16px rgba(37,47,61,.22); }
+  .needs { border-color: color-mix(in srgb, var(--h-wait) 45%, var(--line)); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="appbar">
+      <div class="title" style="padding-left:16px"><b style="font-size:22px">Sessions</b></div>
+      <span class="tap"><i data-i="search"></i></span>
+      <span class="tap"><i data-i="settings"></i></span>
+    </div>
+    <div class="scroll" style="padding:0 16px">
+      <span class="host"><span class="dot ok"></span>studio-mac<span class="faint">· connected</span></span>
+
+      <div class="section label">Needs you</div>
+      <div class="card needs">
+        <div class="listrow">
+          <span class="dot wait"></span>
+          <div class="grow"><div class="t ell">Qwen signatures</div><div class="s ell">pi · Run the provider tests?</div></div>
+          <span class="badge wait">Answer</span>
+        </div>
+      </div>
+
+      <div class="section label">Working</div>
+      <div class="card">
+        <div class="listrow">
+          <span class="dot live"></span>
+          <div class="grow"><div class="t ell">Streaming retry</div><div class="s ell">pi · Changing · 2 files so far</div></div>
+          <span class="hint">2:40</span>
+        </div>
+        <div class="listrow">
+          <span class="dot live"></span>
+          <div class="grow"><div class="t ell">Gutter blame width</div><div class="s ell">zed · Verifying · cargo test</div></div>
+          <span class="hint">0:52</span>
+        </div>
+      </div>
+
+      <div class="section label">Today</div>
+      <div class="card">
+        <div class="listrow">
+          <i data-i="check" class="sm" style="color:var(--green)"></i>
+          <div class="grow"><div class="t ell">Mistral thinking</div><div class="s ell">pi · 3 files changed · checks passed</div></div>
+          <span class="hint">14:02</span>
+        </div>
+        <div class="listrow">
+          <i data-i="check" class="sm" style="color:var(--green)"></i>
+          <div class="grow"><div class="t ell">Kimi K3 default</div><div class="s ell">pi · answered, no changes</div></div>
+          <span class="hint">11:40</span>
+        </div>
+        <div class="listrow">
+          <i data-i="alert" class="sm" style="color:var(--coral)"></i>
+          <div class="grow"><div class="t ell">VM snapshot restore</div><div class="s ell">minivm · stopped: provider error</div></div>
+          <span class="hint">09:15</span>
+        </div>
+      </div>
+      <div class="hint" style="margin:14px 4px">Earlier sessions on studio-mac · 24</div>
+    </div>
+    <span class="fab"><i data-i="plus"></i>New session</span>
+  </main>
+</div>
+<script src="phone.js"></script>
+</body></html>

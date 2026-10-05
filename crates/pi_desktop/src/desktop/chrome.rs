@@ -13,7 +13,19 @@ pub struct HeaderView {
     search: Entity<TextInput>,
     layout: Layout,
     search_open: bool,
+    /// The highlighted result; Enter opens it. Resets as the query changes.
+    selected: usize,
     _subscriptions: Vec<gpui::Subscription>,
+}
+
+/// One result in global search: an action, a view or an open session.
+#[derive(Clone, Copy, PartialEq)]
+enum Entry {
+    NewSession,
+    OpenFolder,
+    View(super::app_views::AppView),
+    Page(super::panels::SessionPage),
+    Session(super::workspace::SessionId),
 }
 impl EventEmitter<ShellEvent> for HeaderView {}
 impl HeaderView {
@@ -31,15 +43,22 @@ impl HeaderView {
                     cx.notify();
                 }
             }),
-            cx.observe(&search, |_, _, cx| cx.notify()),
+            cx.observe(&search, |this: &mut Self, _, cx| {
+                this.selected = 0;
+                cx.notify()
+            }),
         ];
         Self {
             workspace,
             search,
             layout,
             search_open: false,
+            selected: 0,
             _subscriptions: subscriptions,
         }
+    }
+    pub(super) fn search_focused(&self, window: &Window, cx: &App) -> bool {
+        self.search_open && self.search.focus_handle(cx).is_focused(window)
     }
     pub fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
         if self.layout != layout {
@@ -49,6 +68,7 @@ impl HeaderView {
     }
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_open = true;
+        self.selected = 0;
         self.search.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
@@ -176,89 +196,64 @@ impl HeaderView {
             })
     }
 
-    fn search_palette(&self, cx: &Context<Self>, theme: Theme) -> AnyElement {
+    /// What the query finds, in order: actions and views, then open sessions.
+    fn entries(&self, cx: &App) -> Vec<(Entry, &'static str, SharedString, Option<String>)> {
+        use super::{app_views::AppView, panels::SessionPage};
         let query = self.search.read(cx).content().trim().to_lowercase();
         let matches = |label: &str| query.is_empty() || label.to_lowercase().contains(&query);
-        let mut actions = v_flex().gap(px(2.));
+        let shortcut = |mac: &str, other: &str| {
+            Some(
+                if cfg!(target_os = "macos") {
+                    mac
+                } else {
+                    other
+                }
+                .to_owned(),
+            )
+        };
+        let workspace = self.workspace.read(cx);
+        let mut entries = vec![];
         if matches("New session") {
-            actions = actions.child(
-                search_row(
-                    "search-new-session",
-                    "plus",
-                    "New session",
-                    Some(
-                        if cfg!(target_os = "macos") {
-                            "⌘ N"
-                        } else {
-                            "Ctrl+N"
-                        }
-                        .into(),
-                    ),
-                    theme,
-                )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.dismiss_search(cx);
-                    super::new_session::show(this.workspace.clone(), window, cx);
-                })),
-            );
+            entries.push((
+                Entry::NewSession,
+                "plus",
+                "New session".into(),
+                shortcut("⌘ N", "Ctrl+N"),
+            ));
         }
         if matches("Open folder") {
-            actions = actions.child(
-                search_row(
-                    "search-open-folder",
-                    "folder",
-                    "Open folder…",
-                    Some(
-                        if cfg!(target_os = "macos") {
-                            "⌘ O"
-                        } else {
-                            "Ctrl+O"
-                        }
-                        .into(),
-                    ),
-                    theme,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.dismiss_search(cx);
-                    this.workspace
-                        .update(cx, |workspace, cx| workspace.open_folder(cx));
-                })),
-            );
+            entries.push((
+                Entry::OpenFolder,
+                "folder",
+                "Open folder…".into(),
+                shortcut("⌘ O", "Ctrl+O"),
+            ));
         }
-        for (index, view) in [
-            super::app_views::AppView::Sessions,
-            super::app_views::AppView::Models,
-            super::app_views::AppView::Resources,
-            super::app_views::AppView::Settings,
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for view in [
+            AppView::Sessions,
+            AppView::Models,
+            AppView::Resources,
+            AppView::Settings,
+        ] {
             if matches(view.title()) {
-                actions = actions.child(
-                    search_row(
-                        ("search-view", index),
-                        view.icon(),
-                        view.title(),
-                        None,
-                        theme,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.dismiss_search(cx);
-                        this.workspace
-                            .update(cx, |workspace, cx| workspace.show_view(view, cx));
-                    })),
-                );
+                entries.push((Entry::View(view), view.icon(), view.title().into(), None));
             }
         }
-        let mut sessions: Vec<_> = self
-            .workspace
-            .read(cx)
+        if workspace.active_tab_opt().is_some() {
+            for (page, glyph, title) in [
+                (SessionPage::Tree, "list_tree", "Session tree"),
+                (SessionPage::Context, "info", "Context & compaction"),
+            ] {
+                if matches(title) {
+                    entries.push((Entry::Page(page), glyph, title.into(), None));
+                }
+            }
+        }
+        let mut sessions: Vec<_> = workspace
             .summaries
             .iter()
             .filter(|(_, summary)| {
-                query.is_empty()
-                    || summary.title.to_lowercase().contains(&query)
+                matches(&summary.title)
                     || summary
                         .cwd
                         .display()
@@ -266,27 +261,113 @@ impl HeaderView {
                         .to_lowercase()
                         .contains(&query)
             })
-            .map(|(id, summary)| (*id, summary.title.clone(), summary.cwd.clone()))
-            .collect();
-        sessions.sort_by_key(|entry| entry.1.to_lowercase());
-        let has_sessions = !sessions.is_empty();
-        let mut session_rows = v_flex().gap(px(2.));
-        for (id, title, cwd) in sessions.into_iter().take(6) {
-            session_rows = session_rows.child(
-                search_row(
-                    ("search-session", id.0 as usize),
-                    "chat",
-                    title,
-                    cwd.file_name()
+            .map(|(id, summary)| {
+                (
+                    Entry::Session(*id),
+                    "thread",
+                    SharedString::from(summary.title.clone()),
+                    summary
+                        .cwd
+                        .file_name()
                         .map(|name| name.to_string_lossy().into_owned()),
-                    theme,
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.dismiss_search(cx);
-                    this.workspace
-                        .update(cx, |workspace, cx| workspace.select(id, cx));
-                })),
-            );
+            })
+            .collect();
+        sessions.sort_by_key(|entry| entry.2.to_lowercase());
+        entries.extend(sessions.into_iter().take(6));
+        entries
+    }
+
+    pub(super) fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.entries(cx).len();
+        if count > 0 {
+            self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((entry, ..)) = self.entries(cx).get(self.selected).cloned() {
+            self.open(entry, window, cx);
+        }
+    }
+
+    fn open(&mut self, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_search(cx);
+        match entry {
+            Entry::NewSession => super::new_session::show(self.workspace.clone(), window, cx),
+            Entry::OpenFolder => self
+                .workspace
+                .update(cx, |workspace, cx| workspace.open_folder(cx)),
+            Entry::View(view) => self
+                .workspace
+                .update(cx, |workspace, cx| workspace.show_view(view, cx)),
+            Entry::Page(page) => self.workspace.update(cx, |ws, cx| {
+                ws.view = None;
+                cx.emit(WorkspaceEvent::View);
+                if let Some(tab) = ws.active_tab_opt() {
+                    tab.view
+                        .clone()
+                        .update(cx, |view, cx| view.set_page(page, cx));
+                }
+            }),
+            Entry::Session(id) => self
+                .workspace
+                .update(cx, |workspace, cx| workspace.select(id, cx)),
+        }
+    }
+
+    fn search_palette(&self, cx: &Context<Self>, theme: Theme) -> AnyElement {
+        let query = self.search.read(cx).content().trim().to_owned();
+        let entries = self.entries(cx);
+        let empty = entries.is_empty();
+        let selected = self.selected.min(entries.len().saturating_sub(1));
+        let first_session = entries
+            .iter()
+            .position(|(entry, ..)| matches!(entry, Entry::Session(_)));
+        let row = |i: usize,
+                   (entry, glyph, title, detail): (
+            Entry,
+            &'static str,
+            SharedString,
+            Option<String>,
+        )| {
+            let id: ElementId = match entry {
+                Entry::NewSession => "search-new-session".into(),
+                Entry::OpenFolder => "search-open-folder".into(),
+                Entry::View(view) => ("search-view", view as usize).into(),
+                Entry::Page(page) => ("search-session-tool", page as usize).into(),
+                Entry::Session(id) => ("search-session", id.0 as usize).into(),
+            };
+            search_row(id, glyph, title, detail, i == selected, theme)
+                .on_click(cx.listener(move |this, _, window, cx| this.open(entry, window, cx)))
+        };
+        let mut body = v_flex()
+            .debug_selector(|| "global-search-results".into())
+            .px(px(8.))
+            .pb(px(8.));
+        for (i, entry) in entries.into_iter().enumerate() {
+            if i == 0 && first_session != Some(0) {
+                body = body.child(
+                    label("Actions & views", theme)
+                        .px(px(8.))
+                        .pt(px(12.))
+                        .pb(px(6.)),
+                );
+            }
+            if Some(i) == first_session {
+                body = body
+                    .when(i > 0, |body| {
+                        body.child(div().h(px(1.)).mx(px(8.)).mt(px(8.)).bg(theme.line))
+                    })
+                    .child(
+                        label("Open sessions", theme)
+                            .px(px(8.))
+                            .pt(px(12.))
+                            .pb(px(6.)),
+                    );
+            }
+            body = body.child(row(i, entry));
         }
         gpui::deferred(
             h_flex()
@@ -302,48 +383,102 @@ impl HeaderView {
                         .occlude()
                         .w(px(600.))
                         .max_h(px(520.))
-                        .overflow_y_scroll()
                         .rounded(px(10.))
                         .border_1()
                         .border_color(theme.line)
-                        .bg(theme.panel)
+                        .bg(theme.composer)
                         .shadow_lg()
+                        .overflow_hidden()
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_search(cx)))
+                        // Before the input's own line movement: arrows move the selection.
+                        .capture_action(cx.listener(|this, _: &crate::input::Up, _, cx| {
+                            this.move_selection(-1, cx);
+                            cx.stop_propagation();
+                        }))
+                        .capture_action(cx.listener(|this, _: &crate::input::Down, _, cx| {
+                            this.move_selection(1, cx);
+                            cx.stop_propagation();
+                        }))
                         .child(
                             h_flex()
-                                .h(px(44.))
-                                .px(px(14.))
+                                .h(px(48.))
+                                .flex_shrink_0()
+                                .px(px(16.))
                                 .gap(px(10.))
                                 .border_b_1()
                                 .border_color(theme.line)
-                                .child(icon("magnifying_glass", theme.faint))
-                                .child(div().flex_1().min_w_0().child(self.search.clone()))
+                                .child(icon("magnifying_glass", theme.muted))
                                 .child(
                                     div()
-                                        .font_family(MONO)
-                                        .text_size(px(10.))
-                                        .text_color(theme.faint)
-                                        .child("ESC"),
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(15.))
+                                        .child(self.search.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(theme.muted)
+                                        .child("Esc"),
                                 ),
                         )
-                        .child(
-                            label("QUICK ACTIONS", theme)
-                                .mx(px(14.))
-                                .mt(px(10.))
-                                .mb(px(4.)),
-                        )
-                        .child(actions.mx(px(8.)))
-                        .when(has_sessions, |palette| {
-                            palette
-                                .child(divider(theme).mx(px(14.)).mt(px(8.)))
+                        .child(if empty {
+                            // A plain answer, at the palette's usual size.
+                            v_flex()
+                                .debug_selector(|| "global-search-empty".into())
+                                .h(px(240.))
+                                .items_center()
+                                .justify_center()
+                                .gap(px(10.))
                                 .child(
-                                    label("OPEN SESSIONS", theme)
-                                        .mx(px(14.))
-                                        .mt(px(7.))
-                                        .mb(px(4.)),
+                                    div()
+                                        .text_size(px(17.))
+                                        .text_color(theme.text)
+                                        .child(format!("No matches for “{query}”")),
                                 )
-                                .child(session_rows.mx(px(8.)).mb(px(8.)))
-                        }),
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .text_color(theme.muted)
+                                        .child("Try a session, project or action name."),
+                                )
+                                .child(
+                                    button("search-clear", "Clear search", theme)
+                                        .mt(px(6.))
+                                        .debug_selector(|| "search-clear".into())
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.search.update(cx, |search, cx| {
+                                                search.set_content("", cx)
+                                            });
+                                            this.search.focus_handle(cx).focus(window, cx);
+                                        })),
+                                )
+                                .into_any_element()
+                        } else {
+                            div()
+                                .id("global-search-scroll")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .child(body)
+                                .into_any_element()
+                        })
+                        .child(
+                            h_flex()
+                                .h(px(34.))
+                                .flex_shrink_0()
+                                .px(px(16.))
+                                .gap(px(14.))
+                                .border_t_1()
+                                .border_color(theme.line)
+                                .text_size(px(11.5))
+                                .text_color(theme.muted)
+                                .child("↑↓ Move")
+                                .child("Enter Open")
+                                .child("Esc Close")
+                                .child(div().flex_1())
+                                .child("Global search"),
+                        ),
                 ),
         )
         .with_priority(2)
@@ -367,17 +502,20 @@ fn search_row(
     glyph: &'static str,
     title: impl Into<SharedString>,
     detail: Option<String>,
+    selected: bool,
     theme: Theme,
 ) -> Stateful<Div> {
     let title: SharedString = title.into();
     h_flex()
         .id(id)
         .role(Role::Button)
-        .h(px(32.))
+        .aria_selected(selected)
+        .h(px(34.))
         .px(px(8.))
         .gap(px(10.))
-        .rounded(px(5.))
+        .rounded(px(6.))
         .cursor_pointer()
+        .when(selected, |row| row.bg(theme.selected))
         .hover(move |row| row.bg(theme.hover))
         .child(icon(glyph, theme.muted))
         .child(
@@ -385,15 +523,15 @@ fn search_row(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(px(13.))
+                .text_size(px(13.5))
                 .child(title),
         )
         .when_some(detail, |row, detail| {
             row.child(
                 div()
                     .font_family(MONO)
-                    .text_size(px(10.))
-                    .text_color(theme.faint)
+                    .text_size(px(11.))
+                    .text_color(theme.muted)
                     .child(detail),
             )
         })
@@ -565,6 +703,7 @@ impl Render for StatusBarView {
         };
         let open = tab.controller.read(cx);
         let model = open.model();
+        let workbench_demo = model.state.session_id.as_deref() == Some("demo-workbench");
         let count = workspace
             .tabs
             .iter()
@@ -573,7 +712,9 @@ impl Render for StatusBarView {
                 controller.is_connected() && controller.pid().is_some()
             })
             .count();
-        let connection = if open.is_demo() {
+        let connection = if workbench_demo {
+            "Offline sample".to_owned()
+        } else if open.is_demo() {
             "OFFLINE DEMO · sample data".to_owned()
         } else if !open.is_connected() {
             "Disconnected".into()
@@ -597,6 +738,11 @@ impl Render for StatusBarView {
             .cost
             .map(|cost| format!("${cost:.2}"))
             .unwrap_or_else(|| "—".into());
+        let changed_files = model.changed_files().len();
+        let changed = format!(
+            "{changed_files} changed file{}",
+            if changed_files == 1 { "" } else { "s" }
+        );
         h_flex()
             .relative()
             .track_focus(&self.process_focus)
@@ -655,37 +801,50 @@ impl Render for StatusBarView {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .when_some(model.turn_metrics.clone(), |row, metrics| {
-                        row.tooltip(ui::Tooltip::text(format!(
-                            "Pi extension · last reported run statistics\n{metrics}"
-                        )))
-                        .child(metrics)
-                    }),
+                    .when_some(
+                        model.turn_metrics.clone().filter(|_| !workbench_demo),
+                        |row, metrics| {
+                            row.tooltip(ui::Tooltip::text(format!(
+                                "Pi extension · last reported run statistics\n{metrics}"
+                            )))
+                            .child(metrics)
+                        },
+                    ),
             )
-            .child(div().min_w_0().truncate().child(format!(
-                "{terminals}{} · {} observed edits · {cost} · {}",
-                if !open.is_connected() {
-                    "Disconnected"
-                } else if open.bootstrap_failed() {
-                    "Setup incomplete"
-                } else if open.connecting() {
-                    "Connecting"
-                } else if model.shell_running() {
-                    "Shell running"
-                } else if open.working() && !model.busy() {
-                    "Starting"
-                } else {
-                    model.run_label()
-                },
-                model.changed_files().len(),
-                model
-                    .stats
-                    .context_usage
-                    .as_ref()
-                    .and_then(|usage| usage.percent)
-                    .map(|percent| format!("{percent:.0}% context"))
-                    .unwrap_or_else(|| "context not reported".into())
-            )))
+            .child(div().min_w_0().truncate().child(if workbench_demo {
+                "Ctrl K  ·  Search & commands".to_owned()
+            } else {
+                format!(
+                    "{terminals}{}{changed} · {cost} · {}",
+                    if workspace.view.is_none() && tab.view.read(cx).shows_work_status(cx) {
+                        String::new()
+                    } else {
+                        format!(
+                            "{} · ",
+                            if !open.is_connected() {
+                                "Disconnected"
+                            } else if open.bootstrap_failed() {
+                                "Setup incomplete"
+                            } else if open.connecting() {
+                                "Connecting"
+                            } else if model.shell_running() {
+                                "Shell running"
+                            } else if open.working() && !model.busy() {
+                                "Starting"
+                            } else {
+                                model.run_label()
+                            }
+                        )
+                    },
+                    model
+                        .stats
+                        .context_usage
+                        .as_ref()
+                        .and_then(|usage| usage.percent)
+                        .map(|percent| format!("{percent:.0}% context"))
+                        .unwrap_or_else(|| "context not reported".into())
+                )
+            }))
             .when(self.processes_open, |bar| {
                 bar.child(self.processes(window, cx, theme))
             })

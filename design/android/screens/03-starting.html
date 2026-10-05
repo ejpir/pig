@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>03 · Starting</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  .starter { height: 52px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); font-size: 15px; }
+  .composer.tall .draft { min-height: 72px; }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="appbar">
+      <span class="tap"><i data-i="x"></i></span>
+      <div class="title"><b>New session</b></div>
+      <span class="chip" style="margin-right:12px"><i data-i="folder" class="xs"></i>pi · studio-mac<i data-i="chev-d" class="xs"></i></span>
+    </div>
+    <div class="col" style="flex:1;min-height:0">
+      <div style="padding:28px 20px 0">
+        <h1 class="heading" style="font-size:32px">What should we change?</h1>
+        <p class="hint" style="font-size:15px;margin-top:10px">Start with the task. Bring in files and details as you need them.</p>
+      </div>
+      <div class="composer tall" style="margin-top:22px">
+        <div class="draft ph">Describe the change…</div>
+        <div class="tools">
+          <span class="tap"><i data-i="clip"></i></span>
+          <span class="tap"><i data-i="slash"></i></span>
+          <span class="chip" style="border:none;background:transparent">Opus 5.5 · High<i data-i="chev-d" class="xs"></i></span>
+          <span class="grow"></span>
+          <span class="send off"><i data-i="send"></i></span>
+        </div>
+      </div>
+      <div class="hint" style="padding:0 24px">Type / for commands or @ to include a file.</div>
+      <div style="padding:34px 20px 0">
+        <div class="label" style="margin-bottom:4px">A starting point</div>
+        <div class="starter"><i data-i="chat" class="sm muted"></i><span class="grow">Review the local changes</span><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="starter"><i data-i="chat" class="sm muted"></i><span class="grow">Explain this project</span><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="starter"><i data-i="chat" class="sm muted"></i><span class="grow ell">Fix the failing tests</span><span class="mono faint" style="font-size:12px">/fix-tests</span><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="col gap8" style="margin-top:30px">
+          <div class="row gap12"><span class="label">Project</span><span class="mono muted" style="font-size:12.5px">~/repos/pi on studio-mac</span></div>
+          <div class="hint">File history is on. jj records each turn that edits files.</div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="phone.js"></script>
+</body></html>

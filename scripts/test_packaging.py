@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 import fetch_pi
 from package_desktop import TARGETS, archive_name, check_binary, package
-from release_desktop import manifest, validate_tag
+from release_desktop import manifest, validate_tag, validate_release_version
+from package_remote import asset_name, package as package_remote
 
 
 class PackagingTests(unittest.TestCase):
@@ -156,6 +157,17 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 package(self.binary("aarch64-apple-darwin"), "aarch64-apple-darwin", self.root / "dist")
 
+    def test_remote_helpers_have_distinct_verified_native_assets(self):
+        self.assertEqual({asset_name(target) for target in TARGETS}, {
+            "pi-desktop-remote-linux-amd64", "pi-desktop-remote-linux-arm64",
+            "pi-desktop-remote-macos-arm64", "pi-desktop-remote-windows-amd64.exe",
+        })
+        for target in ["aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]:
+            binary = self.binary(target)
+            installed = package_remote(binary, target, self.root / "remote")
+            self.assertEqual(installed.name, asset_name(target))
+            self.assertEqual(installed.read_bytes(), binary.read_bytes())
+
     def test_release_tags_are_validated_not_shell_interpolated(self):
         for tag in ["v0.1.0", "v1.2.3-rc.1"]:
             validate_tag(tag)
@@ -163,10 +175,15 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_tag(tag)
 
+    def test_release_tag_matches_the_version_used_to_download_helpers(self):
+        validate_release_version("v1.2.3-rc.1", "1.2.3-rc.1")
+        with self.assertRaises(ValueError):
+            validate_release_version("v1.2.3", "0.1.0")
+
     def test_release_manifest_requires_exact_complete_matrix_and_correct_digests(self):
         output = self.root / "release"
         output.mkdir()
-        names = sorted(archive_name(target) for target in TARGETS)
+        names = sorted([archive_name(target) for target in TARGETS] + [asset_name(target) for target in TARGETS])
         for name in names[:-1]:
             (output / name).write_bytes(b"fixture")
         with self.assertRaises(ValueError):
@@ -184,6 +201,7 @@ class PackagingTests(unittest.TestCase):
         output.mkdir()
         for target in TARGETS:
             (output / archive_name(target)).write_bytes(b"fixture")
+            (output / asset_name(target)).write_bytes(b"fixture")
         first = output / archive_name(next(iter(TARGETS)))
         first.write_bytes(b"")
         with self.assertRaises(ValueError):

@@ -322,37 +322,54 @@ impl CatalogView {
                     .on_hover(cx.listener(|this, hovered: &bool, _, _| this.project_picker_hovered = *hovered))
                     .on_click(cx.listener(|this, _, window, cx| { this.project_picker = !this.project_picker; this.focus.focus(window, cx); cx.notify(); }))))
                 .child(div().flex_1())
+                .child(search_field("resources-search", &self.search, cx, theme))
                 .child(icon_button("install-resource", "plus", "Install package", theme)
                     .tooltip(ui::Tooltip::text("Install a package in the selected scope"))
                     .on_click(cx.listener(|this, _, _, cx| this.open_install(cx))))
                 .child(icon_button("refresh-resources", "refresh", "Refresh resource metadata", theme)
                     .tooltip(ui::Tooltip::text("Refresh resource metadata · does not reload or execute extensions"))
                     .on_click(cx.listener(|this, _, _, cx| this.refresh_resources(cx))))
-                .child(div().id("resource-settings-source").truncate().font_family(MONO).text_size(px(10.)).text_color(theme.faint)
-                    .tooltip(ui::Tooltip::text("Only effective resource/model keys reported by Pi are shown, not a complete settings-file manifest."))
-                    .child(if self.resource_project { "Project scope" } else { "User scope" })))
-            .when(self.resource_project, |header| header.child(h_flex().debug_selector(|| "resources-trust-strip".into())
-                .h(px(40.)).mt(px(16.)).px(px(12.)).gap(px(8.)).rounded(px(8.)).bg(theme.panel)
-                .border_1().border_color(theme.chip_line)
-                .child(icon("shield", if trust.is_some_and(|trust| trust.trusted) { theme.green } else { theme.amber }).size(px(15.)))
-                .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(match trust { Some(trust) if trust.trusted => "Trusted", Some(_) => "Not trusted", None => "Trust not reported" }))
-                .child(div().id("resource-trust-detail").flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme.faint)
-                    .when_some(trust, |label, trust| label.tooltip(ui::Tooltip::text(trust_description(trust)))
-                        .debug_selector(move || if trust_pending(trust) { "trust-decision-pending".into() } else { "trust-decision-active".into() })
-                        .child(if trust_pending(trust) { "saved decision differs · restart to apply" }
-                            else if trust.saved_decision.is_some() { "saved decision active in this process" }
-                            else { "effective in this Pi process" })))
-                .when(self.mutable(cx) && trust.is_some(), |row| row.child(div().id("resources-trust-action").cursor_pointer().font_family(MONO).text_size(px(10.))
-                    .text_color(theme.accent).child(if trust.is_some_and(|trust| trust.trusted) { "[ REVOKE ]" } else { "[ TRUST ]" })
-                    .tooltip(ui::Tooltip::text("Save a project trust decision · affects the next process restart, not an OS sandbox"))
-                    .on_click(cx.listener(|this, _, window, cx| this.confirm_trust(window, cx)))))))
+                )
+            .when(self.resource_project, |header| {
+                let trusted = trust.is_some_and(|trust| trust.trusted);
+                let hue = if trusted { theme.green } else { theme.amber };
+                header.child(v_flex().debug_selector(|| "resources-trust-strip".into())
+                    .mt(px(16.)).px(px(16.)).py(px(12.)).gap(px(6.)).rounded(px(8.))
+                    .bg(theme.tint(hue))
+                    .child(h_flex().gap(px(10.))
+                        .child(icon("shield", hue).size(px(15.)))
+                        .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(match trust {
+                            Some(trust) if trust.trusted => "Project code is loaded",
+                            Some(_) => "Project code is not loaded",
+                            None => "Trust not reported",
+                        }))
+                        .child(div().flex_1())
+                        .when(self.mutable(cx) && trust.is_some(), |row| row.child(
+                            button("resources-trust-action", if trusted { "Revoke trust…" } else { "Review trust…" }, theme)
+                                .debug_selector(|| "resources-trust-action".into())
+                                .tooltip(ui::Tooltip::text("Save a project trust decision · affects the next process restart, not an OS sandbox"))
+                                .on_click(cx.listener(|this, _, window, cx| this.confirm_trust(window, cx))))))
+                    .child(div().pl(px(25.)).text_size(px(12.5)).line_height(px(19.)).text_color(theme.secondary).child(if trusted {
+                        "Its extensions and settings run with your permissions in this Pi process."
+                    } else {
+                        "Trust this folder only if you are comfortable running its extensions and settings. Context files may still load without trust."
+                    }))
+                    .child(div().id("resource-trust-detail").pl(px(25.)).text_size(px(12.)).text_color(theme.muted)
+                        .when_some(trust, |label, trust| label.tooltip(ui::Tooltip::text(trust_description(trust)))
+                            .debug_selector(move || if trust_pending(trust) { "trust-decision-pending".into() } else { "trust-decision-active".into() })
+                            .child(if trust_pending(trust) { "The saved decision differs from this process; restart to apply. Trust is not a security sandbox." }
+                                else if trust.saved_decision.is_some() { "Saved decision, active in this process. Trust is not a security sandbox." }
+                                else { "Effective in this Pi process only. Trust is not a security sandbox." }))))
+            })
             .child(h_flex().h(px(30.)).mt(px(12.)).gap(px(22.)).border_b_1().border_color(theme.line)
                 .children([ResourceTab::Packages, ResourceTab::Extensions, ResourceTab::Skills, ResourceTab::Prompts, ResourceTab::Context].into_iter().map(|tab| {
                     let count = self.model(cx).filter(|session| reported(session, tab)).map(|session| scoped(session, tab, self.resource_project).len().to_string()).unwrap_or_else(|| "—".into());
                     let selected = tab == self.resource_tab;
                     h_flex().id(keyed("resource-tab", tab.title())).debug_selector(move || format!("resource-tab-{}", tab.title()))
                         .h_full().border_b_2().border_color(if selected { theme.accent } else { gpui::transparent_black() })
-                        .cursor_pointer().child(label(format!("{}  {count}", tab.title().to_uppercase()), theme).text_size(px(9.)).when(selected, |label| label.text_color(theme.text)))
+                        .gap(px(6.)).cursor_pointer()
+                        .child(div().text_size(px(13.)).text_color(if selected { theme.text } else { theme.secondary }).when(selected, |title| title.font_weight(FontWeight::SEMIBOLD)).child(tab.title()))
+                        .child(div().text_size(px(12.)).text_color(theme.muted).child(count))
                         .tooltip(ui::Tooltip::text("Reported User/Project scopes only. CLI/built-in resources are not assigned to this folder; unscoped entries retain their reported metadata."))
                         .on_click(cx.listener(move |this, _, _, cx| { this.resource_tab = tab; this.selected = None; this.project(cx); }))
                 })))
@@ -495,6 +512,30 @@ impl CatalogView {
         theme: Theme,
     ) -> AnyElement {
         let text = self.settings_text(cx);
+        if text.is_none() {
+            // Nothing reported: a line that says so, not an empty panel.
+            return h_flex()
+                .debug_selector(|| "project-settings-preview".into())
+                .mx(px(20.))
+                .mt(px(16.))
+                .h(px(34.))
+                .gap(px(8.))
+                .border_t_1()
+                .border_color(theme.line)
+                .child(div().text_size(px(13.)).child(if self.resource_project {
+                    "Project settings"
+                } else {
+                    "User settings"
+                }))
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.muted)
+                        .child("Not reported by this backend"),
+                )
+                .into_any_element();
+        }
         v_flex().mx(px(20.)).mt(px(16.)).gap(px(4.)).flex_shrink_0()
             .child(h_flex().child(label(if self.resource_project { "PROJECT SETTINGS" } else { "USER SETTINGS" }, theme)).child(div().flex_1())
                 .when_some(text.clone(), |row, text| row.child(icon_button("copy-project-settings", "copy", "Copy reported settings", theme)
@@ -663,13 +704,10 @@ impl CatalogView {
             .children([ResourceTab::Packages, ResourceTab::Extensions, ResourceTab::Skills, ResourceTab::Prompts, ResourceTab::Context].into_iter().map(|tab| {
                 detail(tab.title(), self.model(cx).filter(|session| reported(session, tab)).map(|session| scoped(session, tab, self.resource_project).len().to_string()).unwrap_or_else(|| "Not reported".into()), false, theme)
             }))
-            .when(self.resource_project, |view| view.child(divider(theme)).child(section("TRUST", "", theme))
+            // The decision is made once, in the work area; here is what it means.
+            .when(self.resource_project, |view| view.child(divider(theme)).child(section("What trust means", "", theme))
                 .child(body_text(trust.map(trust_description).unwrap_or_else(|| "Trust has not been reported by this project's Pi process.".into()), theme))
-                .child(button("resources-revoke", if trust.is_some_and(|trust| trust.trusted) { "Revoke trust…" } else { "Trust project…" }, theme)
-                    .w_full().text_color(theme.coral).bg(theme.danger).border_color(theme.danger_line)
-                    .when(!self.mutable(cx) || trust.is_none(), |button| button.opacity(0.5))
-                    .when(self.mutable(cx) && trust.is_some(), |button| button.on_click(cx.listener(|this, _, window, cx| this.confirm_trust(window, cx)))))
-                .child(body_text("Revoking stops project code loading in new processes. It does not unload or sandbox code already running.", theme).mt(px(12.))))
+                .child(body_text("Project code can run with your permissions. Revoking trust affects new processes; it does not unload code already running.", theme).mt(px(8.))))
             .child(body_text("Pi has no per-extension filesystem/network permission grants. Inspect source before loading code.", theme).mt(px(12.)))
             .child(button("resources-reload", "Reload resources…", theme).when(!self.mutable(cx), |button| button.opacity(0.5))
                 .when(self.mutable(cx), |button| button.on_click(cx.listener(|this, _, window, cx| {

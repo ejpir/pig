@@ -213,6 +213,7 @@ fn project_resources_bind_an_existing_background_owner_and_keep_unknown_distinct
     cx: &mut TestAppContext,
 ) {
     let (desktop, mut cx) = setup(cx);
+    show_inspector(&desktop, &mut cx);
     let first = tab(&desktop, 0, &cx);
     open(&desktop, "/demo/repos/zed", None, &mut cx);
     let second = tab(&desktop, 1, &cx);
@@ -300,7 +301,7 @@ fn new_session_study_geometry_keeps_footer_and_fields_visible(cx: &mut TestAppCo
     for selector in [
         "new-session-branch",
         "new-session-path",
-        "new-session-auto-remove",
+        "new-session-warning",
         "new-session-footer",
         "create-session",
     ] {

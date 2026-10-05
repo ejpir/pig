@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>12 · Settings and tools</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  .section { margin: 20px 4px 8px; }
+  .switch { width: 44px; height: 26px; border-radius: 13px; background: var(--raised); position: relative; flex: none; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 10px; background: var(--composer); box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+  .switch.on { background: var(--accent); }
+  .switch.on::after { left: 21px; }
+  .themes { display: flex; gap: 10px; }
+  .theme { flex: 1; border-radius: 14px; border: 1px solid var(--line); padding: 8px; background: var(--composer); }
+  .theme.on { border: 2px solid var(--accent); padding: 7px; }
+  .theme .pv { height: 58px; border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 5px; }
+  .theme .pv i { display: block; height: 6px; border-radius: 3px; }
+  .theme .n { font-size: 13px; font-weight: 600; margin-top: 6px; text-align: center; }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="appbar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="title"><b>Settings and tools</b></div>
+    </div>
+    <div class="scroll" style="padding:0 16px">
+      <div class="section label" style="margin-top:4px">Computers</div>
+      <div class="card">
+        <div class="listrow"><i data-i="computer" class="muted"></i><div class="grow"><div class="t">studio-mac</div><div class="s">nick@studio-mac.local · Pi 1.0.0</div></div><span class="dot ok"></span></div>
+        <div class="listrow"><i data-i="server" class="muted"></i><div class="grow"><div class="t">build-box</div><div class="s">dev@10.0.4.12 · not connected</div></div><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="listrow" style="color:var(--accent)"><i data-i="plus"></i><span class="t">Add a computer</span></div>
+      </div>
+
+      <div class="section label">Appearance</div>
+      <div class="themes">
+        <div class="theme on"><div class="pv" style="background:linear-gradient(90deg,#faf9f7 50%,#161d27 50%)"><i style="width:60%;background:#4b607c"></i><i style="width:80%;background:#cbc3bb"></i><i style="width:45%;background:#8caecb"></i></div><div class="n">System</div></div>
+        <div class="theme"><div class="pv" style="background:#161d27"><i style="width:60%;background:#8caecb"></i><i style="width:80%;background:#424954"></i><i style="width:45%;background:#363d46"></i></div><div class="n">Evening</div></div>
+        <div class="theme"><div class="pv" style="background:#faf9f7;border:1px solid #ddd7d0"><i style="width:60%;background:#4b607c"></i><i style="width:80%;background:#ddd7d0"></i><i style="width:45%;background:#cbc3bb"></i></div><div class="n">Moonstone</div></div>
+      </div>
+
+      <div class="section label">Notifications</div>
+      <div class="card">
+        <div class="listrow"><div class="grow"><div class="t" style="font-weight:400">When Pi needs you</div><div class="s">Questions and permissions, with an answer button</div></div><span class="switch on"></span></div>
+        <div class="listrow"><div class="grow"><div class="t" style="font-weight:400">When a session finishes</div></div><span class="switch on"></span></div>
+        <div class="listrow"><div class="grow"><div class="t" style="font-weight:400">While sessions work</div><div class="s">A quiet ongoing notification</div></div><span class="switch"></span></div>
+      </div>
+
+      <div class="section label">Typing</div>
+      <div class="card">
+        <div class="listrow"><div class="grow"><div class="t" style="font-weight:400">Return sends</div><div class="s">Off: return adds a line, send with the button</div></div><span class="switch"></span></div>
+      </div>
+
+      <div class="section label">On studio-mac</div>
+      <div class="card">
+        <div class="listrow"><i data-i="spark" class="muted"></i><span class="grow">Models</span><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="listrow"><i data-i="layers" class="muted"></i><span class="grow">Resources</span><i data-i="chev-r" class="sm faint"></i></div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="phone.js"></script>
+</body></html>

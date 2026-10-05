@@ -7,6 +7,8 @@ use pi_editor::{Buffer, BufferEvent, Editor, EditorEvent, EditorProject, FileEnt
 use std::collections::HashSet;
 mod actions;
 mod card;
+mod provenance;
+mod remote;
 mod turn_bars;
 use actions::{CancelMutation, ConfirmMutation, Mutation, MutationKind};
 use card::AskPiToFix;
@@ -16,7 +18,12 @@ gpui::actions!(file_tabs, [SaveFile]);
 pub enum FileEvent {
     Tabs,
     Selected,
+    /// A confirmation in the file area needs it shown; the inspector stays.
+    Confirming,
     Empty,
+    /// Compare the open file's observed edits in Changes, by project path.
+    Review(String),
+    ShowTree,
     /// A prompt asking pi to fix a language-server problem.
     AskPi(String),
     /// A turn the ⌥-click card names: show its line in the thread, or its diff.
@@ -39,6 +46,7 @@ enum Confirmation {
 pub struct FilesView {
     root: PathBuf,
     demo: bool,
+    remote: Option<remote::Remote>,
     host: Option<EditorProject>,
     tabs: Vec<Tab>,
     active: Option<PathBuf>,
@@ -64,6 +72,10 @@ pub struct FilesView {
     _project_subscription: Option<gpui::Subscription>,
     hover: card::HoverCard,
     bars: turn_bars::TurnBars,
+    /// What the edited-lines shading was computed for: file, length, edit.
+    shaded: Option<(PathBuf, usize, Option<String>)>,
+    /// Open disclosures in the file details inspector.
+    details_open: HashSet<&'static str>,
     /// `editor.fontSize` as the editors have it.
     font_size: f32,
     _prefs_subscription: gpui::Subscription,
@@ -84,6 +96,7 @@ impl FilesView {
         Self {
             root,
             demo,
+            remote: None,
             host: None,
             tabs: vec![],
             active: None,
@@ -109,9 +122,16 @@ impl FilesView {
             _project_subscription: None,
             hover: Default::default(),
             bars: Default::default(),
+            shaded: None,
+            details_open: HashSet::new(),
             font_size: font_size(cx),
             _prefs_subscription: prefs_subscription,
         }
+    }
+    pub fn with_remote(mut self, target: pi_core::ssh::SshTarget) -> Self {
+        self.remote = Some(remote::Remote::new(target));
+        self.demo = false;
+        self
     }
     /// `editor.fontSize` changed: open editors follow at once.
     fn apply_font_size(&mut self, cx: &mut Context<Self>) {
@@ -140,6 +160,20 @@ impl FilesView {
     pub fn file_entries(&self) -> &[FileEntry] {
         &self.entries
     }
+    /// Status for consumers waiting on the first tree scan (e.g. the @ menu).
+    pub fn browser_status(&self) -> Option<&str> {
+        if self.browser_loading {
+            Some(if self.remote.is_some() {
+                "Loading remote files…"
+            } else {
+                "Loading files…"
+            })
+        } else if self.entries.is_empty() {
+            self.error.as_deref()
+        } else {
+            None
+        }
+    }
     pub fn root(&self) -> &PathBuf {
         &self.root
     }
@@ -154,6 +188,10 @@ impl FilesView {
             .find(|t| Some(&t.path) == self.active.as_ref())
     }
     pub fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.remote.is_some() {
+            self.open_remote(path, cx);
+            return;
+        }
         if self.tabs.iter().any(|t| t.path == path) {
             self.select(path, cx);
             return;
@@ -206,6 +244,10 @@ impl FilesView {
         cx.notify();
     }
     fn attach_project(&mut self, root: PathBuf, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.remote.is_none(),
+            "Remote paths cannot create a local editor project"
+        );
         if self.host.is_some() {
             return Ok(());
         }
@@ -258,6 +300,10 @@ impl FilesView {
         self.browser_focus.focus(window, cx);
     }
     pub fn load_browser(&mut self, cx: &mut Context<Self>) {
+        if self.remote.is_some() {
+            self.load_remote_browser(cx);
+            return;
+        }
         if self.demo {
             self.refresh_entries(cx);
             return;
@@ -337,6 +383,10 @@ impl FilesView {
         cx.notify();
     }
     fn refresh_entries(&mut self, cx: &mut Context<Self>) {
+        if self.remote.is_some() {
+            self.filter_rows(cx);
+            return;
+        }
         self.entries = if self.demo {
             [
                 ("packages", true),
@@ -410,6 +460,10 @@ impl FilesView {
         if self.saving || self.demo {
             return;
         }
+        if self.remote.is_some() {
+            self.save_remote(cx);
+            return;
+        }
         let Some(buffer) = self.tab().map(|t| t.buffer.clone()) else {
             return;
         };
@@ -437,6 +491,10 @@ impl FilesView {
         match self.confirm.take() {
             Some(Confirmation::Close(path)) => self.remove(&path, cx),
             Some(Confirmation::Reload(path)) => {
+                if self.remote.is_some() {
+                    self.reload_remote(path, cx);
+                    return;
+                }
                 if let Some(tab) = self.tabs.iter().find(|t| t.path == path) {
                     let task = tab.buffer.update(cx, |b, cx| b.reload(cx));
                     cx.spawn(async move |this, cx| {
@@ -544,13 +602,13 @@ impl FilesView {
             .when(self.mutation.is_some(),|v|v.child(self.mutation_form(cx)))
             .when_some(self.error.clone(),|v,e|v.child(div().text_size(px(11.)).text_color(theme.coral).child(e)))
             .child(tree)
-            .when(self.selected_entry.is_some() && !self.demo,|v|v.child(h_flex().gap(px(8.))
+            .when(self.selected_entry.is_some() && !self.demo && self.remote.is_none(),|v|v.child(h_flex().gap(px(8.))
                 .child(icon_button("rename-file","pencil","Rename selected item",theme).tooltip(ui::Tooltip::text("Rename selected item")).on_click(cx.listener(|this,_,window,cx|this.begin_mutation(MutationKind::Rename,None,window,cx))))
                 .child(icon_button("delete-file","trash","Delete selected item…",theme).debug_selector(||"delete-file".into()).tooltip(ui::Tooltip::text("Move selected item to Trash…")).on_click(cx.listener(|this,_,window,cx|this.begin_mutation(MutationKind::Trash,None,window,cx))))))
-            .child(note(if self.demo {"Offline preview — editing and file operations disabled."}else{"Right-click for file actions. Delete uses the system Trash."},theme))
+            .child(note(if self.demo {"Offline preview — editing and file operations disabled."}else if self.remote.is_some(){"SSH · UTF-8 files up to 1 MiB. Symlinks and create/rename/delete are not supported yet."}else{"Right-click for file actions. Delete uses the system Trash."},theme))
             .child(divider(theme)).child(label("LANGUAGE SERVICES",theme))
             .child(note(if servers.is_empty(){if self.trusted{"No language server running. Check that this language's server and Node/npm are available."}else{"Off until you explicitly trust this project."}.into()}else{format!("Running: {}",servers.join(", "))},theme))
-            .when(!self.trusted && !self.demo,|v|v.child(button("enable-lsp","Trust project and start services…",theme).on_click(cx.listener(|this,_,_,cx|{this.confirm=Some(Confirmation::Trust);cx.emit(FileEvent::Selected);cx.notify();}))))
+            .when(!self.trusted && !self.demo && self.remote.is_none(),|v|v.child(button("enable-lsp","Trust project and start services…",theme).on_click(cx.listener(|this,_,_,cx|{this.confirm=Some(Confirmation::Trust);cx.emit(FileEvent::Confirming);cx.notify();}))))
             .into_any_element()
     }
 }
@@ -589,33 +647,97 @@ impl Render for FilesView {
             self.focus_pending = false;
             self.focus(window, cx);
         }
+        self.shade_edits(cx);
         let tab = self.tab();
         let dirty = tab.is_some_and(|t| t.buffer.read(cx).is_dirty());
         let conflict = tab.is_some_and(|t| t.buffer.read(cx).has_conflict());
         let editor = tab.and_then(|t| t.editor.clone());
-        let path = tab
-            .map(|t| t.path.display().to_string())
+        let relative = tab
+            .map(|t| {
+                t.path
+                    .strip_prefix(&self.root)
+                    .unwrap_or(&t.path)
+                    .to_path_buf()
+            })
             .unwrap_or_default();
         let language = tab
             .and_then(|t| t.buffer.read(cx).language())
             .map(|l| l.name().to_string())
             .unwrap_or_else(|| "Plain Text".into());
+        let lines = tab.map_or(0, |t| t.buffer.read(cx).max_point().row + 1);
+        let observed = !self.active_edits(cx).is_empty();
+        // packages / ai / src / providers / openai-completions.ts
+        let mut segments: Vec<String> = relative
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let file = segments.pop().unwrap_or_default();
+        let breadcrumb = h_flex()
+            .debug_selector(|| "file-breadcrumb".into())
+            .min_w_0()
+            .gap(px(6.))
+            .font_family(MONO)
+            .text_size(px(12.))
+            .text_color(theme.muted)
+            .children(segments.into_iter().flat_map(|segment| {
+                [
+                    div().flex_shrink_0().child(segment),
+                    div().flex_shrink_0().text_color(theme.faint).child("/"),
+                ]
+            }))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.secondary)
+                    .child(file),
+            );
+        let state = if self.demo {
+            "Read-only preview"
+        } else if conflict {
+            "Changed on disk"
+        } else if dirty {
+            "Unsaved changes"
+        } else if self.remote.is_some() {
+            if self
+                .remote
+                .as_ref()
+                .is_some_and(|remote| remote.is_connected())
+            {
+                "Saved · polling remote host"
+            } else {
+                "Saved · disconnected (last known)"
+            }
+        } else {
+            "Saved · watching disk"
+        };
         v_flex().id("file-editor").debug_selector(||"file-editor".into()).key_context("FileEditor").size_full().min_h_0()
             .on_action(cx.listener(|this,_:&SaveFile,_,cx|this.save(cx)))
             .on_action(cx.listener(|this,_:&Stop,_,cx|{this.hide_card(cx);cx.stop_propagation()}))
             .on_action(cx.listener(|this,_:&AskPiToFix,_,cx|this.ask_pi_at_cursor(cx)))
-            .child(h_flex().p(px(12.)).gap(px(8.)).border_b_1().border_color(theme.line)
-                .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_size(px(11.)).child(path))
-                .child(primary_button("save-file",if self.saving{"Saving…"}else{"Save"},dirty && !conflict && !self.demo && !self.saving,theme).on_click(cx.listener(|this,_,_,cx|this.save(cx))))
-                .child(button("reload-file","Reload…",theme).on_click(cx.listener(|this,_,_,cx|{if !this.demo && let Some(path)=this.active.clone(){this.confirm=Some(Confirmation::Reload(path));cx.notify();}}))))
-            .when(conflict,|v|v.child(div().p(px(12.)).text_color(theme.amber).child("Changed on disk while this buffer has unsaved edits. Copy your edits before reloading; saving is blocked.")))
-            .when_some(self.error.clone(),|v,e|v.child(div().p(px(12.)).text_color(theme.coral).child(e)))
-            .when_some(self.confirm.clone(),|v,confirm|v.child(v_flex().p(px(12.)).gap(px(8.)).bg(theme.selected)
+            .when(tab.is_some(), |v| v.child(v_flex().px(WORK_GUTTER).pt(px(18.)).pb(px(10.)).gap(px(8.))
+                .child(breadcrumb)
+                .child(h_flex().h(px(28.)).gap(px(8.))
+                    .child(div().flex_shrink_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Current file"))
+                    .child(div().flex_1())
+                    .child(div().flex_shrink_0().text_size(px(12.)).text_color(theme.muted).child(state))
+                    .when(!self.demo, |row| row
+                        .child(primary_button("save-file",if self.saving{"Saving…"}else{"Save"},dirty && !conflict && !self.saving,theme).on_click(cx.listener(|this,_,_,cx|this.save(cx))))
+                        .child(button("reload-file","Reload…",theme).on_click(cx.listener(|this,_,_,cx|{if let Some(path)=this.active.clone(){this.confirm=Some(Confirmation::Reload(path));cx.notify();}})))))))
+            .when(conflict,|v|v.child(div().px(WORK_GUTTER).pb(px(10.)).text_size(px(12.)).text_color(theme.amber).child("Changed on disk while this buffer has unsaved edits. Copy your edits before reloading; saving is blocked.")))
+            .when_some(self.error.clone(),|v,e|v.child(div().px(WORK_GUTTER).pb(px(10.)).text_size(px(12.)).text_color(theme.coral).child(e)))
+            .when_some(self.confirm.clone(),|v,confirm|v.child(v_flex().mx(WORK_GUTTER).mb(px(10.)).p(px(12.)).gap(px(8.)).rounded(px(6.)).bg(theme.selected)
                 .child(match confirm {Confirmation::Close(_)=>"Close this tab without saving? Other tabs sharing the buffer keep their edits.",Confirmation::Reload(_)=>"Discard unsaved edits and reload from disk? This affects every tab sharing this buffer.",Confirmation::Trust=>"Trust this project? Language services may execute project configuration and download server packages. Node must already be installed."})
                 .child(h_flex().gap(px(8.)).child(button("confirm-file-action","Confirm",theme).on_click(cx.listener(|this,_,_,cx|this.confirm(cx))))
                     .child(button("cancel-file-action","Cancel",theme).on_click(cx.listener(|this,_,_,cx|{this.confirm=None;cx.notify();}))))))
             .when(editor.is_none(),|v|v.child(super::panels::empty("Files","Select a file in the browser to open it here.",theme).flex_1()))
-            .when_some(editor,|v,e|v.child(div().id("file-editor-text").relative().flex_1().min_h_0().w_full()
+            .when_some(editor,|v,e|v.child(v_flex().debug_selector(||"file-code".into()).flex_1().min_h_0().mx(WORK_GUTTER).rounded(px(6.)).border_1().border_color(theme.line).overflow_hidden()
+                // What the file is, above it: the study's "TypeScript · UTF-8" strip.
+                .child(h_flex().h(px(28.)).flex_shrink_0().px(px(12.)).gap(px(12.)).bg(theme.panel).border_b_1().border_color(theme.line).text_size(px(11.)).text_color(theme.muted)
+                    .child(format!("{language} · {lines} line{}", if lines == 1 { "" } else { "s" }))
+                    .child(div().flex_1())
+                    .children(self.turn_hint(cx)))
+                .child(div().id("file-editor-text").relative().flex_1().min_h_0().w_full()
                 .on_modifiers_changed(cx.listener(|this,event:&gpui::ModifiersChangedEvent,_,cx|this.alt_changed(event.modifiers.alt,cx)))
                 // Before the editor: ⌥-click shows the line's turn instead of adding a cursor.
                 .capture_any_mouse_down(cx.listener(|this,event:&gpui::MouseDownEvent,window,cx|{
@@ -625,9 +747,16 @@ impl Render for FilesView {
                 .on_hover(cx.listener(|this,hovered:&bool,_,cx|if !*hovered {this.leave_card(cx)}))
                 .child(e.cached(gpui::StyleRefinement::default().size_full()))
                 .children(self.card(cx))
-                .children(self.turn_card(cx))))
-            .child(h_flex().px(px(12.)).h(px(28.)).gap(px(12.)).text_size(px(10.)).text_color(theme.faint).child(language).child(if self.demo {"Offline preview · read-only"}else if dirty{"Unsaved changes"}else{"Saved · watching disk"})
-                .child(div().flex_1()).children(self.turn_hint(cx)))
+                .children(self.turn_card(cx)))))
+            // Comparing is Changes' job; the file area says where, not how.
+            .when(observed, |v| {
+                let path = relative.to_string_lossy().into_owned();
+                v.child(h_flex().debug_selector(||"file-compare".into()).px(WORK_GUTTER).pt(px(10.)).text_size(px(12.)).text_color(theme.muted)
+                    .child("Use\u{a0}")
+                    .child(div().id("file-compare-changes").debug_selector(||"file-compare-changes".into()).text_color(theme.accent).cursor_pointer().hover(move |link| link.text_color(theme.text)).child("Changes")
+                        .on_click(cx.listener(move |_,_,_,cx| cx.emit(FileEvent::Review(path.clone())))))
+                    .child("\u{a0}to compare this file with the observed edit."))
+            })
     }
 }
 

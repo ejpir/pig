@@ -12,9 +12,13 @@ anyhow.workspace = true
 async-channel.workspace = true
 dirs = "6"
 rand = "0.9"
+sha2 = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 tempfile = "3.23"
+
+# Android has no system trash; the phone never deletes saved sessions.
+[target.'cfg(not(target_os = "android"))'.dependencies]
 # Zed's revision, so session files go to the system trash as Zed's files do.
 trash = { git = "https://github.com/zed-industries/trash-rs", rev = "41c6c800d884a89351f3b8856d12894cccee261d" }
 

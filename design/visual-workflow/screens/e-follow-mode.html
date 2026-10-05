@@ -1,0 +1,102 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>E · Follow mode</title>
+<link rel="stylesheet" href="mock.css">
+<style>
+  .split { flex: 1; display: grid; grid-template-columns: 470px 1fr; min-height: 0; }
+  .thread { border-right: 1px solid var(--line); padding: 18px 20px 0; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+  .you { font-size: 13.5px; line-height: 20px; color: var(--secondary); padding: 10px 12px; border-radius: 8px; background: var(--panel); }
+  .st { display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border-radius: 8px; font-size: 13px; color: var(--secondary); position: relative; }
+  .st .d { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; background: color-mix(in srgb, var(--hue) 12%, transparent); color: var(--hue); }
+  .st .d .ico { width: 12px; height: 12px; }
+  .st .p { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .st .t { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .st.on { background: var(--composer); box-shadow: 0 0 0 1px color-mix(in srgb, var(--h-edit) 45%, var(--line)), 0 4px 14px color-mix(in srgb, var(--h-edit) 14%, transparent); color: var(--text); font-weight: 600; }
+  .st.on::after { content: ""; position: absolute; right: -21px; top: 12px; width: 0; height: 0; border: 6px solid transparent; border-left-color: var(--h-edit); }
+  .st.todo { color: var(--muted); } .st.todo .d { background: transparent; border: 1.5px dashed var(--line-strong); color: var(--muted); }
+  .say { font-size: 13.5px; line-height: 21px; color: var(--secondary); padding: 4px 2px; }
+
+  .stagec { display: flex; flex-direction: column; min-width: 0; background: var(--panel); }
+  .follow { height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 18px; border-bottom: 1px solid var(--line); background: var(--canvas); }
+  .follow .lab { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--h-edit); font-weight: 600; }
+  .follow .file { font-family: var(--mono); font-size: 13px; }
+  .toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--secondary); }
+  .sw { width: 30px; height: 18px; border-radius: 9px; background: var(--h-edit); position: relative; box-shadow: inset 0 1px 2px rgba(0,0,0,.15); }
+  .sw::after { content: ""; position: absolute; right: 2px; top: 2px; width: 14px; height: 14px; border-radius: 7px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+  .editor { flex: 1; margin: 16px 18px 0; background: var(--composer); border: 1px solid var(--line); border-radius: 10px 10px 0 0; overflow: hidden; box-shadow: 0 8px 30px rgba(37,47,61,.08); }
+  .ehd { height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 14px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .ln { display: grid; grid-template-columns: 52px 18px 1fr; font-family: var(--mono); font-size: 12.5px; line-height: 23px; color: var(--plain); white-space: pre; }
+  .ln .n { text-align: right; padding-right: 10px; color: var(--muted); opacity: .7; }
+  .ln .m { color: var(--muted); }
+  .ln.add { background: linear-gradient(90deg, color-mix(in srgb, var(--h-edit) 22%, var(--added)), var(--added)); }
+  .ln.add .m { color: var(--green); }
+  .ln.rem { background: var(--removed); } .ln.rem .m { color: var(--coral); }
+  .ln.add.fresh { box-shadow: inset 3px 0 0 var(--h-edit); }
+  .k { color: var(--keyword); } .s { color: var(--string); } .c { color: var(--muted); }
+  .hunk { font-family: var(--mono); font-size: 11px; color: var(--muted); padding: 6px 14px; background: var(--panel); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .why { position: absolute; }
+  .bubble { margin: 10px 0 0 70px; width: 420px; padding: 10px 12px; border-radius: 8px; background: var(--canvas); border: 1px solid var(--line); font-size: 12px; line-height: 18px; color: var(--secondary); box-shadow: 0 4px 12px rgba(37,47,61,.08); }
+  .bubble b { color: var(--h-edit); }
+
+  .scrub { height: 56px; display: flex; align-items: center; gap: 14px; padding: 0 18px; background: var(--canvas); border-top: 1px solid var(--line); }
+  .ticks { flex: 1; display: flex; align-items: center; gap: 0; position: relative; height: 24px; }
+  .ticks::before { content: ""; position: absolute; left: 0; right: 0; top: 11px; height: 2px; background: linear-gradient(90deg, var(--h-read), var(--h-edit)); border-radius: 1px; }
+  .ticks .rest { position: absolute; left: 64%; right: 0; top: 11px; height: 2px; background: var(--line); }
+  .tk { position: absolute; top: 5px; width: 14px; height: 14px; border-radius: 7px; background: var(--canvas); border: 2px solid var(--hue); }
+  .tk.cur { width: 20px; height: 20px; top: 2px; background: var(--hue); box-shadow: 0 0 0 5px color-mix(in srgb, var(--hue) 18%, transparent); }
+  .tk.todo { border-style: dashed; border-color: var(--line-strong); }
+  .composer-wrap { padding: 10px 20px 14px; }
+  .composer { background: var(--composer); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; display: flex; align-items: center; gap: 8px; }
+  .ctx { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: 6px; background: color-mix(in srgb, var(--h-edit) 12%, transparent); color: var(--h-edit); font-family: var(--mono); font-size: 11px; }
+</style></head>
+<body data-status="working">
+<main class="main">
+  <div class="tabs"><div class="tab on">Thread</div><div class="tab">Changes <span class="n">2</span></div><span class="sp"></span><span class="branch">pi / main</span></div>
+  <div class="split">
+    <div class="thread">
+      <div class="you"><div class="muted" style="font-size:11px;margin-bottom:2px">You · 10:24</div>OpenCode returns empty thinking signatures. Accept them there, keep Anthropic strict, add a regression test.</div>
+      <div class="st" style="--hue:var(--h-read)"><span class="d"><i data-i="eye"></i></span>Read<span class="p">openai-completions.ts</span><span class="t">0:02</span></div>
+      <div class="st" style="--hue:var(--h-search)"><span class="d"><i data-i="search"></i></span>Grep<span class="p">"signature"</span><span class="t">0:01</span></div>
+      <div class="st" style="--hue:var(--h-read)"><span class="d"><i data-i="eye"></i></span>Read<span class="p">anthropic.ts</span><span class="t">0:01</span></div>
+      <div class="say">The check throws for every provider. I'll gate it on the Anthropic path and let OpenCode through.</div>
+      <div class="st on" style="--hue:var(--h-edit)"><span class="d"><i data-i="pencil"></i></span>Edit<span class="p" style="color:var(--secondary)">openai-completions.ts</span><span class="t"><span class="add">+3</span> <span class="rem">−1</span></span></div>
+      <div class="st todo"><span class="d"><i data-i="dots"></i></span>Thinking about the test…</div>
+      <div class="grow"></div>
+      <div class="composer-wrap" style="padding:0 0 14px">
+        <div class="composer"><span class="ctx"><i data-i="file"></i>L211</span><span class="grow" style="font-size:13.5px;color:var(--muted)">Comment on this edit…</span><span class="btn"><i data-i="stop"></i></span><span class="btn primary">Queue ↵</span></div>
+      </div>
+    </div>
+
+    <div class="stagec">
+      <div class="follow"><span class="lab">Just edited</span><span class="file">packages/ai/src/providers/openai-completions.ts</span><span class="grow"></span><span class="toggle">Follow the agent<span class="sw"></span></span><span class="btn">Open file</span></div>
+      <div class="editor">
+        <div class="ehd"><i data-i="file"></i>openai-completions.ts<span class="grow"></span>observed edit · 2s ago · already on disk</div>
+        <div class="hunk">@@ readThinkingBlock · lines 206–222</div>
+        <div class="ln"><span class="n">206</span><span class="m"></span><span><span class="k">function</span> readThinkingBlock(block, model) {</span></div>
+        <div class="ln"><span class="n">207</span><span class="m"></span><span>  <span class="k">switch</span> (block.type) {</span></div>
+        <div class="ln"><span class="n">208</span><span class="m"></span><span>    <span class="k">case</span> <span class="s">'thinking'</span>: {</span></div>
+        <div class="ln"><span class="n">209</span><span class="m"></span><span>      <span class="k">const</span> signature = block.signature;</span></div>
+        <div class="ln rem"><span class="n">211</span><span class="m">−</span><span>      <span class="k">if</span> (!signature) {</span></div>
+        <div class="ln add fresh"><span class="n">211</span><span class="m">+</span><span>      <span class="k">if</span> (!signature &amp;&amp; isAnthropic(model)) {</span></div>
+        <div class="ln"><span class="n">212</span><span class="m"></span><span>        <span class="k">throw new</span> MissingSignature(model.id);</span></div>
+        <div class="ln"><span class="n">213</span><span class="m"></span><span>      }</span></div>
+        <div class="ln add fresh"><span class="n">214</span><span class="m">+</span><span>      <span class="c">// OpenCode omits signatures; accept them there only.</span></span></div>
+        <div class="ln add fresh"><span class="n">215</span><span class="m">+</span><span>      <span class="k">const</span> safe = signature ?? <span class="s">''</span>;</span></div>
+        <div class="bubble"><b>Why this line</b> · “Gate on the Anthropic path and let OpenCode through.” Linked from the step on the left.</div>
+        <div class="ln" style="margin-top:10px"><span class="n">216</span><span class="m"></span><span>      <span class="k">return</span> {</span></div>
+        <div class="ln"><span class="n">217</span><span class="m"></span><span>        type: <span class="s">'thinking'</span>,</span></div>
+        <div class="ln"><span class="n">218</span><span class="m"></span><span>        thinking: block.thinking,</span></div>
+        <div class="ln"><span class="n">219</span><span class="m"></span><span>        signature: safe,</span></div>
+        <div class="ln"><span class="n">220</span><span class="m"></span><span>      };</span></div>
+      </div>
+      <div class="scrub">
+        <span class="kbd">STEP 4 / 6</span>
+        <div class="ticks"><span class="rest"></span>
+          <span class="tk" style="left:0;--hue:var(--h-read)"></span><span class="tk" style="left:16%;--hue:var(--h-search)"></span><span class="tk" style="left:32%;--hue:var(--h-read)"></span>
+          <span class="tk cur" style="left:63%;--hue:var(--h-edit)"></span><span class="tk todo" style="left:82%"></span><span class="tk todo" style="left:98%"></span></div>
+        <span class="btn" style="height:28px">◀</span><span class="btn" style="height:28px">▶</span>
+      </div>
+    </div>
+  </div>
+</main>
+<script src="shell.js"></script><script src="icons.js"></script>
+</body></html>

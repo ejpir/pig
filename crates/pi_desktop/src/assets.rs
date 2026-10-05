@@ -8,6 +8,7 @@ macro_rules! icons {
 }
 
 const ICONS: &[(&str, &[u8])] = icons![
+    eye,
     folder,
     thread,
     terminal,
@@ -53,6 +54,8 @@ const ICONS: &[(&str, &[u8])] = icons![
     folder_add,
     trash,
     list_collapse,
+    shield,
+    send,
 ];
 
 impl AssetSource for Assets {
@@ -85,4 +88,34 @@ pub fn load_fonts(cx: &App) -> anyhow::Result<()> {
             "../../../assets/fonts/CommitMono-Regular.otf"
         )),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ICONS;
+    use crate::components::{Stage, StepKind};
+
+    #[test]
+    fn every_rail_glyph_is_bundled() {
+        let kinds = [
+            StepKind::Explore,
+            StepKind::Search,
+            StepKind::Change,
+            StepKind::Check,
+            StepKind::Run,
+            StepKind::Other,
+            StepKind::Reasoning,
+        ];
+        let glyphs = kinds
+            .iter()
+            .map(|kind| kind.glyph())
+            .chain(Stage::ALL.iter().map(|stage| stage.glyph()))
+            .chain(["warning", "queue"]);
+        for glyph in glyphs {
+            assert!(
+                ICONS.iter().any(|(name, _)| *name == glyph),
+                "{glyph} is not bundled"
+            );
+        }
+    }
 }

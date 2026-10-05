@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>08 · Typing</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  .thumb { width: 56px; height: 56px; border-radius: 10px; flex: none; position: relative;
+    background: repeating-linear-gradient(45deg, #3d5a80 0 8px, #6f8fbf 8px 16px, #f7f6f3 16px 24px); }
+  .thumb .x { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 10px; background: var(--text); color: var(--canvas);
+    display: flex; align-items: center; justify-content: center; }
+  .thumb .x i { width: 12px; height: 12px; }
+  /* Suggestions for the @ being typed: a strip attached to the composer. */
+  .mentions { margin: 0 12px -1px; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px;
+    background: var(--panel); border: 1px solid var(--line); border-bottom: none; border-radius: 20px 20px 0 0; }
+  .mentions .chip.on { background: var(--composer); border: 1px solid var(--accent); color: var(--text); }
+  .composer.attached { border-radius: 0 0 20px 20px; border-top-color: var(--line); margin-top: 0; }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="appbar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="title"><b>Qwen signatures</b><span>pi · done in 4:31</span></div>
+      <span class="tap"><i data-i="info"></i></span>
+    </div>
+    <div class="scroll col gap12" style="justify-content:flex-end;padding-bottom:14px">
+      <div class="row gap8">
+        <span class="tile" style="--hue:var(--h-read)"><i data-i="eye"></i></span>
+        <span class="tile" style="--hue:var(--h-edit)"><i data-i="pencil"></i></span>
+        <span class="tile" style="--hue:var(--h-check)"><i data-i="shield"></i></span>
+        <span class="tile" style="--hue:var(--accent)"><i data-i="send"></i></span>
+        <span class="hint" style="margin-left:4px">Read 2 · changed 2 · checked</span>
+      </div>
+      <p class="serif" style="font-size:19px;line-height:1.3;font-style:italic">OpenCode models may now send an empty signature; Anthropic still must.</p>
+      <p style="color:var(--secondary);font-size:14px">The check only rejects a missing signature for Anthropic models, and the provider tests pass.</p>
+    </div>
+    <div class="mentions">
+      <span class="label">Files matching “deep”</span>
+      <div class="row gap8">
+        <span class="chip on"><i data-i="file" class="xs"></i>deepseek.ts</span>
+        <span class="chip"><i data-i="file" class="xs"></i>deepseek.test.ts</span>
+        <span class="chip"><i data-i="folder" class="xs"></i>deep/</span>
+      </div>
+    </div>
+    <div class="composer attached">
+      <div class="row gap12" style="margin-bottom:10px">
+        <span class="thumb"><span class="x"><i data-i="x"></i></span></span>
+        <span class="chip" style="height:36px"><i data-i="file" class="xs"></i>build.log<span class="faint">· 12 KB</span><i data-i="x" class="xs"></i></span>
+      </div>
+      <div class="draft">Same for DeepSeek, see the screenshot and log. Start with @deep<span class="caret"></span></div>
+      <div class="tools">
+        <span class="tap"><i data-i="clip"></i></span>
+        <span class="tap"><i data-i="slash"></i></span>
+        <span class="chip" style="border:none;background:transparent">Opus 5.5 · High<i data-i="chev-d" class="xs"></i></span>
+        <span class="grow"></span>
+        <span class="send"><i data-i="send"></i></span>
+      </div>
+    </div>
+  </main>
+  <div class="kb">
+    <div class="sugg"><span>deep</span><span style="font-weight:600">deepseek</span><span>deeper</span></div>
+    <div class="keys">${KEYS1}</div>
+    <div class="keys"><span class="key">a</span><span class="key">s</span><span class="key">d</span><span class="key">f</span><span class="key">g</span><span class="key">h</span><span class="key">j</span><span class="key">k</span><span class="key">l</span></div>
+    <div class="keys"><span class="key w"><i data-i="chev-u" class="sm"></i></span><span class="key">z</span><span class="key">x</span><span class="key">c</span><span class="key">v</span><span class="key">b</span><span class="key">n</span><span class="key">m</span><span class="key w"><i data-i="back" class="sm"></i></span></div>
+    <div class="keys"><span class="key w">?123</span><span class="key">,</span><span class="key space"></span><span class="key">.</span><span class="key w act"><i data-i="chev-r" class="sm"></i></span></div>
+  </div>
+</div>
+<script>
+  document.querySelector(".kb .keys").innerHTML = "qwertyuiop".split("").map((k) => `<span class="key">${k}</span>`).join("");
+</script>
+<script src="phone.js"></script>
+</body></html>

@@ -1,0 +1,112 @@
+{
+  "kind": "static design proposal, not application captures",
+  "master": "../desktop-workbench-vision.svg",
+  "screens": [
+    {
+      "name": "01-work",
+      "size": [
+        1440,
+        900
+      ],
+      "composer": [
+        240,
+        710,
+        1176,
+        142
+      ]
+    },
+    {
+      "name": "02-review-wide",
+      "size": [
+        1600,
+        900
+      ],
+      "composer": [
+        440,
+        710,
+        1136,
+        142
+      ]
+    },
+    {
+      "name": "03-file-details",
+      "size": [
+        1440,
+        900
+      ],
+      "composer": [
+        240,
+        710,
+        856,
+        142
+      ]
+    },
+    {
+      "name": "04-waiting",
+      "size": [
+        1440,
+        900
+      ],
+      "composer": null
+    },
+    {
+      "name": "05-work-evening",
+      "size": [
+        1440,
+        900
+      ],
+      "composer": [
+        240,
+        710,
+        1176,
+        142
+      ]
+    },
+    {
+      "name": "06-tools",
+      "size": [
+        1440,
+        900
+      ],
+      "composer": [
+        240,
+        710,
+        1176,
+        142
+      ]
+    },
+    {
+      "name": "07-review-compact",
+      "size": [
+        1000,
+        720
+      ],
+      "composer": [
+        240,
+        530,
+        736,
+        142
+      ]
+    },
+    {
+      "name": "08-start",
+      "size": [
+        1440,
+        900
+      ],
+      "composer": [
+        240,
+        312,
+        1176,
+        142
+      ]
+    }
+  ],
+  "rules": {
+    "title_bar": 36,
+    "sidebar": 216,
+    "work_gutter": 24,
+    "footer": 24,
+    "default_inspector": "closed"
+  }
+}

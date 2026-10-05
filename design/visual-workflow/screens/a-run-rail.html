@@ -1,0 +1,119 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>A · Run rail</title>
+<link rel="stylesheet" href="mock.css">
+<style>
+  .scroll { flex: 1; overflow: hidden; padding: 22px 24px 0; }
+  .measure { max-width: 900px; }
+  .you { display: flex; gap: 12px; padding: 14px 16px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); }
+  .avatar { width: 26px; height: 26px; border-radius: 13px; background: var(--raised); display: grid; place-items: center; color: var(--muted); flex: none; }
+  .you p { font-size: 14px; line-height: 21px; color: var(--secondary); }
+  .meta { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+
+  /* The rail: one spine per turn; each segment takes the hue of the step it leads into. */
+  .rail { position: relative; margin-top: 18px; padding-left: 40px; }
+  .step { position: relative; padding: 0 0 18px; }
+  .step::before { content: ""; position: absolute; left: -27px; top: 22px; bottom: -2px; width: 2px; border-radius: 1px;
+    background: linear-gradient(180deg, var(--seg-a), var(--seg-b)); }
+  .step.last::before { display: none; }
+  .node { position: absolute; left: -38px; top: 0; width: 24px; height: 24px; border-radius: 12px; display: grid; place-items: center;
+    background: var(--canvas); border: 2px solid var(--hue); color: var(--hue); }
+  .node .ico { width: 12px; height: 12px; }
+  .node.fill { background: var(--hue); color: #fff; }
+  .node.live { box-shadow: 0 0 0 5px color-mix(in srgb, var(--hue) 16%, transparent), 0 0 0 10px color-mix(in srgb, var(--hue) 7%, transparent); }
+  .node.future { border-style: dashed; border-color: var(--line-strong); color: var(--muted); }
+  .sh { display: flex; align-items: center; gap: 10px; height: 24px; }
+  .sh b { font-weight: 600; }
+  .sh .what { color: var(--muted); }
+  .sh .t { margin-left: auto; font-size: 11px; color: var(--muted); font-family: var(--mono); }
+  .pill { font-size: 11px; height: 20px; padding: 0 7px; border-radius: 10px; display: inline-flex; align-items: center; gap: 4px;
+    background: color-mix(in srgb, var(--hue) 11%, transparent); color: var(--hue); font-weight: 600; }
+
+  .fchips { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .fchip { height: 26px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 6px; background: var(--composer);
+    border: 1px solid var(--line); font-family: var(--mono); font-size: 11.5px; color: var(--secondary); }
+
+  .say { margin: 6px 0 4px; }
+  .say h2 { font-family: var(--serif); font-style: italic; font-weight: 400; font-size: 24px; letter-spacing: -.01em; margin-bottom: 6px; }
+  .say p { font-size: 14px; line-height: 22px; color: var(--secondary); max-width: 720px; }
+
+  .files { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .fcard { background: var(--composer); border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; display: flex; gap: 12px; align-items: center;
+    box-shadow: 0 1px 2px rgba(37,47,61,.05); }
+  .fcard .nm { font-weight: 600; } .fcard .pth { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .blocks { display: flex; gap: 2px; } .blocks i { width: 7px; height: 7px; border-radius: 1.5px; background: var(--line); display: block; }
+  .blocks .a { background: var(--green); } .blocks .r { background: var(--coral); }
+
+  .term { margin-top: 10px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); overflow: hidden; }
+  .term .bar { height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; font-family: var(--mono); font-size: 12px; color: var(--secondary); border-bottom: 1px solid var(--line); }
+  .term .out { padding: 10px 14px; font-family: var(--mono); font-size: 12px; line-height: 21px; }
+  .prog { height: 3px; background: var(--line); }
+  .prog i { display: block; height: 3px; width: 64%; background: linear-gradient(90deg, color-mix(in srgb, var(--h-read) 30%, transparent), var(--h-read)); }
+
+  .queued { margin-top: 2px; padding: 10px 12px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--secondary); display: flex; gap: 10px; align-items: center; }
+
+  .composer-wrap { padding: 12px 24px 18px; }
+  .state { display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 4px 0 2px; }
+  .state .sw { width: 8px; height: 8px; border-radius: 4px; background: var(--h-read); box-shadow: 0 0 0 4px color-mix(in srgb, var(--h-read) 18%, transparent); }
+  .composer { background: var(--composer); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px 10px; box-shadow: 0 1px 3px rgba(37,47,61,.06); }
+  .composer .ph { font-size: 14px; color: var(--text); height: 40px; }
+  .composer .tools { display: flex; align-items: center; gap: 6px; }
+  .note { position: absolute; right: 22px; top: 60px; width: 238px; font-size: 11.5px; line-height: 17px; color: var(--muted); }
+  .note b { color: var(--text); display: block; margin-bottom: 4px; font-size: 12px; }
+  .legend { display: grid; grid-template-columns: 14px 1fr; gap: 6px 8px; margin-top: 10px; align-items: center; }
+  .legend i.sw2 { width: 10px; height: 10px; border-radius: 5px; display: block; }
+</style></head>
+<body data-status="working">
+<main class="main" style="position:relative">
+  <div class="tabs"><div class="tab on">Thread</div><div class="tab">Changes <span class="n">2</span></div><span class="sp"></span><span class="branch">pi / main</span></div>
+  <div class="scroll"><div class="measure">
+    <div class="you"><div class="avatar"><i data-i="user"></i></div><div><div class="meta">You · 10:24</div>
+      <p>OpenCode returns empty thinking signatures. Accept them there, keep Anthropic strict, and add a regression test without a live API key.</p></div></div>
+
+    <div class="rail">
+      <div class="step" style="--hue:var(--h-read);--seg-a:var(--h-read);--seg-b:var(--h-edit)">
+        <div class="node fill"><i data-i="eye" data-w="2.2"></i></div>
+        <div class="sh"><b>Explored</b><span class="what">2 files · 1 search</span><span class="pill">Read</span><span class="pill" style="--hue:var(--h-search)">Grep</span><span class="t">0:08</span></div>
+        <div class="fchips"><span class="fchip"><i data-i="file"></i>openai-completions.ts</span><span class="fchip"><i data-i="file"></i>anthropic.ts</span><span class="fchip"><i data-i="search"></i>"signature" in packages/ai</span></div>
+      </div>
+
+      <div class="step" style="--hue:var(--h-edit);--seg-a:var(--h-edit);--seg-b:var(--h-read)">
+        <div class="node fill"><i data-i="pencil" data-w="2.2"></i></div>
+        <div class="sh"><b>Changed 2 files</b><span class="what">observed edits, already on disk</span><span class="t">0:31</span></div>
+        <div class="say"><h2>One narrow fix. One regression test.</h2>
+          <p>Empty signatures are now accepted for OpenCode models only; the Anthropic path still throws. The test mocks the provider, so no API key is needed.</p></div>
+        <div class="files">
+          <div class="fcard"><i data-i="file" style="color:var(--h-edit)"></i><div class="grow"><div class="nm">openai-completions.ts</div><div class="pth">packages/ai/src/providers</div></div>
+            <span class="mono add" style="font-size:12px">+3</span><span class="mono rem" style="font-size:12px">−1</span><span class="blocks"><i class="a"></i><i class="a"></i><i class="a"></i><i class="r"></i><i></i></span></div>
+          <div class="fcard"><i data-i="file" style="color:var(--h-edit)"></i><div class="grow"><div class="nm">openai-completions.test.ts</div><div class="pth">packages/ai/test</div></div>
+            <span class="mono add" style="font-size:12px">+24</span><span class="blocks"><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i></span></div>
+        </div>
+      </div>
+
+      <div class="step" style="--hue:var(--h-read);--seg-a:var(--h-read);--seg-b:var(--line-strong)">
+        <div class="node live fill"><i data-i="term" data-w="2.2"></i></div>
+        <div class="sh"><b>Checking</b><span class="what mono" style="font-size:12px">npm run check</span><span class="pill">running</span><span class="t">0:42</span></div>
+        <div class="term">
+          <div class="prog"><i></i></div>
+          <div class="out"><div><span class="add">✓</span> TypeScript</div><div><span class="add">✓</span> Provider regression tests <span class="muted">· 12 passed</span></div><div class="muted">◌ Checking the remaining workspace packages…</div></div>
+        </div>
+      </div>
+
+      <div class="step last" style="--hue:var(--muted)">
+        <div class="node future"><i data-i="queue"></i></div>
+        <div class="queued"><b style="font-size:12px;color:var(--h-wait)">NEXT</b>Also cover the streaming path with a mock provider.<span class="grow"></span><span class="kbd">starts when this turn ends</span><i data-i="x" class="muted"></i></div>
+      </div>
+    </div>
+  </div></div>
+
+  <div class="composer-wrap">
+    <div class="state"><span class="sw"></span><b>Working</b><span class="muted">Checking the workspace · 0:42</span><span class="grow"></span><span class="btn"><i data-i="stop"></i>Stop</span></div>
+    <div class="composer"><div class="ph">Add a release note once checks finish</div>
+      <div class="tools"><i data-i="clip" class="muted"></i><span class="chip"><i data-i="spark"></i>Claude Opus</span><span class="chip">High</span><span class="grow"></span><span class="btn">Steer now</span><span class="btn primary">Queue follow-up ↵</span></div></div>
+  </div>
+
+  <div class="note"><b>Activity hues</b>Every step gets a node, a hue and a duration. The spine segment fades from one step's hue into the next, so the run reads at a glance even when scrolled.
+    <div class="legend"><i class="sw2" style="background:var(--h-read)"></i>Read · run<i class="sw2" style="background:var(--h-search)"></i>Search<i class="sw2" style="background:var(--h-edit)"></i>Edit<i class="sw2" style="background:var(--h-ok)"></i>Passed<i class="sw2" style="background:var(--h-fail)"></i>Failed<i class="sw2" style="background:var(--h-wait)"></i>Waiting · queued</div>
+  </div>
+</main>
+<script src="shell.js"></script><script src="icons.js"></script>
+</body></html>

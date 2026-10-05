@@ -451,8 +451,10 @@ impl ComposerView {
                             self.slash_seen.as_deref().unwrap_or(""),
                             theme,
                         ))
+                        .child(div().flex_1())
                         .child(
                             div()
+                                .debug_selector(move || format!("slash-tag-{index}"))
                                 .min_w_0()
                                 .truncate()
                                 .font_family(MONO)
@@ -521,10 +523,16 @@ impl ComposerView {
             });
         let menu = div()
             .id("slash-menu")
+            .debug_selector(|| "slash-menu".into())
             .absolute()
             .left(px(8.))
-            .bottom(relative(1.))
-            .mb(px(6.))
+            .map(|menu| {
+                if self.menus_below() {
+                    menu.top(relative(1.)).mt(px(6.))
+                } else {
+                    menu.bottom(relative(1.)).mb(px(6.))
+                }
+            })
             .child(
                 panel(v_flex().w(px(MENU_WIDTH)).occlude())
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_slash(cx)))

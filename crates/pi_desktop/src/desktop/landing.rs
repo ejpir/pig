@@ -1,15 +1,33 @@
-//! The pre-conversation surface. Catalog metadata is not a context manifest.
-//! This owner keeps its scroll/notifications separate from the transcript and draft.
+//! The pre-conversation surface (design/workbench-vision 08): lead with the task
+//! and the composer. Starting points fill the draft; nothing here sends a prompt.
+//! Catalog metadata is not a context manifest. This owner keeps its scroll and
+//! notifications separate from the transcript and draft.
+use super::composer::ComposerView;
 use super::session::{Changes, SessionController, SessionEvent};
 use super::*;
-use gpui::{Div, EventEmitter, Subscription};
+use gpui::{Div, ElementId, EventEmitter, Stateful, Subscription};
 
 pub enum LandingEvent {
     UseCommand(SlashCommand),
+    /// Text for the draft, from a starting point. Never sent by itself.
+    Draft(String),
 }
+
+/// Starting points that suit any project. They fill the draft only.
+const STARTERS: [(&str, &str); 2] = [
+    (
+        "Review the local changes",
+        "Review the local changes in this project and point out anything risky.",
+    ),
+    (
+        "Explain this project",
+        "Explain how this project is organized and where I should start.",
+    ),
+];
 
 pub struct LandingView {
     controller: Entity<SessionController>,
+    composer: Entity<ComposerView>,
     scroll: ScrollHandle,
     composer_focus: gpui::FocusHandle,
     _subscription: Subscription,
@@ -18,92 +36,72 @@ impl EventEmitter<LandingEvent> for LandingView {}
 impl LandingView {
     pub fn new(
         controller: Entity<SessionController>,
-        composer_focus: gpui::FocusHandle,
+        composer: Entity<ComposerView>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscription = cx.subscribe(&controller, |_, _, event, cx| {
-            if matches!(event, SessionEvent::Changed(c) if c.intersects(Changes::CATALOG | Changes::METADATA | Changes::RUN)) {
+            if matches!(event, SessionEvent::Changed(c) if c.intersects(Changes::CATALOG | Changes::METADATA | Changes::RUN | Changes::JJ)) {
                 cx.notify();
             }
         });
+        let composer_focus = composer.read(cx).input.focus_handle(cx);
         Self {
             controller,
+            composer,
             composer_focus,
             scroll: ScrollHandle::new(),
             _subscription: subscription,
         }
     }
-
-    fn catalog(&self, source: &str, title: &str, cx: &Context<Self>, theme: Theme) -> Div {
-        let commands: Vec<_> = self
-            .controller
-            .read(cx)
-            .model()
-            .commands
-            .iter()
-            .filter(|c| c.source == source)
-            .collect();
-        card(title, &commands.len().to_string(), theme)
-            .children(commands.iter().take(3).map(|command| {
-                h_flex()
-                    .h(px(20.))
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .font_family(MONO)
-                            .text_size(px(11.5))
-                            .child(if source == "skill" {
-                                command.name.trim_start_matches("skill:").to_owned()
-                            } else {
-                                format!("/{}", command.name)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .text_right()
-                            .text_size(px(11.))
-                            .text_color(theme.faint)
-                            .child(command.description.clone().unwrap_or_default()),
-                    )
-            }))
-            .when(commands.is_empty(), |v| {
-                v.child(note("None reported by Pi", theme))
-            })
-            .when(commands.len() > 3, |v| {
-                v.child(note(
-                    format!("{} more in / commands", commands.len() - 3),
-                    theme,
-                ))
-            })
-    }
 }
 
-fn note(text: impl Into<SharedString>, theme: Theme) -> Div {
-    div()
-        .text_size(px(11.))
-        .line_height(px(18.))
-        .text_color(theme.faint)
-        .child(text.into())
-}
-fn card(title: &str, count: &str, theme: Theme) -> Div {
-    v_flex()
-        .flex_1()
-        .min_w_0()
-        .min_h(px(102.))
-        .flex_shrink_0()
-        .px(px(14.))
-        .py(px(10.))
-        .rounded(px(8.))
-        .bg(theme.panel)
-        .border_1()
+/// One starting point: a quiet row with a hairline below, as in the study.
+fn starter(
+    id: impl Into<ElementId>,
+    title: String,
+    hint: Option<String>,
+    theme: Theme,
+) -> Stateful<Div> {
+    h_flex()
+        .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(title.clone())
+        .w_full()
+        .h(px(44.))
+        .px(px(2.))
+        .gap(px(12.))
+        .border_b_1()
         .border_color(theme.line)
-        .child(section(title, count, theme).mb(px(4.)))
+        .cursor_pointer()
+        .hover(move |row| row.bg(theme.hover))
+        .child(icon("thread", theme.muted).size(px(14.)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(14.))
+                .text_color(theme.text)
+                .child(title),
+        )
+        .children(hint.map(|hint| {
+            div()
+                .flex_shrink_0()
+                .font_family(MONO)
+                .text_size(px(11.5))
+                .text_color(theme.faint)
+                .child(hint)
+        }))
+        .child(icon("chevron_right", theme.faint).size(px(12.)))
+}
+
+/// `~/repos/pi` for a folder under the home directory; the full path otherwise.
+fn home_relative(path: &std::path::Path) -> String {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| path.strip_prefix(home).ok().map(|rest| rest.to_path_buf()))
+        .map(|rest| format!("~/{}", rest.display()))
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 impl Render for LandingView {
@@ -112,106 +110,145 @@ impl Render for LandingView {
         let controller = self.controller.read(cx);
         let model = controller.model();
         let ready = controller.ready();
+        let demo = controller.is_demo();
+        let recording = controller.jj().project.is_some();
+        let project = home_relative(&model.cwd);
         let commands: Vec<_> = model
             .commands
             .iter()
             .filter(|c| matches!(c.source.as_str(), "prompt" | "skill"))
-            .take(4)
+            .take(2)
             .cloned()
             .collect();
-        let subtitle = if controller.is_demo() {
-            "Offline sample catalog · no prompts are sent or project files read.".to_owned()
-        } else if ready {
-            format!(
-                "Available in {}. Choose a starting point, then send when ready.",
-                model.cwd.display()
+        let gutter = WORK_GUTTER;
+        let starters = v_flex()
+            .debug_selector(|| "landing-starters".into())
+            .px(gutter)
+            .mt(px(52.))
+            .child(
+                div()
+                    .h(px(28.))
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.secondary)
+                    .child("A starting point"),
             )
-        } else {
-            "Waiting for Pi to report this project's session and commands.".to_owned()
-        };
+            .child(div().h(px(1.)).bg(theme.line))
+            .children(STARTERS.iter().enumerate().map(|(i, (title, draft))| {
+                let draft = draft.to_string();
+                starter(("landing-starter", i), title.to_string(), None, theme)
+                    .debug_selector(move || format!("landing-starter-{i}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.emit(LandingEvent::Draft(draft.clone()));
+                        this.composer_focus.focus(window, cx);
+                    }))
+            }))
+            // Pi's own templates and skills attach as a command; the draft is kept.
+            .children(commands.into_iter().enumerate().map(|(i, command)| {
+                let title = command
+                    .description
+                    .clone()
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_else(|| command.name.clone());
+                starter(
+                    ("landing-command", i),
+                    title,
+                    Some(format!("/{}", command.name)),
+                    theme,
+                )
+                .debug_selector(move || format!("landing-command-{i}"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.controller.read(cx).ready() {
+                        cx.emit(LandingEvent::UseCommand(command.clone()));
+                        this.composer_focus.focus(window, cx);
+                    }
+                }))
+            }));
         let body = v_flex()
             .w_full()
-            .px(px(32.))
-            .pt(px(26.))
-            .pb(px(18.))
+            .pt(px(88.))
+            .pb(px(32.))
             .flex_shrink_0()
             .child(
                 v_flex()
-                    .items_center()
-                    .child(brand_mark_sized(48.))
+                    .px(gutter)
                     .child(
                         div()
-                            .mt(px(22.))
                             .font_family(SERIF)
                             .italic()
-                            .text_size(px(24.))
-                            .line_height(px(30.))
-                            .text_center()
-                            .child("Start with a prompt, a template, or a skill."),
+                            .text_size(px(36.))
+                            .line_height(px(44.))
+                            .text_color(theme.text)
+                            .child("What should we change?"),
                     )
                     .child(
                         div()
-                            .mt(px(2.))
-                            .text_center()
-                            .text_size(px(12.5))
-                            .line_height(px(20.))
+                            .mt(px(12.))
+                            .text_size(px(15.))
+                            .line_height(px(22.))
                             .text_color(theme.muted)
-                            .child(subtitle),
+                            .child(
+                                "Start with the task. Bring in files and details as you need them.",
+                            ),
                     ),
             )
+            .child(div().mt(px(26.)).child(self.composer.clone()))
             .child(
-                label("REPORTED FOR THIS PROJECT", theme)
-                    .mt(px(22.))
-                    .mb(px(6.)),
+                div()
+                    .px(gutter)
+                    .mt(px(4.))
+                    .text_size(px(12.))
+                    .text_color(theme.muted)
+                    .child(if ready || demo {
+                        "Type / for commands or @ to include a file."
+                    } else {
+                        "Waiting for Pi to report this project's session and commands."
+                    }),
             )
+            .child(starters)
             .child(
-                h_flex()
-                    .items_stretch()
-                    .gap(px(8.))
+                v_flex()
+                    .debug_selector(|| "landing-project".into())
+                    .px(gutter)
+                    .mt(px(44.))
+                    .gap(px(10.))
                     .child(
-                        card("CONTEXT FILES", "—", theme)
+                        h_flex()
+                            .gap(px(24.))
                             .child(
                                 div()
-                                    .font_family(MONO)
-                                    .text_size(px(11.5))
-                                    .child("Manifest not exposed by RPC"),
+                                    .text_size(px(12.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.secondary)
+                                    .child("Project"),
                             )
-                            .child(note("Pi assembles context for each request.", theme))
-                            .child(note("No file list is inferred from the project.", theme)),
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family(MONO)
+                                    .text_size(px(12.))
+                                    .text_color(theme.muted)
+                                    .child(project),
+                            ),
                     )
-                    .child(self.catalog("skill", "SKILLS", cx, theme)),
-            )
-            .child(
-                h_flex()
-                    .items_stretch()
-                    .gap(px(8.))
-                    .mt(px(8.))
-                    .child(self.catalog("prompt", "PROMPT TEMPLATES", cx, theme))
-                    .child(self.catalog("extension", "EXTENSION COMMANDS", cx, theme)),
-            )
-            .child(label("START FROM", theme).mt(px(24.)).mb(px(2.)))
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap(px(8.))
-                    .min_h(px(24.))
-                    .when(commands.is_empty(), |v| {
-                        v.child(note(
-                            "Write a prompt below, or type / to browse commands.",
-                            theme,
-                        ))
-                    })
-                    .children(commands.into_iter().enumerate().map(|(i, command)| {
-                        button(("landing-command", i), format!("/{}", command.name), theme)
-                            .debug_selector(move || format!("landing-command-{i}"))
-                            .font_family(MONO)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if this.controller.read(cx).ready() {
-                                    cx.emit(LandingEvent::UseCommand(command.clone()));
-                                    this.composer_focus.focus(window, cx);
-                                }
-                            }))
-                    })),
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.muted)
+                            .child(if recording {
+                                "File history is on. jj records each turn that edits files."
+                            } else {
+                                "File history is off. Past edits cannot be restored."
+                            }),
+                    )
+                    .when(demo, |v| {
+                        v.child(
+                            div().text_size(px(12.)).text_color(theme.faint).child(
+                                "Offline sample · no prompts are sent or project files read.",
+                            ),
+                        )
+                    }),
             );
         div()
             .id("landing")

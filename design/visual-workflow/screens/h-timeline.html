@@ -1,0 +1,67 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>H · Timeline tracks</title>
+<link rel="stylesheet" href="mock.css">
+<style>
+  .scroll { flex: 1; overflow: hidden; padding: 20px 28px 0; }
+  .measure { max-width: 860px; }
+  .you { font-size: 14px; line-height: 21px; color: var(--secondary); padding: 12px 14px; border-radius: 10px; background: var(--panel); box-shadow: 0 0 0 1px var(--line); }
+  h2 { font-family: var(--serif); font-style: italic; font-weight: 400; font-size: 26px; margin: 20px 0 6px; }
+  .lede { font-size: 14px; line-height: 22px; color: var(--secondary); max-width: 700px; }
+  .hl { margin-top: 14px; padding: 10px 14px; border-radius: 8px; background: color-mix(in srgb, var(--h-edit) 10%, var(--panel)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--h-edit) 45%, var(--line)); display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .hl .mono { font-size: 12px; color: var(--secondary); }
+
+  .composer { margin: 12px 28px 12px; background: var(--composer); border-radius: 10px; box-shadow: 0 0 0 1px var(--line); padding: 9px 12px; display: flex; align-items: center; gap: 10px; }
+
+  .tl { flex: none; height: 268px; background: var(--deep); border-top: 1px solid var(--line); display: grid; grid-template-rows: 34px 1fr; }
+  .tlh { display: flex; align-items: center; gap: 12px; padding: 0 14px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .tlh b { color: var(--text); font-weight: 600; }
+  .tlb { display: grid; grid-template-columns: 120px 1fr; min-height: 0; }
+  .labels { border-right: 1px solid var(--line); padding-top: 26px; }
+  .labels div { height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 14px; font-size: 12px; color: var(--secondary); }
+  .area { position: relative; overflow: hidden; }
+  .ruler { height: 26px; position: relative; border-bottom: 1px solid var(--line); }
+  .ruler span { position: absolute; top: 6px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); transform: translateX(-50%); }
+  .ruler i { position: absolute; bottom: 0; width: 1px; height: 6px; background: var(--line-strong); }
+  .track { position: relative; height: 38px; border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent); }
+  .span { position: absolute; top: 7px; height: 24px; border-radius: 5px; display: flex; align-items: center; gap: 6px; padding: 0 8px; overflow: hidden; white-space: nowrap;
+    font-size: 11px; font-family: var(--mono); color: #0f141a;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--hue) 100%, #fff 12%), var(--hue)); box-shadow: inset 0 1px 0 rgba(255,255,255,.3); }
+  .span.soft { background: color-mix(in srgb, var(--hue) 22%, transparent); color: var(--secondary); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hue) 45%, transparent); }
+  .span.sel { box-shadow: 0 0 0 2px var(--text), 0 6px 16px rgba(0,0,0,.4); }
+  .span.live { background: repeating-linear-gradient(135deg, var(--hue) 0 8px, color-mix(in srgb, var(--hue) 80%, #000) 8px 10px); }
+  .mark { position: absolute; top: 9px; width: 20px; height: 20px; border-radius: 4px; transform: rotate(45deg) scale(.75); background: var(--h-edit); box-shadow: 0 0 0 3px var(--deep); }
+  .play { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); left: 86%; }
+  .play::before { content: "0:42"; position: absolute; top: 4px; left: 6px; font-family: var(--mono); font-size: 10.5px; color: var(--deep); background: var(--text); padding: 0 5px; border-radius: 3px; }
+  .grid { position: absolute; top: 26px; bottom: 0; width: 1px; background: color-mix(in srgb, var(--line) 50%, transparent); }
+</style></head>
+<body class="dark" data-status="working">
+<main class="main">
+  <div class="tabs"><div class="tab on">Thread</div><div class="tab">Changes <span class="n">2</span></div><span class="sp"></span><span class="branch" style="background:var(--deep)">pi / main</span></div>
+  <div class="scroll"><div class="measure">
+    <div class="you"><span class="muted" style="font-size:11px">You · 10:24 — </span>OpenCode returns empty thinking signatures. Accept them there, keep Anthropic strict, and add a regression test without a live API key.</div>
+    <h2>One narrow fix. One regression test.</h2>
+    <p class="lede">Empty signatures are now accepted for OpenCode models only; the Anthropic path still throws. The test mocks the provider, so no API key is needed.</p>
+    <div class="hl"><i data-i="pencil" style="color:var(--h-edit)"></i><b>Edit</b><span class="mono">openai-completions.ts · lines 211–215</span><span class="add mono">+3</span><span class="rem mono">−1</span><span class="grow"></span><span class="muted" style="font-size:12px">selected on the timeline · 0:24</span></div>
+  </div></div>
+  <div class="composer"><i data-i="clip" class="muted"></i><span class="grow" style="font-size:14px">Add a release note once checks finish</span><span class="chip"><i data-i="spark"></i>Claude Opus · High</span><span class="btn"><i data-i="stop"></i>Stop</span><span class="btn primary">Queue ↵</span></div>
+
+  <div class="tl">
+    <div class="tlh"><b>Turn 3</b>0:42 elapsed · 7 tool calls · 2 in parallel<span class="grow"></span><span class="chip">Turns 1–3 <i data-i="chev-d"></i></span><span class="kbd">− zoom +</span></div>
+    <div class="tlb">
+      <div class="labels"><div><i data-i="spark" style="color:var(--h-search)"></i>Model</div><div><i data-i="eye" style="color:var(--h-read)"></i>Explore</div><div><i data-i="pencil" style="color:var(--h-edit)"></i>Edit</div><div><i data-i="term" style="color:var(--h-run)"></i>Run</div><div><i data-i="file" style="color:var(--muted)"></i>Files</div></div>
+      <div class="area">
+        <div class="ruler"><span style="left:2%">0:00</span><span style="left:21%">0:10</span><span style="left:40%">0:20</span><span style="left:59%">0:30</span><span style="left:78%">0:40</span><span style="left:97%">0:50</span>
+          <i style="left:2%"></i><i style="left:21%"></i><i style="left:40%"></i><i style="left:59%"></i><i style="left:78%"></i><i style="left:97%"></i></div>
+        <i class="grid" style="left:21%"></i><i class="grid" style="left:40%"></i><i class="grid" style="left:59%"></i><i class="grid" style="left:78%"></i>
+        <div class="track"><span class="span soft" style="--hue:var(--h-search);left:2%;width:6%">think</span><span class="span soft" style="--hue:var(--h-search);left:15%;width:8%">plan</span><span class="span soft" style="--hue:var(--h-search);left:35%;width:5%">write</span><span class="span soft" style="--hue:var(--h-search);left:58%;width:9%">summary</span></div>
+        <div class="track"><span class="span" style="--hue:var(--h-read);left:8%;width:6%;top:4px;height:14px;font-size:10px">Read</span><span class="span" style="--hue:var(--h-search);left:9%;width:5%;top:20px;height:14px;font-size:10px">Grep</span><span class="span" style="--hue:var(--h-read);left:23%;width:5%">Read</span></div>
+        <div class="track"><span class="span sel" style="--hue:var(--h-edit);left:40%;width:6.5%">Edit</span><span class="span" style="--hue:var(--h-edit);left:47%;width:10%">Write test +24</span></div>
+        <div class="track"><span class="span live" style="--hue:var(--h-run);left:67%;width:19%;color:#0f141a">npm run check</span><span class="span soft" style="--hue:var(--muted);left:87%;width:11%;border:1px dashed var(--line-strong);background:transparent;box-shadow:none">queued: streaming…</span></div>
+        <div class="track"><span class="mark" style="left:44%"></span><span class="mark" style="left:53%"></span><span style="position:absolute;left:calc(44% - 150px);top:11px;font-family:var(--mono);font-size:11px;color:var(--muted)">openai-completions.ts</span><span style="position:absolute;left:calc(53% + 22px);top:11px;font-family:var(--mono);font-size:11px;color:var(--muted)">….test.ts</span></div>
+        <div class="play"></div>
+      </div>
+    </div>
+  </div>
+</main>
+<script src="shell.js"></script><script src="icons.js"></script>
+</body></html>

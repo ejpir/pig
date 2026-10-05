@@ -1,9 +1,10 @@
+use super::super::diff::DiffSection;
 use super::*;
 use pi_jj::{FileChange, FileStatus, LineKind};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
-#[derive(Clone)]
-pub(super) struct File {
+#[derive(Clone, PartialEq, Eq)]
+pub(in crate::desktop) struct File {
     pub path: String,
     pub patch: String,
     pub preview: String,
@@ -13,6 +14,7 @@ pub(super) struct File {
     pub status: &'static str,
     pub source: String,
     pub touches: Vec<(String, String)>,
+    pub sections: Vec<DiffSection>,
 }
 impl File {
     pub fn recorded(file: &FileChange, turn: usize, record: &super::super::jj::TurnRecord) -> Self {
@@ -39,6 +41,7 @@ impl File {
                 }
             ),
             touches: vec![],
+            sections: DiffSection::recorded(file),
         }
     }
 }
@@ -88,8 +91,15 @@ pub(super) fn patch(file: &FileChange) -> String {
 /// Never attribute older tool calls to a new snapshot merely because their file
 /// paths match. Tool ids are captured at recording time and survive hydration.
 pub(super) fn observed(model: &Session, recorded: &HashSet<String>) -> Vec<File> {
+    observed_tools(model.tools.iter(), recorded, &model.cwd)
+}
+pub(super) fn observed_tools<'a>(
+    tools: impl Iterator<Item = &'a Tool>,
+    recorded: &HashSet<String>,
+    root: &Path,
+) -> Vec<File> {
     let mut files: BTreeMap<String, File> = BTreeMap::new();
-    for tool in &model.tools {
+    for tool in tools {
         if recorded.contains(&tool.id)
             || !tool.finished
             || tool.is_error
@@ -97,10 +107,16 @@ pub(super) fn observed(model: &Session, recorded: &HashSet<String>) -> Vec<File>
         {
             continue;
         }
-        let path = tool.target();
-        if path.is_empty() {
+        let target = tool.target();
+        if target.is_empty() {
             continue;
         }
+        let target_path = Path::new(&target);
+        let path = target_path
+            .strip_prefix(root)
+            .unwrap_or(target_path)
+            .display()
+            .to_string();
         let patch = tool.diff.clone().unwrap_or_else(|| {
             let lines = |text: &str, prefix| {
                 text.lines()
@@ -127,6 +143,7 @@ pub(super) fn observed(model: &Session, recorded: &HashSet<String>) -> Vec<File>
             status: "Tool-reported edits",
             source: "Tool-reported edits · No snapshot".into(),
             touches: vec![],
+            sections: vec![],
         });
         file.added += patch
             .lines()
@@ -151,6 +168,17 @@ pub(super) fn observed(model: &Session, recorded: &HashSet<String>) -> Vec<File>
             short_call_id(&tool.id),
             preview.trim_end_matches('\n')
         ));
+        if file.touches.len() == file.sections.len()
+            && let Some(section) = DiffSection::reported(
+                format!("{} · {}", tool.name, short_call_id(&tool.id)),
+                &patch,
+            )
+        {
+            file.sections.push(section);
+        } else {
+            // A partial split would hide calls whose report cannot be positioned.
+            file.sections.clear();
+        }
         file.touches.push((tool.id.clone(), tool.name.clone()));
     }
     files.into_values().collect()

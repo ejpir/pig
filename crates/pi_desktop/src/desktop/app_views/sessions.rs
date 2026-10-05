@@ -51,6 +51,8 @@ pub struct SessionsView {
     filter: Filter,
     sort: Sort,
     sort_open: bool,
+    /// Infrequent actions: clone, export, share and delete.
+    more_open: bool,
     focus: gpui::FocusHandle,
     /// The selected session's file.
     selected: Option<String>,
@@ -65,6 +67,9 @@ pub struct SessionsView {
 }
 
 impl SessionsView {
+    pub fn search_input(&self) -> Entity<TextInput> {
+        self.search.clone()
+    }
     pub fn new(
         workspace: Entity<WorkspaceController>,
         search: Entity<TextInput>,
@@ -73,6 +78,7 @@ impl SessionsView {
         let subscriptions = vec![
             cx.subscribe(&workspace, |this, _, _, cx| this.refresh(cx)),
             cx.observe(&search, |this, _, cx| this.refresh(cx)),
+            cx.observe_global::<crate::prefs::Prefs>(|this, cx| this.refresh(cx)),
         ];
         let mut this = Self {
             workspace,
@@ -80,6 +86,7 @@ impl SessionsView {
             filter: Filter::All,
             sort: Sort::Recent,
             sort_open: false,
+            more_open: false,
             focus: cx.focus_handle(),
             selected: None,
             rows: Vec::new(),
@@ -135,12 +142,17 @@ impl SessionsView {
     fn counts(&self, cx: &App) -> (usize, usize, usize) {
         let workspace = self.workspace.read(cx);
         let project = workspace.selected_project.as_deref();
-        let all = workspace.saved.len();
+        let remote = crate::prefs::remote_sessions(cx);
+        let all = workspace.saved.len() + remote.len();
         let here = workspace
             .saved
             .iter()
             .filter(|s| Some(Path::new(&s.cwd)) == project)
-            .count();
+            .count()
+            + remote
+                .iter()
+                .filter(|target| Some(target.identity().as_path()) == project)
+                .count();
         let named = workspace
             .saved
             .iter()
@@ -149,6 +161,60 @@ impl SessionsView {
         (all, here, named)
     }
 
+    fn remote_targets(&self, cx: &App) -> Vec<pi_core::ssh::SshTarget> {
+        let query = self.search.read(cx).content().to_lowercase();
+        let project = self.workspace.read(cx).selected_project.as_ref();
+        let mut targets: Vec<_> = crate::prefs::remote_sessions(cx)
+            .into_iter()
+            .filter(|target| match self.filter {
+                Filter::All => true,
+                Filter::Project => project == Some(&target.identity()),
+                Filter::Named => false,
+            })
+            .filter(|target| {
+                query.is_empty()
+                    || format!("{} {} {}", target.host, target.cwd, target.key)
+                        .to_lowercase()
+                        .contains(&query)
+            })
+            .collect();
+        targets.reverse();
+        if self.sort == Sort::Name {
+            targets.sort_by_key(|target| format!("{} {}", target.host, target.cwd).to_lowercase());
+        }
+        targets
+    }
+    fn remote_section(
+        &self,
+        targets: Vec<pi_core::ssh::SshTarget>,
+        cx: &Context<Self>,
+        theme: Theme,
+    ) -> AnyElement {
+        v_flex().id("ssh-sessions").debug_selector(|| "ssh-sessions".into())
+            .max_h(px(180.)).overflow_y_scroll().flex_shrink_0().px(px(20.)).py(px(10.)).gap(px(6.))
+            .child(label("SSH SESSIONS", theme))
+            .child(note("Remove forgets the saved shortcut only. Open tabs, running agents and remote files are unchanged.", theme))
+            .children(targets.into_iter().enumerate().map(|(index, target)| {
+                let state = self.workspace.read(cx).tabs.iter().find_map(|tab| {
+                    let controller = tab.controller.read(cx);
+                    controller.remote_target().filter(|open| open.host == target.host && open.key == target.key)
+                        .map(|_| if !controller.is_connected() { "Disconnected" } else if controller.working() { "Working" } else { "Open" })
+                }).unwrap_or("Detached");
+                let removed = target.clone();
+                h_flex().id(("ssh-session-row", index)).gap(px(8.)).min_h(px(30.))
+                    .child(div().flex_1().min_w_0().truncate().font_family(MONO).text_size(px(11.)).child(format!("{} · {} · {}", target.host, target.cwd, &target.key[..8])))
+                    .child(div().text_size(px(11.)).text_color(theme.muted).child(state))
+                    .child(button(("show-ssh-session", index), "Open", theme).on_click(cx.listener(move |this, _, _, cx| {
+                        this.workspace.update(cx, |workspace, cx| { workspace.open_remote(target.clone(), cx); });
+                    })))
+                    .child(button(("remove-ssh-session", index), "Remove", theme)
+                        .debug_selector(move || format!("remove-ssh-session-{index}"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.workspace.update(cx, |workspace, cx| workspace.forget_remote_session(&removed, cx));
+                            this.refresh(cx);
+                        })))
+            })).into_any_element()
+    }
     fn selected(&self) -> Option<&SavedSession> {
         let path = self.selected.as_ref()?;
         self.rows.iter().find(|row| &row.path == path)
@@ -159,8 +225,9 @@ impl SessionsView {
         let workspace = self.workspace.read(cx);
         workspace.tabs.iter().find_map(|tab| {
             let controller = tab.controller.read(cx);
-            (controller.model().state.session_file.as_deref() == Some(path))
-                .then(|| controller.working())
+            (!controller.is_remote()
+                && controller.model().state.session_file.as_deref() == Some(path))
+            .then(|| controller.working())
         })
     }
 
@@ -233,7 +300,8 @@ impl SessionsView {
         // Rename and export can go to the session's own pi, or any pi for a path.
         let own = self.workspace.read(cx).tabs.iter().find_map(|tab| {
             let controller = tab.controller.read(cx);
-            (controller.model().state.session_file.as_deref() == Some(saved.path.as_str())
+            (!controller.is_remote()
+                && controller.model().state.session_file.as_deref() == Some(saved.path.as_str())
                 && controller.is_connected())
             .then(|| tab.controller.clone())
         });
@@ -617,210 +685,235 @@ impl SessionsView {
                 .justify_center()
                 .when(busy.is_some(), |button| button.opacity(0.5))
         };
+        let more_item = |id: &'static str, label: &'static str, danger: bool| {
+            h_flex()
+                .id(id)
+                .debug_selector(move || id.into())
+                .h(px(30.))
+                .px(px(10.))
+                .rounded(px(5.))
+                .text_size(px(12.5))
+                .text_color(if danger { theme.coral } else { theme.text })
+                .cursor_pointer()
+                .hover(move |row| row.bg(theme.hover))
+                .child(label)
+        };
+        let more = self.more_open.then(|| {
+            let close = |this: &mut Self| this.more_open = false;
+            v_flex()
+                .id("session-more-menu")
+                .debug_selector(|| "session-more-menu".into())
+                .absolute()
+                .bottom(px(40.))
+                .right_0()
+                .w(px(190.))
+                .p(px(4.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.chip_line)
+                .bg(theme.composer)
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.more_open = false;
+                    cx.notify();
+                }))
+                .child(more_item("clone-session", "Clone", false).on_click({
+                    let saved = saved.clone();
+                    cx.listener(move |this, _, _, cx| {
+                        close(this);
+                        this.clone_session(saved.clone(), cx)
+                    })
+                }))
+                .child(more_item("export-html", "Export HTML", false).on_click({
+                    let saved = saved.clone();
+                    cx.listener(move |this, _, _, cx| {
+                        close(this);
+                        this.export_html(saved.clone(), cx)
+                    })
+                }))
+                .child(more_item("export-jsonl", "Export JSONL", false).on_click({
+                    let saved = saved.clone();
+                    cx.listener(move |this, _, _, cx| {
+                        close(this);
+                        this.export_jsonl(saved.clone(), cx)
+                    })
+                }))
+                .child(more_item("share-session", "Share link…", false).on_click({
+                    let saved = saved.clone();
+                    cx.listener(move |this, _, window, cx| {
+                        close(this);
+                        this.share(saved.clone(), window, cx)
+                    })
+                }))
+                .child(div().h(px(1.)).my(px(4.)).bg(theme.line))
+                // Destructive, apart from the rest, and confirmed before it happens.
+                .child(more_item("delete-session", "Delete…", true).on_click({
+                    let saved = saved.clone();
+                    cx.listener(move |this, _, window, cx| {
+                        close(this);
+                        this.delete(saved.clone(), window, cx)
+                    })
+                }))
+        });
         v_flex()
             .id("sessions-inspector")
             .debug_selector(|| "sessions-inspector".into())
             .size_full()
-            .overflow_y_scroll()
-            .px(px(20.))
-            .pt(px(16.))
-            .pb(px(16.))
-            .gap(px(2.))
             .text_size(px(12.))
-            .child(match &self.rename {
-                Some(input) => div()
-                    .key_context("SessionRename")
-                    .on_action(cx.listener(|this, _: &Submit, _, cx| this.finish_rename(cx)))
-                    .on_action(cx.listener(|this, _: &Stop, _, cx| {
-                        this.rename = None;
-                        cx.notify();
-                    }))
-                    .h(px(30.))
-                    .px(px(8.))
-                    .rounded(px(5.))
-                    .border_1()
-                    .border_color(theme.focus)
-                    .child(input.clone())
-                    .into_any_element(),
-                None => inspector_title(saved.title().to_owned(), true).into_any_element(),
-            })
             .child(
-                h_flex()
-                    .mt(px(4.))
-                    .h(px(22.))
-                    .gap(px(8.))
-                    .text_color(theme.secondary)
+                v_flex()
+                    .id("sessions-inspector-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(20.))
+                    .pt(px(16.))
+                    .pb(px(12.))
+                    .child(match &self.rename {
+                        Some(input) => div()
+                            .key_context("SessionRename")
+                            .on_action(cx.listener(|this, _: &Submit, _, cx| this.finish_rename(cx)))
+                            .on_action(cx.listener(|this, _: &Stop, _, cx| {
+                                this.rename = None;
+                                cx.notify();
+                            }))
+                            .h(px(30.))
+                            .px(px(8.))
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(theme.focus)
+                            .child(input.clone())
+                            .into_any_element(),
+                        None => inspector_title(saved.title().to_owned(), true).into_any_element(),
+                    })
                     .child(
                         div()
-                            .size(px(7.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(theme.muted)
-                            .when(state.is_some(), |dot| {
-                                dot.bg(theme.green).border_color(theme.green)
+                            .mt(px(4.))
+                            .text_size(px(12.))
+                            .text_color(theme.muted)
+                            .child(format!(
+                                "{} · {project}",
+                                match state {
+                                    Some(true) => "Open · working",
+                                    Some(false) => "Open",
+                                    None => "Closed",
+                                }
+                            )),
+                    )
+                    .child(divider(theme).my(px(12.)))
+                    .child(detail(
+                        "Messages",
+                        saved
+                            .message_count
+                            .map_or_else(|| "—".into(), |n| n.to_string()),
+                        true,
+                        theme,
+                    ))
+                    .child(detail("Modified", stamp(&saved.modified), false, theme))
+                    .child(detail("Created", stamp(&saved.created), false, theme))
+                    .child(detail(
+                        "Forked from",
+                        parent.unwrap_or_else(|| "—".into()),
+                        false,
+                        theme,
+                    ))
+                    .child(label("First message", theme).mt(px(16.)).mb(px(4.)))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .line_height(px(20.))
+                            .text_color(theme.text)
+                            .child(truncated(&saved.first_message, 400)),
+                    )
+                    .child(label("Session file", theme).mt(px(16.)).mb(px(2.)))
+                    .child(
+                        h_flex()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family(MONO)
+                                    .text_size(px(11.))
+                                    .text_color(theme.secondary)
+                                    .child(tilde(&saved.path)),
+                            )
+                            .child({
+                                let path = saved.path.clone();
+                                icon_button("copy-session-path", "copy", "Copy path", theme).on_click(
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(path.clone()))
+                                    },
+                                )
                             }),
                     )
-                    .child(match state {
-                        Some(true) => "Open · working",
-                        Some(false) => "Open",
-                        None => "Closed",
-                    })
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .font_family(MONO)
-                            .text_size(px(11.))
-                            .text_color(theme.faint)
-                            .child(project),
-                    ),
-            )
-            .child(divider(theme).my(px(10.)))
-            .child(section("DETAILS", "", theme))
-            .child(detail("Project", tilde(&saved.cwd), true, theme))
-            .child(detail("Created", stamp(&saved.created), false, theme))
-            .child(detail("Modified", stamp(&saved.modified), false, theme))
-            .child(detail(
-                "Messages",
-                saved
-                    .message_count
-                    .map_or_else(|| "—".into(), |n| n.to_string()),
-                true,
-                theme,
-            ))
-            .child(detail(
-                "Forked from",
-                parent.unwrap_or_else(|| "—".into()),
-                false,
-                theme,
-            ))
-            .child(divider(theme).my(px(10.)))
-            .child(section("FIRST MESSAGE", "", theme))
-            .child(
-                div()
-                    .mt(px(4.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .rounded(px(5.))
-                    .bg(theme.hover)
-                    .text_size(px(12.))
-                    .line_height(px(18.))
-                    .text_color(theme.text)
-                    .child(truncated(&saved.first_message, 400)),
-            )
-            .child(section("FILE", "", theme).mt(px(12.)))
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(MONO)
-                            .text_size(px(10.5))
-                            .text_color(theme.secondary)
-                            .child(tilde(&saved.path)),
-                    )
-                    .child({
-                        let path = saved.path.clone();
-                        icon_button("copy-session-path", "copy", "Copy path", theme).on_click(
-                            move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(path.clone()))
-                            },
+                    .when_some(busy, |panel, busy| panel.child(note(busy, theme).mt(px(8.))))
+                    .when_some(self.notice.clone(), |panel, (error, text)| {
+                        panel.child(
+                            div()
+                                .mt(px(8.))
+                                .text_size(px(11.5))
+                                .text_color(if error { theme.coral } else { theme.green })
+                                .child(text),
                         )
                     }),
             )
-            .child(divider(theme).my(px(10.)))
-            .child(section("ACTIONS", "", theme))
+            // One primary action, anchored where it is always reachable.
             .child(
-                primary_button(
-                    "resume-session",
-                    if state.is_some() { "Show" } else { "Resume" },
-                    busy.is_none(),
-                    theme,
-                )
-                .debug_selector(|| "resume-session".into())
-                .w_full()
-                .justify_center()
-                .mt(px(4.))
-                .on_click({
-                    let saved = saved.clone();
-                    cx.listener(move |this, _, _, cx| this.resume(saved.clone(), cx))
-                }),
-            )
-            .child(
-                h_flex()
-                    .mt(px(6.))
-                    .gap(px(6.))
-                    .child(action("rename-session", "Rename…").on_click({
-                        let saved = saved.clone();
-                        cx.listener(move |this, _, window, cx| {
-                            this.start_rename(&saved, window, cx)
-                        })
-                    }))
-                    .child(action("fork-session", "Fork…").on_click({
-                        let saved = saved.clone();
-                        cx.listener(move |this, _, window, cx| this.fork(saved.clone(), window, cx))
-                    }))
-                    .child(action("clone-session", "Clone").on_click({
-                        let saved = saved.clone();
-                        cx.listener(move |this, _, _, cx| this.clone_session(saved.clone(), cx))
-                    })),
-            )
-            .child(
-                h_flex()
-                    .mt(px(6.))
-                    .gap(px(6.))
-                    .child(action("export-html", "Export HTML").on_click({
-                        let saved = saved.clone();
-                        cx.listener(move |this, _, _, cx| this.export_html(saved.clone(), cx))
-                    }))
-                    .child(action("export-jsonl", "Export JSONL").on_click({
-                        let saved = saved.clone();
-                        cx.listener(move |this, _, _, cx| this.export_jsonl(saved.clone(), cx))
-                    })),
-            )
-            .child(
-                h_flex()
-                    .mt(px(6.))
-                    .gap(px(6.))
-                    .child(action("share-session", "Share link…").on_click({
-                        let saved = saved.clone();
-                        cx.listener(move |this, _, window, cx| {
-                            this.share(saved.clone(), window, cx)
-                        })
-                    }))
+                v_flex()
+                    .relative()
+                    .flex_shrink_0()
+                    .px(px(20.))
+                    .py(px(16.))
+                    .gap(px(8.))
+                    .border_t_1()
+                    .border_color(theme.line)
                     .child(
-                        action("delete-session", "Delete")
-                            .debug_selector(|| "delete-session".into())
-                            .border_color(theme.danger_line)
-                            .bg(theme.danger)
-                            .text_color(theme.coral)
-                            .on_click({
+                        primary_button(
+                            "resume-session",
+                            if state.is_some() { "Show session" } else { "Resume session" },
+                            busy.is_none(),
+                            theme,
+                        )
+                        .debug_selector(|| "resume-session".into())
+                        .w_full()
+                        .h(px(32.))
+                        .justify_center()
+                        .on_click({
+                            let saved = saved.clone();
+                            cx.listener(move |this, _, _, cx| this.resume(saved.clone(), cx))
+                        }),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(action("rename-session", "Rename…").on_click({
                                 let saved = saved.clone();
                                 cx.listener(move |this, _, window, cx| {
-                                    this.delete(saved.clone(), window, cx)
+                                    this.start_rename(&saved, window, cx)
                                 })
-                            }),
-                    ),
+                            }))
+                            .child(action("fork-session", "Fork…").on_click({
+                                let saved = saved.clone();
+                                cx.listener(move |this, _, window, cx| {
+                                    this.fork(saved.clone(), window, cx)
+                                })
+                            }))
+                            .child(
+                                action("session-more", "More ⌄")
+                                    .debug_selector(|| "session-more".into())
+                                    .aria_expanded(self.more_open)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.more_open = !this.more_open;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(note("Export, share and delete are under More. Share uploads to a private gist, or to Radius when signed in.", theme))
+                    .children(more),
             )
-            .when_some(busy, |panel, busy| {
-                panel.child(note(busy, theme).mt(px(8.)))
-            })
-            .when_some(self.notice.clone(), |panel, (error, text)| {
-                panel.child(
-                    div()
-                        .mt(px(8.))
-                        .text_size(px(11.))
-                        .text_color(if error { theme.coral } else { theme.green })
-                        .child(text),
-                )
-            })
-            .child(div().flex_1().min_h(px(16.)))
-            .child(note(
-                "Share uploads to a private gist, or to Radius when signed in. Review it first.",
-                theme,
-            ))
             .into_any_element()
     }
 }
@@ -831,6 +924,8 @@ impl Render for SessionsView {
         let (all, here, named) = self.counts(cx);
         let weak = cx.entity().downgrade();
         let count = self.rows.len();
+        let remote = self.remote_targets(cx);
+        let shown = count + remote.len();
         let list = uniform_list("sessions-list", count, move |range, _, cx| {
             weak.update(cx, |this, cx| {
                 range.map(|index| this.row(index, cx, theme)).collect()
@@ -883,6 +978,7 @@ impl Render for SessionsView {
                     .child(
                         chip("session-sort", "Sort sessions", theme)
                             .debug_selector(|| "session-sort".into())
+                            .tooltip(ui::Tooltip::text(self.sort.caption()))
                             .child(self.sort.label())
                             .child(icon("chevron_down", theme.faint).size(px(11.)))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -894,12 +990,7 @@ impl Render for SessionsView {
                             })),
                     )
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme.faint)
-                            .child(self.sort.caption()),
-                    )
+                    .child(search_field("sessions-search", &self.search, cx, theme))
                     .when(self.sort_open, |bar| {
                         bar.child(
                             gpui::deferred(
@@ -952,6 +1043,9 @@ impl Render for SessionsView {
                         )
                     }),
             )
+            .when(!remote.is_empty(), |view| {
+                view.child(self.remote_section(remote, cx, theme))
+            })
             .child(
                 h_flex()
                     .h(px(28.))
@@ -977,7 +1071,7 @@ impl Render for SessionsView {
                         if all == 0 {
                             "No saved sessions yet. pi lists them once a session has messages."
                         } else {
-                            "No sessions match."
+                            "No saved local sessions match."
                         },
                         theme,
                     ))
@@ -996,7 +1090,7 @@ impl Render for SessionsView {
                     .text_size(px(11.))
                     .text_color(theme.faint)
                     .child(format!(
-                        "Showing {count} of {all}. Unnamed sessions show their first message."
+                        "Showing {shown} of {all}. Unnamed sessions show their first message."
                     )),
             )
     }

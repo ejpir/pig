@@ -192,6 +192,27 @@ pub fn unmark_rows<T: 'static>(editor: &Entity<Editor>, cx: &mut App) {
     });
 }
 
+/// Shades whole lines behind the text, one color per type `T`, replacing what
+/// `T` shaded before. `rows` are 0-based buffer rows, the end excluded.
+pub fn shade_rows<T: 'static>(
+    editor: &Entity<Editor>,
+    rows: &[std::ops::Range<u32>],
+    color: fn(&App) -> gpui::Hsla,
+    cx: &mut App,
+) {
+    editor.update(cx, |editor, cx| {
+        editor.clear_row_highlights::<T>();
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        for rows in rows.iter().filter(|rows| !rows.is_empty()) {
+            // Zed ends a row highlight at column 0 of the row after it.
+            let range = snapshot.anchor_before(language::Point::new(rows.start, 0))
+                ..snapshot.anchor_before(language::Point::new(rows.end, 0));
+            editor.highlight_rows::<T>(range, color, Default::default(), cx);
+        }
+        cx.notify();
+    });
+}
+
 /// Conservative guard used before file-history operations. Projects are shared
 /// between sessions, so this also catches a dirty buffer in another tab.
 pub fn has_unsaved_buffers(cx: &App) -> bool {
@@ -219,16 +240,26 @@ pub fn language_project(root: &Path, cx: &App) -> Option<Entity<Project>> {
 
 /// Detached offline buffer; no project is opened and no language server runs.
 pub fn preview_buffer(text: &str, cx: &mut App) -> Result<Entity<Buffer>> {
+    detached_buffer(Path::new("preview.ts"), text, cx)
+}
+
+/// In-memory editor buffer with syntax highlighting only. No local file handle,
+/// Project, watcher, formatter or language-server process is attached.
+pub fn detached_buffer(path: &Path, text: &str, cx: &mut App) -> Result<Entity<Buffer>> {
     services(cx)?;
     let buffer = cx.new(|cx| Buffer::local(text, cx));
     let registry = cx.global::<Services>().languages.clone();
     buffer.update(cx, |buffer, _| {
         buffer.set_language_registry(registry.clone())
     });
-    let language = registry.language_for_name("TypeScript");
+    let registry_for_language = registry.clone();
+    let path = path.to_owned();
     let entity = buffer.clone();
     cx.spawn(async move |cx| {
-        if let Ok(language) = language.await {
+        if let Ok(language) = registry_for_language
+            .load_language_for_file_path(&path)
+            .await
+        {
             entity.update(cx, |buffer, cx| buffer.set_language(Some(language), cx));
         }
     })

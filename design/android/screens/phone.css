@@ -1,0 +1,156 @@
+/* Shared phone shell for the Android screens.
+ * One 412×915 CSS-px phone per page (a common Android viewport), rendered at 2x.
+ * Same rule as the desktop mocks: only effects GPUI paints natively — solid and
+ * two-stop linear fills, box shadows, per-corner radii, solid and dashed borders,
+ * opacity and SVG icons. Android's own UI (status bar, keyboard, notifications)
+ * is drawn plainly as context.
+ */
+@font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+@font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+@font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Italic.ttf"); font-style: italic; }
+@font-face { font-family: "Commit"; src: url("../../../assets/fonts/CommitMono-Regular.otf"); }
+
+:root {
+  /* Moonstone (light), from crates/pi_desktop/src/theme.rs */
+  --deep:#eef0f2; --canvas:#faf9f7; --panel:#f0ede8; --bar:#ebe7e2; --raised:#e4ded8;
+  --line:#ddd7d0; --line-strong:#cbc3bb; --hover:#e8e3de; --selected:#e3dfd9;
+  --composer:#ffffff; --chip:#ffffff; --text:#252f3d; --secondary:#3e4753; --muted:#665f59; --faint:#8a837c;
+  --accent:#4b607c; --on-accent:#fff; --amber:#8b631f; --coral:#a44835; --green:#2e7950;
+  --added:#e4eee5; --removed:#f2e4df; --keyword:#2f5f9e; --string:#9a5b17; --plain:#3f4854;
+  --h-read:#2f7fa8; --h-edit:#b0661a; --h-check:#2e7950; --h-wait:#a57514; --h-run:#4b607c;
+  --scrim:rgba(37,47,61,.32); --sheet-shadow:0 -10px 32px rgba(37,47,61,.14);
+  --serif: Georgia, "DejaVu Serif", serif;
+  --sans: "Plex", "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "Commit", ui-monospace, monospace;
+}
+.evening {
+  /* Evening (dark) */
+  --deep:#0d1116; --canvas:#161d27; --panel:#1a212b; --bar:#1f2630; --raised:#252f3d;
+  --line:#363d46; --line-strong:#424954; --hover:#222a35; --selected:#2d3239;
+  --composer:#202731; --chip:#29313c; --text:#ebe7e4; --secondary:#d5d8db; --muted:#9ca2aa; --faint:#7d848d;
+  --accent:#8caecb; --on-accent:#111820; --amber:#e5bd73; --coral:#efa08c; --green:#80bf95;
+  --added:#243b30; --removed:#422e30; --keyword:#8fb6dc; --string:#e1b06e; --plain:#b9bec5;
+  --h-read:#5fa9d0; --h-edit:#e3a35c; --h-check:#80bf95; --h-wait:#e5bd73; --h-run:#8caecb;
+  --scrim:rgba(0,0,0,.5); --sheet-shadow:0 -10px 32px rgba(0,0,0,.4);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 412px; height: 915px; overflow: hidden; }
+body { font-family: var(--sans); font-size: 15px; line-height: 1.45; color: var(--text); background: var(--canvas);
+  -webkit-font-smoothing: antialiased; }
+.mono { font-family: var(--mono); }
+.serif { font-family: var(--serif); }
+.muted { color: var(--muted); }
+.faint { color: var(--faint); }
+.row { display: flex; align-items: center; }
+.col { display: flex; flex-direction: column; }
+.grow { flex: 1; min-width: 0; }
+.ell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+i[data-i] { width: 20px; height: 20px; flex: none; display: inline-block; color: inherit; }
+i[data-i] svg { width: 100%; height: 100%; display: block; }
+i.sm { width: 16px; height: 16px; }
+i.xs { width: 14px; height: 14px; }
+
+/* Phone: Android status bar, content, gesture handle. */
+.phone { position: relative; width: 412px; height: 915px; display: flex; flex-direction: column; background: var(--canvas); overflow: hidden; }
+.status { height: 32px; flex: none; display: flex; align-items: center; padding: 0 22px 0 26px; font-size: 13px; font-weight: 600; color: var(--text); }
+.status .sp { flex: 1; }
+.status i[data-i] { width: 16px; height: 16px; margin-left: 6px; }
+.content { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.gesture { height: 22px; flex: none; display: flex; align-items: center; justify-content: center; }
+.gesture::after { content: ""; width: 108px; height: 4px; border-radius: 2px; background: var(--text); opacity: .55; }
+
+/* Top app bar: 56px, 48px touch targets. */
+.appbar { height: 56px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 4px; }
+.appbar .title { flex: 1; min-width: 0; padding: 0 4px; }
+.appbar .title b { display: block; font-size: 17px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.appbar .title span { display: block; font-size: 12.5px; color: var(--muted); margin-top: -2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tap { width: 48px; height: 48px; flex: none; display: flex; align-items: center; justify-content: center; border-radius: 24px; color: var(--secondary); }
+.tap.on { background: var(--selected); }
+
+.label { font-size: 12.5px; font-weight: 600; color: var(--secondary); }
+.hint { font-size: 13px; color: var(--muted); }
+.heading { font-family: var(--serif); font-style: italic; font-weight: 400; font-size: 30px; line-height: 1.15; letter-spacing: -.01em; }
+.scroll { flex: 1; min-height: 0; overflow: hidden; padding: 0 20px; }
+.gap8 { gap: 8px; } .gap12 { gap: 12px; } .gap16 { gap: 16px; }
+
+/* Cards and rows */
+.card { background: var(--composer); border: 1px solid var(--line); border-radius: 16px; }
+.listrow { min-height: 56px; display: flex; align-items: center; gap: 14px; padding: 8px 16px; }
+.listrow + .listrow { border-top: 1px solid var(--line); }
+.listrow .t { font-size: 15px; font-weight: 600; }
+.listrow .s { font-size: 13px; color: var(--muted); }
+.divider { height: 1px; background: var(--line); }
+
+/* Buttons: 48px tall, pill radius on primary actions. */
+.btn { height: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 20px; border-radius: 24px;
+  font-size: 15px; font-weight: 600; color: var(--text); background: var(--chip); border: 1px solid var(--line); white-space: nowrap; }
+.btn.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+.btn.quiet { background: transparent; border-color: transparent; color: var(--accent); }
+.btn.wide { width: 100%; }
+.btn.small { height: 40px; padding: 0 16px; font-size: 14px; }
+
+/* Chips */
+.chip { height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border-radius: 16px; background: var(--chip);
+  border: 1px solid var(--line); font-size: 13px; color: var(--secondary); white-space: nowrap; }
+.chip.on { background: var(--selected); border-color: transparent; color: var(--text); font-weight: 600; }
+.chip .mono { font-size: 12px; }
+.add { color: var(--green); } .del { color: var(--coral); }
+
+/* Status dots and badges */
+.dot { width: 8px; height: 8px; border-radius: 4px; flex: none; }
+.dot.live { background: var(--h-read); box-shadow: 0 0 0 4px color-mix(in srgb, var(--h-read) 22%, transparent); }
+.dot.wait { background: var(--h-wait); box-shadow: 0 0 0 4px color-mix(in srgb, var(--h-wait) 22%, transparent); }
+.dot.ok { background: var(--green); }
+.badge { height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+.badge.wait { background: color-mix(in srgb, var(--h-wait) 16%, transparent); color: var(--amber); }
+.badge.live { background: color-mix(in srgb, var(--h-read) 14%, transparent); color: var(--h-read); }
+
+/* Run rail tiles, as in the desktop thread (soft tiles, dashed when planned). */
+.tile { width: 32px; height: 32px; flex: none; border-radius: 9px; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--hue) 14%, transparent); color: var(--hue); }
+.tile.live { background: var(--composer); border: 1.5px solid color-mix(in srgb, var(--hue) 60%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--hue) 14%, transparent); }
+.tile.planned { background: transparent; border: 1.5px dashed var(--line-strong); color: var(--faint); }
+.tile i[data-i] { width: 16px; height: 16px; }
+.stage { display: flex; gap: 12px; align-items: flex-start; position: relative; }
+.stage .body { flex: 1; min-width: 0; padding-top: 5px; }
+.stage .name { font-size: 14px; font-weight: 600; }
+.stage .what { font-size: 13px; color: var(--muted); }
+.stage.planned .name { color: var(--faint); font-weight: 400; }
+.rail-line { position: absolute; left: 15.5px; top: 36px; bottom: -14px; width: 1px; background: var(--line); }
+
+/* Composer */
+.composer { margin: 0 12px 10px; background: var(--composer); border: 1px solid var(--line-strong); border-radius: 20px; padding: 12px 8px 8px 16px; }
+.composer .draft { font-size: 15px; min-height: 24px; padding-right: 8px; }
+.composer .draft.ph { color: var(--faint); }
+.composer .tools { display: flex; align-items: center; gap: 2px; margin-top: 6px; margin-left: -8px; }
+.composer .tools .tap { width: 40px; height: 40px; }
+.send { width: 40px; height: 40px; border-radius: 20px; display: flex; align-items: center; justify-content: center; background: var(--accent); color: var(--on-accent); flex: none; }
+.send.off { background: var(--raised); color: var(--faint); }
+.caret { display: inline-block; width: 2px; height: 19px; background: var(--accent); vertical-align: -3px; margin-left: 1px; }
+
+/* Bottom sheet over a scrim */
+.scrim { position: absolute; inset: 0; background: var(--scrim); }
+.sheet { position: absolute; left: 0; right: 0; bottom: 0; background: var(--canvas); border-radius: 24px 24px 0 0; box-shadow: var(--sheet-shadow);
+  padding: 8px 20px 0; display: flex; flex-direction: column; }
+.handle { width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); margin: 4px auto 14px; }
+
+/* Code and diff */
+.code { font-family: var(--mono); font-size: 12px; line-height: 20px; color: var(--plain); }
+.code .ln { width: 34px; flex: none; text-align: right; padding-right: 10px; color: var(--faint); }
+.code .l { display: flex; white-space: pre; }
+.code .l.add { background: var(--added); color: var(--plain); }
+.code .l.del { background: var(--removed); color: var(--plain); }
+.code .l.sel { box-shadow: inset 3px 0 0 var(--accent); }
+.code .k { color: var(--keyword); } .code .s { color: var(--string); }
+
+/* On-screen keyboard (Android's, drawn plainly) */
+.kb { flex: none; background: var(--bar); padding: 8px 4px 4px; }
+.kb .sugg { display: flex; height: 38px; align-items: center; font-size: 15px; color: var(--secondary); margin-bottom: 4px; }
+.kb .sugg span { flex: 1; text-align: center; }
+.kb .sugg span + span { border-left: 1px solid var(--line); }
+.kb .keys { display: flex; gap: 6px; justify-content: center; margin: 0 0 10px; }
+.kb .key { width: 34px; height: 44px; border-radius: 7px; background: var(--chip); display: flex; align-items: center; justify-content: center;
+  font-size: 18px; color: var(--text); box-shadow: 0 1px 0 var(--line-strong); }
+.kb .key.w { width: 52px; font-size: 13px; } .kb .key.space { width: 190px; } .kb .key.act { background: var(--accent); color: var(--on-accent); }

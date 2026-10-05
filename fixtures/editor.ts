@@ -3,15 +3,18 @@ interface ThinkingBlock {
   type: "thinking";
   signature?: string;
 }
+type Model = { provider: string };
+declare function isAnthropic(model: Model): boolean;
 
-export function readThinking(blocks: ThinkingBlock[], isAnthropic: boolean) {
+export function readThinking(blocks: ThinkingBlock[], model: Model) {
   const signatures: string[] = [];
   for (const block of blocks) {
     if (block.type === "thinking") {
-      if (block.signature === undefined && isAnthropic) {
+      const signature = block.signature;
+      if (!signature && isAnthropic(model)) {
         throw new Error("Missing signature");
       }
-      signatures.push(block.signature ?? "");
+      signatures.push(signature ?? "");
     }
   }
   return signatures;

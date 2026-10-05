@@ -58,6 +58,33 @@ pub fn load(model: &mut Session, saved: Option<&SavedSession>, first: bool) {
                 model.apply(&record).expect("valid workspace fixture");
             }
         }
+        if first && std::env::var_os("PI_DESKTOP_DEMO_WORKBENCH").is_some() {
+            model
+                .apply(&json!({"type":"queue_update","steering":[],"followUp":[]}))
+                .expect("sample queue");
+            let mut reader = std::io::Cursor::new(
+                include_bytes!("../../../../fixtures/workbench.jsonl").as_slice(),
+            );
+            while let Ok(Some(record)) = read_record(&mut reader) {
+                model.apply(&record).expect("valid workbench fixture");
+            }
+            if std::env::var_os("PI_DESKTOP_DEMO_WORKBENCH_FRESH").is_some() {
+                // The moment the turn starts: the request, nothing reported yet.
+                let request = model.messages.first().cloned();
+                model
+                    .apply(&json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[request]}}))
+                    .expect("fresh sample");
+            }
+            if std::env::var_os("PI_DESKTOP_DEMO_WORKBENCH_SETTLED").is_some() {
+                model.apply(&json!({"type":"tool_execution_end","toolCallId":"vision-check","isError":false,"result":{"content":[{"type":"text","text":"✓ TypeScript\n✓ Provider regression tests · 12 passed\n  Workspace checks passed"}]}})).expect("finished sample tool");
+                model
+                    .apply(&json!({"type":"agent_settled"}))
+                    .expect("settled sample");
+                model
+                    .apply(&json!({"type":"queue_update","steering":[],"followUp":[]}))
+                    .expect("empty sample queue");
+            }
+        }
     } else if let Some(saved) = saved {
         model.preview_title = Some(saved.title().to_owned());
         model.notice = Some("Offline demo — this saved session has no sample transcript.".into());

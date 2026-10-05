@@ -166,6 +166,11 @@ impl ComposerView {
             self.mention.scroll.set_offset(gpui::point(px(0.), px(0.)));
         }
         let was_open = self.mention.open.is_some();
+        if !was_open && open.is_some() && self.controller.read(cx).is_remote() {
+            // Remote files may have changed since the previous menu opening.
+            self.mention.previews.clear();
+            self.mention.preview_task = None;
+        }
         self.mention.open = open;
         if self.mention.open.is_some() {
             if !was_open && let Some(files) = self.files() {
@@ -300,6 +305,11 @@ impl ComposerView {
     }
 
     fn language_project(&self, cx: &App) -> Option<Entity<pi_editor::Project>> {
+        // Remote LSP is still deferred: even a matching local cache entry must
+        // never provide symbols/diagnostics for a remote project.
+        if self.controller.read(cx).is_remote() {
+            return None;
+        }
         let root = self.files()?.read(cx).root().clone();
         pi_editor::language_project(&root, cx)
     }
@@ -640,14 +650,34 @@ impl ComposerView {
         if self.mention.previews.contains_key(path) {
             return;
         }
-        let Some(root) = self.files().map(|files| files.read(cx).root().clone()) else {
+        let Some(files) = self.files() else {
             return;
         };
         let path = path.clone();
-        let read = cx.background_executor().spawn({
-            let path = path.clone();
-            async move { read_preview(&root, &path) }
-        });
+        let read = if self.controller.read(cx).is_remote() {
+            let Some(read) = files.read(cx).read_remote(path.clone(), cx) else {
+                return; // No local fallback for SSH sessions.
+            };
+            cx.background_executor().spawn({
+                let path = path.clone();
+                async move {
+                    match read.await {
+                        Ok(document) => text_preview(&path, &document.text),
+                        Err(error) => Preview {
+                            path,
+                            summary: format!("Remote preview unavailable: {error:#}"),
+                            lines: Vec::new(),
+                        },
+                    }
+                }
+            })
+        } else {
+            let root = files.read(cx).root().clone();
+            cx.background_executor().spawn({
+                let path = path.clone();
+                async move { read_preview(&root, &path) }
+            })
+        };
         self.mention.preview_task = Some(cx.spawn(async move |this, cx| {
             let preview = read.await;
             this.update(cx, |this, cx| {
@@ -750,6 +780,9 @@ impl ComposerView {
             );
         }
         let empty = self.mention.items.is_empty();
+        let file_status = self
+            .files()
+            .and_then(|files| files.read(cx).browser_status().map(str::to_owned));
         let preview = self
             .mention
             .items
@@ -768,8 +801,13 @@ impl ComposerView {
             .debug_selector(|| "mention-menu".into())
             .absolute()
             .left(px(8.))
-            .bottom(relative(1.))
-            .mb(px(6.))
+            .map(|menu| {
+                if self.menus_below() {
+                    menu.top(relative(1.)).mt(px(6.))
+                } else {
+                    menu.bottom(relative(1.)).mb(px(6.))
+                }
+            })
             .child(
                 panel(v_flex().w(px(MENU_WIDTH)).occlude())
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mentions(cx)))
@@ -781,6 +819,8 @@ impl ComposerView {
                             .text_color(theme.faint)
                             .child(if self.mention.searching {
                                 "Searching…".to_owned()
+                            } else if let Some(status) = file_status {
+                                status
                             } else if query.is_empty() {
                                 "Nothing to mention yet: open the project's files first.".to_owned()
                             } else {
@@ -889,26 +929,30 @@ fn read_preview(root: &Path, relative: &str) -> Preview {
             bytes.len() <= 2 * 1024 * 1024 && !bytes[..bytes.len().min(8192)].contains(&0)
         })
         .and_then(|bytes| String::from_utf8(bytes).ok());
-    let language = language_name(relative);
     match text {
-        Some(text) => Preview {
-            path: relative.to_owned(),
-            summary: match text.lines().count() {
-                1 => format!("1 line · {language}"),
-                lines => format!("{lines} lines · {language}"),
-            },
-            lines: text
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .take(3)
-                .map(|line| line.replace('\t', "    "))
-                .collect(),
-        },
+        Some(text) => text_preview(relative, &text),
         None => Preview {
             path: relative.to_owned(),
             summary: "Not a text file".into(),
             lines: Vec::new(),
         },
+    }
+}
+
+fn text_preview(path: &str, text: &str) -> Preview {
+    let language = language_name(path);
+    Preview {
+        path: path.to_owned(),
+        summary: match text.lines().count() {
+            1 => format!("1 line · {language}"),
+            lines => format!("{lines} lines · {language}"),
+        },
+        lines: text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .take(3)
+            .map(|line| line.replace('\t', "    "))
+            .collect(),
     }
 }
 
@@ -932,3 +976,7 @@ fn language_name(path: &str) -> String {
     }
     .to_owned()
 }
+
+#[cfg(test)]
+#[path = "mention_remote_tests.rs"]
+mod remote_tests;

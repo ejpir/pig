@@ -2,12 +2,14 @@ use super::app_views::AppView;
 use super::*;
 
 fn show(desktop: &Entity<Desktop>, view: AppView, cx: &mut VisualTestContext) {
+    show_inspector(desktop, cx);
     workspace(desktop, cx).update(cx, |workspace, cx| workspace.show_view(view, cx));
     cx.run_until_parked();
 }
 #[gpui::test]
 fn catalog_confirmation_blocks_background_navigation_and_search(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
+    click("settings-tools", &mut cx);
     let answer = cx.update(|window, cx| {
         window.prompt(
             gpui::PromptLevel::Warning,
@@ -254,5 +256,24 @@ fn resource_tabs_copy_original_metadata_and_switch_sessions_without_leaking(
     assert_eq!(
         workspace(&desktop, &cx).read_with(&cx, |workspace, _| workspace.tabs.len()),
         2
+    );
+}
+
+#[gpui::test]
+fn global_search_stays_global_inside_app_views(cx: &mut TestAppContext) {
+    let (desktop, mut cx) = setup(cx);
+    show(&desktop, AppView::Sessions, &mut cx);
+    cx.simulate_keystrokes("secondary-k");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("global-search").is_some(),
+        "Ctrl/Cmd+K works from any view"
+    );
+    cx.simulate_input("models");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        workspace(&desktop, &cx).read_with(&cx, |workspace, _| workspace.view),
+        Some(AppView::Models)
     );
 }

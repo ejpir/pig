@@ -73,6 +73,11 @@ struct NewSessionForm {
     workspace: Entity<WorkspaceController>,
     project: Option<PathBuf>,
     worktree: bool,
+    remote: bool,
+    remote_durable: bool,
+    ssh_host: Entity<TextInput>,
+    ssh_path: Entity<TextInput>,
+    remote_key: Option<String>,
     branch: Entity<TextInput>,
     path: Entity<TextInput>,
     model: Option<(String, String)>,
@@ -90,6 +95,35 @@ struct NewSessionForm {
 impl NewSessionForm {
     fn new(workspace: Entity<WorkspaceController>, cx: &mut Context<Self>) -> Self {
         let project = workspace.read(cx).selected_project.clone();
+        let remote_target = crate::prefs::remote_sessions(cx)
+            .into_iter()
+            .rev()
+            .find(|target| project.as_ref() == Some(&target.identity()))
+            .or_else(|| {
+                workspace.read(cx).tabs.iter().find_map(|tab| {
+                    tab.controller
+                        .read(cx)
+                        .remote_target()
+                        .filter(|target| project.as_ref() == Some(&target.identity()))
+                        .cloned()
+                })
+            });
+        let remote = workspace.read(cx).selected_is_remote(cx);
+        let recent = remote_target.clone().or_else(|| {
+            if remote {
+                None
+            } else {
+                crate::prefs::remote_sessions(cx).last().cloned()
+            }
+        });
+        let ssh_host =
+            cx.new(|cx| TextInput::new("SSH config host alias or user@host", cx).compact());
+        let ssh_path =
+            cx.new(|cx| TextInput::new("Project directory on the remote host", cx).compact());
+        if let Some(target) = &recent {
+            ssh_host.update(cx, |input, cx| input.set_content(target.host.clone(), cx));
+            ssh_path.update(cx, |input, cx| input.set_content(target.cwd.clone(), cx));
+        }
         let model_filter = cx.new(|cx| TextInput::new("Filter models…", cx).compact());
         let mut subscriptions = vec![
             cx.subscribe(&workspace, |_, _, _, cx| cx.notify()),
@@ -124,6 +158,13 @@ impl NewSessionForm {
             workspace,
             project,
             worktree: false,
+            remote,
+            remote_durable: recent
+                .as_ref()
+                .is_some_and(|target| target.backend == pi_core::ssh::RemoteBackend::Durable),
+            ssh_host,
+            ssh_path,
+            remote_key: None,
             branch: cx.new(|cx| TextInput::new("pi/my-task", cx).compact()),
             path: cx.new(|cx| TextInput::new("Absolute path for the new worktree", cx).compact()),
             model: None,
@@ -146,6 +187,43 @@ impl NewSessionForm {
     }
     fn create(&mut self, cx: &mut Context<Self>) {
         if self.creating {
+            return;
+        }
+        if self.remote {
+            if self.workspace.read(cx).is_demo() {
+                self.error = Some("SSH is disabled in the offline demo.".into());
+                cx.notify();
+                return;
+            }
+            let host = self.ssh_host.read(cx).content().trim().to_owned();
+            let cwd = self.ssh_path.read(cx).content().trim().to_owned();
+            match pi_core::ssh::SshTarget::new(host, cwd) {
+                Ok(mut target) => {
+                    if self.remote_durable {
+                        target.backend = pi_core::ssh::RemoteBackend::Durable;
+                    }
+                    if let Some(existing) =
+                        crate::prefs::remote_sessions(cx)
+                            .into_iter()
+                            .find(|existing| {
+                                Some(&existing.key) == self.remote_key.as_ref()
+                                    && existing.host == target.host
+                                    && existing.cwd == target.cwd
+                                    && existing.backend == target.backend
+                            })
+                    {
+                        target = existing;
+                    }
+                    self.workspace.update(cx, |workspace, cx| {
+                        workspace.open_remote(target, cx);
+                    });
+                    cx.emit(PromptResponse(1));
+                }
+                Err(error) => {
+                    self.error = Some(error.to_string());
+                    cx.notify();
+                }
+            }
             return;
         }
         let Some(project) = self.project.clone() else {
@@ -330,15 +408,20 @@ impl NewSessionForm {
                     .gap(px(6.))
                     .text_size(px(11.))
                     .text_color(theme.muted)
-                    .child(div().size(px(5.)).rounded_full().bg(if working > 0 {
-                        theme.amber
-                    } else {
-                        theme.faint
-                    }))
+                    .when(working > 0 || opened > 0, |status| {
+                        status.child(div().size(px(5.)).rounded_full().bg(if working > 0 {
+                            theme.amber
+                        } else {
+                            theme.faint
+                        }))
+                    })
+                    // Only a project with sessions has a status worth reading.
                     .child(if working > 0 {
                         format!("{working} working")
-                    } else {
+                    } else if opened > 0 {
                         format!("{opened} open")
+                    } else {
+                        String::new()
                     }),
             )
             .child(
@@ -691,13 +774,48 @@ impl Render for NewSessionForm {
                 .child(h_flex().px(px(24.)).pt(px(20.)).pb(px(16.)).justify_between().flex_shrink_0()
                     .child(div().font_family(SERIF).italic().text_size(px(22.)).line_height(px(28.)).child("New session"))
                     .child(h_flex().gap(px(6.))
-                        .child(icon_button("new-session-folder", "plus", "Open folder", theme).size(px(20.))
+                        .child(icon_button("new-session-folder", "plus", "Open folder", theme).size(px(28.))
                             .tooltip(ui::Tooltip::text("Add a project folder"))
                             .on_click(cx.listener(|this, _, _, cx| { if !this.creating { this.pick(cx); } })))
-                        .child(icon_button("close-new-session", "close", "Cancel new session", theme).size(px(20.))
+                        .child(icon_button("close-new-session", "close", "Cancel new session", theme).size(px(28.))
                             .tooltip(ui::Tooltip::text("Cancel · Escape")).on_click(cx.listener(|this, _, _, cx| this.cancel(cx))))))
                 .child(v_flex().id("new-session-content").debug_selector(|| "new-session-content".into()).px(px(24.)).pb(px(16.))
                     .min_h_0().overflow_y_scroll()
+                    .child(h_flex().mb(px(12.)).child(segments([(false, "Local"), (true, "SSH")].into_iter().map(|(remote, title)| {
+                        segment(("new-session-backend", remote as usize), title, self.remote == remote, theme)
+                            .on_click(cx.listener(move |this, _, _, cx| { if !this.creating { this.remote = remote; this.worktree = false; this.error = None; cx.notify(); } }))
+                    }), theme)))
+                    .when(self.remote, |form| form
+                        .child(self.field("new-session-ssh-host", "HOST", self.ssh_host.clone(), theme))
+                        .child(div().mt(px(8.)).child(self.field("new-session-ssh-path", "REMOTE PROJECT", self.ssh_path.clone(), theme)))
+                        .child(h_flex().mt(px(8.)).child(segments([(false, "Stock Pi"), (true, "Durable · experimental")].into_iter().map(|(durable, title)| {
+                            segment(("new-ssh-engine", durable as usize), title, self.remote_durable == durable, theme)
+                                .on_click(cx.listener(move |this, _, _, cx| { this.remote_durable = durable; this.remote_key = None; cx.notify(); }))
+                        }), theme)))
+                        .when(self.remote_durable, |form| form.child(div().mt(px(6.)).text_size(px(11.)).text_color(theme.muted).child("Prototype: crash recovery on reconnect. Requires a durable-enabled helper. Uses the SSH host's Pi credentials (including OAuth) and built-in providers; no stock extensions, skills, images or session migration.")))
+                        .child(div().mt(px(8.)).text_size(px(11.)).text_color(theme.muted).child("Uses SSH keys/agent and verified hosts. Installs a per-user helper; no sudo. Remote work continues after disconnecting."))
+                        .child(button("new-ssh-session", "Start a new remote session", theme).mt(px(8.))
+                            .on_click(cx.listener(|this, _, _, cx| { this.remote_key = None; cx.notify(); })))
+                        .children(crate::prefs::remote_sessions(cx).into_iter().rev().take(5).enumerate().map(|(index, target)| {
+                            let label = format!("Reconnect · {} · {} · {}{}", target.host, target.cwd, &target.key[..8], if target.backend == pi_core::ssh::RemoteBackend::Durable { " · durable" } else { "" });
+                            let removed = target.clone();
+                            h_flex().mt(px(4.)).gap(px(6.))
+                                .child(button(("recent-ssh-session", index), label, theme).flex_1().min_w_0()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.ssh_host.update(cx, |input, cx| input.set_content(target.host.clone(), cx));
+                                        this.ssh_path.update(cx, |input, cx| input.set_content(target.cwd.clone(), cx));
+                                        this.remote_durable = target.backend == pi_core::ssh::RemoteBackend::Durable;
+                                        this.remote_key = Some(target.key.clone()); cx.notify();
+                                    })))
+                                .child(button(("remove-recent-ssh", index), "Remove", theme)
+                                    .tooltip(ui::Tooltip::text("Forget this saved shortcut. Open tabs, remote agents and remote files are unchanged."))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.workspace.update(cx, |workspace, cx| workspace.forget_remote_session(&removed, cx));
+                                        if this.remote_key.as_ref() == Some(&removed.key) { this.remote_key = None; }
+                                        cx.notify();
+                                    })))
+                        })))
+                    .when(!self.remote, |form| form
                     .child(label("PROJECT", theme).mb(px(6.)))
                     .child(v_flex().id("new-session-projects").max_h(px(126.)).overflow_y_scroll().gap(px(4.)).flex_shrink_0()
                         .children(projects.iter().enumerate().map(|(index, path)| self.project_row(index, path, cx, theme))))
@@ -710,12 +828,13 @@ impl Render for NewSessionForm {
                     .when(self.worktree, |form| form
                         .child(div().mt(px(8.)).child(self.field("new-session-branch", "BRANCH", self.branch.clone(), theme)))
                         .child(div().mt(px(6.)).child(self.field("new-session-path", "PATH", self.path.clone(), theme))))
-                    .when(overlap > 0 || self.worktree, |form| form.child(h_flex().id("new-session-warning").mt(px(16.)).gap(px(8.)).items_start()
+                    .when(overlap > 0 || self.worktree, |form| form.child(h_flex().id("new-session-warning").debug_selector(|| "new-session-warning".into()).mt(px(16.)).gap(px(8.)).items_start()
                         .tooltip(ui::Tooltip::text("Git hooks may execute. Use an absolute, nonexistent destination. Failed operations retain files and refs; worktrees are never automatically deleted."))
                         .child(icon("warning", theme.amber).size(px(13.)))
                         .child(div().flex_1().min_w_0().text_size(px(11.)).line_height(px(16.)).text_color(theme.amber)
                             .child(if overlap > 0 { format!("{overlap} session(s) are working in this folder. A worktree keeps this one from editing the same files.") }
-                                else { "Git hooks may run. New worktrees and branches are retained, including after failure.".into() }))))
+                                else { "Git hooks may run. New worktrees and branches are retained, including after failure.".into() })))))
+                    .when(!self.remote, |form| form
                     .child(label("MODEL", theme).text_size(px(9.)).mt(px(18.)).mb(px(6.)))
                     .child(h_flex().relative().gap(px(8.))
                         .child(chip("new-session-model", "Choose initial model", theme).debug_selector(|| "new-session-model".into()).max_w(px(310.))
@@ -727,21 +846,15 @@ impl Render for NewSessionForm {
                             .child({ let anchor = self.model_anchor.clone(); gpui::canvas(move |bounds, _, _| anchor.set(Some(bounds)), |_, _, _, _| {}).absolute().size_full() })
                             .on_hover(cx.listener(|this, hovered: &bool, _, _| this.model_button_hovered = *hovered))
                             .on_click(cx.listener(|this, _, window, cx| this.toggle_models(window, cx))))
-                        .child(h_flex().id("new-session-thinking").h(px(24.)).px(px(8.)).gap(px(6.)).rounded(px(5.)).bg(if theme.light { theme.hover } else { theme.chip })
-                            .font_family(MONO).text_size(px(11.)).text_color(theme.muted)
+                        // The thinking level is inherited, not chosen here; say so.
+                        .child(h_flex().id("new-session-thinking").h(px(28.)).px(px(4.)).text_size(px(12.5)).text_color(theme.muted)
                             .tooltip(ui::Tooltip::text("Uses Pi's saved thinking preference for the chosen model. Change it in the new session; no unreported level is assumed here."))
-                            .child(div().size(px(6.)).rounded_full().bg(theme.faint)).child("Saved")))
-                    .when(self.worktree, |form| form.child(h_flex().id("new-session-auto-remove").debug_selector(|| "new-session-auto-remove".into()).mt(px(16.)).gap(px(8.)).opacity(0.5)
-                        .role(gpui::Role::CheckBox).aria_toggled(gpui::Toggled::False)
-                        .aria_description("Unavailable: automatic worktree removal is not implemented")
-                        .tooltip(ui::Tooltip::text("Automatic removal is not implemented. Closing or deleting a session never deletes its worktree."))
-                        .child(div().size(px(14.)).rounded(px(3.)).border_1().border_color(theme.line_strong))
-                        .child(div().flex_1().min_w_0().text_size(px(12.)).line_height(px(17.)).text_color(theme.secondary).child("Remove the worktree when this session is deleted"))))
+                            .child("Thinking · inherited"))))
                     .when_some(self.error.clone(), |form, error| form.child(div().mt(px(10.)).text_size(px(12.)).line_height(px(18.)).text_color(theme.coral).child(error))))
                 .child(h_flex().debug_selector(|| "new-session-footer".into()).px(px(24.)).py(px(12.)).gap(px(8.)).justify_end().border_t_1().border_color(theme.line).flex_shrink_0()
                     .child(button("cancel-new-session", "Cancel", theme).debug_selector(|| "cancel-new-session".into()).when(self.creating, |button| button.opacity(0.5))
                         .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))))
-                    .child(primary_button("create-session", if self.creating { "Creating…" } else { "Create session" }, !self.creating && self.project.is_some(), theme)
+                    .child(primary_button("create-session", if self.creating { "Creating…" } else if self.remote && self.remote_key.is_some() { "Reconnect session" } else { "Create session" }, !self.creating && (self.remote || self.project.is_some()), theme)
                         .debug_selector(|| "create-session".into()).on_click(cx.listener(|this, _, _, cx| this.create(cx)))))
             )
             .when(self.models_open, |overlay| overlay.child(self.model_popup(window, cx, theme)))

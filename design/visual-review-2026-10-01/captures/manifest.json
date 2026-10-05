@@ -1,0 +1,163 @@
+{
+  "revision": "df8a946b13d02e7fd8add287d73c16b6a741c7cf",
+  "binary": "/Users/eh04xk/repos/pi-desktop/target/check/debug/pi-desktop",
+  "environment": "Linux aarch64, Xvfb, 1x, lavapipe; isolated offline demo and catalog fixture",
+  "captures": [
+    {
+      "file": "01-thread-light.png",
+      "scene": "demo",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "02-thread-dark.png",
+      "scene": "demo",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "03-search.png",
+      "scene": "demo",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "04-search-empty.png",
+      "scene": "demo",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "05-changes.png",
+      "scene": "demo",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "06-tree.png",
+      "scene": "demo",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "07-context.png",
+      "scene": "demo",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "08-new-session.png",
+      "scene": "demo",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "09-new-worktree.png",
+      "scene": "demo",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "10-thread-wide.png",
+      "scene": "demo",
+      "width": 1600,
+      "height": 900
+    },
+    {
+      "file": "11-thread-compact.png",
+      "scene": "demo",
+      "width": 1000,
+      "height": 680
+    },
+    {
+      "file": "12-thread-compact-after-toggle.png",
+      "scene": "demo",
+      "width": 1000,
+      "height": 680
+    },
+    {
+      "file": "13-new-session-minimum.png",
+      "scene": "demo",
+      "width": 960,
+      "height": 600
+    },
+    {
+      "file": "13b-new-worktree-minimum.png",
+      "scene": "demo",
+      "width": 960,
+      "height": 600
+    },
+    {
+      "file": "14-idle-session.png",
+      "scene": "catalog",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "15-sessions.png",
+      "scene": "catalog",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "16-models.png",
+      "scene": "catalog",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "17-resources-project.png",
+      "scene": "catalog",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "18-resources-skill.png",
+      "scene": "catalog",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "19-settings.png",
+      "scene": "catalog",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "20-settings-appearance.png",
+      "scene": "catalog",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "21-settings-dark.png",
+      "scene": "catalog",
+      "width": 1344,
+      "height": 740
+    },
+    {
+      "file": "22-settings-compact.png",
+      "scene": "catalog",
+      "width": 1000,
+      "height": 680
+    },
+    {
+      "file": "23-settings-compact-after-toggle.png",
+      "scene": "catalog",
+      "width": 1000,
+      "height": 680
+    },
+    {
+      "file": "24-models-compact.png",
+      "scene": "catalog",
+      "width": 1000,
+      "height": 680
+    },
+    {
+      "file": "25-resources-compact.png",
+      "scene": "catalog",
+      "width": 1000,
+      "height": 680
+    }
+  ]
+}

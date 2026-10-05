@@ -13,6 +13,7 @@ pub const SERIF: &str = "DejaVu Serif";
 pub struct Theme {
     pub light: bool,
     pub deep: Hsla,
+    pub work_code: Hsla,
     pub canvas: Hsla,
     pub panel: Hsla,
     pub bar: Hsla,
@@ -26,8 +27,6 @@ pub struct Theme {
     pub chip_line: Hsla,
     pub composer: Hsla,
     pub focus: Hsla,
-    pub user: Hsla,
-    pub user_line: Hsla,
     pub track: Hsla,
     pub queue: Hsla,
     pub queue_line: Hsla,
@@ -46,6 +45,10 @@ pub struct Theme {
     pub amber: Hsla,
     pub coral: Hsla,
     pub green: Hsla,
+    /// Activity hues from design/visual-workflow: search and change steps.
+    /// Reading uses `steel`, running uses `accent`, waiting uses `amber`.
+    pub violet: Hsla,
+    pub orange: Hsla,
     pub added: Hsla,
     pub removed: Hsla,
     pub code: Hsla,
@@ -62,40 +65,41 @@ impl Theme {
         Self {
             light,
             deep: color(0x0d1116, 0xeef0f2),
+            work_code: color(0x1b232e, 0xf3f1ed),
             canvas: color(0x161d27, 0xfaf9f7),
-            panel: color(0x1a212b, 0xf2efeb),
-            bar: color(0x1f2630, 0xebe7e4),
+            panel: color(0x1a212b, 0xf0ede8),
+            bar: color(0x1f2630, 0xebe7e2),
             raised: color(0x252f3d, 0xe4ded8),
-            line: color(0x2f3640, 0xe3ddd7),
+            line: color(0x363d46, 0xddd7d0),
             line_strong: color(0x424954, 0xcbc3bb),
             edge: color(0x0d1116, 0xcbc3bb),
-            status: color(0x131922, 0xe6e1dc),
+            status: color(0x1f2630, 0xebe7e2),
             hover: color(0x222a35, 0xe8e3de),
             chip: color(0x29313c, 0xffffff),
             chip_line: color(0x3a434f, 0xd3ccc5),
-            composer: color(0x1f2630, 0xffffff),
+            composer: color(0x202731, 0xffffff),
             focus: color(0x424954, 0xcbc3bb),
-            user: color(0x131922, 0xffffff),
-            user_line: color(0x3a434f, 0xd3ccc5),
             track: color(0x252d38, 0xe3ddd7),
-            queue: color(0x2e3133, 0xfaf6ef),
+            queue: color(0x292b2d, 0xf8f3e9),
             queue_line: color(0x454137, 0xf2e7d5),
             danger: color(0x343138, 0xf9eeec),
             danger_line: color(0x684b4d, 0xe9c5be),
             text: color(0xebe7e4, 0x252f3d),
-            secondary: color(0xd5d8db, 0x3a4453),
-            muted: color(0x9fa4ab, 0x5c5752),
-            faint: color(0x737981, 0x8b847d),
-            accent: color(0x6a9fcc, 0x4b607c),
+            secondary: color(0xd5d8db, 0x3e4753),
+            muted: color(0x9ca2aa, 0x665f59),
+            faint: color(0x9ca2aa, 0x665f59),
+            accent: color(0x8caecb, 0x4b607c),
             accent_hover: color(0x7eadd5, 0x5b7190),
-            selected: color(0x273748, 0xe7e8e9),
-            on_accent: color(0x0d1116, 0xffffff),
+            selected: color(0x2d3239, 0xe3dfd9),
+            on_accent: color(0x111820, 0xffffff),
             steel: color(0x4d9abf, 0x2f7fa8),
-            amber: color(0xf1be58, 0xb97a14),
-            coral: color(0xf09082, 0xc05a45),
-            green: color(0x5db87a, 0x2e8a55),
-            added: color(0x182824, 0xd5e3de),
-            removed: color(0x2d2325, 0xe8dcdc),
+            amber: color(0xe5bd73, 0x8b631f),
+            coral: color(0xefa08c, 0xa44835),
+            green: color(0x80bf95, 0x2e7950),
+            violet: color(0xa596e0, 0x6b5ca5),
+            orange: color(0xe3a35c, 0xb0661a),
+            added: color(0x243b30, 0xe4eee5),
+            removed: color(0x422e30, 0xf2e4df),
             code: color(0x9cc2e0, 0x2f6f9e),
             keyword: color(0x8fb6dc, 0x2f5f9e),
             string: color(0xe1b06e, 0x9a5b17),
@@ -106,6 +110,11 @@ impl Theme {
     /// Selected text, in inputs and in the transcript.
     pub fn selection(self) -> Hsla {
         self.accent.opacity(if self.light { 0.22 } else { 0.32 })
+    }
+
+    /// A hue's quiet background, for pills and selected steps.
+    pub fn tint(self, hue: Hsla) -> Hsla {
+        hue.opacity(if self.light { 0.11 } else { 0.16 })
     }
 
     pub fn thinking(self, level: &str) -> Hsla {

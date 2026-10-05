@@ -14,7 +14,7 @@ pub enum Route {
     Extension,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
     /// The extension's and pi's versions, and the extension's commands.
@@ -64,7 +64,7 @@ pub enum Command {
     },
     Prompt {
         message: String,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageContent>,
         #[serde(rename = "streamingBehavior", skip_serializing_if = "Option::is_none")]
         streaming_behavior: Option<StreamingBehavior>,
@@ -164,7 +164,7 @@ impl ImageContent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum StreamingBehavior {
     Steer,
@@ -324,7 +324,7 @@ pub fn read_record(reader: &mut impl BufRead) -> Result<Option<Value>> {
     Ok(Some(value))
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionState {
     pub session_id: Option<String>,
@@ -346,7 +346,7 @@ pub struct SessionState {
     pub active_tools: Option<Vec<ActiveTool>>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActiveTool {
     pub name: String,
@@ -354,7 +354,7 @@ pub struct ActiveTool {
     pub source_info: Option<SourceInfo>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
@@ -370,7 +370,7 @@ pub struct Model {
     pub input: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCost {
     pub input: Option<f64>,
@@ -379,7 +379,7 @@ pub struct ModelCost {
     pub cache_write: Option<f64>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthProvider {
     pub id: String,
@@ -387,13 +387,13 @@ pub struct AuthProvider {
     pub auth_type: String,
     pub status: Option<AuthStatus>,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuthStatus {
     #[serde(rename = "type")]
     pub kind: String,
     pub source: String,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Package {
     pub source: String,
@@ -402,7 +402,7 @@ pub struct Package {
     pub filtered: bool,
     pub installed_path: Option<String>,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectTrust {
     pub cwd: String,
@@ -415,7 +415,7 @@ pub struct ProjectTrust {
     pub user_settings: Option<Value>,
     pub context_files: Option<Vec<String>>,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadedExtension {
     pub path: String,
@@ -425,13 +425,13 @@ pub struct LoadedExtension {
     #[serde(default)]
     pub commands: Vec<String>,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrustDecision {
     pub path: String,
     pub decision: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlashCommand {
     pub name: String,
@@ -442,7 +442,7 @@ pub struct SlashCommand {
 }
 
 /// Where a command's resource was loaded from.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceInfo {
     pub path: String,
     /// Package spec for packaged resources, such as `npm:@acme/git-guard@1.4.0`.
@@ -453,7 +453,7 @@ pub struct SourceInfo {
     pub origin: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStats {
     #[serde(default)]
@@ -464,7 +464,7 @@ pub struct SessionStats {
     pub total_messages: u64,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tokens {
     pub input: u64,
@@ -474,7 +474,7 @@ pub struct Tokens {
     pub cache_write: u64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsage {
     pub tokens: Option<u64>,
@@ -482,7 +482,7 @@ pub struct ContextUsage {
     pub percent: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedSession {
     pub id: String,

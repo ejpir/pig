@@ -1,6 +1,11 @@
-use crate::theme::{MONO, Theme};
+use crate::theme::{MONO, SANS, Theme};
 use gpui::{prelude::*, *};
 use std::time::Duration;
+
+mod rail;
+mod workbench;
+pub use rail::*;
+pub use workbench::*;
 
 // Zed's ui::h_flex/v_flex pattern, without pulling in the editor/workspace graph.
 pub fn h_flex() -> Div {
@@ -10,18 +15,58 @@ pub fn v_flex() -> Div {
     div().flex().flex_col()
 }
 
+/// A section heading in the workbench's voice: short, sentence case, readable.
+/// Headings written in capitals ("QUICK ACTIONS") read as "Quick actions";
+/// acronyms and names keep their case.
 pub fn label(text: impl Into<SharedString>, theme: Theme) -> Div {
-    // GPUI has no letter-spacing style. Individual mono glyphs preserve the
-    // study's 1.2px tracking without adding copyable whitespace to the label.
-    let text = text.into();
+    let text: SharedString = text.into();
     h_flex()
-        .gap(px(1.2))
-        .font_family(MONO)
-        .text_size(px(10.))
-        .line_height(px(16.))
-        .text_color(theme.faint)
+        .font_family(SANS)
+        .text_size(px(12.5))
+        .line_height(px(18.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.secondary)
         .flex_shrink_0()
-        .children(text.chars().map(|ch| div().child(ch.to_string())))
+        .child(sentence_case(&text))
+}
+
+/// "MODEL & THINKING" → "Model & thinking"; mixed-case text is left as written.
+pub fn sentence_case(text: &str) -> String {
+    if text.chars().any(char::is_lowercase) {
+        return text.to_owned();
+    }
+    const KEEP: &[&str] = &[
+        "RPC", "JSON", "LSP", "USD", "MCP", "API", "URL", "ID", "CPU", "SSH", "UTF-8", "1M", "AI",
+    ];
+    let mut previous = "";
+    text.split(' ')
+        .enumerate()
+        .map(|(i, word)| {
+            let out = match word {
+                w if KEEP.contains(&w) => w.to_owned(),
+                "PI" => "Pi".to_owned(),
+                "DESKTOP" if previous == "PI" => "Desktop".to_owned(),
+                "JJ" => "jj".to_owned(),
+                "OAUTH" => "OAuth".to_owned(),
+                w if i == 0 => {
+                    let mut chars = w.chars();
+                    chars
+                        .next()
+                        .map(|first| {
+                            first
+                                .to_uppercase()
+                                .chain(chars.flat_map(char::to_lowercase))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+                w => w.to_lowercase(),
+            };
+            previous = word;
+            out
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn icon(name: &'static str, color: Hsla) -> Svg {
@@ -42,7 +87,7 @@ pub fn icon_button(
         .id(id)
         .role(Role::Button)
         .aria_label(description)
-        .size(px(24.))
+        .size(px(28.))
         .justify_center()
         .rounded(px(5.))
         .text_color(theme.muted)
@@ -213,13 +258,16 @@ pub fn divider(theme: Theme) -> Div {
 
 pub fn section(name: &str, hint: &str, theme: Theme) -> Div {
     h_flex()
-        .h(px(20.))
+        .h(px(22.))
         .justify_between()
+        .gap(px(8.))
         .child(label(name.to_owned(), theme))
         .child(
             div()
-                .text_size(px(10.5))
-                .text_color(theme.faint)
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.))
+                .text_color(theme.muted)
                 .child(hint.to_owned()),
         )
 }

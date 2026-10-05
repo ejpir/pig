@@ -9,9 +9,7 @@ fn tree_navigation_is_session_local_and_never_submits_the_hidden_draft(cx: &mut 
     let before = first
         .controller
         .read_with(&cx, |c, _| c.model().messages.len());
-    let bounds = cx.debug_bounds("tab-tree").unwrap();
-    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-    cx.run_until_parked();
+    click("tab-tree", &mut cx);
     assert!(cx.debug_bounds("tree-view").is_some());
     let tree = first.view.read_with(&cx, |v, _| v.tree.clone());
     assert_eq!(
@@ -52,9 +50,7 @@ fn tree_navigation_is_session_local_and_never_submits_the_hidden_draft(cx: &mut 
 fn tree_rows_match_the_study_pitch_and_filters_keep_selection_valid(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
     let first = tab(&desktop, 0, &cx);
-    let bounds = cx.debug_bounds("tab-tree").unwrap();
-    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-    cx.run_until_parked();
+    click("tab-tree", &mut cx);
     let a = cx.debug_bounds("tree-entry-0").unwrap();
     let b = cx.debug_bounds("tree-entry-1").unwrap();
     assert_eq!(a.size.height, px(36.));

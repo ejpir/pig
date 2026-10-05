@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Visual Workflow Directions</title>
+<style>
+  @font-face { font-family: "Plex"; src: url("../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+  @font-face { font-family: "Plex"; src: url("../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+  @font-face { font-family: "Commit"; src: url("../../assets/fonts/CommitMono-Regular.otf"); }
+  :root { --bg:#ece7e1; --card:#faf9f7; --text:#252f3d; --muted:#665f59; --line:#ddd7d0; --accent:#4b607c;
+    --read:#2f7fa8; --edit:#b0661a; --ok:#2e7950; --wait:#a57514; --fail:#b4472f; --search:#6b5ca5; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0d1116; --card:#161d27; --text:#ebe7e4; --muted:#9ca2aa; --line:#363d46; --accent:#8caecb;
+    --read:#5fa9d0; --edit:#e3a35c; --ok:#80bf95; --wait:#e5bd73; --fail:#ef8f78; --search:#a596e0; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Plex", "IBM Plex Sans", system-ui, sans-serif; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 48px 32px 80px; }
+  .eyebrow { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  h1 { font: italic 400 44px/1.1 Georgia, "DejaVu Serif", serif; margin: 10px 0 12px; letter-spacing: -.01em; }
+  h2 { font: italic 400 28px/1.2 Georgia, "DejaVu Serif", serif; margin: 56px 0 14px; }
+  h3 { font-size: 17px; margin: 0 0 6px; }
+  p { margin: 0 0 12px; max-width: 760px; }
+  code { font: 13px "Commit", ui-monospace, monospace; }
+  .lede { font-size: 17px; color: var(--muted); max-width: 760px; }
+  .diag { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 16px; }
+  .diag div { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; font-size: 14px; }
+  .diag b { display: block; margin-bottom: 4px; }
+  .swatches { display: flex; gap: 4px; margin-top: 8px; } .swatches i { width: 28px; height: 18px; border-radius: 4px; border: 1px solid rgba(0,0,0,.08); }
+
+  .dir { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); gap: 28px; align-items: start; margin-top: 28px;
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .dir img { width: 100%; display: block; border-radius: 8px; border: 1px solid var(--line); }
+  .dir .tag { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .05em; padding: 2px 8px; border-radius: 10px; margin-bottom: 8px;
+    background: color-mix(in srgb, var(--hue) 14%, transparent); color: var(--hue); }
+  .dir ul { margin: 8px 0 12px; padding-left: 18px; font-size: 14px; } .dir li { margin: 3px 0; }
+  .meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .meta span:nth-child(odd) { color: var(--muted); }
+  .dir a { color: var(--accent); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: .03em; }
+  td:first-child { font-weight: 600; white-space: nowrap; }
+  .no td:first-child { color: var(--fail); }
+
+  .demos { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .demo { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; font-size: 13px; color: var(--muted); }
+  .stage { height: 64px; display: grid; place-items: center; margin-bottom: 10px; position: relative; }
+  .pulse { width: 16px; height: 16px; border-radius: 8px; background: var(--read); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--read) 30%, transparent); } 50% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--read) 0%, transparent); } }
+  .track { width: 180px; height: 2px; background: var(--line); position: relative; }
+  .track i { position: absolute; top: -3px; width: 8px; height: 8px; border-radius: 4px; background: var(--read); animation: travel 1.8s cubic-bezier(.45,0,.55,1) infinite; }
+  @keyframes travel { from { left: 0; } to { left: 172px; } }
+  .sweep { width: 200px; height: 2px; background: linear-gradient(90deg, transparent, var(--read)); background-size: 200% 100%; animation: sweep 1.6s linear infinite; }
+  @keyframes sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+  .spring { width: 46px; height: 30px; border-radius: 8px; background: var(--edit); animation: spring 2.4s infinite; }
+  @keyframes spring { 0% { transform: translateX(-60px); } 30% { transform: translateX(14px); } 42% { transform: translateX(-6px); } 52% { transform: translateX(2px); } 60%,100% { transform: translateX(0); } }
+  .count { font: 600 26px "Commit", monospace; color: var(--ok); }
+
+  ol.steps { padding-left: 20px; max-width: 820px; } ol.steps li { margin: 10px 0; }
+  .rec { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; margin: 14px 0; max-width: 820px; }
+  @media (max-width: 860px) { .wrap { padding: 32px 16px 60px; } .dir { grid-template-columns: 1fr; } h1 { font-size: 34px; } td:first-child { white-space: normal; } }
+</style></head>
+<body><div class="wrap">
+  <div class="eyebrow">Pi Desktop · design study · 2 Oct 2026 · static mocks, not implemented UI</div>
+  <h1>Make the work visible.</h1>
+  <p class="lede">Eight alternatives to the current Moonstone thread, building on the workbench vision, the grouped-result polish and the streamline study. Every effect in these mocks is something GPUI can paint natively; nothing depends on browser-only CSS.</p>
+
+  <h2>Why it reads as bland</h2>
+  <div class="diag">
+    <div><b>Value range is too narrow</b>Canvas, panel, bar and raised sit within ~6% lightness of each other, and the accent is a low-chroma slate.
+      <div class="swatches"><i style="background:#faf9f7"></i><i style="background:#f0ede8"></i><i style="background:#ebe7e2"></i><i style="background:#e4ded8"></i><i style="background:#4b607c"></i></div></div>
+    <div><b>Colour carries no meaning</b>Read, edit, run, pass, fail and wait all render in the same ink. Your eye has nothing to sort by.</div>
+    <div><b>The process is invisible</b>A run has a shape (explore → change → verify → hand off), but it's printed as a flat tool log.</div>
+    <div><b>No depth, almost no motion</b>Borders do all the separating. <code>shadow_lg</code> only appears on popovers, and the spinner is the only <code>with_animation</code>.</div>
+  </div>
+
+  <h2>Within one turn</h2>
+  <p>Each screen tells the same story: the <em>Qwen signatures</em> session, mid-verification, with one follow-up queued. Click a screen to open the HTML mock.</p>
+
+  <section class="dir" style="--hue:var(--read)">
+    <a href="screens/a-run-rail.html"><img src="screens/a-run-rail.png" alt="Run rail mock: the turn as a vertical timeline with coloured step nodes"></a>
+    <div><span class="tag">A · RECOMMENDED BASE</span><h3>Run rail</h3>
+      <p>The turn becomes a timeline. Each step gets a node, a hue and a duration. The spine fades from one hue into the next, and the queued follow-up appears as the rail's dashed future.</p>
+      <ul><li>Six semantic activity hues, kept at ~11% tint for backgrounds</li><li>Consecutive reads and searches fold into one "Explored" step</li><li>The live node pulses, and the check output has a progress bar</li><li>Changed-file cards carry diff blocks (from the grouped result)</li></ul>
+      <div class="meta"><span>GPUI</span><span>div borders, 2-stop gradient per segment, <code>border_dashed</code>, box-shadow halo + <code>with_animation</code></span><span>Effort</span><span>Small–medium · reshapes <code>transcript/activity.rs</code></span><span>Risk</span><span>Low. Same layout, more signal.</span></div></div>
+  </section>
+
+  <section class="dir" style="--hue:var(--ok)">
+    <a href="screens/b-stage-flow.html"><img src="screens/b-stage-flow.png" alt="Stage flow mock: four chevron stages above a conversation and result board"></a>
+    <div><span class="tag">B</span><h3>Stage flow</h3>
+      <p>A pipeline strip (Understand → Change → Verify → Hand off) pins the run's progress to the top. Prose stays on the left. What the run produced, files and checks, collects on a board to the right.</p>
+      <ul><li>Chevron joints drawn with <code>PathBuilder</code></li><li>Test results as segmented bars, 1 segment per test</li><li><code>pattern_slash</code> hatch marks "no snapshot / can't restore" honestly</li><li>The composer collapses to one line with a queue pill</li></ul>
+      <div class="meta"><span>GPUI</span><span>paths, <code>pattern_slash</code>, tinted fills, shadows, container_query to drop the board on narrow windows</span><span>Effort</span><span>Medium. Needs stage inference from tool kinds.</span><span>Risk</span><span>Stages are heuristic. Pi doesn't report phases, so mislabelled runs could confuse people.</span></div></div>
+  </section>
+
+  <section class="dir" style="--hue:var(--edit)">
+    <a href="screens/c-studio.html"><img src="screens/c-studio.png" alt="Studio mock: dark floating work sheet over a blurred window, coloured tool tiles and a glowing composer dock"></a>
+    <div><span class="tag">C · MATERIAL LAYER</span><h3>Studio</h3>
+      <p>This direction leaves structure alone and changes the material. A translucent, blurred window holds a floating work sheet. Tools appear as glossy icon tiles and files as typed tiles. The run state glows along the sheet edge and around the composer dock.</p>
+      <ul><li>Ambient state: steel = working, amber = waiting for you, coral = failed, neutral = ready</li><li>A gradient-border dock (outer 1px gradient + inner fill)</li><li>A segmented tab control with inset shadow</li><li>A serif headline at 30px, so the answer leads</li></ul>
+      <div class="meta"><span>GPUI</span><span><code>WindowBackgroundAppearance::Blurred</code> / Mica, layered box-shadows (inset highlight + drop), 2-stop gradients</span><span>Effort</span><span>Small for tokens and dock, medium for window blur per platform</span><span>Risk</span><span>Blur is OS-dependent (fine on macOS and Windows 11, compositor-dependent on Linux), so it needs an opaque fallback.</span></div></div>
+  </section>
+
+  <section class="dir" style="--hue:var(--search)">
+    <a href="screens/d-session-map.html"><img src="screens/d-session-map.png" alt="Session map mock: node graph of the run, with an abandoned fork from the session tree"></a>
+    <div><span class="tag">D · LATER</span><h3>Session map</h3>
+      <p>The most literal visual workflow. A third <em>Map</em> view draws the turn as a graph: ask → explore → change → verify, with files as outputs and earlier forks from the session tree as ghost branches. Selecting a node only inspects it.</p>
+      <ul><li>Bézier edges with an animated dot on the live edge</li><li>A dot grid, zoom/fit and minimap</li><li>The selected node becomes draft context ("Ask about this step")</li></ul>
+      <div class="meta"><span>GPUI</span><span><code>canvas</code> + <code>PathBuilder::stroke().dash_array()</code>, <code>cubic_bezier_to</code>, quads for the grid. Extends <code>tree_graph.rs</code>.</span><span>Effort</span><span>Large: layout, pan/zoom, hit-testing, keyboard nav</span><span>Risk</span><span>Easy to make pretty and rarely used. Ship after A proves the step model.</span></div></div>
+  </section>
+
+  <h2>Four more, in different directions</h2>
+  <p>A–D show a single turn. E–H change the frame: what you watch while it runs, how you track many sessions, how loud the identity is, and time as an axis.</p>
+
+  <section class="dir" style="--hue:var(--edit)">
+    <a href="screens/e-follow-mode.html"><img src="screens/e-follow-mode.png" alt="Follow mode mock: compact steps on the left, the just-edited file on the right with a step scrubber"></a>
+    <div><span class="tag">E</span><h3>Follow mode</h3>
+      <p>Steps stay compact on the left. The right side becomes a live stage showing the file or command the agent just touched, with the step's reasoning pinned to the changed lines. A scrubber replays earlier steps.</p>
+      <ul><li>The "Follow the agent" switch. Scrolling or picking a step turns it off.</li><li>Fresh lines get an edit-hue edge, which fades over a few seconds</li><li>The composer attaches the line ("L211") as context for a comment</li></ul>
+      <div class="meta"><span>GPUI</span><span>existing diff view (<code>diff.rs</code>), gradient row tint, spring for the stage swap</span><span>Effort</span><span>Medium. Reuses the Changes view.</span><span>Risk</span><span>Edits arrive whole, so this must never fake typing. Constant movement in a split pane can distract.</span></div></div>
+  </section>
+
+  <section class="dir" style="--hue:var(--wait)">
+    <a href="screens/f-mission-control.html"><img src="screens/f-mission-control.png" alt="Mission control mock: board of all sessions in columns Needs you, Working, Queued, Done today"></a>
+    <div><span class="tag">F · HIGH VALUE</span><h3>Mission control</h3>
+      <p>A board of every session across projects, grouped as Needs you / Working / Queued / Done today. The workflow you manage is many agents, and this is where you see which one is blocked on you.</p>
+      <ul><li>Extension questions are answerable right on the card</li><li>Each card carries a step strip (the rail from A, miniaturised)</li><li>Failed runs sit in "Needs you", not in Done</li></ul>
+      <div class="meta"><span>GPUI</span><span>grid + cards, layered shadows for the hot state, <code>container_query</code> to go 4 → 2 columns</span><span>Effort</span><span>Medium. Builds on <code>parallel.rs</code> / All Sessions.</span><span>Risk</span><span>Only pays off once people run several sessions at once.</span></div></div>
+  </section>
+
+  <section class="dir" style="--hue:var(--fail)">
+    <a href="screens/g-signal.html"><img src="screens/g-signal.png" alt="Signal mock: ink sidebar, orange working band, huge serif headline and stat numerals"></a>
+    <div><span class="tag">G · IDENTITY</span><h3>Signal</h3>
+      <p>An editorial, poster-like identity. An ink sidebar, paper canvas and one loud accent. State is a full-width band you can't miss, and results become big numerals. It's the furthest from "bland", and the most opinionated.</p>
+      <ul><li>Uppercase mono labels and numbered step ledger</li><li>A hard offset shadow on the composer (a zero-blur <code>BoxShadow</code>)</li><li>The accent only ever means "live" or "act here"</li></ul>
+      <div class="meta"><span>GPUI</span><span>solid fills, zero-blur shadows, large serif text. All trivial.</span><span>Effort</span><span>Small. Mostly a theme plus typography.</span><span>Risk</span><span>Taste. Loud orange gets tiring over long sessions, so it needs a calmer dark variant.</span></div></div>
+  </section>
+
+  <section class="dir" style="--hue:var(--read)">
+    <a href="screens/h-timeline.html"><img src="screens/h-timeline.png" alt="Timeline mock: thread above, video-editor style tracks below with spans for model, explore, edit, run and files"></a>
+    <div><span class="tag">H</span><h3>Timeline tracks</h3>
+      <p>A docked track view treats time as the axis. Model, explore, edit and run each get a lane, file changes are marked as diamonds, and a playhead shows now. It shows where time actually went, and which calls ran in parallel.</p>
+      <ul><li>Selecting a span highlights its block in the thread</li><li>The live span uses <code>pattern_slash</code> stripes</li><li>Queued follow-up appears past the playhead, dashed</li></ul>
+      <div class="meta"><span>GPUI</span><span><code>canvas</code> quads for spans, <code>pattern_slash</code>, a playhead driven by animation frame</span><span>Effort</span><span>Medium–large. Needs tool timestamps from Pi events.</span><span>Risk</span><span>Better as an optional dock than always-on, and it's denser than most people want.</span></div></div>
+  </section>
+
+  <h2>What GPUI can and can't paint</h2>
+  <table>
+    <tr><th>Primitive</th><th>API</th><th>Use it for</th></tr>
+    <tr><td>Linear gradients</td><td><code>linear_gradient(angle, stop, stop)</code>, 2 stops; stack divs for more</td><td>rail segments, dock border, sheet sheen, buttons</td></tr>
+    <tr><td>Box shadows</td><td><code>.shadow(vec![BoxShadow…])</code>, multiple, <code>inset</code>, spread</td><td>depth, focus/state halos, top highlights</td></tr>
+    <tr><td>Dashed borders</td><td><code>.border_dashed()</code></td><td>future/queued steps, ghost branches</td></tr>
+    <tr><td>Patterns</td><td><code>pattern_slash</code>, <code>checkerboard</code></td><td>unavailable snapshots, disabled regions</td></tr>
+    <tr><td>Vector paths</td><td><code>canvas</code> + <code>PathBuilder</code> (bezier, arc, stroke, dash)</td><td>chevrons, graph edges, sparklines, progress arcs</td></tr>
+    <tr><td>Keyframe animation</td><td><code>with_animation</code> / <code>with_animations</code>, easings incl. <code>bounce</code>, <code>pulsating_between</code></td><td>live pulses, sweeps, travelling dots</td></tr>
+    <tr><td>Springs</td><td><code>with_spring(SpringAnimation…)</code>, velocity-preserving</td><td>panels, inspector, file rail, dock grow</td></tr>
+    <tr><td>Responsive</td><td><code>container_query(|size, …|)</code></td><td>board ↔ inline, split ↔ unified diff</td></tr>
+    <tr><td>Window material</td><td><code>WindowBackgroundAppearance::{Blurred, MicaBackdrop}</code></td><td>translucent sidebar / chrome (direction C)</td></tr>
+    <tr><td>Transforms</td><td><code>svg().with_transformation(rotate/scale)</code></td><td>spinners, chevrons that rotate open</td></tr>
+    <tr class="no"><td>Not available</td><td colspan="2">in-app backdrop blur of content, radial or conic gradients, filters (blur, drop-shadow on shapes), blend modes, masks, gradient text. Fake a radial glow with spread shadows.</td></tr>
+  </table>
+
+  <h2>Motion vocabulary</h2>
+  <div class="demos">
+    <div class="demo"><div class="stage"><div class="pulse"></div></div><b style="color:var(--text)">Live pulse</b>Spread shadow on the active node, ~1.6s, <code>pulsating_between</code>.</div>
+    <div class="demo"><div class="stage"><div class="track"><i></i></div></div><b style="color:var(--text)">Travelling dot</b>A quad moved along the active edge. Tells you which step feeds which.</div>
+    <div class="demo"><div class="stage"><div class="sweep"></div></div><b style="color:var(--text)">Ambient sweep</b>2px edge gradient while working. Stops dead when the run settles.</div>
+    <div class="demo"><div class="stage"><div class="spring"></div></div><b style="color:var(--text)">Spring in</b>Inspector, file rail and dock height. Interruptible, so no jank on quick toggles.</div>
+  </div>
+  <p style="margin-top:12px;font-size:13px;color:var(--muted)">Respect reduced-motion: keep the colour and shape of state, drop the movement.</p>
+
+  <h2>How to proceed</h2>
+  <div class="rec"><b>Recommendation:</b> build <b>A (Run rail)</b> as the structure and take <b>C's material layer</b> (state halo on the composer, the inset-highlight shadows, a wider value range) as the finish. Keep B's stage strip as an optional compact header and D as a later view once the step model exists.</div>
+  <ol class="steps">
+    <li><b>Tokens first, in <code>theme.rs</code>.</b> Add the six activity hues (with a <code>tint()</code> helper at ~11%), an <code>elevation(n)</code> helper that returns <code>Vec&lt;BoxShadow&gt;</code>, and widen the light value range so <code>panel</code> and <code>canvas</code> separate. This alone removes a lot of the blandness.</li>
+    <li><b>A step model before visuals.</b> Fold the tool calls in a turn into steps (explore / change / run / ask / queued) with status and duration. Rail, stages and map all render this one model.</li>
+    <li><b>Rail components in <code>components/workbench.rs</code>.</b> <code>rail_step</code>, <code>rail_node</code> (fill, live, future), <code>diff_blocks</code>, <code>state_halo</code>. Add a readability test per state, like the existing <code>*_tests.rs</code>.</li>
+    <li><b>Motion last, behind a setting.</b> Live pulse and ambient sweep via <code>with_animation</code>; panels via <code>with_spring</code>. Honour reduced motion.</li>
+    <li><b>Verify in the real app.</b> Re-run the Xvfb captures from <code>visual-review-2026-10-01</code> in light and dark at 1440 and 1000 widths, and compare against these mocks.</li>
+  </ol>
+  <p style="font-size:13px;color:var(--muted);margin-top:28px">Mocks are HTML/CSS restricted to GPUI-paintable effects. Content, timings and check results are illustrative. Regenerate PNGs with <code>python3 design/visual-workflow/render.py</code>.</p>
+</div></body></html>

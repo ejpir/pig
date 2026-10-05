@@ -5,12 +5,19 @@ A native desktop app for the [pi](https://github.com/earendil-works/pi) coding a
 ![A tour of Pi Desktop: thread, commands, mentions, changes, tree, context, files, terminal, sessions, models, resources, settings and the dark theme](docs/pi-desktop-showcase.gif)
 
 - **Sessions and projects:** a sidebar of open and saved sessions per project, with search, forks, worktrees and **All Sessions**.
-- **Thread:** Markdown messages, collapsible tool calls, a `/` command menu, `@` mentions, attachments, and model and thinking pickers.
+- **Thread:** readable Markdown, collapsible tools, changed-file links, and a shared composer with explicit queue/steer controls, `/` commands, `@` mentions and attachments.
+- **Changes:** main-area file navigation, aligned split or compact unified diffs, full patch copying and explicitly submitted revision requests. Observed edits are already on disk, not a complete working-tree diff; restore requires a recorded jj snapshot.
 - **jj turns:** each run that changes files becomes a jj change you can undo, redo or restore file by file (opt-in per project).
 - **Language servers:** file tabs on Zed's editor. Errors go back to pi after its edits, even though pi has no LSP support itself.
 - **Terminal drawer**, **Settings** (pi's settings and the app's own), **Models** and **Resources**.
 
+**Settings & tools** opens All Sessions, Models, Resources and Settings. **Session tools** opens Tree and Context. The inspector starts closed; core Thread/review actions do not need it.
+
 See [docs/architecture.md](docs/architecture.md) for how it works.
+
+## Remote sessions
+
+Choose **New session → SSH**, or run `pi-desktop --ssh dev --project /srv/project`. The app installs a per-user Rust helper over SSH. Remote agents keep running when the desktop disconnects; **Reconnect** restores the live session. Saved SSH sessions in **All Sessions** have **Open** and **Remove** actions; Remove only forgets the shortcut. SSH keys/agent and verified host keys are required. Remote file browsing/editing is available through **Files**; terminals, LSP and jj are still deferred; see [Remote Pi](docs/remote.md) for setup, development builds and limitations.
 
 ## Install
 
@@ -72,13 +79,13 @@ bash scripts/package-linux.sh      # or package-macos.sh; ./scripts/package-wind
 Packaging needs Python 3.11+ and npm (for license notices). It downloads pi's release binary for the pinned version, checks it against `packaging/pi-release.sha256`, embeds it, and writes an archive to `dist/`. On macOS, `PI_DESKTOP_CODESIGN_IDENTITY` re-signs pi for the hardened runtime. Details: [Built-in pi](docs/architecture.md#built-in-pi).
 
 CI ([`.github/workflows/desktop.yml`](.github/workflows/desktop.yml)):
-- **Every push:** runs the tests and lints on Linux and builds all four packages.
+- **Every push:** runs the tests and lints on Linux and builds all four packages and standalone SSH helpers.
 - **A `v*` tag:** also publishes them with `SHA256SUMS`, once everything passes.
 
 ## Test
 
 ```sh
-cargo fmt -p pi_core -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
+cargo fmt -p pi_core -p pi_remote -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
 cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
 cargo test --locked --workspace
 cargo test --locked -p pi_lsp_bridge --features fake-lsp
@@ -94,15 +101,17 @@ No test calls a model provider. `scripts/capture-*.sh` check the real window und
 |---|---|
 | Ctrl/Cmd+N | New session |
 | Ctrl/Cmd+O | Open folder |
-| Ctrl/Cmd+K | Search sessions |
+| Ctrl/Cmd+K | Global search and destinations |
 | Ctrl/Cmd+B | Show or hide the sidebar |
 | Ctrl+Shift+I | Show or hide the inspector |
 | Ctrl+\` or Ctrl/Cmd+J | Terminal |
 | Ctrl+Shift+T | Theme |
 | Ctrl+Shift+D | Session diagnostics |
-| Enter | Send, or steer while pi works |
+| Enter | Send, or queue a follow-up while pi works |
+| Ctrl/Cmd+Enter | Explicitly steer the current run |
 | Alt/Option+Enter | Queue a follow-up |
 | Escape | Stop |
+| ↑/↓, then Enter, with Changes focused | Select a file, then attach an explicit revision request (not submit) |
 | ⌥ held, in a file tab | Show which turn wrote each line |
 
 ## License

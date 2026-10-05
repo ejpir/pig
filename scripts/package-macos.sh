@@ -10,8 +10,10 @@ export MACOSX_DEPLOYMENT_TARGET=12.0
 pi_out="$PWD/artifacts/pi"
 python3 scripts/fetch_pi.py --platform darwin-arm64 --out "$pi_out" --notices
 PI_DESKTOP_BACKEND_ARCHIVE="$pi_out/pi-darwin-arm64.tar.gz" \
-  cargo build --locked --release -p pi-desktop --target "$target" --features bundled-backend
+  cargo build --locked --release -p pi-desktop -p pi_remote --target "$target" --features pi-desktop/bundled-backend,pi_remote/bundled-backend
 python3 scripts/package_desktop.py --target "$target" \
   --binary "${CARGO_TARGET_DIR:-target}/$target/release/pi-desktop" \
   --notices "$pi_out/pi-notices.txt"
+python3 scripts/package_remote.py --target "$target" \
+  --binary "${CARGO_TARGET_DIR:-target}/$target/release/pi-desktop-remote"
 printf 'Packaged macOS arm64 (ad-hoc signed; not Developer ID signed or notarized).\n'

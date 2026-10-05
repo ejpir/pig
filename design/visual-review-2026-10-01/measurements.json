@@ -1,0 +1,77 @@
+{
+  "units": "logical pixels; capture at 1x",
+  "current": {
+    "window": [
+      1344,
+      740
+    ],
+    "header": 36,
+    "sidebar": 208,
+    "inspector": 328,
+    "middle": 808,
+    "session_toolbar": 40,
+    "status": 24,
+    "settings_category_rail": 180,
+    "settings_middle_remaining": 628,
+    "transcript_gutters": [
+      24,
+      20
+    ],
+    "composer_gutters": [
+      20,
+      20
+    ],
+    "primary_button_height": 24,
+    "new_session_header_target": 20,
+    "wide_window": [
+      1600,
+      900
+    ],
+    "wide_middle": 1064
+  },
+  "contrast": [
+    {
+      "name": "current-light-caption-panel",
+      "foreground": "#8b847d",
+      "background": "#f2efeb",
+      "ratio": 3.22
+    },
+    {
+      "name": "current-dark-caption-panel",
+      "foreground": "#737981",
+      "background": "#1a212b",
+      "ratio": 3.69
+    },
+    {
+      "name": "current-light-warning-white",
+      "foreground": "#b97a14",
+      "background": "#ffffff",
+      "ratio": 3.59
+    },
+    {
+      "name": "proposed-light-caption-panel",
+      "foreground": "#6b645d",
+      "background": "#f2efeb",
+      "ratio": 5.08
+    },
+    {
+      "name": "proposed-light-caption-bar",
+      "foreground": "#6b645d",
+      "background": "#ebe7e4",
+      "ratio": 4.74
+    },
+    {
+      "name": "proposed-dark-caption-panel",
+      "foreground": "#959ca5",
+      "background": "#1a212b",
+      "ratio": 5.84
+    },
+    {
+      "name": "proposed-light-warning-white",
+      "foreground": "#8b631f",
+      "background": "#ffffff",
+      "ratio": 5.38
+    }
+  ],
+  "note": "Geometry checked against source and screenshot surface boundaries. Contrast uses flat theme colors, not antialiasing; not a complete accessibility audit."
+}

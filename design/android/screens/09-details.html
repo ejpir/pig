@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>09 · Details</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  .meter { height: 8px; border-radius: 4px; background: var(--raised); overflow: hidden; margin-top: 10px; }
+  .meter span { display: block; height: 100%; width: 31%; background: var(--accent); border-radius: 4px; }
+  .pair { flex: 1; padding: 14px 16px; }
+  .pair + .pair { border-left: 1px solid var(--line); }
+  .pair b { display: block; font-size: 20px; font-weight: 600; margin-top: 2px; }
+  .disclosure { height: 52px; display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--line); font-size: 15px; }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content" data-frag="done"></main>
+  <div class="scrim"></div>
+  <div class="sheet" style="height:610px">
+    <div class="handle"></div>
+    <div class="row"><span style="font-size:20px;font-weight:600" class="grow">Details</span><span class="tap" style="margin-right:-12px"><i data-i="x"></i></span></div>
+    <div class="label" style="margin-top:8px">Context</div>
+    <div class="row" style="align-items:baseline;gap:8px;margin-top:2px"><span style="font-size:28px;font-weight:600">31%</span><span class="hint">62k of 200k tokens</span></div>
+    <div class="meter"><span></span></div>
+    <div class="hint" style="margin-top:8px">Auto-compaction is on.</div>
+    <div class="card row" style="margin-top:18px;align-items:stretch">
+      <div class="pair"><span class="label">Session cost</span><b>$0.41</b></div>
+      <div class="pair"><span class="label">Observed edits</span><b>2</b></div>
+    </div>
+    <div style="margin-top:18px">
+      <div class="disclosure"><span class="grow">Usage</span><span class="hint">Opus 5.5 · 14 turns</span><i data-i="chev-r" class="sm faint"></i></div>
+      <div class="disclosure"><span class="grow">Active tools</span><span class="hint">7</span><i data-i="chev-r" class="sm faint"></i></div>
+      <div class="disclosure"><span class="grow">File history</span><span class="hint">on · 3 snapshots</span><i data-i="chev-r" class="sm faint"></i></div>
+      <div class="disclosure"><span class="grow">Session file</span><span class="hint mono" style="font-size:12px">~/.pi/…/qwen.jsonl</span><i data-i="chev-r" class="sm faint"></i></div>
+    </div>
+  </div>
+</div>
+<script src="fragments.js"></script><script src="phone.js"></script>
+</body></html>

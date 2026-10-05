@@ -21,7 +21,7 @@ fn other_sessions(cx: &App) -> Hsla {
 
 #[derive(Default)]
 pub(super) struct TurnBars {
-    session: Option<WeakEntity<SessionController>>,
+    pub(super) session: Option<WeakEntity<SessionController>>,
     /// ⌥ is held.
     held: bool,
     /// The annotated file and which turn wrote each line.

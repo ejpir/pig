@@ -9,7 +9,68 @@ use super::{
     session::{Changes, SessionController, SessionEvent},
 };
 mod data;
+mod view;
 use data::File;
+
+/// A turn-local, factual file summary. Only the last assistant row owns it;
+/// stored snapshots take precedence over their associated tool calls.
+pub(super) fn thread_files(controller: &SessionController, row: usize) -> Vec<File> {
+    let model = controller.model();
+    if model
+        .messages
+        .get(row)
+        .is_none_or(|m| m["role"] != "assistant")
+    {
+        return vec![];
+    }
+    if model
+        .messages
+        .iter()
+        .skip(row + 1)
+        .take_while(|m| m["role"] != "user")
+        .any(|m| m["role"] == "assistant")
+    {
+        return vec![];
+    }
+    let start = model.messages[..row]
+        .iter()
+        .rposition(|m| m["role"] == "user")
+        .unwrap_or(0);
+    let ids: HashSet<_> = model.messages[start..=row]
+        .iter()
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .filter(|b| b["type"] == "toolCall")
+        .filter_map(|b| b["id"].as_str())
+        .collect();
+    let records: Vec<_> = controller
+        .jj()
+        .records
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.anchored && r.after_message >= start && r.after_message <= row)
+        .collect();
+    let recorded = records
+        .iter()
+        .flat_map(|(_, r)| r.tool_ids.iter().cloned())
+        .collect();
+    let mut files: Vec<_> = records
+        .iter()
+        .flat_map(|(index, r)| r.diff.iter().map(|f| File::recorded(f, *index, r)))
+        .collect();
+    files.extend(data::observed_tools(
+        model.tools.iter().filter(|t| ids.contains(t.id.as_str())),
+        &recorded,
+        &model.cwd,
+    ));
+    files
+}
+use gpui::EventEmitter;
+
+#[derive(Clone, Debug)]
+pub(super) enum ChangesEvent {
+    RequestRevision { path: String, source: String },
+}
+impl EventEmitter<ChangesEvent> for ChangesView {}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -17,7 +78,7 @@ enum Tab {
     Operations,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum Row {
     Turn(usize),
     File(usize),
@@ -27,10 +88,16 @@ enum Row {
 pub struct ChangesView {
     controller: Entity<SessionController>,
     editors: Entity<FilesView>,
+    composer: Entity<super::composer::ComposerView>,
     files: Vec<File>,
     rows: Vec<Row>,
     selected: Option<usize>,
     document: Entity<DocumentView>,
+    diff: Entity<super::diff::DiffView>,
+    wide: bool,
+    picker_open: bool,
+    focus: gpui::FocusHandle,
+    file_list: gpui::ListState,
     scroll: ScrollHandle,
     file_scroll: gpui::UniformListScrollHandle,
     tab: Tab,
@@ -45,19 +112,27 @@ impl ChangesView {
     pub fn new(
         controller: Entity<SessionController>,
         editors: Entity<FilesView>,
+        composer: Entity<super::composer::ComposerView>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscription = cx.subscribe(&controller, |this,_,event,cx| {
-            if matches!(event,SessionEvent::Changed(c) if c.intersects(Changes::JJ|Changes::METADATA|Changes::HISTORY)) {this.refresh(cx);}
+            if matches!(event, SessionEvent::Content(super::session::ContentChange::Reset | super::session::ContentChange::Tool(_)))
+                || matches!(event,SessionEvent::Changed(c) if c.intersects(Changes::JJ|Changes::METADATA|Changes::HISTORY)) {this.refresh(cx);}
             if this.tab == Tab::Operations && matches!(event,SessionEvent::Changed(c) if c.intersects(Changes::JJ)) && this.controller.read(cx).jj_idle() {this.load_operations(cx);}
         });
         let mut this = Self {
             controller,
             editors,
+            composer,
             files: vec![],
             rows: vec![],
             selected: None,
-            document: cx.new(|cx| DocumentView::new(cx).compact().wrapped()),
+            document: cx.new(|cx| DocumentView::new(cx).review().wrapped()),
+            diff: cx.new(super::diff::DiffView::new),
+            wide: true,
+            picker_open: false,
+            focus: cx.focus_handle(),
+            file_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(100.)),
             scroll: ScrollHandle::new(),
             file_scroll: Default::default(),
             tab: Tab::Turns,
@@ -74,8 +149,8 @@ impl ChangesView {
         let key = self.file().map(|f| (f.turn, f.path.clone()));
         let controller = self.controller.read(cx);
         let records = &controller.jj().records;
-        self.files.clear();
-        self.rows.clear();
+        let previous_files = std::mem::take(&mut self.files);
+        let previous_rows = std::mem::take(&mut self.rows);
         for (turn, record) in records.iter().enumerate().rev() {
             self.rows.push(Row::Turn(turn));
             for file in &record.diff {
@@ -89,11 +164,16 @@ impl ChangesView {
             .collect();
         let fallback = data::observed(controller.model(), &recorded);
         if !fallback.is_empty() {
-            self.rows.push(Row::Observed);
+            if !self.rows.is_empty() {
+                self.rows.push(Row::Observed);
+            }
             for file in fallback {
                 self.rows.push(Row::File(self.files.len()));
                 self.files.push(file);
             }
+        }
+        if self.files == previous_files && self.rows == previous_rows {
+            return;
         }
         self.selected = key
             .and_then(|key| {
@@ -102,16 +182,58 @@ impl ChangesView {
                     .position(|f| (f.turn, f.path.clone()) == key)
             })
             .or_else(|| (!self.files.is_empty()).then_some(0));
+        self.file_list.reset(self.rows.len());
         self.sync_document(cx);
         cx.notify();
+    }
+    pub fn shows_composer(&self) -> bool {
+        self.tab == Tab::Turns
+    }
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        self.focus.focus(window, cx);
+    }
+    fn move_file(&mut self, direction: isize, cx: &mut Context<Self>) {
+        if self.files.is_empty() {
+            return;
+        }
+        let index = (self.selected.unwrap_or(0) as isize + direction)
+            .rem_euclid(self.files.len() as isize) as usize;
+        self.select(index, cx);
+        if let Some(row) = self
+            .rows
+            .iter()
+            .position(|r| matches!(r,Row::File(i) if *i==index))
+        {
+            self.file_list.scroll_to_reveal_item(row);
+        }
+    }
+    pub fn set_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        let wide = width >= px(900.);
+        if self.wide != wide {
+            self.wide = wide;
+            self.picker_open = false;
+            cx.notify();
+        }
+        self.diff
+            .update(cx, |diff, cx| diff.set_wide(width >= px(1040.), cx));
+    }
+    pub fn select_path(&mut self, path: &str, turn: Option<usize>, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .files
+            .iter()
+            .position(|file| file.path == path && file.turn == turn)
+        {
+            self.select(index, cx);
+        }
     }
     fn file(&self) -> Option<&File> {
         self.selected.and_then(|i| self.files.get(i))
     }
     fn sync_document(&self, cx: &mut Context<Self>) {
         let text = self.file().map(|f| f.preview.clone()).unwrap_or_default();
-        self.document
-            .update(cx, |d, cx| d.set(text, Some("diff"), cx));
+        let sections = self.file().map(|f| f.sections.clone()).unwrap_or_default();
+        self.diff
+            .update(cx, |diff, cx| diff.set(text, &sections, cx));
     }
     pub fn select_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
         if let Some(i) = self.files.iter().position(|f| f.turn == Some(turn)) {
@@ -121,9 +243,25 @@ impl ChangesView {
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.files.len() {
             self.selected = Some(index);
+            self.picker_open = false;
             self.sync_document(cx);
             self.scroll.set_offset(gpui::point(px(0.), px(0.)));
             cx.notify();
+        }
+    }
+    fn request_revision(&self, cx: &mut Context<Self>) {
+        if let Some(file) = self.file() {
+            let source = self
+                .diff
+                .read(cx)
+                .selected_source(cx)
+                .filter(|selection| !selection.trim().is_empty())
+                .map(|selection| format!("{}\n\nSelected lines:\n{selection}", file.source))
+                .unwrap_or_else(|| file.source.clone());
+            cx.emit(ChangesEvent::RequestRevision {
+                path: file.path.clone(),
+                source,
+            });
         }
     }
     fn open(&mut self, cx: &mut Context<Self>) {
@@ -573,8 +711,7 @@ impl ChangesView {
                     .on_click(cx.listener(|this,_,window,cx|this.restore_file(window,cx)))))
             .child(primary_button("changes-undo",action,enabled,theme).justify_center().mt(px(8.)).on_click(cx.listener(|this,_,_,cx|this.undo(cx))))
             .child(button("changes-copy","Copy diff",theme).justify_center().mt(px(8.)).debug_selector(||"changes-copy".into()).on_click(move|_,_,cx|cx.write_to_clipboard(ClipboardItem::new_string(patch.clone()))))
-            .child(divider(theme))
-            .child(super::inspector::usage(self.controller.read(cx).model(),theme))
+            // Session usage lives in the Thread inspector; this one is about the file.
             .child(div().flex_1().min_h(px(24.)))
             .when(file.turn.is_some(),|v|v.child(note("Changes are what jj recorded, including shell/external edits during the turn. Earlier work may be unrecorded.",theme)))
             .child(note("Restore file and undo/redo refuse when a later turn edits the same lines; save unsaved editor buffers first.",theme).mt(px(10.)))
@@ -582,13 +719,17 @@ impl ChangesView {
     }
     fn row(&self, i: usize, cx: &Context<Self>, theme: Theme) -> AnyElement {
         match &self.rows[i] {
-            Row::Observed => label("TOOL-REPORTED EDITS", theme)
-                .h(px(28.))
+            Row::Observed => div()
+                .child("Observed edits")
+                .text_size(px(12.))
+                .text_color(theme.muted)
+                .py(px(8.))
+                .h(px(32.))
                 .into_any_element(),
             Row::Turn(index) => {
                 let r = &self.controller.read(cx).jj().records[*index];
                 h_flex()
-                    .h(px(28.))
+                    .h(px(32.))
                     .gap(px(7.))
                     .px(px(4.))
                     .child(
@@ -628,82 +769,35 @@ impl ChangesView {
                 let index = *index;
                 let file = &self.files[index];
                 let selected = self.selected == Some(index);
-                h_flex()
-                    .id(("changed-file", index))
-                    .debug_selector(move || format!("changed-file-{index}"))
-                    .h(px(28.))
-                    .w_full()
-                    .pl(px(18.))
-                    .pr(px(6.))
-                    .gap(px(5.))
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .when(selected, |v| v.bg(theme.selected))
-                    .hover(move |s| s.bg(theme.hover))
-                    .child(icon("file", theme.muted).size(px(13.)))
+                div()
+                    .h(px(76.))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(MONO)
-                            .text_size(px(11.))
-                            .child(
-                                PathBuf::from(&file.path)
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned(),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .font_family(MONO)
-                            .text_size(px(10.))
-                            .text_color(theme.green)
-                            .child(format!("+{}", file.added)),
-                    )
-                    .when(file.removed > 0, |v| {
-                        v.child(
-                            div()
-                                .font_family(MONO)
-                                .text_size(px(10.))
-                                .text_color(theme.coral)
-                                .child(format!("−{}", file.removed)),
+                        review_file_row(
+                            ("changed-file", index),
+                            &file.path,
+                            file.added,
+                            file.removed,
+                            selected,
+                            theme,
                         )
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
+                        .debug_selector(move || format!("changed-file-{index}"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx))),
+                    )
                     .into_any_element()
             }
         }
     }
 }
-impl Render for ChangesView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl ChangesView {
+    /// The operation log retains its existing recorded-history presentation.
+    fn operations_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
         let weak = cx.entity().downgrade();
-        let turns = self.controller.read(cx).jj().records.len();
-        let (added, removed) = self
-            .files
-            .iter()
-            .filter(|f| f.turn.is_some())
-            .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
-        let operations_tab = self.tab == Tab::Operations;
-        let count = if operations_tab {
-            self.operations.len()
-        } else {
-            self.rows.len()
-        };
+        let count = self.operations.len();
         let rows = gpui::uniform_list("turn-files", count, move |range, _, cx| {
             weak.update(cx, |this, cx| {
                 range
-                    .map(|i| {
-                        if this.tab == Tab::Operations {
-                            this.operation_row(i, cx, theme)
-                        } else {
-                            this.row(i, cx, theme)
-                        }
-                    })
+                    .map(|i| this.operation_row(i, cx, theme))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
@@ -714,69 +808,10 @@ impl Render for ChangesView {
         )))
         .flex_shrink_0()
         .w_full();
-        let (action, enabled) = self.turn_action(cx);
-        let has_jj = self.controller.read(cx).jj().project.is_some();
-        let tab = |id: &'static str, text: String, active: bool, target: Tab| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .role(gpui::Role::Tab)
-                .aria_selected(active)
-                .font_family(MONO)
-                .text_size(px(10.))
-                .cursor_pointer()
-                .text_color(if active { theme.text } else { theme.faint })
-                .when(active, |v| v.border_b_2().border_color(theme.accent))
-                .child(text)
-                .on_click(cx.listener(move |this, _, _, cx| this.show_tab(target, cx)))
-        };
-        let tabs = h_flex()
-            .h(px(22.))
-            .gap(px(14.))
-            .px(px(4.))
-            .child(tab(
-                "changes-tab-turns",
-                if turns > 0 {
-                    format!("TURNS {turns}")
-                } else {
-                    "FILES".into()
-                },
-                !operations_tab,
-                Tab::Turns,
-            ))
-            .when(has_jj, |v| {
-                v.child(tab(
-                    "changes-tab-operations",
-                    "OPERATIONS".into(),
-                    operations_tab,
-                    Tab::Operations,
-                ))
-            })
-            .child(div().flex_1())
-            .when(!operations_tab, |v| {
-                v.child(
-                    div()
-                        .font_family(MONO)
-                        .text_size(px(10.))
-                        .text_color(theme.faint)
-                        .child(if turns > 0 {
-                            format!("+{added} −{removed}")
-                        } else {
-                            self.files.len().to_string()
-                        }),
-                )
-            });
+        let tabs = work_button("changes-tab-turns", "← Files", theme)
+            .debug_selector(|| "changes-tab-turns".into())
+            .on_click(cx.listener(|this, _, _, cx| this.show_tab(Tab::Turns, cx)));
         let operation = self.operation.and_then(|i| self.operations.get(i));
-        let main_folder = (turns > 0 && !operations_tab)
-            .then(|| {
-                self.controller.read(cx).main_folder().map(|main| {
-                    main.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned()
-                })
-            })
-            .flatten();
         let operation_content = v_flex()
             .id("operations-scroll")
             .size_full()
@@ -829,42 +864,10 @@ impl Render for ChangesView {
                     theme,
                 ))
             });
-        let content=v_flex().id("changes-scroll").track_scroll(&self.scroll).size_full().overflow_y_scroll().p(px(12.))
-            .when_some(self.file(),|v,file|v
-                .child(div().font_family(MONO).text_size(px(11.5)).px(px(8.)).truncate().child(file.path.clone()))
-                .child(h_flex().h(px(26.)).px(px(8.)).gap(px(8.))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(10.5)).text_color(theme.faint).child(file.source.clone()))
-                    .child(button("changes-wrap",if self.document.read(cx).is_wrapped(){"Wrap: on"}else{"Wrap: off"},theme)
-                        .debug_selector(||"changes-wrap".into())
-                        .tooltip(ui::Tooltip::text("Toggle soft wrapping. Copy diff always preserves the original lines."))
-                        .on_click(cx.listener(|this,_,_,cx|{this.document.update(cx,|d,cx|d.toggle_wrap(cx));cx.notify();})))
-                    .child(div().id("changes-top-restore").role(gpui::Role::Button).aria_label("Restore file").text_size(px(10.)).font_family(MONO)
-                        .text_color(if self.can_restore(cx){theme.accent}else{theme.faint}).when(self.can_restore(cx),|v|v.cursor_pointer())
-                        .child("[ RESTORE FILE ]")
-                        .on_click(cx.listener(|this,_,window,cx|this.restore_file(window,cx))))
-                    .child(div().id("changes-top-undo").role(gpui::Role::Button).aria_label(action.clone()).text_size(px(10.)).font_family(MONO)
-                        .text_color(if enabled{theme.accent}else{theme.faint}).when(enabled,|v|v.cursor_pointer())
-                        .child(if action.starts_with("Redo"){"[ REDO TURN ]"}else{"[ UNDO TURN ]"})
-                        .on_click(cx.listener(|this,_,_,cx|this.undo(cx)))))
-                .when(file.turn.is_none(),|v|v.child(note("From Pi’s edit/write tools only, shown in call order—not a combined file diff. Shell or external edits may be missing. No linked snapshot is available, so undo is unavailable.",theme)
-                    .debug_selector(||"tool-reported-explanation".into()).px(px(8.)).mb(px(12.))))
-                .child(div().debug_selector(||"changes-document".into()).py(px(4.)).bg(theme.deep).rounded(px(6.)).child(self.document.clone()))
-                .when(file.turn.is_some(),|v|v.child(note("Old / new line numbers are from the recorded hunks. Copy diff copies the patch without display numbers. Undo applies to the whole recorded turn; Restore file to this file only.",theme).px(px(8.)).mt(px(24.)))))
-            .when(self.files.is_empty(),|v|v.child(empty("No recorded changes","Older sessions have no per-turn snapshots here. jj records future turns; it cannot reconstruct earlier work. Successful edit/write calls are shown when available.",theme)));
-        h_flex().debug_selector(||"changes-view".into()).size_full().items_stretch().min_h_0()
-            .child(v_flex().w(px(240.)).flex_shrink_0().border_r_1().border_color(theme.line).p(px(8.)).gap(px(8.))
-                .child(tabs)
-                .when_some(main_folder, |v, main| v.child(
-                    button("changes-bring-in", format!("Bring turns into {main}"), theme)
-                        .debug_selector(|| "changes-bring-in".into())
-                        .justify_center()
-                        .tooltip(ui::Tooltip::text("This session works in a jj workspace of its own; its turns can go into the main folder."))
-                        .on_click(cx.listener(|this, _, window, cx| this.bring_in(window, cx)))))
-                .child(rows)
-                .when(turns>0 && !operations_tab,|v|v.child(note("Immutable jj snapshots. Earlier or unassociated tool edits appear separately.",theme).px(px(8.))))
-                .when(operations_tab,|v|v.child(note("This project, all sessions: turns, recorded files, git commits made outside, restores.",theme).px(px(8.)))))
-            .when(operations_tab, |v| v.child(div().relative().flex_1().min_w_0().h_full().child(operation_content)))
-            .when(!operations_tab, |v| v.child(div().relative().flex_1().min_w_0().h_full().child(content)
-                .custom_scrollbars(scrollbar("changes-scrollbar",&self.scroll,None),window,cx)))
+        h_flex().debug_selector(|| "changes-view".into()).size_full().items_stretch().min_h_0()
+            .child(v_flex().w(px(240.)).flex_shrink_0().border_r_1().border_color(theme.line)
+                .p(px(8.)).gap(px(8.)).child(tabs).child(rows)
+                .child(note("This project, all sessions: recorded files, turns, external Git commits and restores.",theme).px(px(8.))))
+            .child(div().relative().flex_1().min_w_0().h_full().child(operation_content))
     }
 }

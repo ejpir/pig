@@ -36,6 +36,7 @@ struct Tab {
 pub struct TerminalDrawer {
     cwd: PathBuf,
     shell: pi_terminal::Shell,
+    available: bool,
     tabs: Vec<Tab>,
     active: usize,
     next_id: usize,
@@ -54,6 +55,7 @@ impl TerminalDrawer {
         Self {
             cwd,
             shell: pi_terminal::Shell::System,
+            available: true,
             tabs: Vec::new(),
             active: 0,
             next_id: 0,
@@ -63,6 +65,11 @@ impl TerminalDrawer {
             starting: 0,
             error: None,
         }
+    }
+
+    pub fn unavailable(mut self) -> Self {
+        self.available = false;
+        self
     }
 
     pub fn is_open(&self) -> bool {
@@ -151,6 +158,15 @@ impl TerminalDrawer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.available {
+            self.open = true;
+            self.error = Some(
+                "Remote terminals are not supported yet. Agent bash tools run on the remote host."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
         self.open = true;
         self.starting += 1;
         self.error = None;

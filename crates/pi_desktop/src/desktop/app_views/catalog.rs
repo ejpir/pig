@@ -44,6 +44,9 @@ pub struct CatalogScreen {
     pub inspector: Entity<CatalogInspector>,
 }
 impl CatalogScreen {
+    pub fn search_input(&self, cx: &App) -> Entity<TextInput> {
+        self.view.read(cx).search.clone()
+    }
     pub fn new(
         workspace: Entity<WorkspaceController>,
         search: Entity<TextInput>,

@@ -95,6 +95,7 @@ async fn blocking<T: Send + 'static>(
 }
 
 /// A saved session file, checked by its header before anything touches it.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 fn session_file(path: &Path) -> Result<PathBuf> {
     anyhow::ensure!(path.is_absolute(), "The session path must be absolute");
     let file = path
@@ -118,6 +119,7 @@ fn session_file(path: &Path) -> Result<PathBuf> {
 
 /// Moves a saved session file to the system trash; there is no permanent-delete
 /// fallback. The desktop refuses sessions open in a tab.
+#[cfg(not(target_os = "android"))]
 pub async fn delete(path: String) -> Result<Value> {
     blocking(move || {
         let file = session_file(Path::new(&path))?;

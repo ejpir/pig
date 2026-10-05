@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use gpui::{App, Context, EventEmitter, Task};
 use pi_core::{
     protocol::{Command, ImageContent, SavedSession},
-    session::{RunState, Session, text},
+    session::{RunState, Session, Tool, text},
     transport::{Launch, RpcClient, TransportEvent},
 };
 use pi_jj::{ObjectId as _, Project, Vcs};
@@ -51,6 +51,27 @@ pub enum ContentChange {
     Append(usize),
     Tool(String),
 }
+/// Failed tools belonging to the latest user turn. Earlier failures remain in
+/// their own activity groups and must not color the current result.
+pub(super) fn latest_failed_tools(model: &Session) -> Vec<&Tool> {
+    let start = model
+        .messages
+        .iter()
+        .rposition(|message| message["role"] == "user")
+        .unwrap_or(0);
+    let ids: HashSet<&str> = model.messages[start..]
+        .iter()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .filter(|block| block["type"] == "toolCall")
+        .filter_map(|block| block["id"].as_str())
+        .collect();
+    model
+        .tools
+        .iter()
+        .filter(|tool| tool.is_error && ids.contains(tool.id.as_str()))
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
     Changed(Changes),
@@ -65,6 +86,7 @@ pub enum SessionEvent {
     BranchChanged,
     RevealTool(String),
     ReviewTurn(usize),
+    ReviewFile(String, Option<usize>),
     OpenFork(Box<pi_core::session_actions::Forked>),
     /// Another session is working in this jj workspace: where should this
     /// session's first run work? (design study 05, 04)
@@ -126,6 +148,8 @@ pub struct SessionController {
     summary: Summary,
     demo: bool,
     client: Option<RpcClient>,
+    remote: Option<pi_core::ssh::SshTarget>,
+    remote_starting: bool,
     task: Option<Task<()>>,
     bootstrap: HashSet<String>,
     bootstrap_failed: bool,
@@ -193,7 +217,17 @@ impl SessionController {
         self.demo
     }
     pub fn pid(&self) -> Option<u32> {
-        self.client.as_ref().map(RpcClient::pid)
+        if self.is_remote() {
+            None
+        } else {
+            self.client.as_ref().map(RpcClient::pid)
+        }
+    }
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
+    }
+    pub fn remote_target(&self) -> Option<&pi_core::ssh::SshTarget> {
+        self.remote.as_ref()
     }
     pub fn answer_extension(&mut self, response: Value, cx: &mut Context<Self>) {
         #[cfg(test)]
@@ -226,16 +260,30 @@ impl SessionController {
         self.connected = false;
     }
     pub fn change_count(&self) -> usize {
-        if self.jj.records.is_empty() {
-            self.model.changed_files().len()
-        } else {
-            self.jj.records.len()
-        }
+        self.jj
+            .records
+            .iter()
+            .flat_map(|r| r.diff.iter().map(|f| f.path.as_str()))
+            .chain(
+                self.model
+                    .tools
+                    .iter()
+                    .filter(|t| {
+                        t.finished && !t.is_error && matches!(t.name.as_str(), "edit" | "write")
+                    })
+                    .filter_map(|t| t.args["path"].as_str())
+                    .filter(|p| !p.is_empty()),
+            )
+            .collect::<HashSet<_>>()
+            .len()
     }
     pub fn not_started(&self) -> bool {
         self.model.messages.is_empty() && !self.working()
     }
     pub fn open_in_terminal(&self, command: String, cx: &mut Context<Self>) {
+        if self.is_remote() {
+            return;
+        }
         cx.emit(SessionEvent::OpenInTerminal(command));
     }
     /// Drops a deleted session from this pi's last session list.
@@ -264,6 +312,26 @@ impl SessionController {
         first: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_with_remote(cwd, saved, None, demo, first, cx)
+    }
+    pub fn new_remote(target: pi_core::ssh::SshTarget, cx: &mut Context<Self>) -> Self {
+        Self::new_with_remote(target.identity(), None, Some(target), false, false, cx)
+    }
+    #[cfg(test)]
+    pub fn remote_test(target: pi_core::ssh::SshTarget, cx: &mut Context<Self>) -> Self {
+        let mut controller =
+            Self::new_with_remote(target.identity(), None, Some(target), true, false, cx);
+        controller.demo = false;
+        controller
+    }
+    fn new_with_remote(
+        cwd: PathBuf,
+        saved: Option<SavedSession>,
+        remote: Option<pi_core::ssh::SshTarget>,
+        demo: bool,
+        first: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut model = Session::new(cwd.clone());
         if let Some(saved) = &saved {
             model.preview_title = Some(saved.title().to_owned());
@@ -274,10 +342,12 @@ impl SessionController {
         let mut diagnostics = super::diagnostics::DiagnosticLog::default();
         let mut lsp = None;
         let mut program = None;
-        if !demo {
+        if !demo && remote.is_none() {
             crate::prefs::load_project(cx, &cwd);
         }
-        let client = if demo {
+        let client = if remote.is_some() {
+            None
+        } else if demo {
             super::demo::load(&mut model, saved.as_ref(), first);
             None
         } else {
@@ -322,16 +392,23 @@ impl SessionController {
             }
         };
         let connected = demo || client.is_some();
-        let summary = Self::summarize(&model, connected);
+        let summary = Self::summarize(&model, connected, remote.as_ref());
         let jj = if demo {
             super::demo::workspace_history(&model)
         } else {
             Default::default()
         };
+        let main_folder = if remote.is_none() {
+            main_folder_of(&cwd)
+        } else {
+            None
+        };
         let mut this = Self {
             model,
             summary,
             client,
+            remote,
+            remote_starting: false,
             task: None,
             demo,
             connected,
@@ -353,12 +430,12 @@ impl SessionController {
             working_in: None,
             parallel_ok: false,
             pending_prompt: None,
-            main_folder: main_folder_of(&cwd),
+            main_folder,
         };
         let id = cx.entity_id();
         cx.on_release(move |_, cx| super::parallel::set_working(cx, id, None))
             .detach();
-        if !demo {
+        if !demo && !this.is_remote() {
             match pi_jj::detect(&this.model.cwd) {
                 Vcs::Jj { root } => this.open_jj(root, false, cx),
                 Vcs::Git { root }
@@ -407,14 +484,70 @@ impl SessionController {
             this.command(Command::GetBackendInfo, cx);
             this.jj.links_request = this.command(super::turn_links::request(), cx);
         }
+        if this.is_remote() {
+            this.connect_remote(cx);
+        }
         this
     }
 
-    fn summarize(model: &Session, connected: bool) -> Summary {
+    /// Bootstrap and reconnect never resend a prompt or mutate the remote agent.
+    pub fn connect_remote(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.remote.clone() else {
+            return;
+        };
+        if self.remote_starting || self.connected {
+            return;
+        }
+        self.remote_starting = true;
+        self.bootstrap_failed = false;
+        self.model.error = None;
+        self.client.take();
+        self.publish(Changes::STATUS, cx);
+        cx.spawn(async move |this, cx| {
+            let attached = target.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = RpcClient::spawn_forwarded(pi_core::ssh::install(&attached)?)?;
+                    client.send_record(attached.attach_record())?;
+                    Ok::<_, anyhow::Error>(client)
+                })
+                .await;
+            this.update(cx, |this, cx| match result {
+                Ok(client) => {
+                    this.program = Some(format!("SSH · {}", target.host));
+                    let events = client.events();
+                    this.client = Some(client);
+                    this.task = Some(cx.spawn(async move |this, cx| {
+                        while let Ok(event) = events.recv().await {
+                            if this.update(cx, |this, cx| this.receive(event, cx)).is_err() {
+                                break;
+                            }
+                        }
+                    }));
+                    this.publish(Changes::STATUS, cx);
+                }
+                Err(error) => {
+                    this.remote_starting = false;
+                    this.error(format!("SSH connection failed: {error:#}"), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn summarize(
+        model: &Session,
+        connected: bool,
+        remote: Option<&pi_core::ssh::SshTarget>,
+    ) -> Summary {
         Summary {
             cwd: model.cwd.clone(),
             title: model.title().to_owned(),
-            file: model.state.session_file.clone(),
+            file: remote
+                .map(|target| format!("ssh-session://{}/{}", target.host, target.key))
+                .or_else(|| model.state.session_file.clone()),
             busy: model.busy(),
             connected,
             modified: model
@@ -431,7 +564,7 @@ impl SessionController {
             && self.initial_model.is_none()
     }
     pub fn connecting(&self) -> bool {
-        !self.bootstrap.is_empty() || self.initial_model.is_some()
+        self.remote_starting || !self.bootstrap.is_empty() || self.initial_model.is_some()
     }
     pub fn set_initial_model(&mut self, model: (String, String), cx: &mut Context<Self>) {
         self.initial_model = Some(model);
@@ -471,7 +604,7 @@ impl SessionController {
             let id = cx.entity_id();
             super::parallel::set_working(cx, id, working_in.map(|root| (root, title)));
         }
-        let summary = Self::summarize(&self.model, self.connected);
+        let summary = Self::summarize(&self.model, self.connected, self.remote.as_ref());
         if summary != self.summary {
             self.summary = summary;
             changes |= Changes::SUMMARY;
@@ -799,6 +932,10 @@ impl SessionController {
     }
 
     pub fn fork_session(&mut self, entry_id: String, cx: &mut Context<Self>) {
+        if self.is_remote() {
+            self.notice("Remote forks are not supported yet.", cx);
+            return;
+        }
         if !self.can_navigate() {
             return;
         }
@@ -855,6 +992,19 @@ impl SessionController {
         self.ready() && !self.working() && !self.jj.busy
     }
     pub fn command(&mut self, command: Command, cx: &mut Context<Self>) -> Option<String> {
+        if self.is_remote()
+            && matches!(
+                command,
+                Command::Bash { .. }
+                    | Command::NavigateTree { .. }
+                    | Command::Fork { .. }
+                    | Command::Clone
+                    | Command::ExportHtml { .. }
+            )
+        {
+            self.notice("This operation is not supported for SSH sessions yet.", cx);
+            return None;
+        }
         let exclusive = matches!(
             command,
             Command::NavigateTree { .. }
@@ -1771,6 +1921,60 @@ impl SessionController {
     }
 
     pub fn receive(&mut self, event: TransportEvent, cx: &mut Context<Self>) {
+        if self.is_remote()
+            && let TransportEvent::Record(record) = &event
+        {
+            if record["type"] == "remote_snapshot" {
+                let target = self.remote.as_ref().expect("remote target");
+                if record["version"] != pi_core::ssh::PROTOCOL_VERSION
+                    || record["key"] != target.key
+                {
+                    self.bootstrap_failed = true;
+                    self.remote_starting = false;
+                    self.connected = false;
+                    self.error("Remote session handshake mismatch", cx);
+                    return;
+                }
+                let was_connected = self.connected;
+                match self.model.apply(record) {
+                    Ok(()) => {
+                        self.remote_starting = false;
+                        self.connected = true;
+                        self.remote.as_mut().expect("remote target").session_file =
+                            self.model.state.session_file.clone();
+                        cx.emit(SessionEvent::Content(ContentChange::Reset));
+                        self.publish(
+                            Changes::RUN
+                                | Changes::METADATA
+                                | Changes::QUEUE
+                                | Changes::STATUS
+                                | Changes::CONTEXT
+                                | Changes::CATALOG
+                                | Changes::SUMMARY,
+                            cx,
+                        );
+                        if !was_connected {
+                            self.command(Command::GetCommands, cx);
+                            self.command(Command::GetBackendInfo, cx);
+                            self.command(Command::GetAvailableModels, cx);
+                            self.command(Command::GetActiveTools, cx);
+                        }
+                    }
+                    Err(error) => {
+                        self.bootstrap_failed = true;
+                        self.remote_starting = false;
+                        self.error(error.to_string(), cx);
+                    }
+                }
+                return;
+            }
+            if record["type"] == "remote_error" {
+                self.diagnostics
+                    .push("remote error", &text(record, "error"));
+                self.error(text(record, "error"), cx);
+                return;
+            }
+        }
         let old_run = self.model.run;
         let old_error = self.model.error.clone();
         let old_notice = self.model.notice.clone();
@@ -1878,6 +2082,7 @@ impl SessionController {
                     }
                     "response" if record["success"] == true => {
                         match record["command"].as_str().unwrap_or("") {
+                            "get_messages" if record["data"]["remoteSnapshot"] == true => {}
                             "get_messages"
                                 if self.model.shell_snapshot_appends(&record["data"]) =>
                             {
@@ -1932,6 +2137,12 @@ impl SessionController {
                         self.bootstrap_failed = true;
                     }
                     self.model.error = Some(error.to_string());
+                }
+                if let Some(target) = &mut self.remote
+                    && target.session_file != self.model.state.session_file
+                {
+                    target.session_file = self.model.state.session_file.clone();
+                    changes |= Changes::SUMMARY;
                 }
                 if reanchor {
                     self.reanchor_records();
@@ -2137,6 +2348,7 @@ impl SessionController {
                 );
                 changes |= Changes::DIAGNOSTICS;
                 self.connected = false;
+                self.remote_starting = false;
                 self.view_request = None;
                 self.bootstrap.clear();
                 self.clear_request = None;
@@ -2146,11 +2358,27 @@ impl SessionController {
                         cx.emit(SessionEvent::RecoverImages(images));
                     }
                 }
-                self.model.run = RunState::Idle;
-                self.model.shell = None;
-                self.model.state.is_bash_running = Some(false);
+                if !self.is_remote() {
+                    self.model.run = RunState::Idle;
+                    self.model.shell = None;
+                    self.model.state.is_bash_running = Some(false);
+                }
+                let description = if self.is_remote() {
+                    self.model
+                        .error
+                        .as_ref()
+                        .map(|error| format!("{description}\n{error}"))
+                        .unwrap_or(description)
+                } else {
+                    description
+                };
                 self.model.error = Some(format!(
-                    "{description}{}",
+                    "{description}{}{}",
+                    if self.is_remote() {
+                        "\nRemote work may still be running. Reconnect to check its state; no prompt was retried."
+                    } else {
+                        ""
+                    },
                     if stderr.is_empty() {
                         String::new()
                     } else {

@@ -1,5 +1,6 @@
 mod activity;
 use activity::{Activity, Block, Group};
+pub(super) use activity::{call_kinds, stages_ahead};
 use serde_json::Value;
 use std::borrow::Cow;
 
@@ -25,6 +26,9 @@ pub struct TranscriptView {
     document_subscriptions: HashMap<SharedString, Subscription>,
     /// Images of sent messages, decoded once: by message, block and data length.
     images: HashMap<(usize, usize, usize), std::sync::Arc<gpui::Image>>,
+    /// While follow mode is open, a call opens on its stage instead of inline.
+    follow: Option<Entity<super::follow::FollowView>>,
+    _follow_subscription: Option<Subscription>,
     _subscription: Subscription,
     #[cfg(test)]
     pub renders: usize,
@@ -43,7 +47,9 @@ impl TranscriptView {
         let subscription = cx.subscribe(&controller, |this, _, event, cx| match event {
             SessionEvent::Content(change) => this.content_changed(change, cx),
             SessionEvent::Changed(changes)
-                if changes.intersects(Changes::RUN | Changes::METADATA | Changes::JJ) =>
+                if changes.intersects(
+                    Changes::RUN | Changes::METADATA | Changes::JJ | Changes::QUEUE,
+                ) =>
             {
                 this.refresh_activity(cx);
                 // Run status, thinking-level colors and whether jj actions are
@@ -95,6 +101,8 @@ impl TranscriptView {
             row_keys: HashMap::new(),
             document_subscriptions: HashMap::new(),
             images: HashMap::new(),
+            follow: None,
+            _follow_subscription: None,
             _subscription: subscription,
             #[cfg(test)]
             renders: 0,
@@ -103,6 +111,19 @@ impl TranscriptView {
             #[cfg(test)]
             rows_synced: 0,
         }
+    }
+    pub fn set_follow(
+        &mut self,
+        follow: Entity<super::follow::FollowView>,
+        cx: &mut Context<Self>,
+    ) {
+        self._follow_subscription = Some(cx.observe(&follow, |_, _, cx| cx.notify()));
+        self.follow = Some(follow);
+    }
+    /// The call follow mode is showing, when its stage is open.
+    fn on_stage(&self, cx: &App) -> Option<String> {
+        let follow = self.follow.as_ref()?.read(cx);
+        follow.open.then(|| follow.shown_id(cx)).flatten()
     }
     fn content_changed(&mut self, change: &ContentChange, cx: &mut Context<Self>) {
         let model = self.controller.read(cx).model();
@@ -143,6 +164,27 @@ impl TranscriptView {
                 self.list.remeasure_items(index..index + 1);
             }
         }
+        // A new assistant row moves the turn's file summary off its predecessor;
+        // a tool result can update a summary owned by a later assistant row.
+        if matches!(
+            change,
+            ContentChange::Append(_) | ContentChange::Tool(_) | ContentChange::Message(_)
+        ) {
+            let model = self.controller.read(cx).model();
+            for (index, _) in model
+                .messages
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, m)| m["role"] == "assistant")
+                .take(2)
+            {
+                self.list.remeasure_items(index..index + 1);
+            }
+        }
+        // The stages ahead and the queue below the last row follow every change.
+        let trailing = self.controller.read(cx).model().messages.len().max(1);
+        self.list.remeasure_items(trailing..trailing + 1);
         self.refresh_activity(cx);
         cx.notify();
     }
@@ -174,6 +216,27 @@ impl TranscriptView {
         {
             self.toggle_activity(group.key, cx);
         }
+    }
+    fn featured_tool(&self, id: &str, row: usize, cx: &App) -> bool {
+        let model = self.controller.read(cx).model();
+        model.busy()
+            && model
+                .messages
+                .iter()
+                .rposition(|m| m["role"] == "assistant")
+                == Some(row)
+            && model
+                .tools
+                .iter()
+                .any(|tool| tool.id == id && tool.name == "bash" && !tool.finished)
+    }
+    /// A call's kind as the rail names it, knowing what the agent wrote before it.
+    fn kind(&self, tool: &Tool) -> StepKind {
+        self.activity
+            .kinds
+            .get(&tool.id)
+            .copied()
+            .unwrap_or_else(|| StepKind::of_call(&tool.name, &tool.args, &[]))
     }
     fn activity_open(&self, group: &Group) -> bool {
         self.activity_choices
@@ -271,25 +334,183 @@ impl TranscriptView {
     fn activity_header(&self, group: &Group, cx: &Context<Self>, theme: Theme) -> impl IntoElement {
         let key = group.key;
         let expanded = self.activity_open(group);
-        h_flex()
+        let model = self.controller.read(cx).model();
+        let calls: Vec<&Tool> = group
+            .tools
+            .iter()
+            .filter_map(|id| model.tools.iter().find(|t| &t.id == id))
+            .collect();
+        let latest = self.activity.groups.last().map(|g| g.key) == Some(key);
+        let state = group.node_state(latest);
+        let live = state == NodeState::Live;
+        let plural =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let distinct = |names: &[&str]| {
+            calls
+                .iter()
+                .filter(|t| names.contains(&t.name.as_str()))
+                .map(|t| t.target())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        };
+        let commands: Vec<String> = calls
+            .iter()
+            .filter(|t| t.name == "bash")
+            .map(|t| t.target().lines().next().unwrap_or_default().to_owned())
+            .collect();
+        let (title, detail, mono) = match group.kind.phase() {
+            StepKind::Explore => {
+                let files = distinct(&["read", "ls", "find"]);
+                let searches = calls.iter().filter(|t| t.name == "grep").count();
+                let detail = [
+                    (files > 0).then(|| plural(files, "file", "files")),
+                    (searches > 0).then(|| plural(searches, "search", "searches")),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+                let title = if group.kind == StepKind::Search {
+                    if live { "Searching" } else { "Searched" }
+                } else if live {
+                    "Exploring"
+                } else {
+                    "Explored"
+                };
+                (title.to_owned(), detail, false)
+            }
+            StepKind::Change => {
+                let files = distinct(&["edit", "write"]);
+                let verb = if live { "Changing" } else { "Changed" };
+                (
+                    format!("{verb} {}", plural(files, "file", "files")),
+                    String::new(),
+                    false,
+                )
+            }
+            StepKind::Run | StepKind::Check => {
+                // Checks are named as checks, as the composer's status already does.
+                let verb = match (group.kind == StepKind::Check, live) {
+                    (true, true) => "Checking",
+                    (true, false) => "Checked",
+                    (false, true) => "Running",
+                    (false, false) => "Ran",
+                };
+                match commands.as_slice() {
+                    [command] => (verb.to_owned(), command.clone(), true),
+                    _ => (
+                        verb.to_owned(),
+                        plural(commands.len(), "command", "commands"),
+                        false,
+                    ),
+                }
+            }
+            StepKind::Other => (
+                if live { "Using tools" } else { "Used tools" }.to_owned(),
+                String::new(),
+                false,
+            ),
+            _ => ("Reasoning".to_owned(), String::new(), false),
+        };
+        // A change step totals what its calls reported, as the follow stage does.
+        let counts = (group.kind == StepKind::Change)
+            .then(|| {
+                calls
+                    .iter()
+                    .filter_map(|t| t.diff.as_deref())
+                    .map(crate::presentation::diff_counts)
+                    .fold((0, 0), |(a, r), (x, y)| (a + x, r + y))
+            })
+            .filter(|(added, removed)| added + removed > 0);
+        let hue = group.kind.hue(theme);
+        // The header's status mark: a result only once the run has left the step.
+        let status = (!group.tools.is_empty()
+            && (group.failed > 0 || (!group.live && group.pending == 0)))
+            .then_some(if group.failed > 0 { "failed" } else { "passed" });
+        let node = div()
+            .id(SharedString::from(format!("{}-node", key.selector())))
+            .when_some(status, |node, status| {
+                node.debug_selector(move || format!("{}-{status}", key.selector()))
+            })
+            .child(rail_node(
+                SharedString::from(format!("{}-live", key.selector())),
+                group.kind,
+                state,
+                theme,
+            ));
+        let header = h_flex()
             .id(SharedString::from(key.selector()))
             .debug_selector(move || key.selector())
             .role(Role::Button)
             .aria_label(group.label())
             .aria_expanded(expanded)
             .w_full()
-            .h(px(28.))
-            .my(px(4.))
-            .px(px(8.))
+            .relative()
+            .h(px(32.))
+            .pr(px(10.))
             .gap(px(8.))
-            .rounded(px(4.))
+            .rounded(px(8.))
             .cursor_pointer()
             .hover(move |v| v.bg(theme.hover))
-            .text_size(px(12.))
-            .text_color(if group.failed > 0 {
-                theme.coral
-            } else {
-                theme.muted
+            .text_size(px(13.))
+            // The step the run is in sits on a soft card, tile included.
+            .when(live, |row| {
+                row.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(-RAIL)
+                        .right_0()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(hue.opacity(0.55))
+                        .bg(theme.composer)
+                        .shadow(lift(theme)),
+                )
+            })
+            .child(on_rail(node.into_any_element(), px(5.)))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if group.failed > 0 {
+                        theme.coral
+                    } else {
+                        theme.text
+                    })
+                    .child(title),
+            )
+            .when(!detail.is_empty(), |row| {
+                row.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.muted)
+                        .when(mono, |d| d.font_family(MONO).text_size(px(12.)))
+                        .child(detail),
+                )
+            })
+            .child(div().flex_1())
+            .when(group.failed > 0, |row| {
+                row.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(12.))
+                        .text_color(theme.coral)
+                        .child(format!("{} failed", group.failed)),
+                )
+            })
+            .when_some(counts, |row, (added, removed)| {
+                row.child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .gap(px(4.))
+                        .font_family(MONO)
+                        .text_size(px(11.5))
+                        .child(div().text_color(theme.green).child(format!("+{added}")))
+                        .child(div().text_color(theme.coral).child(format!("−{removed}"))),
+                )
             })
             .child(
                 icon(
@@ -302,33 +523,167 @@ impl TranscriptView {
                 )
                 .size(px(12.)),
             )
-            .when(
-                !group.tools.is_empty()
-                    && (group.failed > 0 || (!group.live && group.pending == 0)),
-                |row| {
-                    let failed = group.failed > 0;
-                    row.child(
-                        icon(
-                            if failed { "warning" } else { "check" },
-                            if failed { theme.coral } else { theme.green },
-                        )
-                        .id(SharedString::from(format!("{}-status", key.selector())))
-                        .debug_selector(move || {
-                            format!(
-                                "{}-{}",
-                                key.selector(),
-                                if failed { "failed" } else { "passed" }
-                            )
-                        })
-                        .size(px(13.)),
-                    )
-                },
-            )
-            .child(group.label())
             .tooltip(ui::Tooltip::text(
                 "Show or hide original tool calls and reasoning. No generated summary.",
             ))
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_activity(key, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_activity(key, cx)));
+        let chips =
+            (!expanded && !calls.is_empty()).then(|| self.step_chips(group, &calls, cx, theme));
+        v_flex()
+            .w_full()
+            .mt(px(2.))
+            .mb(px(if chips.is_some() { 14. } else { 8. }))
+            .gap(px(6.))
+            .child(header)
+            .children(chips)
+    }
+
+    /// What a collapsed step touched, as the study shows it: files read, searches,
+    /// changed files with their counts, commands with their outcome.
+    fn step_chips(
+        &self,
+        group: &Group,
+        calls: &[&Tool],
+        cx: &Context<Self>,
+        theme: Theme,
+    ) -> impl IntoElement {
+        const SHOWN: usize = 8;
+        let key = group.key;
+        let mut seen = HashSet::new();
+        let mut chips = vec![];
+        let mut hidden = 0;
+        for tool in calls {
+            let target = tool.target();
+            let first = target.lines().next().unwrap_or_default().to_owned();
+            let name = std::path::Path::new(&first)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| first.clone());
+            let (glyph, text) = match tool.name.as_str() {
+                "read" | "edit" | "write" => ("file", name),
+                "grep" => {
+                    let path = text(&tool.args, "path");
+                    let pattern = format!("\"{}\"", text(&tool.args, "pattern"));
+                    (
+                        "magnifying_glass",
+                        if path.is_empty() {
+                            pattern
+                        } else {
+                            format!("{pattern} in {path}")
+                        },
+                    )
+                }
+                "bash" => ("terminal", first.clone()),
+                other => ("box", other.to_owned()),
+            };
+            // A file read twice or edited in several calls is one chip.
+            if !seen.insert((tool.name.clone(), first)) {
+                continue;
+            }
+            if chips.len() == SHOWN {
+                hidden += 1;
+                continue;
+            }
+            let id = tool.id.clone();
+            let changed = matches!(tool.name.as_str(), "edit" | "write");
+            let (added, removed) = if changed {
+                calls
+                    .iter()
+                    .filter(|t| matches!(t.name.as_str(), "edit" | "write") && t.target() == target)
+                    .filter_map(|t| t.diff.as_deref())
+                    .map(crate::presentation::diff_counts)
+                    .fold((0, 0), |(a, r), (x, y)| (a + x, r + y))
+            } else {
+                (0, 0)
+            };
+            chips.push(
+                h_flex()
+                    .id(SharedString::from(format!("step-chip-{}", tool.id)))
+                    .debug_selector({
+                        let id = tool.id.clone();
+                        move || format!("step-chip-{id}")
+                    })
+                    .role(Role::Button)
+                    .aria_label(format!("Show {} {target}", tool.name))
+                    .max_w(px(420.))
+                    .h(px(24.))
+                    .px(px(8.))
+                    .gap(px(6.))
+                    .rounded(px(6.))
+                    .bg(if tool.is_error {
+                        theme.tint(theme.coral)
+                    } else {
+                        theme.chip
+                    })
+                    .font_family(MONO)
+                    .text_size(px(11.5))
+                    .text_color(theme.secondary)
+                    .cursor_pointer()
+                    .hover(move |chip| chip.bg(theme.hover))
+                    .tooltip(ui::Tooltip::text(target.clone()))
+                    .child(icon(glyph, self.kind(tool).hue(theme)).size(px(12.)))
+                    .child(div().min_w_0().truncate().child(text))
+                    .when(changed && added + removed > 0, |chip| {
+                        chip.child(div().text_color(theme.green).child(format!("+{added}")))
+                            .when(removed > 0, |chip| {
+                                chip.child(
+                                    div().text_color(theme.coral).child(format!("−{removed}")),
+                                )
+                            })
+                    })
+                    .when(tool.is_error, |chip| {
+                        chip.child(div().text_color(theme.coral).child("failed"))
+                    })
+                    .when(
+                        tool.name == "bash" && tool.finished && !tool.is_error,
+                        |chip| chip.child(icon("check", theme.green).size(px(11.))),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.show_call(key, &id, cx))),
+            );
+        }
+        h_flex()
+            .debug_selector(move || format!("{}-chips", key.selector()))
+            .w_full()
+            .flex_wrap()
+            .gap(px(6.))
+            .children(chips)
+            .when(hidden > 0, |row| {
+                row.child(
+                    div()
+                        .id(SharedString::from(format!("{}-more", key.selector())))
+                        .h(px(24.))
+                        .px(px(8.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(6.))
+                        .text_size(px(11.5))
+                        .text_color(theme.muted)
+                        .cursor_pointer()
+                        .hover(move |more| more.bg(theme.hover))
+                        .child(format!("+{hidden} more"))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_activity(key, cx))),
+                )
+            })
+    }
+
+    /// A chip opens its call: on follow mode's stage when that is open, else inline.
+    fn show_call(&mut self, key: Block, id: &str, cx: &mut Context<Self>) {
+        if let Some(follow) = self.follow.clone().filter(|f| f.read(cx).open) {
+            follow.update(cx, |follow, cx| follow.pin(id.to_owned(), cx));
+            return;
+        }
+        let Some(group) = self.activity.group(key) else {
+            return;
+        };
+        let rows: HashSet<_> = group.blocks.iter().map(|b| b.row).collect();
+        self.activity_choices.insert(key, true);
+        self.expanded.insert(id.to_owned());
+        self.list.pause_following_tail();
+        for row in rows {
+            self.dirty.insert(row);
+            self.list.remeasure_items(row..row + 1);
+        }
+        cx.notify();
     }
     /// What a finished `bash` call changed, when jj took snapshots around it and
     /// it changed anything, and whether that was restored since.
@@ -395,7 +750,8 @@ impl TranscriptView {
         theme: Theme,
     ) -> AnyElement {
         let id = tool.id.clone();
-        let expanded = self.expanded.contains(&id);
+        let featured = self.featured_tool(&id, message, cx);
+        let expanded = featured || self.expanded.contains(&id);
         let busy = self.controller.read(cx).model().busy();
         let color = if tool.is_error {
             theme.coral
@@ -427,6 +783,8 @@ impl TranscriptView {
             None => (target.clone(), 0),
         };
         let group = SharedString::from(format!("tool-row-{}", tool.id));
+        let on_stage = self.on_stage(cx).as_deref() == Some(tool.id.as_str());
+        let kind_hue = self.kind(tool).hue(theme);
         let header = h_flex()
             .id(SharedString::from(format!("tool-{}", tool.id)))
             .group(group.clone())
@@ -437,14 +795,20 @@ impl TranscriptView {
                 let id = tool.id.clone();
                 move || format!("tool-header-{id}")
             })
-            .h(px(24.))
-            .gap(px(8.))
-            .px(px(8.))
+            .h(px(if featured { 32. } else { 24. }))
+            .when(featured, |v| v.relative().top(px(-3.)))
+            .gap(px(if featured { 11. } else { 8. }))
+            .px(px(if featured { 0. } else { 8. }))
             .rounded(px(4.))
             .hover(move |row| row.bg(theme.hover))
             .cursor_pointer()
+            .when(on_stage, |row| row.bg(theme.tint(kind_hue)))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle(&id, message, cx);
+                if let Some(follow) = this.follow.clone().filter(|f| f.read(cx).open) {
+                    follow.update(cx, |follow, cx| follow.pin(id.clone(), cx));
+                } else {
+                    this.toggle(&id, message, cx);
+                }
             }))
             .child(icon(
                 match tool.name.as_str() {
@@ -453,15 +817,17 @@ impl TranscriptView {
                     "grep" => "magnifying_glass",
                     _ => "file",
                 },
-                theme.muted,
+                kind_hue,
             ))
-            .child(
-                div()
-                    .w(px(32.))
-                    .text_size(px(12.))
-                    .text_color(theme.muted)
-                    .child(verb.to_owned()),
-            )
+            .when(!featured, |v| {
+                v.child(
+                    div()
+                        .w(px(32.))
+                        .text_size(px(12.))
+                        .text_color(theme.muted)
+                        .child(verb.to_owned()),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -469,7 +835,7 @@ impl TranscriptView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .font_family(MONO)
-                    .text_size(px(11.5))
+                    .text_size(px(if featured { 13. } else { 11.5 }))
                     .text_color(theme.secondary)
                     .debug_selector({
                         let id = tool.id.clone();
@@ -614,7 +980,7 @@ impl TranscriptView {
                 tool.finished && tool.diff.is_none() && !tool.is_error,
                 |row| row.child(icon("check", theme.green).size(px(13.))),
             )
-            .when(!tool.finished || tool.is_error, |row| {
+            .when((!tool.finished && !featured) || tool.is_error, |row| {
                 row.child(
                     div()
                         .font_family(MONO)
@@ -631,7 +997,9 @@ impl TranscriptView {
             });
         let header = header.child(
             icon(
-                if expanded {
+                if expanded && featured {
+                    "chevron_up"
+                } else if expanded {
                     "chevron_down"
                 } else {
                     "chevron_right"
@@ -653,24 +1021,38 @@ impl TranscriptView {
                 move || format!("tool-details-{id}")
             })
             .w_full()
-            .bg(theme.deep)
-            .rounded(px(4.))
-            .mx(px(8.))
-            .px(px(12.))
-            .py(px(8.))
+            .bg(theme.work_code)
+            .rounded(px(5.))
+            .when(featured, |v| v.min_h(px(106.)))
+            .px(px(16.))
+            .py(px(12.))
             .gap(px(8.));
-        for field in tool_texts(tool) {
+        let mut feature_style = output.clone();
+        feature_style.base_text_style.font_size = px(13.).into();
+        feature_style.base_text_style.line_height = px(28.).into();
+        feature_style.container_style = feature_style
+            .container_style
+            .text_size(px(13.))
+            .line_height(px(28.));
+        feature_style.paragraph_line_height = px(28.).into();
+        feature_style.code_block = feature_style
+            .code_block
+            .clone()
+            .line_height(px(28.))
+            .py(px(0.));
+        let output = if featured { &feature_style } else { output };
+        for field in tool_texts(tool)
+            .into_iter()
+            .filter(|f| !featured || f.part != "command")
+        {
             let shown = shown_output(field.text);
             let selector = format!("tool-{}-{}", tool.id, field.part);
             details = details.child(v_flex().w_full().gap(px(4.))
-                .child(label(field.label, theme).text_color(theme.faint))
+                .when(!featured,|v|v.child(label(field.label, theme).text_color(theme.faint)))
                 .child(div().w_full().debug_selector(move || selector)
                     .child(self.document(tool_text_key(&tool.id, field.part), shown, output, field.copy, None)))
                 .when(shown.len() < field.text.len(), |body| body.child(div().text_size(px(10.)).text_color(theme.faint)
                     .child("Preview limited to 500 lines / 64 KiB. The tool header's copy menu has the full text."))));
-        }
-        if tool.name == "bash" && !tool.finished && busy {
-            details = details.child(div().w(px(7.)).h(px(13.)).rounded(px(1.)).bg(theme.accent));
         }
         body = body.child(details);
         body.into_any_element()
@@ -837,31 +1219,28 @@ impl TranscriptView {
         div()
             .relative()
             .group(group.clone())
-            .rounded(px(8.))
-            .border_1()
-            .border_color(theme.user_line)
-            .bg(theme.user)
-            .px(px(16.))
-            .py(px(9.))
-            .mb(px(2.))
-            .pr(px(64.))
-            // The time stays out of the way until the message is pointed at.
-            .when_some(timestamp, |bubble, timestamp| {
-                bubble.child(
-                    div()
-                        .id(("message-time", index))
-                        .absolute()
-                        .right(px(12.))
-                        .top(px(9.))
-                        .invisible()
-                        .group_hover(group, |time| time.visible())
-                        .font_family(MONO)
-                        .text_size(px(10.))
-                        .text_color(theme.faint)
-                        .aria_label("Message time in UTC")
-                        .child(clock(timestamp)),
-                )
-            })
+            .border_b_1()
+            .border_color(theme.line)
+            .pt(px(8.))
+            .pb(px(20.))
+            .mb(px(4.))
+            .child(
+                h_flex()
+                    .gap(px(16.))
+                    .mb(px(10.))
+                    .text_size(px(12.))
+                    .text_color(theme.muted)
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("You"))
+                    .when_some(timestamp, |row, timestamp| {
+                        row.child(
+                            div()
+                                .id(("message-time", index))
+                                .text_size(px(12.))
+                                .aria_label("Message time in UTC")
+                                .child(clock(timestamp)),
+                        )
+                    }),
+            )
             .child(self.document(
                 doc_key(index, "user"),
                 text,
@@ -1024,12 +1403,32 @@ impl TranscriptView {
         let model = self.controller.read(cx).model();
         let theme = theme(cx);
         let mut prose = markdown_view::style(theme, theme.secondary, window, cx);
-        prose.base_text_style.line_height = px(22.).into();
-        prose.container_style = prose.container_style.line_height(px(22.));
-        prose.paragraph_line_height = px(22.).into();
-        prose.paragraph_spacing = px(12.);
+        prose.base_text_style.font_size = px(15.).into();
+        prose.base_text_style.line_height = px(24.).into();
+        prose.container_style = prose
+            .container_style
+            .text_size(px(15.))
+            .line_height(px(24.));
+        prose.paragraph_line_height = px(24.).into();
+        prose.paragraph_spacing = px(10.);
+        if let Some(headings) = prose.heading_level_styles.as_mut()
+            && let Some(h1) = headings.h1.as_mut()
+        {
+            h1.font_family = Some(SERIF.into());
+            h1.font_size = Some(px(27.).into());
+            h1.font_weight = Some(FontWeight::NORMAL);
+            h1.font_style = Some(gpui::FontStyle::Italic);
+            h1.line_height = Some(px(32.).into());
+        }
         let quiet = markdown_view::style(theme, theme.muted, window, cx);
         let mut request = markdown_view::style(theme, theme.text, window, cx);
+        request.base_text_style.font_size = px(15.).into();
+        request.base_text_style.line_height = px(24.).into();
+        request.container_style = request
+            .container_style
+            .text_size(px(15.))
+            .line_height(px(24.));
+        request.paragraph_line_height = px(24.).into();
         // Mention chips: accent text on Markdown's inline-code chip, not underlined.
         request.link_callback = Some(std::rc::Rc::new(move |url: &str, _: &App| {
             url.starts_with(mentions::LINK_SCHEME)
@@ -1041,41 +1440,17 @@ impl TranscriptView {
         let output = markdown_view::output_style(theme, window, cx);
         let mut content = v_flex().w_full();
         if index >= model.messages.len().max(1) {
-            // pi confirms a run with `agent_start`; show work from the moment Enter is pressed.
-            let open = self.controller.read(cx);
-            if open.working() {
-                content = content.child(
-                    h_flex()
-                        .debug_selector(|| "working".into())
-                        .h(px(28.))
-                        .mt(px(4.))
-                        .px(px(8.))
-                        .gap(px(9.))
-                        .text_size(px(12.))
-                        .italic()
-                        .text_color(theme.muted)
-                        .child(spinner("transcript-working", theme))
-                        .child(match model.run {
-                            pi_core::session::RunState::Compacting => "Compacting…",
-                            pi_core::session::RunState::Retrying => "Retrying…",
-                            _ if model.shell_running() => "Running shell command…",
-                            _ if self.activity.groups.iter().any(|g| g.live && g.pending > 0) => {
-                                "Running tools…"
-                            }
-                            _ if model
-                                .messages
-                                .last()
-                                .and_then(|m| m["content"].as_array())
-                                .and_then(|blocks| blocks.last())
-                                .is_some_and(|b| b["type"] == "thinking") =>
-                            {
-                                "Thinking…"
-                            }
-                            _ => "Working…",
-                        }),
-                );
-            }
-            return content.into_any_element();
+            // Run controls/status have a single home beside the shared composer;
+            // the rail only shows the stages ahead and what is queued next.
+            // Only an agent turn has stages; a shell command or snapshot does not.
+            let running = matches!(
+                model.run,
+                pi_core::session::RunState::Running | pi_core::session::RunState::Retrying
+            );
+            return content
+                .children(running.then(|| self.stages_ahead(model, theme)))
+                .children(self.queued_step(model, theme))
+                .into_any_element();
         }
         if model.messages.is_empty() {
             content = content.child(
@@ -1154,13 +1529,19 @@ impl TranscriptView {
                             .size(px(12.)),
                         )
                         .child(if stopped {
-                            "Stopped".to_owned()
+                            "Run stopped before completion".to_owned()
                         } else {
                             error.to_owned()
                         })
                 });
                 if let Some(blocks) = message["content"].as_array() {
                     for (block_index, block) in blocks.iter().enumerate() {
+                        if block["id"]
+                            .as_str()
+                            .is_some_and(|id| self.featured_tool(id, index, cx))
+                        {
+                            continue;
+                        }
                         if let Some(group) = self.activity.group(Block {
                             row: index,
                             index: block_index,
@@ -1170,10 +1551,17 @@ impl TranscriptView {
                                     row: index,
                                     index: block_index,
                                 })
+                                && !block["id"]
+                                    .as_str()
+                                    .is_some_and(|id| self.featured_tool(id, index, cx))
                             {
                                 content = content.child(self.activity_header(group, cx, theme));
                             }
-                            if !self.activity_open(group) {
+                            if !self.activity_open(group)
+                                && !block["id"]
+                                    .as_str()
+                                    .is_some_and(|id| self.featured_tool(id, index, cx))
+                            {
                                 continue;
                             }
                             // Automatic live expansion shows calls, not repeated thinking rows.
@@ -1190,15 +1578,37 @@ impl TranscriptView {
                         match block["type"].as_str() {
                             Some("text") if text(block, "text").trim().is_empty() => {}
                             Some("text") => {
+                                let hand_off = self.activity.hand_offs.contains(&Block {
+                                    row: index,
+                                    index: block_index,
+                                });
                                 content = content.child(
                                     div()
+                                        .relative()
                                         .w_full()
+                                        .max_w(px(760.))
                                         .debug_selector(move || {
                                             format!("assistant-prose-{index}-{block_index}")
                                         })
-                                        .px(px(8.))
-                                        .mt(px(8.))
-                                        .mb(px(12.))
+                                        .mt(px(6.))
+                                        .mb(px(20.))
+                                        // The template's last stage, filled by the turn's closing text.
+                                        .when(hand_off, |prose| {
+                                            prose.child(
+                                                on_rail(
+                                                    stage_node(
+                                                        "hand-off",
+                                                        Stage::HandOff,
+                                                        NodeState::Done,
+                                                        theme,
+                                                    ),
+                                                    px(1.),
+                                                )
+                                                .debug_selector(move || {
+                                                    format!("rail-handoff-{index}")
+                                                }),
+                                            )
+                                        })
                                         .child(self.markdown(
                                             doc_key(index, &format!("text-{block_index}")),
                                             &text(block, "text"),
@@ -1397,108 +1807,318 @@ impl TranscriptView {
             _ => {}
         }
         let controller = self.controller.read(cx);
-        let idle = controller.jj_idle() && controller.jj().project.is_some();
+        let files = super::changes::thread_files(controller, index);
+        if !files.is_empty() {
+            let changed_label = format!(
+                "{} changed file{}",
+                files.len(),
+                if files.len() == 1 { "" } else { "s" }
+            );
+            content = content.child(
+                v_flex()
+                    .debug_selector(move || format!("thread-result-card-{index}"))
+                    .w_full()
+                    .max_w(px(980.))
+                    .mt(px(8.))
+                    .overflow_hidden()
+                    .rounded(px(8.))
+                    .bg(theme.composer)
+                    .border_1()
+                    .border_color(theme.line)
+                    .shadow(lift(theme))
+                    .child(
+                        h_flex()
+                            .h(px(43.))
+                            .px(px(16.))
+                            .justify_between()
+                            .text_size(px(13.))
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(changed_label))
+                            .child(
+                                h_flex()
+                                    .id(("review-turn-files", index))
+                                    .role(Role::Button)
+                                    .h(px(30.))
+                                    .text_size(px(12.))
+                                    .text_color(theme.accent)
+                                    .cursor_pointer()
+                                    .child("Open review →")
+                                    .hover(move |v| v.text_color(theme.text))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.controller.update(cx, |_, cx| {
+                                            cx.emit(SessionEvent::ReviewFile(String::new(), None))
+                                        })
+                                    })),
+                            ),
+                    )
+                    .children(files.into_iter().enumerate().map(|(file_index, file)| {
+                        let path = file.path.clone();
+                        let turn = file.turn;
+                        div().border_t_1().border_color(theme.line).child(
+                            grouped_changed_file_row(
+                                ("thread-file", index * 10000 + file_index),
+                                &file.path,
+                                file.added,
+                                file.removed,
+                                theme,
+                            )
+                            .debug_selector(move || format!("thread-file-{index}-{file_index}"))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.controller.update(cx, |_, cx| {
+                                        cx.emit(SessionEvent::ReviewFile(path.clone(), turn));
+                                    })
+                                },
+                            )),
+                        )
+                    })),
+            );
+        }
+        let failed = super::session::latest_failed_tools(model);
+        let latest_assistant = model
+            .messages
+            .iter()
+            .rposition(|message| message["role"] == "assistant");
+        if latest_assistant == Some(index) && !controller.working() && !failed.is_empty() {
+            let count = failed.len();
+            let id = failed[0].id.clone();
+            content = content.child(
+                h_flex()
+                    .debug_selector(|| "thread-result-issue".into())
+                    .w_full()
+                    .max_w(px(980.))
+                    .h(px(44.))
+                    .mt(px(20.))
+                    .px(px(12.))
+                    .gap(px(10.))
+                    .rounded(px(6.))
+                    .bg(theme.queue)
+                    .border_1()
+                    .border_color(theme.queue_line)
+                    .text_size(px(13.))
+                    .child(icon("warning", theme.coral).size(px(14.)))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!(
+                        "Completed with {count} issue{}",
+                        if count == 1 { "" } else { "s" }
+                    )))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.))
+                            .text_color(theme.muted)
+                            .child(if count == 1 {
+                                "One tool call failed".to_owned()
+                            } else {
+                                format!("{count} tool calls failed")
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .id("review-failed-tool")
+                            .debug_selector(|| "review-failed-tool".into())
+                            .role(Role::Button)
+                            .h(px(30.))
+                            .cursor_pointer()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(12.))
+                            .text_color(theme.accent)
+                            .child("Review failure  →")
+                            .hover(move |action| action.text_color(theme.text))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.controller.update(cx, |controller, cx| {
+                                    controller.reveal_tool(id.clone(), cx)
+                                });
+                            })),
+                    ),
+            );
+        }
+        for tool in model.tools.iter().filter(|tool| {
+            self.featured_tool(&tool.id, index, cx)
+                && message["content"]
+                    .as_array()
+                    .is_some_and(|blocks| blocks.iter().any(|b| b["id"].as_str() == Some(&tool.id)))
+        }) {
+            // Without its own header, the running call is the step on the rail.
+            let headless = self.activity.groups.iter().any(|group| {
+                let key = &model.messages[group.key.row]["content"][group.key.index];
+                key["id"].as_str() == Some(&tool.id)
+            });
+            content = content.child(
+                div()
+                    .relative()
+                    .mt(px(22.))
+                    .mb(px(12.))
+                    .when(headless, |step| {
+                        step.child(on_rail(
+                            rail_node(
+                                SharedString::from(format!("featured-node-{}", tool.id)),
+                                self.kind(tool),
+                                NodeState::Live,
+                                theme,
+                            ),
+                            px(1.),
+                        ))
+                    })
+                    .child(self.tool(index, tool, &output, cx, theme)),
+            );
+        }
+        // Retain a nonvisual anchor for restored turn links. Undo/redo and file
+        // restore now live in Changes instead of duplicating revision controls here.
         for (record_index, record) in controller.jj().records.iter().enumerate() {
             if record.anchored && record.after_message == index {
-                content = content.child(turn_line(record_index, record, idle, cx, theme));
+                content = content.child(
+                    div()
+                        .debug_selector(move || format!("jj-turn-{record_index}"))
+                        .h(px(1.))
+                        .invisible()
+                        .child(record.files_label()),
+                );
             }
         }
-        content.into_any_element()
+        if message["role"] != "assistant" {
+            return content.into_any_element();
+        }
+        div()
+            .debug_selector(move || format!("rail-row-{index}"))
+            .relative()
+            .w_full()
+            .pl(RAIL)
+            .child(content)
+            .into_any_element()
     }
-}
 
-/// One quiet line under a turn that changed files: its jj change and counts,
-/// with Undo on hover; once undone, what was restored and Redo.
-fn turn_line(
-    index: usize,
-    record: &super::jj::TurnRecord,
-    idle: bool,
-    cx: &Context<TranscriptView>,
-    theme: Theme,
-) -> AnyElement {
-    let group = SharedString::from(format!("jj-turn-{index}"));
-    let row = h_flex()
-        .group(group.clone())
-        .debug_selector(move || format!("jj-turn-{index}"))
-        .h(px(26.))
-        .mt(px(2.))
-        .mb(px(12.))
-        .rounded(px(5.))
-        .hover(move |row| row.bg(theme.hover))
-        .px(px(8.))
-        .gap(px(8.))
-        .font_family(MONO)
-        .text_size(px(10.5))
-        .text_color(theme.faint);
-    let action = |id: &'static str, name: &'static str, glyph: &'static str| {
-        button((id, index), name, theme)
-            .h(px(20.))
-            .child(icon(glyph, theme.muted).size(px(12.)))
-            .flex_row_reverse()
-    };
-    match &record.undone {
-        None => row
-            .child(icon("git_commit", theme.faint).size(px(12.)))
-            .child(record.short.clone())
-            .child(record.files_label())
-            .child(
-                div()
-                    .text_color(theme.green)
-                    .child(format!("+{}", record.added)),
-            )
-            .child(
-                div()
-                    .text_color(theme.coral)
-                    .child(format!("−{}", record.removed)),
-            )
-            .child(div().flex_1())
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .invisible()
-                    .group_hover(group, |style| style.visible())
-                    .child(
-                        action("jj-diff", "Diff", "git_commit").on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                this.controller
-                                    .update(cx, |controller, cx| controller.review_turn(index, cx));
-                            },
-                        )),
-                    )
-                    .when(idle, |v| {
-                        v.child(action("jj-undo", "Undo turn", "undo").on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                this.controller
-                                    .update(cx, |controller, cx| controller.undo_turn(index, cx))
-                            },
-                        )))
+    /// The rest of the template while a turn runs: dashed tiles for the stages its
+    /// calls have not reached, painted before any work arrives. Each disappears
+    /// as the real step that fills it lands above.
+    fn stages_ahead(&self, model: &Session, theme: Theme) -> impl IntoElement {
+        let queued = !model.follow_up.is_empty();
+        v_flex()
+            .debug_selector(|| "rail-ahead".into())
+            .w_full()
+            .pl(RAIL)
+            .pb(px(4.))
+            .children(
+                activity::stages_ahead(model)
+                    .into_iter()
+                    .map(|(stage, state)| {
+                        let live = state == NodeState::Live;
+                        let purpose = match stage {
+                            Stage::Understand if live => "Thinking it through",
+                            Stage::HandOff if queued => "Summary, then your queued follow-up",
+                            stage => stage.purpose(),
+                        };
+                        h_flex()
+                            .debug_selector(move || format!("rail-plan-{}", stage.slug()))
+                            .relative()
+                            .w_full()
+                            .h(px(32.))
+                            .gap(px(8.))
+                            .text_size(px(13.))
+                            .child(on_rail(
+                                stage_node(
+                                    SharedString::from(format!("rail-plan-{}", stage.slug())),
+                                    stage,
+                                    state,
+                                    theme,
+                                ),
+                                px(5.),
+                            ))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if live { theme.text } else { theme.muted })
+                                    .child(stage.title()),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme.faint)
+                                    .child(purpose),
+                            )
                     }),
             )
-            .into_any_element(),
-        Some(_) => row
-            .child(icon("undo", theme.muted).size(px(12.)))
-            .child(
-                div()
-                    .font_family(SANS)
-                    .text_size(px(12.))
-                    .text_color(theme.muted)
-                    .child("Turn undone"),
-            )
-            .child(format!(
-                "· {} restored, change {} abandoned",
-                record.files_label(),
-                record.short
-            ))
-            .child(div().flex_1())
-            .when(idle, |row| {
-                row.child(action("jj-redo", "Redo", "redo").on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        this.controller
-                            .update(cx, |controller, cx| controller.redo_turn(index, cx))
-                    },
-                )))
-            })
-            .into_any_element(),
+    }
+
+    /// Queued messages are the rail's future: a dashed node after the last step.
+    fn queued_step(&self, model: &Session, theme: Theme) -> Option<AnyElement> {
+        let (label, first, count) = if let Some(first) = model.steering.first() {
+            ("Steer", first, model.steering.len() + model.follow_up.len())
+        } else {
+            ("Next", model.follow_up.first()?, model.follow_up.len())
+        };
+        let first = first.lines().next().unwrap_or_default().to_owned();
+        Some(
+            div()
+                .debug_selector(|| "rail-queued".into())
+                .relative()
+                .w_full()
+                .pl(RAIL)
+                .pt(px(4.))
+                .pb(px(8.))
+                .child(
+                    h_flex()
+                        .relative()
+                        .w_full()
+                        .max_w(px(980.))
+                        .h(px(40.))
+                        .px(px(12.))
+                        .gap(px(10.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_dashed()
+                        .border_color(theme.line_strong)
+                        .text_size(px(13.))
+                        .child(on_rail(
+                            rail_node(
+                                "rail-queued-node",
+                                StepKind::Reasoning,
+                                NodeState::Queued,
+                                theme,
+                            ),
+                            px(8.),
+                        ))
+                        .child(
+                            div()
+                                .font_family(MONO)
+                                .text_size(px(11.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.amber)
+                                .child(label.to_uppercase()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.secondary)
+                                .child(first),
+                        )
+                        .when(count > 1, |row| {
+                            row.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme.muted)
+                                    .child(format!("+{} more", count - 1)),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .font_family(MONO)
+                                .text_size(px(11.))
+                                .text_color(theme.muted)
+                                .child(if label == "Steer" {
+                                    "delivered after the current tool"
+                                } else {
+                                    "sent when this run ends"
+                                }),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 }
 
@@ -1520,10 +2140,10 @@ impl Render for TranscriptView {
             .id("transcript")
             .size_full()
             .pl(px(24.))
-            .pr(px(20.))
+            .pr(WORK_GUTTER)
             .child(content)
             .custom_scrollbars(
-                Scrollbars::always_visible(ScrollAxes::Vertical)
+                Scrollbars::new(ScrollAxes::Vertical)
                     .id("transcript-scrollbar")
                     .tracked_scroll_handle(&self.list),
                 window,

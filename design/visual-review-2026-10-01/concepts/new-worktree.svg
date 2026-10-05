@@ -1,0 +1,364 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1344" height="740" viewBox="0 0 1344 740">
+<title>Pi Desktop — proposed design, not an app screenshot</title>
+<style>
+@font-face {font-family:Plex;src:url('../../../assets/fonts/IBMPlexSans-Regular.ttf')}
+@font-face {font-family:Plex;src:url('../../../assets/fonts/IBMPlexSans-SemiBold.ttf');font-weight:600}
+@font-face {font-family:Commit;src:url('../../../assets/fonts/CommitMono-Regular.otf')}
+text {font-family:Plex,sans-serif}
+</style>
+<svg xmlns="http://www.w3.org/2000/svg" width="1344" height="740" viewBox="0 0 1344 740">
+<title>Pi Desktop — proposed design, not an app screenshot</title>
+<style>
+@font-face {font-family:Plex;src:url('../../../assets/fonts/IBMPlexSans-Regular.ttf')}
+@font-face {font-family:Plex;src:url('../../../assets/fonts/IBMPlexSans-SemiBold.ttf');font-weight:600}
+@font-face {font-family:Commit;src:url('../../../assets/fonts/CommitMono-Regular.otf')}
+text {font-family:Plex,sans-serif}
+</style>
+<rect x="0" y="0" width="1344" height="740" rx="0" fill="#faf9f7" />
+<rect x="0" y="36" width="216" height="680" rx="0" fill="#f2efeb" />
+<rect x="0" y="0" width="1344" height="36" rx="0" fill="#ebe7e4" />
+<path d="M0 35.5 L1344 35.5" stroke="#ded8d1" stroke-width="1"/>
+<path d="M215.5 36 L215.5 716" stroke="#ded8d1" stroke-width="1"/>
+<svg x="14" y="10" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect opacity="0.8" width="5" height="12" rx="2" transform="matrix(-1 0 0 1 7 2)" fill="#6b645d"/>
+<path d="M7 2V14" stroke="#6b645d" stroke-width="1.2"/>
+<rect x="2" y="2" width="12" height="12" rx="1.5" stroke="#6b645d" stroke-width="1.2"/>
+</svg>
+
+<svg x="46" y="10" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path opacity="0.1" d="M3 7.31034C3 4.92981 4.92981 3 7.31034 3C9.6909 3 11.6207 4.92981 11.6207 7.31034C11.6207 9.6909 9.6909 11.6207 7.31034 11.6207C4.92981 11.6207 3 9.6909 3 7.31034Z" fill="#6b645d"/>
+<path d="M13 13L10.4138 10.4138M3 7.31034C3 4.92981 4.92981 3 7.31034 3C9.6909 3 11.6207 4.92981 11.6207 7.31034C11.6207 9.6909 9.6909 11.6207 7.31034 11.6207C4.92981 11.6207 3 9.6909 3 7.31034Z" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<svg x="1284" y="10" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M3.33325 8H12.6666" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M8 3.33333V12.6667" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<svg x="1316" y="10" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect opacity="0.8" width="5" height="12" rx="2" transform="matrix(-1 0 0 1 14 2)" fill="#6b645d"/>
+<path d="M9 2V14" stroke="#6b645d" stroke-width="1.2"/>
+<rect x="2" y="2" width="12" height="12" rx="1.5" stroke="#6b645d" stroke-width="1.2"/>
+</svg>
+
+<svg x="16" y="54" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.15186 6.47321L7.99258 10.1696L11.8483 6.47321" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="34" y="64" fill="#6b645d" font-size="12" font-weight="600" text-anchor="start" style="">Open</text>
+<text x="196" y="64" fill="#6b645d" font-size="12" font-weight="400" text-anchor="end" style="">1</text>
+<rect x="8" y="78" width="200" height="32" rx="6" fill="#e7e3de" />
+<circle cx="23" cy="94" r="3" fill="#4b607c"/>
+<text x="38" y="98" fill="#252f3d" font-size="13" font-weight="600" text-anchor="start" style="">Qwen signatures</text>
+<text x="196" y="98" fill="#6b645d" font-size="11" font-weight="400" text-anchor="end" style="">pi</text>
+<svg x="16" y="130" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.15186 6.47321L7.99258 10.1696L11.8483 6.47321" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="34" y="140" fill="#6b645d" font-size="12" font-weight="600" text-anchor="start" style="">Projects</text>
+<svg x="181" y="130" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M3.33325 8H12.6666" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M8 3.33333V12.6667" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<svg x="16" y="162" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.15186 6.47321L7.99258 10.1696L11.8483 6.47321" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<svg x="34" y="160" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.41707 12.4786H6.20854H11.5829C12.5724 12.4786 13.3744 11.6766 13.3744 10.6872V7.55212V7.10426C13.3744 6.11486 12.5724 5.3128 11.5829 5.3128H9.63778C9.16265 5.3128 8.70699 5.12406 8.37102 4.78808L7.62898 4.04604C7.29301 3.71007 6.83735 3.52133 6.36222 3.52133H4.41707C3.42768 3.52133 2.62561 4.3234 2.62561 5.3128V10.6872C2.62561 11.6766 3.42768 12.4786 4.41707 12.4786Z" stroke="#6b645d" stroke-width="1.2"/>
+</svg>
+
+<text x="60" y="174" fill="#252f3d" font-size="13" font-weight="600" text-anchor="start" style="">pi</text>
+<text x="195" y="174" fill="#6b645d" font-size="12" font-weight="400" text-anchor="end" style="">7</text>
+<svg x="37" y="194" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.17279 8.26346C4.87566 8.62402 5.68419 8.72168 6.4527 8.53885C7.2212 8.35601 7.89913 7.90471 8.36433 7.26626C8.82953 6.62781 9.0514 5.8442 8.98996 5.05664C8.92852 4.26908 8.58781 3.52936 8.02922 2.97078C7.47064 2.41219 6.73092 2.07148 5.94336 2.01004C5.1558 1.9486 4.37219 2.17047 3.73374 2.63567C3.09529 3.10087 2.64399 3.7788 2.46115 4.5473C2.27832 5.31581 2.37598 6.12435 2.73654 6.82721L2 9L4.17279 8.26346Z" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M7.07168 11C7.16761 11.4537 7.35843 11.8857 7.63567 12.2662C8.10087 12.9047 8.7788 13.356 9.5473 13.5388C10.3158 13.7217 11.1243 13.624 11.8272 13.2634L14 14L13.2635 11.8272C13.624 11.1243 13.7217 10.3158 13.5388 9.54728C13.356 8.77877 12.9047 8.10084 12.2663 7.63564C11.8858 7.3584 11.4537 7.16759 11 7.07166" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="60" y="206" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">Mistral thinking</text>
+<text x="197" y="206" fill="#6b645d" font-size="11" font-weight="400" text-anchor="end" style="">2h</text>
+<svg x="37" y="226" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.17279 8.26346C4.87566 8.62402 5.68419 8.72168 6.4527 8.53885C7.2212 8.35601 7.89913 7.90471 8.36433 7.26626C8.82953 6.62781 9.0514 5.8442 8.98996 5.05664C8.92852 4.26908 8.58781 3.52936 8.02922 2.97078C7.47064 2.41219 6.73092 2.07148 5.94336 2.01004C5.1558 1.9486 4.37219 2.17047 3.73374 2.63567C3.09529 3.10087 2.64399 3.7788 2.46115 4.5473C2.27832 5.31581 2.37598 6.12435 2.73654 6.82721L2 9L4.17279 8.26346Z" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M7.07168 11C7.16761 11.4537 7.35843 11.8857 7.63567 12.2662C8.10087 12.9047 8.7788 13.356 9.5473 13.5388C10.3158 13.7217 11.1243 13.624 11.8272 13.2634L14 14L13.2635 11.8272C13.624 11.1243 13.7217 10.3158 13.5388 9.54728C13.356 8.77877 12.9047 8.10084 12.2663 7.63564C11.8858 7.3584 11.4537 7.16759 11 7.07166" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="60" y="238" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">Kimi K3 default</text>
+<text x="197" y="238" fill="#6b645d" font-size="11" font-weight="400" text-anchor="end" style="">5h</text>
+<svg x="37" y="258" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.17279 8.26346C4.87566 8.62402 5.68419 8.72168 6.4527 8.53885C7.2212 8.35601 7.89913 7.90471 8.36433 7.26626C8.82953 6.62781 9.0514 5.8442 8.98996 5.05664C8.92852 4.26908 8.58781 3.52936 8.02922 2.97078C7.47064 2.41219 6.73092 2.07148 5.94336 2.01004C5.1558 1.9486 4.37219 2.17047 3.73374 2.63567C3.09529 3.10087 2.64399 3.7788 2.46115 4.5473C2.27832 5.31581 2.37598 6.12435 2.73654 6.82721L2 9L4.17279 8.26346Z" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M7.07168 11C7.16761 11.4537 7.35843 11.8857 7.63567 12.2662C8.10087 12.9047 8.7788 13.356 9.5473 13.5388C10.3158 13.7217 11.1243 13.624 11.8272 13.2634L14 14L13.2635 11.8272C13.624 11.1243 13.7217 10.3158 13.5388 9.54728C13.356 8.77877 12.9047 8.10084 12.2663 7.63564C11.8858 7.3584 11.4537 7.16759 11 7.07166" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="60" y="270" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">Discount jev</text>
+<text x="197" y="270" fill="#6b645d" font-size="11" font-weight="400" text-anchor="end" style="">6h</text>
+<text x="60" y="302" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">3 more saved sessions</text>
+<svg x="16" y="325" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<svg x="34" y="323" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.41707 12.4786H6.20854H11.5829C12.5724 12.4786 13.3744 11.6766 13.3744 10.6872V7.55212V7.10426C13.3744 6.11486 12.5724 5.3128 11.5829 5.3128H9.63778C9.16265 5.3128 8.70699 5.12406 8.37102 4.78808L7.62898 4.04604C7.29301 3.71007 6.83735 3.52133 6.36222 3.52133H4.41707C3.42768 3.52133 2.62561 4.3234 2.62561 5.3128V10.6872C2.62561 11.6766 3.42768 12.4786 4.41707 12.4786Z" stroke="#6b645d" stroke-width="1.2"/>
+</svg>
+
+<text x="60" y="337" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">zed</text>
+<svg x="16" y="357" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<svg x="34" y="355" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.41707 12.4786H6.20854H11.5829C12.5724 12.4786 13.3744 11.6766 13.3744 10.6872V7.55212V7.10426C13.3744 6.11486 12.5724 5.3128 11.5829 5.3128H9.63778C9.16265 5.3128 8.70699 5.12406 8.37102 4.78808L7.62898 4.04604C7.29301 3.71007 6.83735 3.52133 6.36222 3.52133H4.41707C3.42768 3.52133 2.62561 4.3234 2.62561 5.3128V10.6872C2.62561 11.6766 3.42768 12.4786 4.41707 12.4786Z" stroke="#6b645d" stroke-width="1.2"/>
+</svg>
+
+<text x="60" y="369" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">minivm</text>
+<svg x="18" y="391" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M3.33325 8H12.6666" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M8 3.33333V12.6667" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="44" y="404" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">Open folder…</text>
+<path d="M16 570 L200 570" stroke="#ded8d1" stroke-width="1"/>
+<svg x="20" y="588" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M13.5 8H9.5" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M13.5 4L6.5 4" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M13.5 12H9.5" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M3 3.5V6.33333C3 7.25 3.72 8 4.6 8H7" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M3 6V10.5C3 11.325 3.72 12 4.6 12H7" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="46" y="601" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">All Sessions</text>
+<svg x="20" y="620" width="16" height="16" xmlns="http://www.w3.org/2000/svg" fill="none"><path stroke="#6b645d" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.2" d="M6.762 10.1a1.2 1.2 0 0 0-.862-.862l-3.68-.95a.3.3 0 0 1 0-.577l3.68-.95a1.2 1.2 0 0 0 .862-.86l.95-3.682a.3.3 0 0 1 .577 0L9.238 5.9a1.2 1.2 0 0 0 .862.862l3.68.949a.3.3 0 0 1 0 .578l-3.68.949a1.2 1.2 0 0 0-.862.862l-.95 3.68a.3.3 0 0 1-.577 0l-.949-3.68Z"/></svg>
+
+<text x="46" y="633" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">Models</text>
+<svg x="20" y="652" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M13.3996 5.59852C13.3994 5.3881 13.3439 5.18144 13.2386 4.99926C13.1333 4.81709 12.9819 4.66581 12.7997 4.56059L8.59996 2.16076C8.41755 2.05544 8.21063 2 8 2C7.78937 2 7.58246 2.05544 7.40004 2.16076L3.20033 4.56059C3.0181 4.66581 2.86674 4.81709 2.76144 4.99926C2.65613 5.18144 2.60059 5.3881 2.60037 5.59852V10.3982C2.60059 10.6086 2.65613 10.8153 2.76144 10.9975C2.86674 11.1796 3.0181 11.3309 3.20033 11.4361L7.40004 13.836C7.58246 13.9413 7.78937 13.9967 8 13.9967C8.21063 13.9967 8.41755 13.9413 8.59996 13.836L12.7997 11.4361C12.9819 11.3309 13.1333 11.1796 13.2386 10.9975C13.3439 10.8153 13.3994 10.6086 13.3996 10.3982V5.59852Z" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M2.78033 4.99857L7.99998 7.99836L13.2196 4.99857" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M8 13.9979V7.99829" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="46" y="665" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">Resources</text>
+<svg x="20" y="684" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M8.13418 2H7.86581C7.54229 2 7.23202 2.12643 7.00326 2.35148C6.7745 2.57652 6.64597 2.88174 6.64597 3.2V3.308C6.64576 3.51843 6.58929 3.72512 6.48224 3.9073C6.37518 4.08949 6.22132 4.24078 6.03605 4.346L5.77379 4.496C5.58836 4.60132 5.378 4.65677 5.16387 4.65677C4.94974 4.65677 4.73939 4.60132 4.55395 4.496L4.46246 4.44799C4.18255 4.28915 3.85 4.24606 3.53783 4.32819C3.22565 4.4103 2.95935 4.61092 2.79738 4.886L2.6632 5.11399C2.50174 5.38936 2.45793 5.7165 2.5414 6.02359C2.62488 6.33069 2.82881 6.59266 3.10844 6.75199L3.19993 6.81199C3.38429 6.9167 3.53759 7.06704 3.64459 7.24809C3.75159 7.42914 3.80857 7.63457 3.80985 7.84399V8.14999C3.8107 8.36144 3.75475 8.56937 3.64764 8.7527C3.54054 8.93602 3.38609 9.08826 3.19993 9.19399L3.10844 9.24799C2.82881 9.40732 2.62488 9.66929 2.5414 9.97638C2.45793 10.2835 2.50174 10.6106 2.6632 10.886L2.79738 11.114C2.95935 11.3891 3.22565 11.5897 3.53783 11.6718C3.85 11.7539 4.18255 11.7109 4.46246 11.552L4.55395 11.5039C4.73939 11.3986 4.94974 11.3432 5.16387 11.3432C5.378 11.3432 5.58836 11.3986 5.77379 11.5039L6.03605 11.654C6.22132 11.7592 6.37518 11.9105 6.48224 12.0927C6.58929 12.2749 6.64576 12.4815 6.64597 12.6919V12.7999C6.64597 13.1183 6.7745 13.4235 7.00326 13.6486C7.23202 13.8735 7.54229 14 7.86581 14H8.13418C8.4577 14 8.76797 13.8735 8.99674 13.6486C9.22551 13.4235 9.35402 13.1183 9.35402 12.7999V12.6919C9.35424 12.4815 9.4107 12.2749 9.51776 12.0927C9.62481 11.9105 9.77869 11.7592 9.96397 11.654L10.2262 11.5039C10.4116 11.3986 10.622 11.3432 10.8361 11.3432C11.0503 11.3432 11.2606 11.3986 11.4461 11.5039L11.5376 11.552C11.8174 11.7109 12.15 11.7539 12.4621 11.6718C12.7744 11.5897 13.0406 11.3891 13.2026 11.114L13.3368 10.88C13.4982 10.6047 13.5421 10.2775 13.4586 9.97035C13.3751 9.66329 13.1712 9.40131 12.8916 9.24199L12.8001 9.19399C12.6139 9.08826 12.4595 8.93602 12.3524 8.7527C12.2452 8.56937 12.1893 8.36144 12.1901 8.14999V7.84999C12.1893 7.63854 12.2452 7.43062 12.3524 7.24729C12.4595 7.06396 12.6139 6.91172 12.8001 6.80599L12.8916 6.75199C13.1712 6.59266 13.3751 6.33069 13.4586 6.02359C13.5421 5.7165 13.4982 5.38936 13.3368 5.11399L13.2026 4.886C13.0406 4.61092 12.7744 4.4103 12.4621 4.32819C12.15 4.24606 11.8174 4.28915 11.5376 4.44799L11.4461 4.496C11.2606 4.60132 11.0503 4.65677 10.8361 4.65677C10.622 4.65677 10.4116 4.60132 10.2262 4.496L9.96397 4.346C9.77869 4.24078 9.62481 4.08949 9.51776 3.9073C9.4107 3.72512 9.35424 3.51843 9.35402 3.308V3.2C9.35402 2.88174 9.22551 2.57652 8.99674 2.35148C8.76797 2.12643 8.4577 2 8.13418 2Z" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M8 10C9.10457 10 10 9.10457 10 8C10 6.89543 9.10457 6 8 6C6.89543 6 6 6.89543 6 8C6 9.10457 6.89543 10 8 10Z" fill="#6b645d"/>
+</svg>
+
+<text x="46" y="697" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">Settings</text>
+<rect x="0" y="716" width="1344" height="24" rx="0" fill="#ebe7e4" />
+<path d="M0 716 L1344 716" stroke="#ded8d1" stroke-width="1"/>
+<circle cx="18" cy="728" r="3" fill="#6b645d"/>
+<text x="29" y="732" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">Offline demo</text>
+<text x="1328" y="732" fill="#6b645d" font-size="12" font-weight="400" text-anchor="end" style="">Run details</text>
+<rect x="1024" y="36" width="320" height="680" rx="0" fill="#f2efeb" />
+<path d="M1024 36 L1024 716" stroke="#ded8d1" stroke-width="1"/>
+<path d="M216 75.5 L1024 75.5" stroke="#ded8d1" stroke-width="1"/>
+<text x="240" y="60" fill="#252f3d" font-size="13" font-weight="600" text-anchor="start" style="">Thread</text>
+<text x="317" y="60" fill="#6b645d" font-size="13" font-weight="400" text-anchor="start" style="">Changes  1</text>
+<text x="426" y="60" fill="#6b645d" font-size="13" font-weight="400" text-anchor="start" style="">Tree</text>
+<text x="487" y="60" fill="#6b645d" font-size="13" font-weight="400" text-anchor="start" style="">Context</text>
+<path d="M240 74 L280 74" stroke="#3a4453" stroke-width="2"/>
+<text x="936" y="60" fill="#6b645d" font-size="11" font-weight="400" text-anchor="end" style="font-family:Commit,monospace;white-space:pre;">~/repos/pi</text>
+<svg x="949" y="48" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.41707 12.4786H6.20854H11.5829C12.5724 12.4786 13.3744 11.6766 13.3744 10.6872V7.55212V7.10426C13.3744 6.11486 12.5724 5.3128 11.5829 5.3128H9.63778C9.16265 5.3128 8.70699 5.12406 8.37102 4.78808L7.62898 4.04604C7.29301 3.71007 6.83735 3.52133 6.36222 3.52133H4.41707C3.42768 3.52133 2.62561 4.3234 2.62561 5.3128V10.6872C2.62561 11.6766 3.42768 12.4786 4.41707 12.4786Z" stroke="#6b645d" stroke-width="1.2"/>
+</svg>
+
+<svg x="987" y="48" width="16" height="16" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#6b645d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m6 10 3 2-3 2M12 15h6"/></svg>
+
+<rect x="240" y="100" width="760" height="76" rx="6" fill="#ffffff" stroke="#ded8d1" data-layout="user-turn"/>
+<text x="256" y="128" fill="#252f3d" font-size="15" font-weight="400" text-anchor="start" style="">qwen3.8-flash on OpenCode returns empty thinking signatures and we reject the response.</text>
+<text x="256" y="152" fill="#252f3d" font-size="15" font-weight="400" text-anchor="start" style="">Accept empty signatures there, but keep the check strict for Anthropic.</text>
+<svg x="246" y="192" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="268" y="204" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">Reasoning</text>
+<text x="248" y="241" fill="#3a4453" font-size="15" font-weight="400" text-anchor="start" style="">The check lives in openai-completions.ts. I’ll allow empty strings for OpenCode</text>
+<text x="248" y="265" fill="#3a4453" font-size="15" font-weight="400" text-anchor="start" style="">and leave the Anthropic path untouched.</text>
+<svg x="246" y="294" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.15186 6.47321L7.99258 10.1696L11.8483 6.47321" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="270" y="306" fill="#6b645d" font-size="12" font-weight="600" text-anchor="start" style="">4 tool calls</text>
+<svg x="248" y="326" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M9 2V4.24394C9 4.5622 9.12643 4.86743 9.35147 5.09247C9.57652 5.31751 9.88174 5.44394 10.2 5.44394H12.5" stroke="#6b645d" stroke-width="1.2" stroke-linejoin="round"/>
+<path d="M10.4283 2.79015C9.95564 2.28602 9.29544 2 8.60442 2H4.625C4.32663 2 4.04048 2.12643 3.8295 2.35147C3.61853 2.57652 3.5 2.88174 3.5 3.2V12.8C3.5 13.1183 3.61853 13.4235 3.8295 13.6485C4.04048 13.8736 4.32663 14 4.625 14H11.375C11.6734 14 11.9595 13.8736 12.1705 13.6485C12.3815 13.4235 12.5 13.1183 12.5 12.8V5.98862C12.5 5.35347 12.2582 4.74213 11.8238 4.27877L10.4283 2.79015Z" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="272" y="338" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">Read</text>
+<text x="316" y="338" fill="#3a4453" font-size="12" font-weight="400" text-anchor="start" style="font-family:Commit,monospace;white-space:pre;">packages/ai/src/providers/openai-completions.ts</text>
+<text x="962" y="338" fill="#2e7950" font-size="12" font-weight="400" text-anchor="end" style="">✓</text>
+<svg x="978" y="326" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<svg x="248" y="358" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path opacity="0.1" d="M3 7.31034C3 4.92981 4.92981 3 7.31034 3C9.6909 3 11.6207 4.92981 11.6207 7.31034C11.6207 9.6909 9.6909 11.6207 7.31034 11.6207C4.92981 11.6207 3 9.6909 3 7.31034Z" fill="#6b645d"/>
+<path d="M13 13L10.4138 10.4138M3 7.31034C3 4.92981 4.92981 3 7.31034 3C9.6909 3 11.6207 4.92981 11.6207 7.31034C11.6207 9.6909 9.6909 11.6207 7.31034 11.6207C4.92981 11.6207 3 9.6909 3 7.31034Z" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="272" y="370" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">Grep</text>
+<text x="316" y="370" fill="#3a4453" font-size="12" font-weight="400" text-anchor="start" style="font-family:Commit,monospace;white-space:pre;">&quot;signature&quot; in packages/ai</text>
+<text x="962" y="370" fill="#2e7950" font-size="12" font-weight="400" text-anchor="end" style="">✓</text>
+<svg x="978" y="358" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<svg x="248" y="390" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M12.5871 5.40582C12.8514 5.14152 13 4.78304 13 4.40922C13 4.03541 12.8516 3.67688 12.5873 3.41252C12.323 3.14816 11.9645 2.99962 11.5907 2.99957C11.2169 2.99953 10.8584 3.14798 10.594 3.41227L3.92098 10.0869C3.80488 10.2027 3.71903 10.3452 3.67097 10.5019L3.01047 12.678C2.99754 12.7212 2.99657 12.7672 3.00764 12.8109C3.01872 12.8547 3.04143 12.8946 3.07337 12.9265C3.1053 12.9584 3.14528 12.981 3.18905 12.992C3.23282 13.003 3.27875 13.002 3.32197 12.989L5.49849 12.329C5.65508 12.2813 5.79758 12.196 5.91349 12.0805L12.5871 5.40582Z" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M9 5L11 7" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="272" y="402" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">Edit</text>
+<text x="316" y="402" fill="#3a4453" font-size="12" font-weight="400" text-anchor="start" style="font-family:Commit,monospace;white-space:pre;">packages/ai/src/providers/openai-completions.ts</text>
+<text x="962" y="402" fill="#2e7950" font-size="12" font-weight="400" text-anchor="end" style="">+3 −1</text>
+<svg x="978" y="390" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<svg x="248" y="422" width="14" height="14" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#6b645d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m6 10 3 2-3 2M12 15h6"/></svg>
+
+<text x="272" y="434" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">Bash</text>
+<text x="316" y="434" fill="#3a4453" font-size="12" font-weight="400" text-anchor="start" style="font-family:Commit,monospace;white-space:pre;">npm run check</text>
+<text x="962" y="434" fill="#6b645d" font-size="12" font-weight="400" text-anchor="end" style="">Running</text>
+<svg x="978" y="422" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<g transform="translate(0 0)">
+<rect x="240" y="548" width="760" height="152" rx="8" fill="#ffffff" stroke="#ded8d1" data-layout="composer"/>
+<rect x="241" y="549" width="758" height="30" rx="7" fill="#faf6ef" />
+<text x="254" y="569" fill="#8b631f" font-size="12" font-weight="600" text-anchor="start" style="">Queued · 1</text>
+<text x="331" y="569" fill="#3a4453" font-size="12" font-weight="400" text-anchor="start" style="">Also add a regression test for the OpenCode path</text>
+<svg x="975" y="557" width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.70581 4.5L11.294 11.5M11.294 4.5L4.70581 11.5" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round"/>
+</svg>
+
+<path d="M241 579 L999 579" stroke="#ded8d1" stroke-width="1"/>
+<text x="256" y="609" fill="#252f3d" font-size="15" font-weight="400" text-anchor="start" style="">Run the qwen provider tests once check passes</text>
+<svg x="255" y="661" width="16" height="16" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#6b645d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 12-8.5 8.5a5 5 0 0 1-7-7L14 5a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 8"/></svg>
+
+<text x="289" y="674" fill="#6b645d" font-size="16" font-weight="400" text-anchor="start" style="">/</text>
+<text x="320" y="674" fill="#252f3d" font-size="12" font-weight="400" text-anchor="start" style="font-family:Commit,monospace;white-space:pre;">claude-opus-5-5</text>
+<svg x="440" y="662" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.15186 6.47321L7.99258 10.1696L11.8483 6.47321" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<circle cx="477" cy="669" r="3" fill="#8b631f"/>
+<text x="488" y="674" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">high</text>
+<svg x="520" y="662" width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.15186 6.47321L7.99258 10.1696L11.8483 6.47321" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<rect x="763" y="654" width="104" height="30" rx="6" fill="#ffffff" stroke="#ded8d1" />
+<text x="815.0" y="673.0" fill="#252f3d" font-size="12" font-weight="400" text-anchor="middle" style="">Follow-up  ⌥↵</text>
+<rect x="879" y="654" width="76" height="30" rx="6" fill="#4b607c" />
+<text x="917.0" y="673.0" fill="#ffffff" font-size="12" font-weight="600" text-anchor="middle" style="">Steer ↵</text>
+<rect x="963" y="654" width="28" height="30" rx="6" fill="#ffffff" stroke="#ded8d1" />
+<rect x="973" y="665" width="8" height="8" rx="1" fill="none" stroke="#3a4453" />
+</g>
+<g transform="translate(0 0)">
+<text x="1044" y="72" fill="#252f3d" font-size="23" font-weight="400" text-anchor="start" style="font-family:Georgia,DejaVu Serif,serif;font-style:italic;">Qwen signatures</text>
+<text x="1044" y="98" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">pi · ~/repos/pi</text>
+<path d="M1044 120 L1324 120" stroke="#ded8d1" stroke-width="1"/>
+<text x="1044" y="148" fill="#6b645d" font-size="12" font-weight="600" text-anchor="start" style="">Context</text>
+<text x="1044" y="181" fill="#252f3d" font-size="25" font-weight="600" text-anchor="start" style="">62.4k</text>
+<text x="1116" y="180" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">/ 200k tokens</text>
+<rect x="1044" y="195" width="280" height="4" rx="2" fill="#ded8d1" />
+<rect x="1044" y="195" width="87" height="4" rx="2" fill="#4b607c" />
+<text x="1044" y="221" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">31% used · auto-compaction on</text>
+<text x="1044" y="258" fill="#3a4453" font-size="13" font-weight="400" text-anchor="start" style="">Session cost</text>
+<text x="1324" y="258" fill="#252f3d" font-size="13" font-weight="400" text-anchor="end" style="font-family:Commit,monospace;white-space:pre;">$0.41</text>
+<text x="1044" y="290" fill="#3a4453" font-size="13" font-weight="400" text-anchor="start" style="">Observed edits</text>
+<text x="1324" y="290" fill="#252f3d" font-size="13" font-weight="400" text-anchor="end" style="font-family:Commit,monospace;white-space:pre;">1</text>
+<path d="M1044 314 L1324 314" stroke="#ded8d1" stroke-width="1"/>
+<svg x="1044" y="333" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="1066" y="345" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">Usage details</text>
+<svg x="1044" y="369" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="1066" y="381" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">Tools</text>
+<text x="1324" y="381" fill="#6b645d" font-size="12" font-weight="400" text-anchor="end" style="">Not reported</text>
+<svg x="1044" y="405" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="1066" y="417" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">File history</text>
+<text x="1324" y="417" fill="#6b645d" font-size="12" font-weight="400" text-anchor="end" style="">Not recording</text>
+<text x="1066" y="443" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">No snapshots; past edits cannot be restored.</text>
+<path d="M1044 467 L1324 467" stroke="#ded8d1" stroke-width="1"/>
+<svg x="1044" y="487" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="1066" y="499" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">Session file</text>
+<svg x="1044" y="523" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M6.44653 4.16071L10.1608 8.00143L6.44653 11.8571" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<text x="1066" y="535" fill="#252f3d" font-size="13" font-weight="400" text-anchor="start" style="">Extensions</text>
+<text x="1324" y="535" fill="#6b645d" font-size="12" font-weight="400" text-anchor="end" style="">1 status</text>
+</g>
+</svg>
+
+<rect x="0" y="0" width="1344" height="740" rx="0" fill="#111820" opacity="0.24"/>
+<rect x="422" y="62.0" width="500" height="616" rx="10" fill="#ffffff" stroke="#ded8d1" />
+<text x="446" y="105.0" fill="#252f3d" font-size="23" font-weight="400" text-anchor="start" style="font-family:Georgia,DejaVu Serif,serif;font-style:italic;">New session</text>
+<svg x="852" y="89.0" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M3.33325 8H12.6666" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M8 3.33333V12.6667" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+
+<svg x="884" y="89.0" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.70581 4.5L11.294 11.5M11.294 4.5L4.70581 11.5" stroke="#6b645d" stroke-width="1.2" stroke-linecap="round"/>
+</svg>
+
+<text x="446" y="148.0" fill="#6b645d" font-size="12" font-weight="600" text-anchor="start" style="">Project</text>
+<rect x="446" y="163.0" width="452" height="36" rx="6" fill="#e7e3de" />
+<circle cx="460" cy="181.0" r="6" fill="none" stroke="#6b645d"/>
+<circle cx="460" cy="181.0" r="3" fill="#252f3d"/>
+<svg x="477" y="173.0" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.41707 12.4786H6.20854H11.5829C12.5724 12.4786 13.3744 11.6766 13.3744 10.6872V7.55212V7.10426C13.3744 6.11486 12.5724 5.3128 11.5829 5.3128H9.63778C9.16265 5.3128 8.70699 5.12406 8.37102 4.78808L7.62898 4.04604C7.29301 3.71007 6.83735 3.52133 6.36222 3.52133H4.41707C3.42768 3.52133 2.62561 4.3234 2.62561 5.3128V10.6872C2.62561 11.6766 3.42768 12.4786 4.41707 12.4786Z" stroke="#6b645d" stroke-width="1.2"/>
+</svg>
+
+<text x="503" y="186.0" fill="#252f3d" font-size="14" font-weight="600" text-anchor="start" style="">pi</text>
+<text x="570" y="186.0" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">~/repos/pi</text>
+<text x="883" y="186.0" fill="#8b631f" font-size="12" font-weight="400" text-anchor="end" style="">1 working</text>
+<circle cx="460" cy="221.0" r="6" fill="none" stroke="#6b645d"/>
+<svg x="477" y="213.0" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.41707 12.4786H6.20854H11.5829C12.5724 12.4786 13.3744 11.6766 13.3744 10.6872V7.55212V7.10426C13.3744 6.11486 12.5724 5.3128 11.5829 5.3128H9.63778C9.16265 5.3128 8.70699 5.12406 8.37102 4.78808L7.62898 4.04604C7.29301 3.71007 6.83735 3.52133 6.36222 3.52133H4.41707C3.42768 3.52133 2.62561 4.3234 2.62561 5.3128V10.6872C2.62561 11.6766 3.42768 12.4786 4.41707 12.4786Z" stroke="#6b645d" stroke-width="1.2"/>
+</svg>
+
+<text x="503" y="226.0" fill="#252f3d" font-size="14" font-weight="400" text-anchor="start" style="">zed</text>
+<text x="570" y="226.0" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">~/repos/zed</text>
+<circle cx="460" cy="261.0" r="6" fill="none" stroke="#6b645d"/>
+<svg x="477" y="253.0" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M4.41707 12.4786H6.20854H11.5829C12.5724 12.4786 13.3744 11.6766 13.3744 10.6872V7.55212V7.10426C13.3744 6.11486 12.5724 5.3128 11.5829 5.3128H9.63778C9.16265 5.3128 8.70699 5.12406 8.37102 4.78808L7.62898 4.04604C7.29301 3.71007 6.83735 3.52133 6.36222 3.52133H4.41707C3.42768 3.52133 2.62561 4.3234 2.62561 5.3128V10.6872C2.62561 11.6766 3.42768 12.4786 4.41707 12.4786Z" stroke="#6b645d" stroke-width="1.2"/>
+</svg>
+
+<text x="503" y="266.0" fill="#252f3d" font-size="14" font-weight="400" text-anchor="start" style="">minivm</text>
+<text x="570" y="266.0" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">~/repos/minivm</text>
+<text x="446" y="308.0" fill="#6b645d" font-size="12" font-weight="600" text-anchor="start" style="">Run in</text>
+<rect x="446" y="318.0" width="308" height="30" rx="6" fill="#ebe7e4" />
+<rect x="599" y="321.0" width="152" height="24" rx="4" fill="#ffffff" />
+<text x="524" y="338.0" fill="#252f3d" font-size="12" font-weight="400" text-anchor="middle" style="">Project folder</text>
+<text x="673" y="338.0" fill="#252f3d" font-size="12" font-weight="400" text-anchor="middle" style="">New git worktree</text>
+<text x="446" y="377.0" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">Branch</text>
+<rect x="446" y="387.0" width="452" height="30" rx="6" fill="#ffffff" stroke="#ded8d1" />
+<text x="458" y="407.0" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">pi/my-task</text>
+<text x="446" y="442.0" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">Path</text>
+<rect x="446" y="452.0" width="452" height="30" rx="6" fill="#ffffff" stroke="#ded8d1" />
+<text x="458" y="472.0" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">Absolute path for the new worktree</text>
+<text x="446" y="510.0" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">This session edits a separate working folder.</text>
+<text x="446" y="547.0" fill="#6b645d" font-size="12" font-weight="600" text-anchor="start" style="">Initial model</text>
+<rect x="446" y="559.0" width="230" height="30" rx="6" fill="#ffffff" stroke="#ded8d1" />
+<text x="561.0" y="578.0" fill="#252f3d" font-size="12" font-weight="400" text-anchor="middle" style="">Pi configured default  ⌄</text>
+<text x="695" y="579.0" fill="#6b645d" font-size="12" font-weight="400" text-anchor="start" style="">Thinking · inherited</text>
+<path d="M423 622.0 L921 622.0" stroke="#ded8d1" stroke-width="1"/>
+<rect x="698" y="636.0" width="76" height="30" rx="6" fill="#ffffff" stroke="#ded8d1" />
+<text x="736.0" y="655.0" fill="#252f3d" font-size="12" font-weight="400" text-anchor="middle" style="">Cancel</text>
+<rect x="786" y="636.0" width="112" height="30" rx="6" fill="#4b607c" />
+<text x="842.0" y="655.0" fill="#ffffff" font-size="12" font-weight="600" text-anchor="middle" style="">Create session</text>
+</svg>

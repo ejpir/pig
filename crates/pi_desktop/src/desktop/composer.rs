@@ -6,6 +6,23 @@ use super::session::{Changes, SessionController, SessionEvent};
 use super::*;
 use gpui::{EventEmitter, Subscription};
 
+mod status;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RevisionContext {
+    pub path: String,
+    pub source: String,
+}
+impl RevisionContext {
+    fn prompt(&self, draft: &str) -> String {
+        format!(
+            "Revision request for file {} ({}). The review is historical/observed; inspect the current file before editing.\n\n{draft}",
+            serde_json::to_string(&self.path).expect("string serialization"),
+            self.source
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum ComposerEvent {
     NewSession,
@@ -14,10 +31,17 @@ pub enum ComposerEvent {
 }
 
 pub struct ComposerView {
+    /// Where the input card was drawn last, so its menus open where they fit.
+    card_top: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
     pub controller: Entity<SessionController>,
     pub input: Entity<TextInput>,
     pub attached: Option<slash::Attached>,
     pub expanded: bool,
+    pub(super) revision: Option<RevisionContext>,
+    pub(super) waiting: bool,
+    /// Thread renders a settled tool failure beside its turn result; Changes
+    /// keeps the shared status beside the composer instead.
+    pub(super) contextual_issue: bool,
     pub(super) picker_filter: Entity<TextInput>,
     pub(super) picker: Option<Picker>,
     pub(super) picker_pending: Option<String>,
@@ -47,8 +71,11 @@ impl ComposerView {
         initial_draft: &str,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx
-            .new(|cx| TextInput::new("Ask pi. Type / for commands, ! for shell…", cx).multiline(8));
+        let input = cx.new(|cx| {
+            TextInput::new("Describe a change, ask a question, or drop a file…", cx)
+                .multiline(8)
+                .font_size(px(15.))
+        });
         input.update(cx, |input, cx| input.set_content(initial_draft, cx));
         let picker_filter = cx.new(|cx| TextInput::new("Filter…", cx).compact());
         let subscriptions = vec![
@@ -95,10 +122,14 @@ impl ComposerView {
             }),
         ];
         Self {
+            card_top: Default::default(),
             controller,
             input,
             attached: None,
             expanded: false,
+            revision: None,
+            waiting: false,
+            contextual_issue: false,
             picker_filter,
             picker: None,
             picker_pending: None,
@@ -120,8 +151,45 @@ impl ComposerView {
             renders: 0,
         }
     }
+    pub(super) fn set_revision(&mut self, context: RevisionContext, cx: &mut Context<Self>) {
+        self.revision = Some(context);
+        cx.notify();
+    }
+    pub(super) fn set_waiting(&mut self, waiting: bool, cx: &mut Context<Self>) {
+        if self.waiting != waiting {
+            self.waiting = waiting;
+            cx.notify();
+        }
+    }
+    pub(super) fn set_contextual_issue(&mut self, contextual: bool, cx: &mut Context<Self>) {
+        if self.contextual_issue != contextual {
+            self.contextual_issue = contextual;
+            cx.notify();
+        }
+    }
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.input.focus_handle(cx).focus(window, cx);
+    }
+    /// Menus open above a docked composer; one high on the page, as on the
+    /// landing, has no room above, so they open below it.
+    pub(super) fn menus_below(&self) -> bool {
+        self.card_top.get().is_some_and(|top| top < px(420.))
+    }
+    /// A starting point's text: the draft when it is empty, else added below it.
+    /// Never submitted.
+    pub fn offer_draft(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            let current = input.content().trim_end().to_owned();
+            input.set_content(
+                if current.is_empty() {
+                    text.to_owned()
+                } else {
+                    format!("{current}\n\n{text}")
+                },
+                cx,
+            )
+        });
+        cx.notify();
     }
     /// Choose a landing-page starting point without submitting or replacing the draft.
     pub fn use_command(&mut self, command: SlashCommand, cx: &mut Context<Self>) {
@@ -150,6 +218,20 @@ impl ComposerView {
     }
     pub fn send_prompt(&mut self, follow_up: bool, cx: &mut Context<Self>) {
         let raw = self.input.read(cx).content().to_owned();
+        if self.waiting
+            || (raw.trim().is_empty() && self.attachments.is_empty() && self.attached.is_none())
+        {
+            return;
+        }
+        if self.revision.is_some() && (self.attached.is_some() || raw.starts_with(['!', '/'])) {
+            self.controller.update(cx, |c, cx| {
+                c.notice(
+                    "Remove the revision attachment before running a shell or slash command.",
+                    cx,
+                )
+            });
+            return;
+        }
         if self.attached.is_none() && raw.starts_with('!') {
             if follow_up || !self.attachments.is_empty() || !self.input.read(cx).chips().is_empty()
             {
@@ -199,6 +281,10 @@ impl ComposerView {
             Some(slash::Attached::Pi(command)) => format!("/{} {draft}", command.name),
             _ => draft,
         };
+        let content = match &self.revision {
+            Some(context) if !content.trim().is_empty() => context.prompt(&content),
+            _ => content,
+        };
         let images = self
             .attachments
             .iter()
@@ -209,6 +295,7 @@ impl ComposerView {
         }) {
             self.attachments.clear();
             self.attached = None;
+            self.revision = None;
             self.expanded = false;
             self.input.update(cx, |input, cx| {
                 input.set_fill(false, cx);
@@ -217,23 +304,55 @@ impl ComposerView {
             cx.notify();
         }
     }
+    fn compact_idle(&self, cx: &App) -> bool {
+        let controller = self.controller.read(cx);
+        let model = controller.model();
+        !self.expanded
+            && !self.waiting
+            && !controller.working()
+            && self.input.read(cx).content().trim().is_empty()
+            && self.attached.is_none()
+            && self.attachments.is_empty()
+            && self.revision.is_none()
+            && model.steering.is_empty()
+            && model.follow_up.is_empty()
+            && model.shell.is_none()
+    }
     fn composer(&self, window: &Window, cx: &Context<Self>, theme: Theme) -> impl IntoElement {
         let open = self.controller.read(cx);
         let model = open.model();
+        let compact = self.compact_idle(cx);
         let shell = self.attached.is_none() && self.input.read(cx).content().starts_with('!');
-        let enabled = open.ready() && (!shell || open.can_navigate());
+        let enabled = open.ready()
+            && !self.waiting
+            && (!shell || open.can_navigate())
+            && (!self.input.read(cx).content().trim().is_empty()
+                || !self.attachments.is_empty()
+                || self.attached.is_some());
         let queue = model
             .steering
             .iter()
-            .map(|message| ("STEER", message))
-            .chain(model.follow_up.iter().map(|message| ("FOLLOW-UP", message)));
+            .map(|message| ("Steer", message))
+            .chain(model.follow_up.iter().map(|message| ("Next", message)));
+        let card_top = self.card_top.clone();
         v_flex()
             .debug_selector(|| "composer".into())
             .relative()
-            .when(self.expanded, |composer| composer.h_full())
-            .mx(px(20.))
-            .mb(px(12.))
-            .rounded(px(10.))
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| card_top.set(Some(bounds.top())),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .when(!self.expanded, |composer| {
+                composer.h(px(if compact { 112. } else { 142. }))
+            })
+            .when(self.expanded, |composer| composer.flex_1().min_h_0())
+            .mx(WORK_GUTTER)
+            .mb(WORK_GUTTER)
+            .rounded(px(8.))
             .bg(theme.composer)
             .border_1()
             .border_color(if shell { theme.amber } else { theme.focus })
@@ -267,17 +386,19 @@ impl ComposerView {
             .children(queue.enumerate().map(|(index, (kind, message))| {
                 h_flex()
                     .h(px(30.))
-                    .gap(px(9.))
-                    .px(px(12.))
+                    .gap(px(12.))
+                    .px(px(14.))
                     .rounded_t(px(9.))
                     .bg(theme.queue)
                     .border_b_1()
                     .border_color(theme.queue_line)
-                    .child(icon("queue", theme.amber))
                     .child(
-                        label(kind, theme)
-                            .text_size(px(9.5))
-                            .text_color(theme.amber),
+                        div()
+                            .font_family(MONO)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(12.))
+                            .text_color(theme.amber)
+                            .child(kind),
                     )
                     .child(
                         div()
@@ -288,18 +409,21 @@ impl ComposerView {
                             .text_size(px(12.))
                             .child(message.clone()),
                     )
-                    .when(index == 0, |row| {
-                        row.child(
-                            div()
-                                .text_size(px(10.5))
-                                .font_family(MONO)
-                                .text_color(theme.faint)
-                                .child(format!(
-                                    "{} queued",
-                                    model.steering.len() + model.follow_up.len()
-                                )),
-                        )
-                    })
+                    .when(
+                        index == 0 && model.steering.len() + model.follow_up.len() > 1,
+                        |row| {
+                            row.child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .font_family(MONO)
+                                    .text_color(theme.faint)
+                                    .child(format!(
+                                        "{} queued",
+                                        model.steering.len() + model.follow_up.len()
+                                    )),
+                            )
+                        },
+                    )
                     .child(
                         icon_button(
                             ("clear-queue", index),
@@ -311,6 +435,45 @@ impl ComposerView {
                         .on_click(cx.listener(|this, _, _, cx| this.clear_queue(false, cx))),
                     )
             }))
+            .when_some(self.revision.as_ref(), |v, context| {
+                v.child(
+                    h_flex()
+                        .id("revision-attachment")
+                        .px(px(12.))
+                        .h(px(30.))
+                        .gap(px(8.))
+                        .text_size(px(12.))
+                        .text_color(theme.muted)
+                        .debug_selector(|| "revision-context".into())
+                        .tooltip(ui::Tooltip::text(format!(
+                            "{}\n{}",
+                            context.path, context.source
+                        )))
+                        .child(icon("file", theme.muted).size(px(13.)))
+                        .child(
+                            div().flex_1().min_w_0().truncate().child(
+                                std::path::Path::new(&context.path)
+                                    .file_name()
+                                    .unwrap_or_else(|| std::ffi::OsStr::new(&context.path))
+                                    .to_string_lossy()
+                                    .into_owned(),
+                            ),
+                        )
+                        .child(
+                            icon_button(
+                                "remove-revision",
+                                "close",
+                                "Remove revision attachment",
+                                theme,
+                            )
+                            .debug_selector(|| "remove-revision".into())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.revision = None;
+                                cx.notify();
+                            })),
+                        ),
+                )
+            })
             .children(self.attachments_row(cx, theme))
             .child(
                 h_flex()
@@ -318,10 +481,19 @@ impl ComposerView {
                     .items_start()
                     .gap(px(8.))
                     .pl(px(16.))
-                    .pr(px(40.))
+                    .pr(px(44.))
                     .pt(px(13.))
                     .pb(px(6.))
-                    .min_h(px(64.))
+                    .min_h(px(if compact {
+                        66.
+                    } else if model.steering.is_empty()
+                        && model.follow_up.is_empty()
+                        && self.revision.is_none()
+                    {
+                        96.
+                    } else {
+                        66.
+                    }))
                     .when(self.expanded, |area| area.flex_1().min_h_0())
                     .when_some(self.attached.as_ref(), |row, attached| {
                         row.child(command_chip(attached, cx, theme))
@@ -354,14 +526,14 @@ impl ComposerView {
             )
             .child(
                 h_flex()
-                    .pl(px(12.))
-                    .pr(px(6.))
+                    .pl(px(8.))
+                    .pr(px(16.))
                     .pb(px(14.))
                     .gap(px(8.))
                     .child(
                         icon_button("attach", "attach", "Attach files or images", theme)
                             .debug_selector(|| "attach".into())
-                            .w(px(18.))
+                            .w(px(28.))
                             .tooltip(ui::Tooltip::text(
                                 "Attach files or images; you can also paste or drop them",
                             ))
@@ -369,25 +541,32 @@ impl ComposerView {
                                 cx.listener(|this, _, window, cx| this.pick_files(window, cx)),
                             ),
                     )
+                    // Beside the paperclip, so the menu opens in the column it was asked from.
                     .child(
                         icon_button("commands", "slash", "Choose a slash command", theme)
-                            .w(px(18.))
-                            .mr(px(5.))
+                            .debug_selector(|| "slash-button".into())
+                            .aria_expanded(self.slash_query(cx).is_some())
+                            .tooltip(ui::Tooltip::text("Choose a slash command"))
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.open_slash(window, cx)),
                             ),
                     )
                     .child(
                         chip("choose-model", "Choose model", theme)
+                            .bg(gpui::transparent_black())
                             .aria_expanded(self.picker == Some(menus::Picker::Model))
-                            .child(icon("sparkle", theme.muted).size(px(13.)))
+                            .h(px(30.))
+                            .font_family(SANS)
+                            .text_size(px(13.))
                             .child(
                                 div().max_w(px(190.)).truncate().child(
                                     model
                                         .state
                                         .model
                                         .as_ref()
-                                        .map(|model| model.id.clone())
+                                        .map(|model| {
+                                            model.name.as_ref().unwrap_or(&model.id).clone()
+                                        })
                                         .unwrap_or_else(|| "Choose model".into()),
                                 ),
                             )
@@ -398,18 +577,17 @@ impl ComposerView {
                     )
                     .child(
                         chip("choose-thinking", "Choose thinking level", theme)
+                            .bg(gpui::transparent_black())
                             .px(px(10.))
+                            .h(px(30.))
+                            .font_family(SANS)
+                            .text_size(px(13.))
                             .aria_expanded(self.picker == Some(menus::Picker::Thinking))
-                            .child(
-                                div()
-                                    .size(px(7.))
-                                    .rounded_full()
-                                    .bg(theme.thinking(&model.state.thinking_level)),
-                            )
                             .child(if model.state.thinking_level.is_empty() {
-                                "off".to_owned()
+                                "Off".to_owned()
                             } else {
-                                model.state.thinking_level.clone()
+                                let level = &model.state.thinking_level;
+                                format!("{}{}", level[..1].to_uppercase(), &level[1..])
                             })
                             .child(icon("chevron_down", theme.faint).size(px(11.)))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -419,45 +597,45 @@ impl ComposerView {
                     .child(div().flex_1())
                     .when(model.busy() && !shell && model.shell.is_none(), |row| {
                         row.child(
-                            button("follow-up", "Follow-up ⌥↵", theme)
-                                .on_click(cx.listener(|this, _, _, cx| this.send_prompt(true, cx))),
+                            work_button("steer-now", "Steer now", theme)
+                                .w(px(114.))
+                                .justify_center()
+                                .debug_selector(|| "steer-now".into())
+                                .tooltip(|_, cx| ui::Tooltip::for_action("Steer now", &Steer, cx))
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.send_prompt(false, cx)),
+                                ),
                         )
                     })
                     .child(
-                        primary_button(
+                        work_primary(
                             "submit",
                             if shell {
                                 "Run ↵"
                             } else if model.busy() {
-                                "Steer ↵"
+                                "Queue follow-up ↵"
+                            } else if self.revision.is_some() {
+                                "Send revision ↵"
                             } else {
                                 "Send ↵"
                             },
                             enabled,
                             theme,
                         )
-                        .on_click(cx.listener(|this, _, _, cx| this.send_prompt(false, cx))),
-                    )
-                    .when(
-                        model.busy() || !model.follow_up.is_empty() || !model.steering.is_empty(),
-                        |row| {
-                            row.child(
-                                icon_button(
-                                    "stop",
-                                    "stop",
-                                    "Stop and restore queued drafts",
-                                    Theme {
-                                        muted: theme.coral,
-                                        ..theme
-                                    },
-                                )
-                                .bg(theme.danger)
-                                .border_1()
-                                .border_color(theme.danger_line)
-                                .text_color(theme.coral)
-                                .on_click(cx.listener(|this, _, _, cx| this.clear_queue(true, cx))),
-                            )
-                        },
+                        .w(px(if model.busy() {
+                            150.
+                        } else if self.revision.is_some() {
+                            148.
+                        } else {
+                            98.
+                        }))
+                        .justify_center()
+                        .flex_shrink_0()
+                        .debug_selector(|| "submit".into())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let follow_up = this.controller.read(cx).model().busy();
+                            this.send_prompt(follow_up, cx);
+                        })),
                     ),
             )
             .children(self.picker_view(cx, theme))
@@ -471,8 +649,10 @@ impl Render for ComposerView {
         {
             self.renders += 1;
         }
-        div()
+        let compact = self.compact_idle(cx);
+        v_flex()
             .key_context("Composer")
+            .min_h(px(if compact { 136. } else { 190. }))
             .flex_shrink_0()
             .when(self.expanded, |view| view.h(relative(0.62)))
             .on_action(cx.listener(|this, _: &Submit, window, cx| {
@@ -483,6 +663,17 @@ impl Render for ComposerView {
                 } else if this.slash_query(cx).is_some() {
                     this.choose_slash(this.slash_index, window, cx);
                 } else if this.input.focus_handle(cx).is_focused(window) {
+                    let follow_up = this.controller.read(cx).model().busy()
+                        && !this.input.read(cx).content().starts_with('!');
+                    this.send_prompt(follow_up, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Steer, window, cx| {
+                if this.picker.is_none()
+                    && !this.mention_open()
+                    && this.slash_query(cx).is_none()
+                    && this.input.focus_handle(cx).is_focused(window)
+                {
                     this.send_prompt(false, cx);
                 }
             }))
@@ -568,6 +759,7 @@ impl Render for ComposerView {
                 cx.stop_propagation();
                 this.toggle_composer(window, cx)
             }))
+            .child(self.work_status(cx, theme(cx)))
             .child(self.composer(window, cx, theme(cx)))
     }
 }

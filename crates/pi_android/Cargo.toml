@@ -1,0 +1,39 @@
+[package]
+name = "pi_android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pi on an Android phone: follow sessions, answer questions, review changes and start work."
+
+# The cdylib is what GpuiActivity loads (`libpi_android.so`); build the APK with
+# scripts/build_apk.py. The views compile on any host for tests and previews.
+[lib]
+path = "src/pi_android.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[example]]
+name = "preview"
+path = "examples/preview.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-channel.workspace = true
+gpui.workspace = true
+gpui_android = { path = "../gpui_android" }
+libc = "0.2"
+log = "0.4"
+pi_core = { path = "../pi_core" }
+# The SSH key; the same rand as russh's ssh-key.
+rand = "0.10"
+# SSH in pure Rust, with ring for its crypto: it builds for Android with the NDK alone.
+russh = { version = "0.64", default-features = false, features = ["ring", "flate2"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+# The preview window. Runtime shaders, as in pi_desktop: a Mac needs no Xcode `metal` tool.
+[target.'cfg(not(target_os = "android"))'.dev-dependencies]
+gpui_platform = { workspace = true, features = ["runtime_shaders"] }

@@ -161,6 +161,8 @@ pub struct RpcClient {
     timeout: Duration,
     pid: u32,
     channel: Option<Channel>,
+    /// SSH forwards both RPC and desktop-extension requests to their remote owner.
+    forward_extension: bool,
     supervisor: Option<thread::JoinHandle<()>>,
 }
 
@@ -408,8 +410,20 @@ impl RpcClient {
             timeout: launch.request_timeout,
             pid,
             channel,
+            forward_extension: false,
             supervisor: Some(supervisor),
         })
+    }
+
+    /// Own only the local SSH bridge; its remote daemon owns the agent.
+    pub fn spawn_forwarded(launch: Launch) -> Result<Self> {
+        anyhow::ensure!(
+            launch.extension.is_none(),
+            "forwarded transport installs no local extension"
+        );
+        let mut client = Self::spawn(launch)?;
+        client.forward_extension = true;
+        Ok(client)
     }
 
     pub fn pid(&self) -> u32 {
@@ -419,9 +433,38 @@ impl RpcClient {
         self.events.clone()
     }
 
+    /// Correlated helper requests, separate from the Pi command vocabulary.
+    pub fn send_custom(&self, name: &str, mut record: Value) -> Result<String> {
+        let id = format!("desktop-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        record["id"] = id.clone().into();
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                id.clone(),
+                Pending {
+                    command: name.into(),
+                    deadline: Some(Instant::now() + self.timeout),
+                },
+            );
+        if let Err(error) = self.send_record(record) {
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
+            return Err(error);
+        }
+        Ok(id)
+    }
+
     pub fn send(&self, command: Command) -> Result<String> {
         let id = format!("desktop-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
-        let record = command.record(&id)?;
+        let mut record = command.record(&id)?;
+        if self.forward_extension && matches!(command, Command::Prompt { .. }) {
+            // Correlation counters restart on reconnect. A durable admission key must not.
+            // This is never automatically replayed; callers can query an uncertain admission.
+            record["requestId"] = format!("{:032x}", rand::random::<u128>()).into();
+        }
         self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -435,6 +478,7 @@ impl RpcClient {
             );
         let sent = match command.route() {
             Route::Pi => self.send_record(record),
+            Route::Extension if self.forward_extension => self.send_record(record),
             Route::Extension => self.send_to_extension(record),
         };
         if let Err(error) = sent {

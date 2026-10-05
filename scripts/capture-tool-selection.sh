@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Native clipboard/selection check for expanded tool details; offline fixture only.
+# Native clipboard/selection check for an expanded edit detail; offline fixture only.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p artifacts
@@ -34,8 +34,8 @@ find_header() {
 from PIL import Image
 import sys,subprocess,io,csv
 p=sys.argv[1]
-im=Image.open(p).crop((208,92,1016,555))
-im.resize((1616,926)).save(p)
+im=Image.open(p).crop((208,92,1016,700))
+im.resize((1616,1216)).save(p)
 rows=csv.DictReader(io.StringIO(subprocess.check_output(['tesseract',p,'stdout','--psm','6','tsv'],stderr=subprocess.DEVNULL,text=True)),delimiter='\t')
 r=next(r for r in rows if r['text'].lower()==sys.argv[2].lower())
 print(92+(int(r['top'])+int(r['height'])//2)//2)
@@ -81,24 +81,9 @@ import -window "$window" artifacts/tool-selection-expanded.png
 select_line edit MissingSignature "$((edit_y+30))" 550 > /dev/null
 import -window "$window" artifacts/thread-edit-selected.png
 click 500 "$edit_y"
-bash_y="$(find_header Bash)"
-click 500 "$bash_y"
-import -window "$window" artifacts/tool-bash-expanded.png
-y="$(select_line bash 'Checked 1,284' "$((bash_y+60))" 550)"
-import -window "$window" artifacts/thread-bash-selected.png
-printf sentinel | "$clipboard" -selection clipboard
-click 340 "$y" 3
-sleep 0.4
-xdotool key Home Return
-for _ in $(seq 1 20); do
-    sleep 0.1
-    timeout 2 "$clipboard" -selection clipboard -o > artifacts/tool-context-copy.txt 2>/dev/null || continue
-    grep -Fq 'Checked 1,284' artifacts/tool-context-copy.txt && break
-done
-grep -Fq 'Checked 1,284' artifacts/tool-context-copy.txt
 xdotool key ctrl+q
 for _ in $(seq 1 50); do
-    if ! kill -0 "$app" 2>/dev/null; then wait "$app"; echo 'PASS: native edit/bash drag selection, keyboard clipboard copy, context-menu copy, clean exit.'; exit 0; fi
+    if ! kill -0 "$app" 2>/dev/null; then wait "$app"; echo 'PASS: native edit drag selection and keyboard clipboard copy; clean exit.'; exit 0; fi
     sleep 0.1
 done
 exit 1

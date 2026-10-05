@@ -60,7 +60,20 @@ impl WorkspaceController {
         if matches!(target, CloseTarget::Project(_) | CloseTarget::Saved(_))
             || self.close_warning(&ids, cx)
         {
+            let all_remote = !ids.is_empty()
+                && ids.iter().all(|id| {
+                    self.tab(*id)
+                        .is_some_and(|tab| tab.controller.read(cx).is_remote())
+                });
             let (title, detail) = match &target {
+                CloseTarget::Session(_) if all_remote => (
+                    "Detach from this SSH session?",
+                    "The remote agent keeps running. Unsaved drafts in this tab are discarded. Use Stop before closing if you want to abort remote work.",
+                ),
+                CloseTarget::Project(_) if all_remote => (
+                    "Remove this remote project from the sidebar?",
+                    "Its sessions detach; remote agents keep running. Unsaved drafts are discarded. Remote files and saved conversations are not deleted.",
+                ),
                 CloseTarget::Session(_) => (
                     "Close this session?",
                     "Its running agent will be stopped. Unsaved draft/editor text in this tab will be discarded; buffers still open elsewhere are retained. An unfinished turn may not be recorded. Saved conversation and project files will not be deleted.",
@@ -119,7 +132,7 @@ impl WorkspaceController {
         for id in &ids {
             if let Some(tab) = self.tab(*id) {
                 let controller = tab.controller.clone();
-                if let Some(saved) = saved_session(controller.read(cx).model())
+                if let Some(saved) = saved_session(controller.read(cx))
                     && !self.saved.iter().any(|s| s.path == saved.path)
                 {
                     self.saved.push(saved);

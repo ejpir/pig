@@ -12,6 +12,8 @@ pub struct ContextView {
     instructions: Entity<TextInput>,
     summary: Entity<DocumentView>,
     show_summary: bool,
+    /// The reported-sources disclosure.
+    sources_open: bool,
     scroll: ScrollHandle,
     usage: Vec<ResponseUsage>,
     _subscription: gpui::Subscription,
@@ -26,6 +28,7 @@ impl ContextView {
             }),
             summary: cx.new(DocumentView::new),
             show_summary: false,
+            sources_open: false,
             scroll: ScrollHandle::new(),
             usage: vec![],
             _subscription: subscription,
@@ -61,11 +64,16 @@ impl ContextView {
             .map(|p| format!("{p:.0}% of window used"))
             .unwrap_or_else(|| "Context usage not yet reported".into());
         let settings = model.settings.as_ref();
-        v_flex().p(px(20.)).gap(px(8.)).child(heading("Context",percent,theme)).child(section("AUTO-COMPACTION","",theme))
-            .child(primary_button("context-auto",if auto{"Enabled · turn off"}else{"Disabled · turn on"},toggle,theme).debug_selector(||"context-auto".into()).on_click(cx.listener(move|this,_,_,cx|{if toggle{this.controller.update(cx,|c,cx|c.command(Command::SetAutoCompaction {enabled:!auto},cx));}})))
-            .child(note("This changes Pi’s saved auto-compaction setting.",theme)).child(pair("Reserve for reply","Not exposed by RPC".into(),theme)).child(pair("Keep recent","Not exposed by RPC".into(),theme))
-            .child(divider(theme)).child(section("COMPACT NOW","",theme)).child(input_box(self.instructions.clone(),theme))
-            .child(primary_button("context-compact","Compact",enabled,theme).debug_selector(||"context-compact".into()).on_click(cx.listener(move|this,_,_,cx|{if enabled{let text=this.instructions.read(cx).content().trim().to_owned();this.controller.update(cx,|c,cx|c.command(Command::Compact {custom_instructions:(!text.is_empty()).then_some(text)},cx));}})))
+        v_flex().p(px(20.)).gap(px(8.)).child(heading("Context",percent,theme))
+            .child(h_flex().mt(px(8.)).h(px(28.)).gap(px(12.))
+                .child(div().flex_1().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child("Auto-compaction"))
+                .child(super::app_views::toggle("context-auto", auto, theme).debug_selector(||"context-auto".into())
+                    .role(gpui::Role::Switch).aria_toggled(if auto { gpui::Toggled::True } else { gpui::Toggled::False })
+                    .when(!toggle, |switch| switch.opacity(0.5))
+                    .on_click(cx.listener(move|this,_,_,cx|{if toggle{this.controller.update(cx,|c,cx|c.command(Command::SetAutoCompaction {enabled:!auto},cx));}}))))
+            .child(note("Saved in Pi's settings, so future runs use it too.",theme)).child(pair("Reserve for reply","Not exposed by RPC".into(),theme)).child(pair("Keep recent","Not exposed by RPC".into(),theme))
+            .child(divider(theme)).child(label("Compact now",theme).mt(px(8.))).child(note("Optional instructions",theme)).child(input_box(self.instructions.clone(),theme))
+            .child(primary_button("context-compact","Compact…",enabled,theme).w_full().justify_center().debug_selector(||"context-compact".into()).on_click(cx.listener(move|this,_,_,cx|{if enabled{let text=this.instructions.read(cx).content().trim().to_owned();this.controller.update(cx,|c,cx|c.command(Command::Compact {custom_instructions:(!text.is_empty()).then_some(text)},cx));}})))
             .child(note("Uses the selected model to summarize. Entries stay in the file. Wait for active runs and file recording to finish.",theme))
             .child(divider(theme)).child(section("RETRIES",if settings.and_then(|s|s["autoRetry"].as_bool())==Some(true){"auto-retry on"}else{""},theme))
             .when(model.retries.is_empty(),|v|v.child(note("No retry events observed in this connection.",theme)))
@@ -77,6 +85,7 @@ impl ContextView {
             .child(pair("Cache misses","Not exposed by RPC".into(),theme)).into_any_element()
     }
 }
+/// One figure in the summary row: plain, with a hairline between figures.
 fn tile(title: &str, value: String, detail: String, theme: Theme) -> gpui::Div {
     v_flex()
         .debug_selector({
@@ -85,19 +94,24 @@ fn tile(title: &str, value: String, detail: String, theme: Theme) -> gpui::Div {
         })
         .flex_1()
         .min_w_0()
-        .min_h(px(92.))
         .flex_shrink_0()
-        .p(px(12.))
-        .gap(px(3.))
-        .bg(theme.panel)
-        .border_1()
-        .border_color(theme.line)
-        .rounded(px(7.))
-        .child(label(title.to_owned(), theme))
+        .px(px(16.))
+        .py(px(12.))
+        .gap(px(2.))
+        // Hairlines between figures, not a box around the first.
+        .when(title != "CONTEXT", |tile| {
+            tile.border_l_1().border_color(theme.line)
+        })
         .child(
             div()
-                .text_size(px(22.))
-                .line_height(px(28.))
+                .text_size(px(12.5))
+                .text_color(theme.muted)
+                .child(sentence_case(title)),
+        )
+        .child(
+            div()
+                .text_size(px(26.))
+                .line_height(px(34.))
                 .flex_shrink_0()
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(value),
@@ -108,10 +122,10 @@ fn tile(title: &str, value: String, detail: String, theme: Theme) -> gpui::Div {
                     let title = title.to_lowercase();
                     move || format!("context-detail-{title}")
                 })
-                .text_size(px(10.))
-                .line_height(px(16.))
+                .text_size(px(12.))
+                .line_height(px(18.))
                 .flex_shrink_0()
-                .text_color(theme.faint)
+                .text_color(theme.muted)
                 .child(detail),
         )
 }
@@ -160,46 +174,144 @@ impl Render for ContextView {
             .max()
             .unwrap_or(1)
             .max(1) as f32;
+        // Sparse samples stay narrow bars on a scale, not wide slabs.
+        const CHART: f32 = 150.;
         let mut bars = h_flex()
+            .debug_selector(|| "context-bars".into())
             .items_end()
-            .h(px(170.))
-            .w_full()
-            .gap(px(8.))
-            .border_b_1()
-            .border_color(theme.line);
+            .h(px(CHART))
+            .gap(px(if visible.len() > 24 { 4. } else { 22. }));
         for (i, u) in visible.iter().enumerate() {
-            let segment = |n, color| div().w_full().h(px(n as f32 / max * 155.)).bg(color);
+            let segment = |n, color| div().w_full().h(px(n as f32 / max * CHART)).bg(color);
             bars = bars.child(
                 v_flex()
                     .id(("usage-bar", i))
+                    .debug_selector(move || format!("usage-bar-{i}"))
                     .flex_1()
-                    .min_w_0()
+                    .max_w(px(28.))
+                    .min_w(px(4.))
                     .h_full()
                     .justify_end()
-                    .gap(px(0.))
+                    .rounded_t(px(2.))
+                    .overflow_hidden()
                     .when(u.compaction_before, |v| {
-                        v.border_l_1().border_color(theme.amber)
+                        v.border_l_2().border_color(theme.amber)
                     })
-                    .child(segment(u.output, theme.amber))
-                    .child(segment(u.input, theme.accent))
+                    .child(segment(u.output, theme.orange))
+                    .child(segment(u.input, theme.secondary))
                     .child(segment(u.cache, theme.steel)),
             );
         }
+        let gridline = |fraction: f32| {
+            h_flex()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(CHART * (1. - fraction)))
+                .gap(px(8.))
+                .child(
+                    div()
+                        .w(px(40.))
+                        .text_right()
+                        .text_size(px(11.))
+                        .text_color(theme.muted)
+                        .child(count((max * fraction) as u64)),
+                )
+                .child(div().flex_1().h(px(1.)).bg(theme.line))
+        };
+        let legend = |name: &'static str, color| {
+            h_flex()
+                .gap(px(6.))
+                .child(div().size(px(9.)).rounded(px(2.)).bg(color))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.secondary)
+                        .child(name),
+                )
+        };
+        let chart =
+            v_flex()
+                .gap(px(10.))
+                .child(
+                    h_flex()
+                        .child(label("Tokens per response", theme))
+                        .child(div().flex_1())
+                        .child(
+                            h_flex()
+                                .gap(px(16.))
+                                .child(legend("Cache read", theme.steel))
+                                .child(legend("Input", theme.secondary))
+                                .child(legend("Output", theme.orange)),
+                        ),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .h(px(CHART))
+                        .child(gridline(0.))
+                        .child(gridline(0.5))
+                        .child(gridline(1.))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(56.))
+                                .right_0()
+                                .top_0()
+                                .bottom_0()
+                                .child(bars),
+                        ),
+                )
+                .when(!visible.is_empty() && visible.len() <= 24, |chart| {
+                    chart.child(h_flex().pl(px(56.)).gap(px(22.)).children(
+                        (1..=visible.len()).map(|n| {
+                            div()
+                                .flex_1()
+                                .max_w(px(28.))
+                                .text_center()
+                                .text_size(px(11.))
+                                .text_color(theme.muted)
+                                .child(n.to_string())
+                        }),
+                    ))
+                })
+                .when(visible.is_empty(), |v| {
+                    v.child(note("No assistant usage reported on this path yet.", theme))
+                })
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.muted)
+                        .child(format!(
+                            "{} response{} · current branch{}",
+                            self.usage.len(),
+                            if self.usage.len() == 1 { "" } else { "s" },
+                            if self.usage.len() > 64 {
+                                " · latest 64"
+                            } else {
+                                ""
+                            }
+                        )),
+                );
         let content=v_flex().id("context-scroll").track_scroll(&self.scroll).size_full().overflow_y_scroll().px(px(24.)).py(px(16.)).gap(px(20.))
-            .child(h_flex().gap(px(10.)).items_stretch()
+            .child(h_flex().items_stretch().pb(px(4.)).border_b_1().border_color(theme.line)
                 .child(tile("CONTEXT",tokens,usage.map(|u|format!("of {} · {}",count(u.context_window),u.percent.map(|p|format!("{p:.0}%")).unwrap_or_else(||"pending".into()))).unwrap_or_else(||"Not reported yet".into()),theme))
                 .child(tile("COST",stats.cost.map(|c|format!("${c:.2}")).unwrap_or_else(||"—".into()),"whole session".into(),theme))
                 .child(tile("CACHE READ",cache,"of all input tokens".into(),theme))
                 .child(tile("COMPACTIONS",model.history.as_ref().map(|_|compactions.len().to_string()).unwrap_or_else(||"—".into()),"on current path".into(),theme)))
-            .child(v_flex().gap(px(12.)).child(section("TOKENS PER RESPONSE","cache read  ·  input + cache write  ·  output",theme)).child(bars)
-                .when(visible.is_empty(),|v|v.child(note("No assistant usage reported on this path yet.",theme)))
-                .child(section(&format!("{} RESPONSES",self.usage.len()),&format!("{} max · latest 64 · amber marker = compaction",count(max as u64)),theme)))
-            .child(v_flex().gap(px(8.)).child(section("IN CONTEXT / REPORTED SOURCES","",theme))
-                .child(pair("System prompt","Not exposed by RPC".into(),theme)).child(pair("Context files","Not exposed by RPC".into(),theme))
+            .child(chart)
+            .child(v_flex().gap(px(6.)).pt(px(4.)).border_t_1().border_color(theme.line)
+                .child(h_flex().id("context-sources").debug_selector(||"context-sources".into()).h(px(36.)).gap(px(8.)).cursor_pointer()
+                    .child(icon(if self.sources_open {"chevron_down"} else {"chevron_right"}, theme.muted).size(px(12.)))
+                    .child(div().text_size(px(13.5)).child("Reported context sources"))
+                    .child(div().flex_1())
+                    .child(div().text_size(px(12.)).text_color(theme.muted).child("Skills, observed tools and history"))
+                    .on_click(cx.listener(|this,_,_,cx|{this.sources_open = !this.sources_open;cx.notify();})))
+                .child(note("The exact request payload is not exposed by Pi. These are reported sources, not a prompt manifest.",theme).pl(px(20.)))
+                .when(self.sources_open, |v| v.child(v_flex().pl(px(20.)).child(pair("System prompt","Not exposed by RPC".into(),theme)).child(pair("Context files","Not exposed by RPC".into(),theme))
                 .child(pair("Skills available",if skills.is_empty(){"None reported".into()}else{skills},theme))
                 .child(pair("Tools observed",if names.is_empty(){"None yet".into()}else{names.join(", ")},theme))
-                .child(pair("History",model.history.as_ref().map(|h|format!("{} entries on current path",h.active.len())).unwrap_or_else(||"Loading…".into()),theme))
-                .child(note("Available skills and observed tools are not an exact prompt manifest. Pi assembles request-specific context; this RPC does not expose that payload.",theme)))
+                .child(pair("History",model.history.as_ref().map(|h|format!("{} entries on current path",h.active.len())).unwrap_or_else(||"Loading…".into()),theme)))))
             .when_some(compactions.last(),|v,e|v.child(v_flex().p(px(14.)).gap(px(8.)).bg(theme.panel).border_1().border_color(theme.line).rounded(px(7.)).child(h_flex().gap(px(8.)).child(div().text_color(theme.amber).child("◆")).child(div().flex_1().child(format!("Compacted at {}",history::time(e)))).child(button("context-summary",if self.show_summary{"Hide summary"}else{"View summary"},theme).debug_selector(||"context-summary".into()).on_click(cx.listener(|this,_,_,cx|{this.show_summary = !this.show_summary;cx.notify();}))))
                 .child(note(format!("{} tokens before compaction. Original entries remain in the session file.",e["tokensBefore"].as_u64().map(count).unwrap_or_else(||"Unreported".into())),theme))
                 .when(self.show_summary,|v|v.child(self.summary.clone()))));

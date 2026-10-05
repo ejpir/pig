@@ -1,0 +1,115 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>B · Stage flow</title>
+<link rel="stylesheet" href="mock.css">
+<style>
+  .stages { flex: none; display: flex; align-items: stretch; gap: 0; padding: 16px 24px; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, var(--canvas), var(--panel)); }
+  .stage { flex: 1; position: relative; height: 62px; padding: 10px 14px 0 30px; background: var(--composer); border: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .stage:first-child { border-radius: 10px 0 0 10px; padding-left: 16px; }
+  .stage:last-child { border-radius: 0 10px 10px 0; }
+  /* Chevron joints: drawn with PathBuilder in GPUI; here as an inline SVG. */
+  .stage svg.joint { position: absolute; right: -15px; top: -1px; width: 16px; height: 62px; z-index: 2; overflow: visible; }
+  .stage .lbl { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 13px; }
+  .stage .sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stage .num { width: 18px; height: 18px; border-radius: 9px; display: grid; place-items: center; font-size: 10.5px; font-weight: 600; background: var(--hue); color: #fff; }
+  .stage .num .ico { width: 11px; height: 11px; }
+  .stage.done { background: color-mix(in srgb, var(--h-ok) 6%, var(--composer)); }
+  .stage.live { background: color-mix(in srgb, var(--h-read) 9%, var(--composer)); border-color: color-mix(in srgb, var(--h-read) 45%, var(--line));
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--h-read) 18%, transparent); z-index: 1; }
+  .stage.todo .num { background: transparent; color: var(--muted); border: 1.5px dashed var(--line-strong); }
+  .stage .bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: color-mix(in srgb, var(--h-read) 15%, transparent); }
+  .stage .bar i { display: block; height: 3px; width: 64%; background: var(--h-read); }
+
+  .split { flex: 1; display: grid; grid-template-columns: 1fr 384px; min-height: 0; }
+  .conv { padding: 22px 28px 0 24px; overflow: hidden; }
+  .board { border-left: 1px solid var(--line); background: var(--panel); padding: 18px 18px; display: flex; flex-direction: column; gap: 14px; overflow: hidden; }
+  .you { font-size: 14px; line-height: 21px; color: var(--secondary); padding-left: 14px; border-left: 3px solid var(--line-strong); }
+  .meta { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+  h2 { font-family: var(--serif); font-style: italic; font-weight: 400; font-size: 24px; margin: 22px 0 6px; }
+  .conv p { font-size: 14px; line-height: 22px; color: var(--secondary); max-width: 700px; }
+  .anchor { display: flex; align-items: center; gap: 8px; margin: 18px 0 8px; font-size: 11px; letter-spacing: .05em; color: var(--muted); text-transform: uppercase; }
+  .anchor::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .anchor .d { width: 8px; height: 8px; border-radius: 2px; background: var(--hue); }
+  .log { display: flex; flex-direction: column; }
+  .log .r { height: 30px; display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .log .r .k { width: 58px; color: var(--muted); }
+  .log .r .ico { color: var(--hue); }
+  .log .r .p { font-family: var(--mono); font-size: 12px; color: var(--secondary); }
+
+  .card { background: var(--composer); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 1px 2px rgba(37,47,61,.05); }
+  .card .hd { display: flex; align-items: center; gap: 8px; padding: 12px 14px 10px; font-weight: 600; }
+  .card .hd .a { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--accent); display: flex; gap: 4px; align-items: center; }
+  .fr { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 10px 14px; border-top: 1px solid var(--line); }
+  .fr .nm { font-weight: 600; font-size: 13px; } .fr .pth { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .fr .cnt { font-family: var(--mono); font-size: 12px; text-align: right; }
+  .dbar { grid-column: 1 / -1; height: 6px; border-radius: 3px; background: var(--line); display: flex; overflow: hidden; }
+  .dbar .a { background: var(--green); } .dbar .r { background: var(--coral); }
+  .hatch { margin: 0 14px 12px; padding: 7px 10px; border-radius: 6px; font-size: 11.5px; color: var(--muted);
+    background: repeating-linear-gradient(135deg, transparent 0 6px, color-mix(in srgb, var(--line-strong) 45%, transparent) 6px 7px); }
+  .ck { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-top: 1px solid var(--line); font-size: 13px; }
+  .ck .st { width: 18px; height: 18px; border-radius: 9px; display: grid; place-items: center; background: var(--hue); color: #fff; }
+  .ck .st .ico { width: 11px; height: 11px; }
+  .ck .st.spin { background: transparent; border: 2px solid color-mix(in srgb, var(--h-read) 25%, transparent); border-top-color: var(--h-read); }
+  .segs { display: flex; gap: 2px; margin: 0 14px 12px; } .segs i { flex: 1; height: 5px; border-radius: 1px; background: var(--h-ok); }
+
+  .composer-wrap { padding: 12px 24px 16px; border-top: 1px solid var(--line); background: var(--canvas); }
+  .composer { background: var(--composer); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; display: flex; align-items: center; gap: 10px; }
+  .queuepill { display: inline-flex; gap: 6px; align-items: center; height: 24px; padding: 0 9px; border-radius: 12px; background: color-mix(in srgb, var(--h-wait) 14%, transparent); color: var(--h-wait); font-size: 12px; font-weight: 600; }
+</style></head>
+<body data-status="working">
+<main class="main">
+  <div class="tabs"><div class="tab on">Thread</div><div class="tab">Changes <span class="n">2</span></div><span class="sp"></span><span class="branch">pi / main</span></div>
+
+  <div class="stages">
+    <div class="stage done" style="--hue:var(--h-ok)"><div class="lbl"><span class="num"><i data-i="check" data-w="3"></i></span>Understand</div><div class="sub">2 reads · 1 search · 0:08</div>
+      <svg class="joint" viewBox="0 0 16 62"><path d="M0 0 L15 31 L0 62" fill="color-mix(in srgb, #2e7950 6%, #fff)" stroke="#ddd7d0"/></svg></div>
+    <div class="stage done" style="--hue:var(--h-ok)"><div class="lbl"><span class="num"><i data-i="check" data-w="3"></i></span>Change</div><div class="sub">2 files · <span class="add">+27</span> <span class="rem">−1</span> · 0:31</div>
+      <svg class="joint" viewBox="0 0 16 62"><path d="M0 0 L15 31 L0 62" fill="color-mix(in srgb, #2e7950 6%, #fff)" stroke="#ddd7d0"/></svg></div>
+    <div class="stage live" style="--hue:var(--h-read)"><div class="lbl"><span class="num">3</span>Verify</div><div class="sub"><span class="mono">npm run check</span> · 2 of 3 · 0:42</div><div class="bar"><i></i></div>
+      <svg class="joint" viewBox="0 0 16 62"><path d="M0 0 L15 31 L0 62" fill="color-mix(in srgb, #2f7fa8 9%, #fff)" stroke="color-mix(in srgb, #2f7fa8 45%, #ddd7d0)"/></svg></div>
+    <div class="stage todo"><div class="lbl"><span class="num">4</span>Hand off</div><div class="sub">Summary, then your queued follow-up</div></div>
+  </div>
+
+  <div class="split">
+    <div class="conv">
+      <div class="meta">You · 10:24</div>
+      <div class="you">OpenCode returns empty thinking signatures. Accept them there, keep Anthropic strict, and add a regression test without a live API key.</div>
+      <div class="anchor" style="--hue:var(--h-ok)"><span class="d"></span>Understand</div>
+      <div class="log">
+        <div class="r" style="--hue:var(--h-read)"><span class="k">Read</span><i data-i="eye"></i><span class="p">packages/ai/src/providers/openai-completions.ts</span></div>
+        <div class="r" style="--hue:var(--h-search)"><span class="k">Grep</span><i data-i="search"></i><span class="p">"signature" in packages/ai</span></div>
+      </div>
+      <div class="anchor" style="--hue:var(--h-ok)"><span class="d"></span>Change</div>
+      <h2 style="margin-top:4px">One narrow fix. One regression test.</h2>
+      <p>Empty signatures are now accepted for OpenCode models only; the Anthropic path still throws <span class="mono" style="font-size:12.5px">MissingSignature</span>. The test mocks the provider, so no API key is needed.</p>
+      <div class="anchor" style="--hue:var(--h-read)"><span class="d"></span>Verify</div>
+      <div class="log"><div class="r" style="--hue:var(--h-read)"><span class="k">Run</span><i data-i="term"></i><span class="p">npm run check</span><span class="grow"></span><span class="muted" style="font-size:12px">streaming output in Checks →</span></div></div>
+    </div>
+
+    <div class="board">
+      <div class="card">
+        <div class="hd"><i data-i="diff"></i>Change set<span class="muted" style="font-weight:400">2 files</span><span class="a">Review <i data-i="arrow"></i></span></div>
+        <div class="fr"><div><div class="nm">openai-completions.ts</div><div class="pth">packages/ai/src/providers</div></div><div class="cnt"><span class="add">+3</span> <span class="rem">−1</span></div>
+          <div class="dbar"><i class="a" style="width:30%"></i><i class="r" style="width:10%"></i></div></div>
+        <div class="fr"><div><div class="nm">openai-completions.test.ts</div><div class="pth">packages/ai/test</div></div><div class="cnt add">+24</div>
+          <div class="dbar"><i class="a" style="width:100%"></i></div></div>
+        <div class="hatch"><span style="background:var(--composer);padding:2px 6px;border-radius:4px">No snapshot for these edits — restore is unavailable.</span></div>
+      </div>
+      <div class="card">
+        <div class="hd"><i data-i="term"></i>Checks<span class="muted" style="font-weight:400">2 of 3</span><span class="a" style="color:var(--muted)">Output <i data-i="chev-r"></i></span></div>
+        <div class="ck" style="--hue:var(--h-ok)"><span class="st"><i data-i="check" data-w="3"></i></span>TypeScript<span class="grow"></span><span class="mono muted" style="font-size:11px">4.1s</span></div>
+        <div class="ck" style="--hue:var(--h-ok)"><span class="st"><i data-i="check" data-w="3"></i></span>Provider regression tests<span class="grow"></span><span class="mono add" style="font-size:11px">12/12</span></div>
+        <div class="segs"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="ck"><span class="st spin"></span>Workspace packages<span class="grow"></span><span class="mono muted" style="font-size:11px">running</span></div>
+      </div>
+      <div style="font-size:11.5px;line-height:17px;color:var(--muted);padding:0 4px">The board holds what the run produced. The transcript stays prose. Each stage chip scrolls to its anchor.</div>
+    </div>
+  </div>
+
+  <div class="composer-wrap">
+    <div class="composer"><i data-i="clip" class="muted"></i><span class="grow" style="font-size:14px">Add a release note once checks finish</span>
+      <span class="queuepill"><i data-i="queue"></i>1 queued</span><span class="chip"><i data-i="spark"></i>Claude Opus · High</span><span class="btn"><i data-i="stop"></i>Stop</span><span class="btn">Steer now</span><span class="btn primary">Queue ↵</span></div>
+  </div>
+</main>
+<script src="shell.js"></script><script src="icons.js"></script>
+</body></html>

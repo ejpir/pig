@@ -85,12 +85,12 @@ impl CatalogView {
                 providers.extend(auth.iter().map(|provider| provider.id.clone()));
             }
         }
-        // Provider cards scroll independently; a large provider catalog must not consume the table.
+        // Provider filters scroll on one line; a large catalog must not consume the table.
         let cards = h_flex()
             .id("model-providers")
             .overflow_x_scroll()
             .gap(px(8.))
-            .h(px(86.))
+            .h(px(40.))
             .flex_shrink_0()
             .children(providers.into_iter().map(|provider| {
                 let session = self.model(cx).expect("providers have a session");
@@ -107,22 +107,24 @@ impl CatalogView {
                     .map(|entry| entry.name.clone())
                     .unwrap_or_else(|| provider.clone());
                 let selected = self.provider.as_ref() == Some(&provider);
-                v_flex()
+                // A compact filter: provider, count and whether it is configured.
+                let configured = !status.starts_with("Not");
+                h_flex()
                     .id(keyed("provider", &provider))
-                    .w(px(152.))
-                    .h(px(66.))
+                    .h(px(28.))
                     .flex_shrink_0()
-                    .p(px(10.))
-                    .gap(px(4.))
-                    .rounded(px(7.))
+                    .px(px(10.))
+                    .gap(px(7.))
+                    .rounded(px(6.))
                     .border_1()
                     .border_color(theme.line)
                     .bg(if selected {
                         theme.selected
                     } else {
-                        theme.panel
+                        theme.composer
                     })
                     .cursor_pointer()
+                    .hover(move |chip| chip.bg(theme.hover))
                     .tooltip(ui::Tooltip::text(format!("{name} · {status}")))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.provider = if this.provider.as_ref() == Some(&provider) {
@@ -132,20 +134,18 @@ impl CatalogView {
                         };
                         this.project(cx);
                     }))
+                    .child(div().size(px(6.)).rounded_full().bg(if configured {
+                        theme.green
+                    } else {
+                        theme.line_strong
+                    }))
+                    .child(div().text_size(px(12.5)).child(name))
                     .child(
-                        h_flex()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(12.))
-                                    .child(name),
-                            )
-                            .child(body_text(count.to_string(), theme)),
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.muted)
+                            .child(count.to_string()),
                     )
-                    .child(body_text(status, theme).truncate())
             }));
         v_flex().flex_shrink_0()
             .child(h_flex().px(px(24.)).pt(px(12.)).gap(px(8.))
@@ -156,6 +156,10 @@ impl CatalogView {
                     if let Some(controller) = this.controller.clone() {
                         this.workspace.update(cx, |workspace, cx| workspace.select(workspace.active, cx));
                         controller.update(cx, |controller, cx| {
+                            if controller.is_remote() {
+                                controller.notice("Sign in on the SSH host: run pi there, then /login. Desktop credentials are not copied to the remote host.", cx);
+                                return;
+                            }
                             controller.notice("Sign in: run pi in the terminal, then /login. Restart this session afterward to read the new credentials.", cx);
                             controller.open_in_terminal("pi".into(), cx);
                         });
@@ -170,7 +174,9 @@ impl CatalogView {
                         .debug_selector(move || format!("model-filter-{index}"))
                         .on_click(cx.listener(move |this, _, _, cx| { this.model_filter = index; this.project(cx); }))
                 }), theme))
-                .child(body_text(format!("{} models · USD / 1M tokens", self.models.len()), theme)))
+                .child(body_text(format!("{} models · USD / 1M tokens", self.models.len()), theme))
+                .child(div().flex_1())
+                .child(search_field("models-search", &self.search, cx, theme)))
             .child(h_flex().h(px(28.)).px(px(20.)).gap(px(10.)).bg(theme.hover)
                 .border_l_2().border_color(gpui::transparent_black())
                 .child(cell("Cycle", 36., theme))

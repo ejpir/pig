@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>05 · Waiting for you</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  .choice { min-height: 56px; display: flex; align-items: center; gap: 14px; padding: 8px 14px; border-radius: 14px; }
+  .choice + .choice { margin-top: 4px; }
+  .choice.on { background: var(--selected); }
+  .radio { width: 20px; height: 20px; flex: none; border-radius: 10px; border: 2px solid var(--line-strong); }
+  .choice.on .radio { border: 6px solid var(--accent); }
+  .choice .t { font-size: 15px; } .choice .s { font-size: 13px; color: var(--muted); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content" data-frag="working"></main>
+  <div class="scrim"></div>
+  <div class="sheet" style="padding-bottom:22px">
+    <div class="handle"></div>
+    <span class="badge wait" style="align-self:flex-start"><span class="dot wait" style="box-shadow:none;width:6px;height:6px"></span>Needs you</span>
+    <div style="font-size:20px;font-weight:600;margin-top:10px">Run the provider tests?</div>
+    <div class="hint" style="font-size:14px;margin-top:2px">Pi wants to run a command on studio-mac, in ~/repos/pi.</div>
+    <div class="card code" style="margin-top:14px;padding:12px 14px;font-size:13px;border-radius:12px;background:var(--panel);border-color:transparent">pnpm test --filter @pi/ai -- qwen</div>
+    <div style="margin-top:14px">
+      <div class="choice on"><span class="radio"></span><div class="grow"><div class="t">Allow once</div></div></div>
+      <div class="choice"><span class="radio"></span><div class="grow"><div class="t">Allow for this session</div><div class="s">Pi won’t ask again for this command</div></div></div>
+      <div class="choice"><span class="radio"></span><div class="grow"><div class="t">Don’t run it</div><div class="s">Tell Pi why in the next message</div></div></div>
+    </div>
+    <div class="row gap8" style="margin-top:16px">
+      <span class="btn grow">Later</span>
+      <span class="btn primary grow">Answer</span>
+    </div>
+  </div>
+</div>
+<script src="fragments.js"></script><script src="phone.js"></script>
+</body></html>

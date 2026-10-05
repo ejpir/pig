@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi in your pocket</title>
+<style>
+  @font-face { font-family: "Plex"; src: url("../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+  @font-face { font-family: "Plex"; src: url("../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+  :root { --bg:#ece7e1; --card:#faf9f7; --text:#252f3d; --muted:#665f59; --line:#ddd7d0; --accent:#4b607c; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0d1116; --card:#161d27; --text:#ebe7e4; --muted:#9ca2aa; --line:#363d46; --accent:#8caecb; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Plex", "IBM Plex Sans", system-ui, sans-serif; }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 48px 24px 80px; }
+  .eyebrow { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  h1 { font: italic 400 44px/1.1 Georgia, "DejaVu Serif", serif; margin: 10px 0 12px; letter-spacing: -.01em; }
+  .lede { font-size: 17px; color: var(--muted); max-width: 760px; margin: 0 0 8px; }
+  .links a { color: var(--accent); margin-right: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 28px 20px; margin-top: 36px; }
+  figure { margin: 0; }
+  figure a { display: block; }
+  figure img { width: 100%; display: block; border-radius: 22px; border: 1px solid var(--line); background: var(--card); }
+  figcaption { margin-top: 10px; font-size: 14px; color: var(--muted); }
+  figcaption b { display: block; color: var(--text); font-size: 15px; }
+</style></head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">Design study · Android</div>
+  <h1>Pi in your pocket</h1>
+  <p class="lede">Pi keeps running on your computer or server; the phone follows its sessions, answers its questions, reviews its changes and starts new work. Twelve static screens in Pi Desktop's Moonstone and Evening themes.</p>
+  <p class="links"><a href="README.md">Notes and phone contract</a><a href="overview.png">Overview PNG</a><a href="../../crates/gpui_android/README.md">GPUI Android backend</a></p>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+  const screens = [
+    ["01-connect", "01 · Connect", "Where Pi runs, this phone's key, and what connecting does."],
+    ["02-sessions", "02 · Sessions", "Needs you first, then working, then today's results."],
+    ["03-starting", "03 · Starting", "The task and the composer; starting points only fill the draft."],
+    ["04-working", "04 · Working", "The run rail as soft tiles, the live step with its diff, the stages ahead."],
+    ["05-waiting", "05 · Waiting for you", "One question, the exact command, and an explicit Answer."],
+    ["06-done", "06 · Done", "Pi's closing words, changed files, the check, and Review."],
+    ["07-review", "07 · Review", "One file at a time; tap lines to ask for a revision."],
+    ["08-typing", "08 · Typing", "Screenshot and log attached, @ suggestions above the keyboard."],
+    ["09-details", "09 · Details", "The inspector as a sheet, closed until asked for."],
+    ["10-alerts", "10 · Notifications", "Questions, finished sessions, and one quiet progress notification."],
+    ["11-evening", "11 · Evening", "Working in the dark theme."],
+    ["12-settings", "12 · Settings and tools", "Computers, appearance, notifications and typing."],
+  ];
+  document.getElementById("grid").innerHTML = screens.map(([file, title, note]) =>
+    `<figure><a href="screens/${file}.html"><img src="screens/${file}.png" alt="${title}" loading="lazy"></a><figcaption><b>${title}</b>${note}</figcaption></figure>`).join("");
+</script>
+</body></html>

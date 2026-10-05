@@ -3,9 +3,11 @@
 import argparse
 import hashlib
 import re
+import tomllib
 from pathlib import Path
 
-from package_desktop import TARGETS, archive_name
+from package_desktop import ROOT, TARGETS, archive_name
+from package_remote import asset_name
 
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?")
 
@@ -16,9 +18,16 @@ def validate_tag(tag: str) -> None:
         raise ValueError(f"Expected a version tag such as v0.1.0 or v0.1.0-rc.1: {tag!r}")
 
 
+def validate_release_version(tag: str, version: str) -> None:
+    """The desktop downloads helpers by its compiled version, so the release tag must match."""
+    validate_tag(tag)
+    if tag != f"v{version}":
+        raise ValueError(f"Release tag {tag!r} does not match workspace version {version!r}")
+
+
 def manifest(directory: Path) -> Path:
     """Fail closed on missing/extra files rather than publishing a partial matrix."""
-    expected = {archive_name(target) for target in TARGETS}
+    expected = {archive_name(target) for target in TARGETS} | {asset_name(target) for target in TARGETS}
     entries = {file.name for file in directory.iterdir()}
     if entries != expected:
         raise ValueError(f"Release matrix mismatch: missing={sorted(expected - entries)}, extra={sorted(entries - expected)}")
@@ -41,7 +50,8 @@ def main() -> None:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--directory", type=Path)
     args = parser.parse_args()
-    validate_tag(args.tag)
+    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
+    validate_release_version(args.tag, version)
     if args.directory:
         print(manifest(args.directory))
 
