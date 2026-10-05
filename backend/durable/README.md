@@ -2,6 +2,19 @@
 
 This is the first vertical slice, **not yet the default or a stock Pi replacement**. It pins pi-durable/pi-ai/chord and the stock Pi model/auth SDK at 1.0.2 and compiles the JavaScript and Bun 1.4.2 runtime into a standalone worker. Rust keeps ownership/SSH/files; SQLite owns recoverable execution state. No provider is called by the tests.
 
+## Build-machine Bun setup
+
+Use Bun **1.4.2** on the build machine, not the execution host. If Bun isn't already installed, use a separate tools directory and explicitly run its installer; this also works when npm lifecycle scripts are disabled. Project dependencies still use `npm ci --ignore-scripts`.
+
+```sh
+tools="$HOME/.local/share/pi-desktop-build"
+npm install --prefix "$tools" --ignore-scripts bun@1.4.2
+(cd "$tools/node_modules/bun" && node install.js)
+export PATH="$tools/node_modules/.bin:$PATH"
+```
+
+If `npm exec --package=bun@1.4.2` reports "Bun's postinstall script was not run", use this setup instead of the cached npm-exec wrapper.
+
 ## Native recovery tests (including on a Mac)
 
 Run from the repository root. You need the project's Rust toolchain and npm on the build machine. The sibling Zed checkout is required by the existing workspace. These tests do not need SSH, credentials or a model subscription:
@@ -10,8 +23,8 @@ Run from the repository root. You need the project's Rust toolchain and npm on t
 cd backend/durable
 npm ci --ignore-scripts
 npm run check
-npm exec --yes --package=bun@1.4.2 -- bun test
-npm exec --yes --package=bun@1.4.2 -- bun build test/fixture.ts --compile \
+bun test
+bun build test/fixture.ts --compile \
   --outfile ../../artifacts/durable/pi-desktop-durable-fixture
 cd ../..
 PI_DESKTOP_TEST_DURABLE_RUNNER="$PWD/artifacts/durable/pi-desktop-durable-fixture" \
@@ -29,7 +42,7 @@ Build **on the SSH host's OS/CPU**, or on a matching build machine. A Mac helper
 ```sh
 cd backend/durable
 npm ci --ignore-scripts
-npm exec --yes --package=bun@1.4.2 -- bun run build
+bun run build
 cd ../..
 PI_DESKTOP_DURABLE_BINARY="$PWD/artifacts/durable/pi-desktop-durable" \
   cargo build --locked -p pi_remote --features bundled-durable
@@ -45,7 +58,7 @@ An upgraded helper does not hot-reload an already running daemon/runner. A fresh
 
 The production runner and the test fixture are different artifacts. Compiling `test/fixture.ts` updates **only** `pi-desktop-durable-fixture`; it does not replace `pi-desktop-durable`, which the helper embeds. In a shared sandbox/host checkout, the production artifact may still be a Linux ELF even though the Rust helper was rebuilt as a Mac executable.
 
-Run `npm exec --yes --package=bun@1.4.2 -- bun run build` in `backend/durable` from your **Mac terminal**, then verify `file artifacts/durable/pi-desktop-durable` from the repository root says **Mach-O 64-bit arm64**, not ELF. Rebuild the helper with the same `PI_DESKTOP_DURABLE_BINARY` command above, fully quit/relaunch the GUI with `PI_DESKTOP_REMOTE_HELPER` pointing to that rebuilt helper, and reconnect. The changed binary/helper hashes select fresh installation/cache paths; do not delete durable session storage or old running caches.
+Run `bun run build` in `backend/durable` (after the Bun setup above) from your **Mac terminal**, then verify `file artifacts/durable/pi-desktop-durable` from the repository root says **Mach-O 64-bit arm64**, not ELF. Rebuild the helper with the same `PI_DESKTOP_DURABLE_BINARY` command above, fully quit/relaunch the GUI with `PI_DESKTOP_REMOTE_HELPER` pointing to that rebuilt helper, and reconnect. The changed binary/helper hashes select fresh installation/cache paths; do not delete durable session storage or old running caches.
 
 The helper build now checks the embedded runner's executable header against Cargo's **target** OS/CPU (not the build host), and runtime overrides/caches are checked against the execution host. A mismatch fails with the production-build instructions before executing the runner. Header validation does not prove shared-library availability or a complete valid executable.
 
@@ -75,7 +88,19 @@ Stored OAuth tokens refresh at request time under stock Pi's credential-file loc
 
 **Models → Refresh** reloads the host's auth/model configuration without restarting the runner. Catalog discovery is offline/cache-only, so startup and model browsing do not fetch provider catalogs or exchange OAuth tokens. Configured credential commands retain stock Pi's execution/caching behavior. Dynamic providers need an existing cached catalog populated by stock Pi. Creating a new login still uses stock Pi's interactive `/login` on the SSH host; there is no durable-specific GUI/browser login flow yet. No stock Pi agent process is started by the durable runner.
 
-The Bun tests use only temporary credential files and synthetic OAuth refresh functions. They cover built-in registration, stored keys/subscription discovery, locked rotation, failed-refresh retention, model refresh and non-secret wire metadata; they never call a model or a real token endpoint.
+The Bun tests use only temporary credential files and synthetic OAuth refresh functions. They cover built-in registration, stored keys/subscription discovery and request-auth derivation, locked rotation, failed-refresh retention, model refresh and non-secret wire metadata; they never call a model or a real token endpoint.
+
+The production factory explicitly registers the SDK's static Bun OAuth flows and Bedrock implementation, matching stock Pi's standalone setup. Their default imports are deliberately opaque to bundlers; merely listing models/auth does not exercise them. A compiled regression probe checks Codex, ChatGPT, Anthropic, Kimi and Copilot auth derivation with unexpired fake tokens, outside the repository with no Node/Bun on PATH and fetch forbidden. After building the production runner:
+
+```sh
+(cd backend/durable && bun build test/standalone-auth.ts --compile --minify \
+  --outfile ../../artifacts/durable/pi-desktop-durable-auth-probe)
+PI_DESKTOP_TEST_DURABLE_PRODUCTION="$PWD/artifacts/durable/pi-desktop-durable" \
+PI_DESKTOP_TEST_DURABLE_AUTH_PROBE="$PWD/artifacts/durable/pi-desktop-durable-auth-probe" \
+  cargo test --locked -p pi_remote --test durable_auth -- --ignored
+```
+
+If stock Pi works but an older durable build reports `OAuth auth derivation failed` with a missing OAuth module, rebuild **both** the production runner and bundled helper, install the new hash-specific helper, and use a new session or explicitly shut down an idle old daemon before reconnecting. Reconnect does not upgrade a live owner. Do not delete credentials/session storage or re-login merely to repair a missing bundled module.
 
 ## Headless use from a phone
 

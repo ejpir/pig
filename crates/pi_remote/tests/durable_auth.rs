@@ -1,4 +1,4 @@
-//! Standalone PRODUCTION runner metadata only, using isolated synthetic credentials; no prompts/inference.
+//! Standalone production metadata and compiled auth derivation with synthetic credentials; no inference.
 #![cfg(unix)]
 use pi_core::{
     protocol::read_record,
@@ -60,6 +60,59 @@ impl Drop for Bridge {
                 libc::kill(pid as i32, libc::SIGTERM);
             }
         }
+    }
+}
+
+#[test]
+#[ignore = "Compile test/standalone-auth.ts and set PI_DESKTOP_TEST_DURABLE_AUTH_PROBE"]
+fn standalone_oauth_derivation_needs_no_package_files_runtime_or_network() {
+    let probe = std::env::var_os("PI_DESKTOP_TEST_DURABLE_AUTH_PROBE")
+        .expect("Compile backend/durable/test/standalone-auth.ts");
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("auth.json");
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        * 1000
+        + 3_600_000;
+    let providers = [
+        "openai-codex",
+        "openai",
+        "anthropic",
+        "kimi-coding",
+        "github-copilot",
+    ];
+    let credential = json!({"type":"oauth","access":"FAKE-ACCESS-NEVER-SEND","refresh":"FAKE-REFRESH-NEVER-SEND","expires":expires});
+    let credentials: serde_json::Map<String, Value> = providers
+        .iter()
+        .map(|provider| ((*provider).to_string(), credential.clone()))
+        .collect();
+    let before = serde_json::to_vec(&credentials).unwrap();
+    std::fs::write(&path, &before).unwrap();
+    for provider in providers {
+        let output = Command::new(&probe)
+            .arg(&path)
+            .arg(provider)
+            .current_dir(directory.path())
+            .env_clear()
+            .env("HOME", directory.path())
+            .env("PATH", "/no-node-or-bun")
+            .env("PI_CODING_AGENT_DIR", directory.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{provider}: {stderr}");
+        assert!(!stdout.contains("FAKE-ACCESS-NEVER-SEND"));
+        assert!(!stderr.contains("FAKE-ACCESS-NEVER-SEND"));
+        assert!(!stdout.contains("FAKE-REFRESH-NEVER-SEND"));
+        assert!(!stderr.contains("FAKE-REFRESH-NEVER-SEND"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&stdout).unwrap(),
+            json!({"provider":provider,"derived":true,"networkRequests":0})
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }
 

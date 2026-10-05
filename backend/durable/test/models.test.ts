@@ -71,6 +71,20 @@ test("existing Pi OAuth credentials appear in the GUI without refreshing tokens"
   expect(JSON.parse(readFileSync(path, "utf8"))["kimi-coding"].expires).toBe(1);
 });
 
+test("built-in OAuth credentials derive request auth without token exchange", async () => {
+  const providers = ["openai-codex", "openai", "anthropic", "kimi-coding", "github-copilot"];
+  const credential = { type: "oauth", access: "SYNTHETIC-ACCESS", refresh: "SYNTHETIC-REFRESH", expires: Date.now() + 3_600_000 };
+  const path = authFile(Object.fromEntries(providers.map((provider) => [provider, credential])));
+  const before = readFileSync(path, "utf8");
+  const runtime = await desktopModels({ authPath: path, modelsPath: null });
+  for (const provider of providers) {
+    const result = await runtime.getAuth(provider);
+    expect(result).toBeDefined();
+    expect(result?.auth.apiKey ?? result?.auth.headers?.Authorization).toContain(credential.access);
+  }
+  expect(readFileSync(path, "utf8")).toBe(before);
+});
+
 test("two durable runtimes serialize expired OAuth refresh and persist rotated credentials", async () => {
   const path = authFile({ "test-oauth": { type: "oauth", access: "old-access", refresh: "old-refresh", expires: 1 }, anthropic: { type: "api_key", key: "unrelated" } });
   const first = await desktopModels({ authPath: path, modelsPath: null });

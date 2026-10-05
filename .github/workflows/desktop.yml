@@ -171,10 +171,12 @@ jobs:
           bun test
           bun run build
           bun build test/fixture.ts --compile --outfile ../../artifacts/durable/pi-desktop-durable-fixture
+          bun build test/standalone-auth.ts --compile --minify --outfile ../../artifacts/durable/pi-desktop-durable-auth-probe
           cd ../..
           PI_DESKTOP_TEST_DURABLE_RUNNER="$PWD/artifacts/durable/pi-desktop-durable-fixture" \
             cargo test --locked -p pi_remote --test durable -- --ignored
           PI_DESKTOP_TEST_DURABLE_PRODUCTION="$PWD/artifacts/durable/pi-desktop-durable" \
+          PI_DESKTOP_TEST_DURABLE_AUTH_PROBE="$PWD/artifacts/durable/pi-desktop-durable-auth-probe" \
             cargo test --locked -p pi_remote --test durable_auth -- --ignored
           PI_DESKTOP_DURABLE_BINARY="$PWD/artifacts/durable/pi-desktop-durable" \
             cargo check --locked -p pi_remote --features bundled-durable
