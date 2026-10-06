@@ -233,7 +233,12 @@ impl SessionView {
             cx.notify();
         });
         files.update(cx, |files, _| files.set_session(controller.downgrade()));
-        let cwd = controller.read(cx).model().cwd.clone();
+        let mut cwd = controller.read(cx).model().cwd.clone();
+        // The demo's projects are made up; its shells start in a real folder.
+        if controller.read(cx).is_demo() && !cwd.is_dir() {
+            cwd = std::env::temp_dir().join("pi-desktop-demo");
+            std::fs::create_dir_all(&cwd).ok();
+        }
         let remote = controller.read(cx).is_remote();
         let terminal = cx.new(|_| {
             let terminal = super::terminal::TerminalDrawer::new(cwd);

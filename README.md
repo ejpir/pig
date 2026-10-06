@@ -2,98 +2,70 @@
 
 A native desktop app for the [pi](https://github.com/earendil-works/pi) coding agent, built with Zed's GPUI (no webview). Each session runs its own pi process in its project folder.
 
-![A tour of Pi Desktop: thread, commands, mentions, changes, tree, context, files, terminal, sessions, models, resources, settings and the dark theme](docs/pi-desktop-showcase.gif)
+<table>
+  <tr>
+    <td><img src="docs/pi-desktop-showcase.gif" alt="A tour of Pi Desktop on macOS"></td>
+    <td width="240"><img src="docs/pi-android-showcase.gif" alt="A tour of Pi for Android"></td>
+  </tr>
+  <tr>
+    <td align="center">Pi Desktop on macOS</td>
+    <td align="center"><a href="crates/pi_android/README.md">Pi for Android</a></td>
+  </tr>
+</table>
 
-- **Sessions and projects:** a sidebar of open and saved sessions per project, with search, forks, worktrees and **All Sessions**.
-- **Thread:** readable Markdown, collapsible tools, changed-file links, and a shared composer with explicit queue/steer controls, `/` commands, `@` mentions and attachments.
-- **Changes:** main-area file navigation, aligned split or compact unified diffs, full patch copying and explicitly submitted revision requests. Observed edits are already on disk, not a complete working-tree diff; restore requires a recorded jj snapshot.
-- **jj turns:** each run that changes files becomes a jj change you can undo, redo or restore file by file (opt-in per project).
-- **Language servers:** file tabs on Zed's editor. Errors go back to pi after its edits, even though pi has no LSP support itself.
-- **Terminal drawer**, **Settings** (pi's settings and the app's own), **Models** and **Resources**.
+- **Sessions and projects** in a sidebar, with search, forks and worktrees.
+- **Thread** with readable Markdown, collapsible tools, and a composer with `/` commands, `@` mentions and attachments.
+- **Changes** as split or unified diffs; each run that edits files can become a jj change you can undo.
+- **Files, terminal, language servers, models and settings** in the same window.
+- **Remote sessions over SSH** that keep running when you disconnect ([docs/remote.md](docs/remote.md)).
 
-**Settings & tools** opens All Sessions, Models, Resources and Settings. **Session tools** opens Tree and Context. The inspector starts closed; core Thread/review actions do not need it.
+## Build and run
 
-See [docs/architecture.md](docs/architecture.md) for how it works.
-
-## Remote sessions
-
-Choose **New session → SSH**, or run `pi-desktop --ssh dev --project /srv/project`. The app installs a per-user Rust helper over SSH. Remote agents keep running when the desktop disconnects; **Reconnect** restores the live session. Saved SSH sessions in **All Sessions** have **Open** and **Remove** actions; Remove only forgets the shortcut. SSH keys/agent and verified host keys are required. Remote file browsing/editing is available through **Files**; terminals, LSP and jj are still deferred; see [Remote Pi](docs/remote.md) for setup, development builds and limitations.
-
-## Install
-
-Download a package for Linux (amd64, arm64), macOS (Apple Silicon) or Windows (amd64) from the releases. pi is built into the executable, so you don't need Node.js or pi. Existing pi settings and sign-ins in `~/.pi/agent` are reused. Signing in to a provider currently opens a terminal that runs `pi`, so that one step still needs pi installed.
-
-The macOS app is ad-hoc signed and the Windows ZIP is unsigned, so the first launch may need an explicit override.
-
-## Build from source
-
-Keep a checkout of Zed next to this repository:
+Keep a checkout of [Zed](https://github.com/zed-industries/zed) next to this repository (revision `5becf8b5910fd538ccc5489e8edd3fde32917fad`):
 
 ```text
 repos/
   pi-desktop/
-  zed/   # revision 5becf8b5910fd538ccc5489e8edd3fde32917fad
+  zed/
 ```
 
-You need rustup (the toolchain in `rust-toolchain.toml`) and CMake, plus:
+You need rustup and CMake (macOS: Xcode Command Line Tools and `brew install cmake`).
 
-- **Linux:**
-  ```sh
-  sudo apt-get install build-essential cmake pkg-config libx11-dev libx11-xcb-dev libxcb1-dev \
-    libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev \
-    libfreetype6-dev libvulkan-dev libssl-dev libclang-dev libasound2-dev
-  ```
-- **macOS:** Xcode Command Line Tools and `brew install cmake`. Metal shaders compile at launch, so `xcrun metal` isn't needed.
-- **Windows:** Visual Studio 2022 Build Tools with **Desktop development with C++** and the Windows SDK. Run from a Developer PowerShell.
-
-Run an offline preview, which never starts pi:
+Fetch pi's release build, point the build at it, and run:
 
 ```sh
-cargo run --locked -p pi-desktop -- --demo
+python3 scripts/fetch_pi.py    # writes artifacts/pi/pi-<platform>.tar.gz
+export PI_DESKTOP_BACKEND_ARCHIVE=$PWD/artifacts/pi/pi-darwin-arm64.tar.gz
+cargo run --release --locked -p pi-desktop --features bundled-backend -- --project /path/to/project
 ```
 
-Run for real with pi's release binary, as release builds embed it:
+On Linux, use the `pi-linux-x64` or `pi-linux-arm64` archive instead. pi is built into the app, so you don't need Node.js or pi installed. Your existing pi settings and sign-ins in `~/.pi/agent` are reused.
+
+Real sessions use your provider credentials and can edit files, just like pi. To try the app offline with sample sessions, add `--demo`.
+
+To record the tour above again, run `scripts/macos-demo/record.sh` after a release build.
+
+## Durable sessions (experimental)
+
+Pi Desktop can also run sessions with a durable engine built on pi-durable. A session's state lives in SQLite on the computer that runs it, so the session survives disconnects and crashes and resumes where it was. Use it for SSH sessions (**New session → SSH → Durable · experimental**) and for [Pi for Android](crates/pi_android/README.md), which starts durable sessions on your computer.
+
+Local sessions don't need it; the steps above are enough. For durable sessions, build the engine into the SSH helper on the machine that will run the sessions (it needs npm and Bun 1.4.2):
 
 ```sh
-python3 scripts/fetch_pi.py                # writes artifacts/pi/<platform>/pi
-PI_DESKTOP_PI="$PWD/artifacts/pi/linux-x64/pi" \
-  cargo run --release --locked -p pi-desktop -- --project /path/to/project
+(cd backend/durable && npm ci --ignore-scripts && bun run build)
+PI_DESKTOP_DURABLE_BINARY=$PWD/artifacts/durable/pi-desktop-durable \
+  cargo build --release --locked -p pi_remote --features bundled-durable
 ```
 
-Real sessions use your provider credentials and can edit files, just like pi.
-
-### Which pi runs
-
-Each session runs stock `pi --mode rpc` with Pi Desktop's extension, which supplies what pi's RPC mode lacks (see [architecture](docs/architecture.md#pi-and-the-desktop-extension)). The first of these that is set runs:
-
-1. For development, `PI_DESKTOP_PI`: an executable. Or `PI_DESKTOP_RPC_ENTRY`: a JavaScript entry, run with `PI_DESKTOP_NODE` or `node`; `scripts/pi-rpc.mjs` runs a sibling `../pi` source checkout this way.
-2. The pi built into release builds (the `bundled-backend` feature).
-3. `pi` from PATH.
-
-## Package
-
-```sh
-bash scripts/package-linux.sh      # or package-macos.sh; ./scripts/package-windows.ps1 on Windows
-```
-
-Packaging needs Python 3.11+ and npm (for license notices). It downloads pi's release binary for the pinned version, checks it against `packaging/pi-release.sha256`, embeds it, and writes an archive to `dist/`. On macOS, `PI_DESKTOP_CODESIGN_IDENTITY` re-signs pi for the hardened runtime. Details: [Built-in pi](docs/architecture.md#built-in-pi).
-
-CI ([`.github/workflows/desktop.yml`](.github/workflows/desktop.yml)):
-- **Every push:** runs the tests and lints on Linux and builds all four packages and standalone SSH helpers.
-- **A `v*` tag:** also publishes them with `SHA256SUMS`, once everything passes.
+See [docs/remote.md](docs/remote.md#experimental-durable-backend) for what it supports and how to install the helper, and [backend/durable](backend/durable/README.md) for its tests.
 
 ## Test
 
 ```sh
-cargo fmt -p pi_core -p pi_remote -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
-cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
 cargo test --locked --workspace
-cargo test --locked -p pi_lsp_bridge --features fake-lsp
-PI_DESKTOP_TEST_PI="$PWD/artifacts/pi/linux-x64/pi" cargo test --locked -p pi_core --test transport -- --ignored
-python3 -m unittest discover -s scripts -p 'test_packaging.py'
 ```
 
-No test calls a model provider. `scripts/capture-*.sh` check the real window under Xvfb; see [docs/validation.md](docs/validation.md).
+See [docs/validation.md](docs/validation.md) for the full checks and [docs/architecture.md](docs/architecture.md) for how it works, including packaging.
 
 ## Keys
 
@@ -101,19 +73,13 @@ No test calls a model provider. `scripts/capture-*.sh` check the real window und
 |---|---|
 | Ctrl/Cmd+N | New session |
 | Ctrl/Cmd+O | Open folder |
-| Ctrl/Cmd+K | Global search and destinations |
-| Ctrl/Cmd+B | Show or hide the sidebar |
-| Ctrl+Shift+I | Show or hide the inspector |
-| Ctrl+\` or Ctrl/Cmd+J | Terminal |
-| Ctrl+Shift+T | Theme |
-| Ctrl+Shift+D | Session diagnostics |
+| Ctrl/Cmd+K | Search |
+| Ctrl/Cmd+B | Sidebar |
+| Ctrl/Cmd+J | Terminal |
 | Enter | Send, or queue a follow-up while pi works |
-| Ctrl/Cmd+Enter | Explicitly steer the current run |
-| Alt/Option+Enter | Queue a follow-up |
+| Ctrl/Cmd+Enter | Steer the current run |
 | Escape | Stop |
-| ↑/↓, then Enter, with Changes focused | Select a file, then attach an explicit revision request (not submit) |
-| ⌥ held, in a file tab | Show which turn wrote each line |
 
 ## License
 
-GPL-3.0-or-later ([LICENSE](LICENSE)), because the app links Zed's GPL crates. Fonts, icons, pi, Bun and the bundled npm packages are listed in [THIRD_PARTY.md](THIRD_PARTY.md) and `licenses/`.
+GPL-3.0-or-later ([LICENSE](LICENSE)), because the app links Zed's GPL crates. Third-party notices are in [THIRD_PARTY.md](THIRD_PARTY.md) and `licenses/`.

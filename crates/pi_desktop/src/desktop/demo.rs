@@ -42,6 +42,12 @@ pub fn load(model: &mut Session, saved: Option<&SavedSession>, first: bool) {
                 }
             }
         }
+        // Sample models and resources, so Models and Resources have something to show.
+        let mut reader =
+            std::io::Cursor::new(include_bytes!("../../../../fixtures/catalog.jsonl").as_slice());
+        while let Ok(Some(record)) = read_record(&mut reader) {
+            model.apply(&record).expect("valid catalog fixture");
+        }
         let extra: Option<&[u8]> = if std::env::var_os("PI_DESKTOP_DEMO_READABILITY").is_some() {
             Some(include_bytes!("../../../../fixtures/readability.jsonl"))
         } else if std::env::var_os("PI_DESKTOP_DEMO_WORKSPACE").is_some() {
