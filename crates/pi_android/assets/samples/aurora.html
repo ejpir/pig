@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aurora</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05070d; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; }
+  p { position: fixed; left: 0; right: 0; bottom: 24px; margin: 0; text-align: center;
+      font: 500 14px system-ui, sans-serif; color: #9fb4c8; opacity: .8; }
+</style>
+</head>
+<body>
+<canvas></canvas>
+<p>Touch to stir the sky</p>
+<script>
+const canvas = document.querySelector("canvas");
+const g = canvas.getContext("2d");
+const stars = Array.from({ length: 140 }, () => [Math.random(), Math.random() * 0.7, Math.random()]);
+let width, height, stir = 0, touchX = 0.5;
+function resize() {
+  const scale = devicePixelRatio || 1;
+  width = canvas.width = innerWidth * scale;
+  height = canvas.height = innerHeight * scale;
+}
+addEventListener("resize", resize);
+addEventListener("pointerdown", e => { stir = 1; touchX = e.clientX / innerWidth; });
+addEventListener("pointermove", e => { if (e.buttons) touchX = e.clientX / innerWidth; });
+resize();
+function frame(time) {
+  const t = time / 1000;
+  stir *= 0.97;
+  g.fillStyle = "rgba(5, 7, 13, 0.35)";
+  g.fillRect(0, 0, width, height);
+  for (const [x, y, phase] of stars) {
+    g.fillStyle = `rgba(255,255,255,${0.3 + 0.5 * Math.abs(Math.sin(t + phase * 9))})`;
+    g.fillRect(x * width, y * height, 2, 2);
+  }
+  g.globalCompositeOperation = "lighter";
+  for (let band = 0; band < 3; band++) {
+    const hue = 140 + band * 40 + 30 * Math.sin(t * 0.3 + band);
+    g.beginPath();
+    for (let i = 0; i <= 60; i++) {
+      const x = i / 60;
+      const pull = stir * Math.exp(-((x - touchX) ** 2) * 30);
+      const y = 0.32 + band * 0.08
+        + 0.06 * Math.sin(x * 6 + t * (0.6 + band * 0.2))
+        + 0.03 * Math.sin(x * 17 - t * 1.3) - 0.15 * pull;
+      i ? g.lineTo(x * width, y * height) : g.moveTo(0, y * height);
+    }
+    g.lineWidth = height * 0.09;
+    g.strokeStyle = `hsla(${hue}, 85%, 60%, 0.07)`;
+    g.shadowBlur = 40;
+    g.shadowColor = `hsl(${hue}, 90%, 60%)`;
+    g.stroke();
+  }
+  g.globalCompositeOperation = "source-over";
+  g.shadowBlur = 0;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

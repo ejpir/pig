@@ -332,6 +332,43 @@ impl Java {
         .unwrap_or(false)
     }
 
+    pub fn show_page(&self, title: &str, html: &str, dark: bool, source: bool, poster: &str) -> bool {
+        self.call("showPage", |env, activity| {
+            let title = JString::from_str(env, title)?;
+            let html = JString::from_str(env, html)?;
+            let poster = JString::from_str(env, poster)?;
+            env.call_method(
+                activity,
+                jni_str!("showPage"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;ZZLjava/lang/String;)Z"),
+                &[
+                    JValue::Object(&title),
+                    JValue::Object(&html),
+                    JValue::Bool(dark),
+                    JValue::Bool(source),
+                    JValue::Object(&poster),
+                ],
+            )?
+            .z()
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn render_poster(&self, html: &str, path: &str) -> bool {
+        self.call("renderPoster", |env, activity| {
+            let html = JString::from_str(env, html)?;
+            let path = JString::from_str(env, path)?;
+            env.call_method(
+                activity,
+                jni_str!("renderPoster"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;)Z"),
+                &[JValue::Object(&html), JValue::Object(&path)],
+            )?
+            .z()
+        })
+        .unwrap_or(false)
+    }
+
     pub fn device_name(&self) -> Option<String> {
         self.call("deviceName", |env, activity| {
             let name = env

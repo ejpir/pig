@@ -310,10 +310,12 @@ pub fn gateway_command() -> Result<Vec<String>> {
     }
     command.remove(0);
     let allowed = matches!(command.as_slice(),
-        [one] if matches!(one.as_str(), "sessions" | "models" | "discover" | "--version" | "--capabilities")
+        [one] if matches!(one.as_str(), "sessions" | "models" | "commands" | "discover" | "--version" | "--capabilities")
     ) || matches!(command.as_slice(), [one, two] if
         (one == "connect" || one == "files") && two == "--stdio"
     ) || matches!(command.as_slice(), [one, two, _] if one == "directories" && two == "--path")
+        || matches!(command.as_slice(), [one, two, _] if matches!(one.as_str(), "jj-history" | "jj-enable") && two == "--path")
+        || matches!(command.as_slice(), [one, two, _, three, _] if one == "jj-restore" && two == "--path" && three == "--operation")
         || matches!(command.as_slice(), [one, two, _, three] if one == "directories" && two == "--path" && three == "--show-hidden");
     if !allowed {
         bail!("This phone key cannot run that command");

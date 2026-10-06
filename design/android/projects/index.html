@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Projects and files</title>
+<style>
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+  :root { --bg:#ece7e1; --card:#faf9f7; --text:#252f3d; --muted:#665f59; --line:#ddd7d0; --accent:#4b607c; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0d1116; --card:#161d27; --text:#ebe7e4; --muted:#9ca2aa; --line:#363d46; --accent:#8caecb; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Plex", "IBM Plex Sans", system-ui, sans-serif; }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 48px 24px 80px; }
+  h1 { font: italic 400 44px/1.1 Georgia, "DejaVu Serif", serif; margin: 0 0 12px; letter-spacing: -.01em; }
+  .lede { font-size: 17px; color: var(--muted); max-width: 760px; margin: 0 0 8px; }
+  .links a { color: var(--accent); margin-right: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 28px 20px; margin-top: 36px; }
+  figure { margin: 0; }
+  figure a { display: block; }
+  figure img { width: 100%; display: block; border-radius: 22px; border: 1px solid var(--line); background: var(--card); }
+  figcaption { margin-top: 10px; font-size: 14px; color: var(--muted); }
+  figcaption b { display: block; color: var(--text); font-size: 15px; }
+</style></head>
+<body>
+<div class="wrap">
+  <h1>Projects and files</h1>
+  <p class="lede">Choosing where Pi works, and looking at what is there: a folder tree that rolls out in place, and files that open read-only.</p>
+  <p class="links"><a href="README.md">Notes</a><a href="overview.png">Overview PNG</a></p>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+  const screens = [
+    ["01-choose", "Choose a project", "Search, recent projects, then the computer's folders as a tree."],
+    ["02-files", "Inside a project", "The tree rolled out down to files, with guides under open folders."],
+    ["03-file", "A file", "Read-only, edge to edge, with File history and Ask about it."],
+    ["04-first", "First project", "The same browser as the step after pairing."],
+    ["05-search", "Find and go to", "Find folders and files, or type a path."],
+  ];
+  document.getElementById("grid").innerHTML = screens.map(([file, title, note]) =>
+    `<figure><a href="screens/${file}.html"><img src="screens/${file}.png" alt="${title}" loading="lazy"></a><figcaption><b>${title}</b>${note}</figcaption></figure>`).join("");
+</script>
+</body></html>

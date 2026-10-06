@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>09 · File history</title>
+<link rel="stylesheet" href="../next.css">
+<style>
+  .line { position: relative; }
+  .line::before { content: ""; position: absolute; left: 11px; top: 20px; bottom: 32px; border-left: 1px solid var(--line); }
+  .point { display: flex; gap: 16px; align-items: flex-start; padding: 12px 0; position: relative; }
+  .node { width: 24px; height: 24px; flex: none; display: flex; align-items: center; justify-content: center; margin-top: 8px; }
+  .node span { width: 12px; height: 12px; border-radius: 6px; background: var(--canvas); border: 2px solid var(--accent); }
+  .node.now span { width: 16px; height: 16px; border-radius: 8px; background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, var(--canvas)); border: none; }
+  .node.snap span { width: 8px; height: 8px; border-color: var(--line-strong); }
+  .point .what { line-height: 22px; }
+  .point .ops { display: flex; gap: 8px; margin-top: 2px; }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="bar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="title"><b>File history</b><span>pi · ~/repos/pi on studio-mac</span></div>
+    </div>
+    <div class="scroll">
+      <div class="row g8 meta" style="align-items:flex-start;padding:4px 0 16px">
+        <i data-i="shield" class="sm" style="color:var(--green)"></i>
+        <span>Each turn that edits files is a point you can return to. Restoring saves the current files first, so it can be undone. It's off while Pi is working here.</span>
+      </div>
+      <div class="line">
+        <div class="point">
+          <span class="node now"><span></span></span>
+          <div class="grow"><div class="what strong">Now</div><div class="meta">Same as after turn 3</div></div>
+        </div>
+        <div class="point">
+          <span class="node"><span></span></span>
+          <div class="grow"><div class="what ell">Accept empty signatures for OpenCode</div>
+            <div class="ops meta"><span>Turn 3 · 4 min ago</span><span class="cmd add">+21</span><span class="cmd del">−1</span></div></div>
+          <span class="btn sm quiet" style="padding:0 8px">Restore</span>
+        </div>
+        <div class="point">
+          <span class="node snap"><span></span></span>
+          <div class="grow"><div class="what muted">Your edits on the computer</div>
+            <div class="ops meta"><span>Snapshot · 18 min ago</span><span class="cmd add">+2</span></div></div>
+          <span class="btn sm quiet" style="padding:0 8px">Restore</span>
+        </div>
+        <div class="point">
+          <span class="node"><span></span></span>
+          <div class="grow"><div class="what ell">Add a regression test for thinking signatures</div>
+            <div class="ops meta"><span>Turn 2 · 1 h ago</span><span class="cmd add">+18</span></div></div>
+          <span class="btn sm quiet" style="padding:0 8px">Restore</span>
+        </div>
+        <div class="point">
+          <span class="node snap"><span></span></span>
+          <div class="grow"><div class="what muted">Before this session</div>
+            <div class="ops meta"><span>Imported from git · yesterday</span></div></div>
+          <span class="btn sm quiet" style="padding:0 8px">Restore</span>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../next.js"></script>
+</body></html>

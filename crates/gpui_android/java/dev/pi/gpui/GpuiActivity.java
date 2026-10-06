@@ -109,6 +109,14 @@ public class GpuiActivity extends NativeActivity {
     /** Set once native code is listening. */
     private volatile boolean nativeReady;
 
+    /**
+     * VIEW intents can arrive before NativeActivity has attached the Rust application.
+     * Keep them here instead of entering JNI while the native event queue is still being
+     * constructed. Access is shared by Android's UI thread and the native app thread.
+     */
+    private final Object openUrlLock = new Object();
+    private final List<String> pendingOpenUrls = new ArrayList<>();
+
     /** System bar icons: -1 follows night mode, 0 light icons, 1 dark icons. UI thread only. */
     private int barIcons = -1;
 
@@ -125,9 +133,11 @@ public class GpuiActivity extends NativeActivity {
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
                         | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
         Files.clearPicked(this);
-        if (savedInstanceState == null) {
-            openIntent(getIntent());
-        }
+        // This is a new native app even when Android supplies a saved-state
+        // bundle after process death. Deliver the current launch intent in
+        // both cases; otherwise notification and preview links silently open
+        // whatever screen Android happened to restore.
+        openIntent(getIntent());
         // Draw under the system bars and keyboard; native code avoids them using the
         // insets reported below. Android 15 does this by itself for apps targeting it.
         drawEdgeToEdge();
@@ -217,7 +227,16 @@ public class GpuiActivity extends NativeActivity {
         if (intent != null
                 && Intent.ACTION_VIEW.equals(intent.getAction())
                 && intent.getData() != null) {
-            nativeOpenUrl(intent.getData().toString());
+            String url = intent.getData().toString();
+            synchronized (openUrlLock) {
+                if (!nativeReady) {
+                    pendingOpenUrls.add(url);
+                    Log.i(TAG, "Queued a VIEW intent until the native app attaches");
+                    return;
+                }
+            }
+            Log.i(TAG, "Delivering a VIEW intent to the native app");
+            nativeOpenUrl(url);
         }
     }
 
@@ -253,9 +272,18 @@ public class GpuiActivity extends NativeActivity {
                 ime.left, ime.top, ime.right, ime.bottom);
     }
 
-    /** Native code is listening: send the current insets. */
+    /** Native code is listening: replay launch URLs and send the current insets. */
     public void attachNative() {
-        nativeReady = true;
+        List<String> urls;
+        synchronized (openUrlLock) {
+            nativeReady = true;
+            urls = new ArrayList<>(pendingOpenUrls);
+            pendingOpenUrls.clear();
+        }
+        Log.i(TAG, "Native app attached; replaying " + urls.size() + " queued VIEW intent(s)");
+        for (String url : urls) {
+            nativeOpenUrl(url);
+        }
         runOnUiThread(() -> sendInsets(getWindow().getDecorView().getRootWindowInsets()));
     }
 
@@ -563,6 +591,111 @@ public class GpuiActivity extends NativeActivity {
             Log.w(TAG, "Could not open the QR scanner", e);
             return false;
         }
+    }
+
+    /**
+     * Opens {@link PageActivity} on an HTML page. The page goes through a file in the
+     * cache, since an intent's extras are limited to about a megabyte.
+     */
+    public boolean showPage(String title, String html, boolean dark, boolean source, String poster) {
+        try {
+            File file = PageActivity.save(this, html);
+            Log.i(TAG, "Opening a saved HTML page");
+            runOnUiThread(
+                    () -> {
+                        try {
+                            startActivity(
+                                    new Intent(this, PageActivity.class)
+                                            .putExtra(PageActivity.TITLE, title)
+                                            .putExtra(PageActivity.PATH, file.getPath())
+                                            .putExtra(PageActivity.DARK, dark)
+                                            .putExtra(PageActivity.SOURCE, source)
+                                            .putExtra(PageActivity.POSTER, poster));
+                        } catch (ActivityNotFoundException | SecurityException e) {
+                            Log.w(TAG, "Could not open the page", e);
+                        }
+                    });
+            return true;
+        } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "Could not save the page", e);
+            return false;
+        }
+    }
+
+    /**
+     * Draws a page in a web view no one sees and saves its top, at the shape of
+     * its card, as a half-size PNG at {@code path}: the card's poster before the
+     * page is ever opened. The page gets no network, files or storage.
+     */
+    public boolean renderPoster(String html, String path) {
+        if (new File(path).exists()) return true;
+        runOnUiThread(() -> {
+            try {
+                android.webkit.WebView.enableSlowWholeDocumentDraw();
+                android.webkit.WebView view = new android.webkit.WebView(this);
+                android.webkit.WebSettings settings = view.getSettings();
+                settings.setJavaScriptEnabled(true);
+                settings.setAllowContentAccess(false);
+                settings.setAllowFileAccess(false);
+                settings.setBlockNetworkLoads(true);
+                settings.setDomStorageEnabled(false);
+                view.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+                int width = getResources().getDisplayMetrics().widthPixels;
+                int height = width * 232 / 412;
+                // Chromium only lays out and draws a page in a window: the view
+                // is in this one, invisible and off the screen so it takes no
+                // touches, until its picture is taken.
+                view.setAlpha(0f);
+                view.setTranslationX(-2f * width);
+                view.setFocusable(false);
+                addContentView(view, new ViewGroup.LayoutParams(width, height));
+                view.setWebViewClient(new android.webkit.WebViewClient() {
+                    private boolean saved;
+
+                    @Override
+                    public void onPageFinished(android.webkit.WebView page, String url) {
+                        Log.i(TAG, "Drawing a page's poster");
+                        // Give scripts a moment to draw, as the full page does.
+                        page.postDelayed(() -> {
+                            if (saved) return;
+                            saved = true;
+                            android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(
+                                    width, height, android.graphics.Bitmap.Config.ARGB_8888);
+                            page.draw(new android.graphics.Canvas(bitmap));
+                            ((ViewGroup) page.getParent()).removeView(page);
+                            page.destroy();
+                            new Thread(() -> savePoster(bitmap, path)).start();
+                        }, 1500);
+                    }
+
+                    @Override
+                    public boolean shouldOverrideUrlLoading(
+                            android.webkit.WebView page, android.webkit.WebResourceRequest request) {
+                        return true;
+                    }
+                });
+                view.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
+            } catch (RuntimeException e) {
+                Log.w(TAG, "Could not draw the page's poster", e);
+            }
+        });
+        return true;
+    }
+
+    private static void savePoster(android.graphics.Bitmap bitmap, String path) {
+        File file = new File(path);
+        File directory = file.getParentFile();
+        if (directory != null) directory.mkdirs();
+        File partial = new File(path + ".part");
+        android.graphics.Bitmap small = android.graphics.Bitmap.createScaledBitmap(
+                bitmap, bitmap.getWidth() / 2, bitmap.getHeight() / 2, true);
+        try (FileOutputStream output = new FileOutputStream(partial)) {
+            small.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output);
+        } catch (IOException e) {
+            Log.w(TAG, "Could not save the page's poster", e);
+            return;
+        }
+        partial.renameTo(file);
     }
 
     public String deviceName() {

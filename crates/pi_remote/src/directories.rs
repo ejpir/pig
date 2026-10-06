@@ -22,6 +22,9 @@ struct Entry {
     name: String,
     path: String,
     project: bool,
+    /// What makes it a project: "git", "jj" or "package".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
 }
 
 fn list(path: &Path, show_hidden: bool) -> Result<Directory> {
@@ -63,21 +66,24 @@ fn list(path: &Path, show_hidden: bool) -> Result<Directory> {
             continue;
         }
         let entry_path = entry.path();
+        let kind = [
+            (".git", "git"),
+            (".jj", "jj"),
+            ("Cargo.toml", "package"),
+            ("package.json", "package"),
+            ("pyproject.toml", "package"),
+        ]
+        .into_iter()
+        .find(|(marker, _)| entry_path.join(marker).exists())
+        .map(|(_, kind)| kind);
         result.entries.push(Entry {
             name,
             path: entry_path
                 .to_str()
                 .context("Unsupported folder path")?
                 .into(),
-            project: [
-                ".git",
-                ".jj",
-                "Cargo.toml",
-                "package.json",
-                "pyproject.toml",
-            ]
-            .iter()
-            .any(|marker| entry_path.join(marker).exists()),
+            project: kind.is_some(),
+            kind,
         });
     }
     result.entries.sort_by(|a, b| {
@@ -113,6 +119,7 @@ mod tests {
         assert_eq!(listed.entries.len(), 2);
         assert_eq!(listed.entries[0].name, "café's project");
         assert!(listed.entries[0].project);
+        assert_eq!(listed.entries[0].kind, Some("package"));
         assert_eq!(list(root.path(), true).unwrap().entries.len(), 3);
         assert_eq!(
             Path::new(&listed.path),

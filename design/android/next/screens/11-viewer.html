@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>11 · Page viewer</title>
+<link rel="stylesheet" href="../next.css">
+<style>
+  .page { flex: 1; min-height: 0; background: #05070d url("aurora-full.jpg") center top / cover no-repeat; }
+  .tools-bar { height: 64px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-top: 1px solid var(--line); }
+  .seg { flex: 1; height: 40px; display: flex; padding: 4px; border-radius: 20px; background: var(--panel); }
+  .seg span { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; border-radius: 16px; font-size: 14px; font-weight: 600; color: var(--muted); }
+  .seg span.on { background: var(--composer); color: var(--text); box-shadow: 0 1px 2px rgba(37,47,61,.12); }
+  .seg i[data-i] { width: 16px; height: 16px; }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="page"></div>
+    <div class="tools-bar">
+      <span class="tap"><i data-i="x"></i></span>
+      <div class="seg"><span class="on"><i data-i="eye"></i>Preview</span><span><i data-i="code"></i>Code</span></div>
+      <span class="tap"><i data-i="refresh"></i></span>
+    </div>
+  </main>
+</div>
+<script src="../next.js"></script>
+</body></html>

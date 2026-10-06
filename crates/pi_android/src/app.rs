@@ -11,8 +11,8 @@ use crate::{
     live::{Live, Update},
     model::{Answer, Computer, SessionId, State},
     motion::SwipeMotion,
-    prefs::Prefs,
-    projects::ProjectBrowser,
+    prefs::{Prefs, SavedCommand},
+    projects::{FileView, ProjectBrowser},
     remote,
     ssh::{self, Address, Connection, Identity},
     store::{Event, Store},
@@ -41,8 +41,11 @@ pub enum Route {
     Sessions,
     Projects,
     Start,
+    /// A file from the project browser, read-only.
+    File,
     Thread(SessionId),
     Review(SessionId),
+    History(SessionId),
     Settings,
 }
 
@@ -56,7 +59,6 @@ pub enum Target {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sheet {
-    Question(SessionId),
     Details(SessionId),
     Attach(Target),
     Model,
@@ -67,23 +69,45 @@ pub enum Sheet {
     Resources,
     Activity(SessionId, usize, usize),
     Delete(SessionId),
+    RestoreHistory(SessionId, usize),
+    EnableJj(SessionId),
     Image(Target, usize),
+    /// An image a tool returned: session, turn, which.
+    ToolImage(SessionId, usize, usize),
+    /// What the app logged lately, from Settings.
+    Logs,
+    Computers,
+    /// Text from the thread, to select part of and copy.
+    SelectText,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum JjHistoryState {
+    Loading,
+    Loaded(remote::JjHistory),
+    Failed(SharedString),
 }
 
 pub struct PhoneApp {
     pub(crate) store: Option<Store>,
     pub(crate) routes: Vec<Route>,
     pub(crate) sheet: Option<Sheet>,
-    pub(crate) drawer_open: bool,
     pub(crate) swiping_session: Option<(SessionId, SwipeMotion)>,
     pub(crate) deleting_session: Option<SessionId>,
-    pub(crate) drawer_motion: SwipeMotion,
+    pub(crate) jj_histories: HashMap<SessionId, JjHistoryState>,
+    pub(crate) restoring_history: Option<(SessionId, usize)>,
+    pub(crate) enabling_jj: Option<SessionId>,
     pub(crate) sheet_motion: SwipeMotion,
     pub(crate) closing_sheet: Option<Sheet>,
     sheet_height: Rc<Cell<Pixels>>,
     pub(crate) sheet_scroll: ScrollHandle,
-    pub(crate) drawer_scroll: ScrollHandle,
     pub(crate) expanded_turns: HashMap<(SessionId, usize), bool>,
+    /// Finished prompts shown in full instead of on one line.
+    pub(crate) expanded_prompts: HashSet<(SessionId, usize)>,
+    /// Questions put off with Later: the composer shows instead of the card.
+    pub(crate) questions_later: HashSet<SessionId>,
+    /// Report cards showing every changed file, not just the first few.
+    pub(crate) all_files: HashSet<SessionId>,
     /// A sheet transition gives focus back to the app once, before its fields can focus.
     sheet_focus_pending: bool,
     /// The answer picked in the question sheet; sent only with Answer.
@@ -94,17 +118,23 @@ pub struct PhoneApp {
     notice_generation: usize,
     pub(crate) focus: FocusHandle,
     pub(crate) address: Entity<TextArea>,
+    /// The text a long press opened, to select and copy parts of.
+    pub(crate) selectable: Entity<TextArea>,
     pub(crate) connect_error: Option<SharedString>,
     pub(crate) connecting: bool,
+    /// Identifies the connection attempt that is still allowed to update the app.
+    connection_generation: u64,
     /// Enrollment progress and the code that must match the computer.
     pub(crate) pairing_status: Option<SharedString>,
     /// The phone's public key, once made: one line for authorized_keys.
     pub(crate) phone_key: Option<String>,
     /// The computer turned down the phone's key on the last try.
     pub(crate) key_refused: bool,
+    /// The connect screen shows manual SSH key setup instead of QR pairing.
+    pub(crate) manual_setup: bool,
     /// Where the key and settings live.
     pub(crate) data_dir: PathBuf,
-    /// A project folder typed into the project sheet.
+    /// Finds a folder or file in the project browser, or goes to a path.
     pub(crate) folder: Entity<TextArea>,
     reconnecting: bool,
     last_listed: Instant,
@@ -120,6 +150,13 @@ pub struct PhoneApp {
     pub(crate) start_visible_height: Option<gpui::Pixels>,
     pub(crate) project: usize,
     pub(crate) project_browser: ProjectBrowser,
+    pub(crate) file_view: Option<FileView>,
+    /// Tool images decoded once, by key.
+    pub(crate) tool_images: std::cell::RefCell<HashMap<String, crate::screens::ShownImage>>,
+    /// Page posters asked for, so each is drawn once.
+    pub(crate) posters_drawing: std::cell::RefCell<std::collections::HashSet<PathBuf>>,
+    /// Invalidates file replies when another file opens.
+    pub(crate) file_generation: u64,
     /// Invalidates project-tree replies when the selected folder changes.
     pub(crate) project_files_generation: u64,
     pub(crate) threads: HashMap<SessionId, Entity<Composer>>,
@@ -182,25 +219,37 @@ impl PhoneApp {
         });
         let folder = cx.new(|cx| {
             TextArea::single_line(
-                "/Users/you/repos/app",
+                "Find a folder or file, or type a path",
                 TextInputConfiguration {
                     autocorrect: false,
                     autocapitalize: gpui::Autocapitalize::None,
                     suggestions: false,
-                    input_action: TextInputAction::Done,
+                    input_action: TextInputAction::Search,
                 },
                 cx,
             )
         });
-        let start = cx.new(|cx| Composer::new("Describe the change…", cx));
+        let start = cx.new(|cx| {
+            let mut composer = Composer::new("Describe the change…", cx);
+            composer.set_new_task();
+            composer
+        });
         let review = cx.new(|cx| Composer::new("Ask for a revision…", cx));
+        let selectable = cx.new(|cx| TextArea::read_only(12, cx));
         let subscriptions = vec![
+            cx.subscribe(&selectable, |this, _, event: &TextAreaEvent, cx| {
+                if *event == TextAreaEvent::Copied {
+                    this.close_sheet(cx);
+                    this.notify_user("Copied", cx);
+                }
+            }),
             cx.subscribe_in(&address, window, |this, _, event, window, cx| match event {
                 TextAreaEvent::Submit => this.connect(window, cx),
                 TextAreaEvent::Changed => {
                     this.connect_error = None;
                     cx.notify();
                 }
+                TextAreaEvent::Copied => {}
             }),
             cx.subscribe(&search, |_, _, _: &TextAreaEvent, cx| cx.notify()),
             cx.subscribe(&model_search, |this, _, event: &TextAreaEvent, cx| {
@@ -209,10 +258,13 @@ impl PhoneApp {
                 }
                 cx.notify();
             }),
-            cx.subscribe_in(&folder, window, |this, _, event, window, cx| {
-                if *event == TextAreaEvent::Submit {
-                    this.add_folder(window, cx);
+            cx.subscribe_in(&folder, window, |this, _, event, window, cx| match event {
+                TextAreaEvent::Submit => this.submit_folder_search(window, cx),
+                TextAreaEvent::Changed => {
+                    this.sheet_scroll.set_offset(gpui::Point::default());
+                    cx.notify();
                 }
+                TextAreaEvent::Copied => {}
             }),
             cx.subscribe_in(&start, window, |this, _, event, window, cx| {
                 this.composer_event(Target::Start, event, window, cx)
@@ -254,16 +306,19 @@ impl PhoneApp {
             store: None,
             routes: vec![Route::Connect],
             sheet: None,
-            drawer_open: false,
             swiping_session: None,
             deleting_session: None,
-            drawer_motion: SwipeMotion::at(1.),
+            jj_histories: HashMap::new(),
+            restoring_history: None,
+            enabling_jj: None,
             sheet_motion: SwipeMotion::at(1.),
             closing_sheet: None,
             sheet_height: Rc::new(Cell::new(px(0.))),
             sheet_scroll: ScrollHandle::new(),
-            drawer_scroll: ScrollHandle::new(),
             expanded_turns: HashMap::new(),
+            expanded_prompts: HashSet::new(),
+            questions_later: HashSet::new(),
+            all_files: HashSet::new(),
             sheet_focus_pending: false,
             choice: None,
             expanded: HashSet::new(),
@@ -271,11 +326,14 @@ impl PhoneApp {
             notice_generation: 0,
             focus: cx.focus_handle(),
             address,
+            selectable,
             connect_error: None,
             connecting: false,
+            connection_generation: 0,
             pairing_status: None,
             phone_key,
             key_refused: false,
+            manual_setup: false,
             data_dir,
             folder,
             reconnecting: false,
@@ -290,6 +348,10 @@ impl PhoneApp {
             start_visible_height: None,
             project: 0,
             project_browser: ProjectBrowser::default(),
+            file_view: None,
+            tool_images: Default::default(),
+            posters_drawing: Default::default(),
+            file_generation: 0,
             project_files_generation: 0,
             threads: HashMap::new(),
             sample_models: HashMap::new(),
@@ -347,10 +409,59 @@ impl PhoneApp {
 
     pub(crate) fn update_prefs(&mut self, cx: &mut Context<Self>, update: impl FnOnce(&mut Prefs)) {
         update(cx.global_mut::<Prefs>());
-        if let Some(path) = &self.prefs_path {
+        // Preview fixtures freely vary appearance, models and computers. They
+        // must never replace the real app state stored on the phone.
+        if !self.paused
+            && let Some(path) = &self.prefs_path
+        {
             cx.global::<Prefs>().save(path);
         }
         cx.notify();
+    }
+
+    fn command_catalog_for_path(&self, path: &str, cx: &App) -> Option<Vec<SavedCommand>> {
+        let store = self.store.as_ref()?;
+        let live = match &store.live {
+            Some(live) => live,
+            None => return None,
+        };
+        if let Some(commands) = live.commands_for_path(path) {
+            return Some(commands.iter().map(SavedCommand::from).collect());
+        }
+        Some(
+            self.prefs(cx)
+                .command_catalogs
+                .get(&store.computer.address)
+                .and_then(|projects| projects.get(path))
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+
+    pub(crate) fn command_catalog_for_project(
+        &self,
+        project: usize,
+        cx: &App,
+    ) -> Option<Vec<SavedCommand>> {
+        let path = self.store.as_ref()?.projects.get(project)?.path.clone();
+        self.command_catalog_for_path(&path, cx)
+    }
+
+    pub(crate) fn command_catalog_for_session(
+        &self,
+        id: SessionId,
+        cx: &App,
+    ) -> Option<Vec<SavedCommand>> {
+        let store = self.store.as_ref()?;
+        let live = match &store.live {
+            Some(live) => live,
+            None => return None,
+        };
+        if let Some(commands) = live.commands(id) {
+            return Some(commands.iter().map(SavedCommand::from).collect());
+        }
+        let path = live.session_cwd(id)?.to_owned();
+        self.command_catalog_for_path(&path, cx)
     }
 
     pub(crate) fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -364,7 +475,8 @@ impl PhoneApp {
             Appearance::Evening => true,
             Appearance::Moonstone => false,
         };
-        cx.set_global(Theme::new(dark));
+        let palette = Theme::new(dark);
+        cx.set_global(palette);
         activity::set_bar_icons(match appearance {
             Appearance::System => activity::BarIcons::System,
             _ if dark => activity::BarIcons::Light,
@@ -410,31 +522,20 @@ impl PhoneApp {
 
     fn entered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.swiping_session = None;
-        self.close_drawer(cx);
         self.close_sheet(cx);
         self.searching = false;
         window.dismiss_virtual_keyboard();
         window.focus(&self.focus, cx);
-        if let Route::Thread(id) | Route::Review(id) = self.route() {
+        if let Route::Thread(id) | Route::Review(id) | Route::History(id) = self.route() {
             activity::cancel_notification(alerts::question_id(id));
             activity::cancel_notification(alerts::finished_id(id));
-            // A question waiting in the session opens with it.
-            if self
-                .store
-                .as_ref()
-                .and_then(|store| store.session(id))
-                .is_some_and(|s| s.state == State::NeedsYou)
-                && self.route() == Route::Thread(id)
-            {
-                self.open_sheet(Sheet::Question(id), cx);
-            }
+            // A question waiting in the session takes the composer's place.
+            self.questions_later.remove(&id);
         }
         cx.notify();
     }
 
     pub(crate) fn open_sheet(&mut self, sheet: Sheet, cx: &mut Context<Self>) {
-        self.drawer_open = false;
-        self.drawer_motion = SwipeMotion::at(1.);
         self.closing_sheet = None;
         self.sheet_motion.settle(0.);
         self.sheet_scroll = ScrollHandle::new();
@@ -442,15 +543,9 @@ impl PhoneApp {
             self.model_search
                 .update(cx, |area, cx| area.set_text("", cx));
         }
-        if let Sheet::Question(_) = sheet {
-            self.choice = None;
-        }
         self.sheet = Some(sheet);
-        if sheet == Sheet::Project
-            && self.project_browser.directory.is_none()
-            && !self.project_browser.loading
-        {
-            self.browse_projects(None, cx);
+        if sheet == Sheet::Project {
+            self.open_project_browser(false, cx);
         }
         self.sheet_focus_pending = true;
         cx.notify();
@@ -465,18 +560,9 @@ impl PhoneApp {
         cx.notify();
     }
 
-    pub(crate) fn close_drawer(&mut self, cx: &mut Context<Self>) {
-        if self.drawer_open {
-            self.drawer_open = false;
-            self.drawer_motion.settle(1.);
-            cx.notify();
-        }
-    }
-
     fn animate_panels(&mut self, window: &Window, cx: &Context<Self>) {
         let now = Instant::now();
         let reduced = cx.reduce_motion();
-        self.drawer_motion.tick(now, reduced);
         self.sheet_motion.tick(now, reduced);
         if self.sheet.is_none() && !self.sheet_motion.animating() {
             self.closing_sheet = None;
@@ -487,8 +573,7 @@ impl PhoneApp {
                 self.swiping_session = None;
             }
         }
-        if self.drawer_motion.animating()
-            || self.sheet_motion.animating()
+        if self.sheet_motion.animating()
             || self
                 .swiping_session
                 .as_ref()
@@ -501,51 +586,34 @@ impl PhoneApp {
     /// Capture dismissal for the gesture's lifetime, not the moving panel's
     /// hitbox. Moving a panel away from the starting finger must not lose the
     /// remaining events. Sheet content gets normal scrolling until its top.
-    pub(crate) fn dismiss_gesture(&self, drawer: bool, cx: &Context<Self>) -> impl IntoElement {
+    pub(crate) fn dismiss_gesture(&self, cx: &Context<Self>) -> impl IntoElement {
         let view = cx.entity().downgrade();
         let sheet_height = self.sheet_height.clone();
         gpui::canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
-                if !drawer {
-                    sheet_height.set(bounds.size.height);
-                }
+                sheet_height.set(bounds.size.height);
                 window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, _, cx| {
                     if phase != gpui::DispatchPhase::Capture {
                         return;
                     }
                     let _ = view.update(cx, |this, cx| {
-                        if (drawer && !this.drawer_open) || (!drawer && this.sheet.is_none()) {
+                        if this.sheet.is_none() {
                             return;
                         }
                         let delta = event.delta.pixel_delta(px(20.));
-                        let (along, across) = if drawer {
-                            (-delta.x, delta.y)
-                        } else {
-                            (delta.y, delta.x)
-                        };
-                        let motion = if drawer {
-                            &mut this.drawer_motion
-                        } else {
-                            &mut this.sheet_motion
-                        };
-                        let extent = if drawer {
-                            bounds.size.width
-                        } else {
-                            bounds.size.height
-                        }
-                        .max(px(1.));
+                        let (along, across) = (delta.y, delta.x);
+                        let motion = &mut this.sheet_motion;
+                        let extent = bounds.size.height.max(px(1.));
                         if event.touch_phase == gpui::TouchPhase::Started {
                             if !bounds.contains(&event.position)
                                 || along <= px(0.)
                                 || along.abs() < across.abs()
-                                || (!drawer
-                                    && this.sheet_scroll.max_offset().y > px(1.)
+                                || (this.sheet_scroll.max_offset().y > px(1.)
                                     && this.sheet_scroll.bounds().contains(&event.position)
                                     && event.position.x
                                         >= this.sheet_scroll.bounds().right() - px(18.))
-                                || (!drawer
-                                    && event.position.y > bounds.top() + px(36.)
+                                || (event.position.y > bounds.top() + px(36.)
                                     && this.sheet_scroll.offset().y < px(-1.))
                             {
                                 return;
@@ -561,12 +629,10 @@ impl PhoneApp {
                             motion.settle(0.);
                         } else if event.touch_phase == gpui::TouchPhase::Ended {
                             let close = extent * motion.position() > px(85.).min(extent * 0.4);
-                            if !close {
-                                motion.settle(0.);
-                            } else if drawer {
-                                this.close_drawer(cx);
-                            } else {
+                            if close {
                                 this.close_sheet(cx);
+                            } else {
+                                motion.settle(0.);
                             }
                         }
                         cx.notify();
@@ -580,10 +646,6 @@ impl PhoneApp {
 
     /// One step back; false when there is nothing to go back to.
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.drawer_open {
-            self.close_drawer(cx);
-            return true;
-        }
         if self.sheet.is_some() {
             self.close_sheet(cx);
             window.dismiss_virtual_keyboard();
@@ -601,8 +663,20 @@ impl PhoneApp {
             cx.notify();
             return true;
         }
+        if self.route() == Route::Connect && self.manual_setup {
+            self.manual_setup = false;
+            window.dismiss_virtual_keyboard();
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return true;
+        }
         if self.routes.len() > 1 {
-            self.routes.pop();
+            let left = self.routes.pop();
+            if left == Some(Route::File)
+                && self.file_view.as_ref().is_some_and(|view| view.from_sheet)
+            {
+                self.open_sheet(Sheet::Project, cx);
+            }
             if !matches!(self.route(), Route::Review(_)) {
                 self.review_lines.clear();
             }
@@ -649,6 +723,9 @@ impl PhoneApp {
         self.routes = vec![Route::Sessions];
         self.threads.clear();
         self.sample_models.clear();
+        self.jj_histories.clear();
+        self.restoring_history = None;
+        self.enabling_jj = None;
         self.swiping_session = None;
         self.deleting_session = None;
         self.scrolls.clear();
@@ -656,6 +733,7 @@ impl PhoneApp {
     }
 
     pub(crate) fn open_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_connection_attempt();
         self.paused = false;
         let typed = self.address.read(cx).text().trim().to_owned();
         let address = if typed.is_empty() {
@@ -664,7 +742,10 @@ impl PhoneApp {
             typed
         };
         self.open_store(&address);
-        self.start.update(cx, |start, _| start.use_files(None));
+        self.start.update(cx, |start, _| {
+            start.use_files(None);
+            start.use_commands(None);
+        });
         self.update_prefs(cx, |prefs| {
             prefs.computer = Some(address.clone());
             prefs.sample = true;
@@ -676,6 +757,20 @@ impl PhoneApp {
         let identity = Identity::load_or_create(&self.data_dir.join("id_ed25519"))?;
         self.phone_key = Some(identity.public_line());
         Ok(identity)
+    }
+
+    fn begin_connection_attempt(&mut self) -> u64 {
+        self.connection_generation = self.connection_generation.wrapping_add(1);
+        self.connecting = true;
+        self.connection_generation
+    }
+
+    /// Retires an in-flight connection without relying on its transport being cancellable.
+    /// Its task may finish, but the generation check prevents stale navigation or state.
+    pub(crate) fn cancel_connection_attempt(&mut self) {
+        self.connection_generation = self.connection_generation.wrapping_add(1);
+        self.connecting = false;
+        self.pairing_status = None;
     }
 
     pub(crate) fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -699,7 +794,7 @@ impl PhoneApp {
             }
         };
         let known = self.prefs(cx).host_keys.get(&address.to_string()).cloned();
-        self.connecting = true;
+        let generation = self.begin_connection_attempt();
         self.pairing_status = None;
         self.connect_error = None;
         window.dismiss_virtual_keyboard();
@@ -714,6 +809,9 @@ impl PhoneApp {
             }
             .await;
             this.update_in(cx, |this, window, cx| {
+                if this.connection_generation != generation {
+                    return;
+                }
                 this.connecting = false;
                 match reached {
                     Ok((connection, helper, listed)) => {
@@ -753,9 +851,6 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.connecting {
-            return;
-        }
         if let Err(error) = offer.check_time() {
             self.connect_error = Some(error.to_string().into());
             cx.notify();
@@ -778,7 +873,7 @@ impl PhoneApp {
         };
         self.address
             .update(cx, |field, cx| field.set_text(address.to_string(), cx));
-        self.connecting = true;
+        let generation = self.begin_connection_attempt();
         self.key_refused = false;
         self.connect_error = None;
         self.pairing_status = Some(format!("Confirm {code} on the computer").into());
@@ -790,6 +885,9 @@ impl PhoneApp {
         cx.spawn_in(window, async move |this, cx| {
             let reached = crate::pairing::enroll(offer, identity, public_key, device_name).await;
             this.update_in(cx, |this, window, cx| {
+                if this.connection_generation != generation {
+                    return;
+                }
                 this.connecting = false;
                 match reached {
                     Ok((address, connection, helper, listed)) => {
@@ -830,6 +928,7 @@ impl PhoneApp {
         let mut live = Live::new(connection, helper, address.to_string(), wanted);
         live.thinking = prefs.thinking.clone();
         live.refresh_models();
+        live.refresh_commands();
         let mut computer = Computer::from_address(&address.to_string());
         computer.pi_version = None;
         let mut store = Store::live(computer, live);
@@ -843,8 +942,13 @@ impl PhoneApp {
         self.store = Some(store);
         self.routes = vec![Route::Sessions, Route::Projects];
         self.threads.clear();
-        self.start
-            .update(cx, |start, _| start.use_files(Some(Vec::new())));
+        self.jj_histories.clear();
+        self.restoring_history = None;
+        self.enabling_jj = None;
+        self.start.update(cx, |start, _| {
+            start.use_files(Some(Vec::new()));
+            start.use_commands(Some(Vec::new()));
+        });
         self.key_refused = false;
         self.last_listed = Instant::now();
         self.update_prefs(cx, |prefs| {
@@ -856,7 +960,7 @@ impl PhoneApp {
         self.start_pump(cx);
         activity::request_notification_permission();
         self.entered(window, cx);
-        self.browse_projects(None, cx);
+        self.open_project_browser(true, cx);
     }
 
     /// Carries the computer's updates into the store as they come.
@@ -887,11 +991,53 @@ impl PhoneApp {
 
     fn take_updates(&mut self, batch: Vec<(Option<SessionId>, Update)>, cx: &mut Context<Self>) {
         self.keep_latest_in_view();
+        let global_commands = batch
+            .iter()
+            .any(|(id, update)| id.is_none() && matches!(update, Update::CommandCatalog(Ok(_))));
+        let command_sessions: HashSet<SessionId> = batch
+            .iter()
+            .filter_map(|(id, update)| {
+                (*id).filter(|_| {
+                    matches!(update, Update::Record(_, record) if record["type"] == "response" && record["command"] == "get_commands" && record["success"] == true)
+                })
+            })
+            .collect();
         let Some(store) = &mut self.store else {
             return;
         };
-        for event in store.apply(batch) {
+        let events = store.apply(batch);
+        for event in events {
             self.alert(event, cx);
+        }
+        let catalogs = self.store.as_ref().and_then(|store| {
+            let live = store.live.as_ref()?;
+            let mut catalogs: HashMap<String, Vec<SavedCommand>> = HashMap::new();
+            if global_commands && let Some(project) = store.projects.get(self.project) {
+                catalogs.insert(
+                    project.path.clone(),
+                    live.commands.iter().map(SavedCommand::from).collect(),
+                );
+            }
+            for id in &command_sessions {
+                if let (Some(path), Some(commands)) = (live.session_cwd(*id), live.commands(*id)) {
+                    catalogs.insert(
+                        path.to_owned(),
+                        commands.iter().map(SavedCommand::from).collect(),
+                    );
+                }
+            }
+            Some((store.computer.address.clone(), catalogs))
+        });
+        if let Some((computer, catalogs)) = catalogs
+            && !catalogs.is_empty()
+        {
+            self.update_prefs(cx, |prefs| {
+                prefs
+                    .command_catalogs
+                    .entry(computer)
+                    .or_default()
+                    .extend(catalogs);
+            });
         }
         self.update_working_notification(cx);
         cx.notify();
@@ -941,7 +1087,7 @@ impl PhoneApp {
 
     pub(crate) fn model_session(&self) -> Option<SessionId> {
         match self.route() {
-            Route::Thread(id) | Route::Review(id) => Some(id),
+            Route::Thread(id) | Route::Review(id) | Route::History(id) => Some(id),
             _ => None,
         }
     }
@@ -1020,6 +1166,9 @@ impl PhoneApp {
         self.project_browser.clear();
         self._pump = None;
         self.threads.clear();
+        self.jj_histories.clear();
+        self.restoring_history = None;
+        self.enabling_jj = None;
         self.update_prefs(cx, |prefs| {
             prefs.computer = None;
             prefs.sample = false;
@@ -1031,28 +1180,22 @@ impl PhoneApp {
         self.entered(window, cx);
     }
 
-    /// A manually entered path is opened and checked by the remote browser.
-    pub(crate) fn add_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut path = self.folder.read(cx).text().trim().to_owned();
-        if let Some(home) = self
-            .store
-            .as_ref()
-            .and_then(|store| store.live.as_ref())
-            .map(|live| &live.helper.home)
-        {
-            if path == "~" {
-                path = home.clone();
-            } else if let Some(rest) = path.strip_prefix("~/") {
-                path = format!("{home}/{rest}");
-            }
-        }
-        if !path.starts_with('/') {
-            self.notify_user("Type the folder's full path, starting with /", cx);
-            return;
-        }
+    /// Goes to a typed `~/…` or `/…` path; otherwise closes the keyboard
+    /// over what was found.
+    pub(crate) fn submit_folder_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.folder.read(cx).text().trim().to_owned();
         window.dismiss_virtual_keyboard();
         window.focus(&self.focus, cx);
-        self.browse_projects(Some(path), cx);
+        if !(query.starts_with('~') || query.starts_with('/')) {
+            return;
+        }
+        match self.full_path(&query) {
+            Some(path) => {
+                self.folder.update(cx, |area, cx| area.set_text("", cx));
+                self.go_to_folder(path, cx);
+            }
+            None => self.notify_user("Type the folder's full path, starting with ~ or /", cx),
+        }
     }
 
     // Sample sessions and notifications
@@ -1103,7 +1246,7 @@ impl PhoneApp {
 
     fn viewing(&self, id: SessionId) -> bool {
         self.visible
-            && matches!(self.route(), Route::Thread(shown) | Route::Review(shown) if shown == id)
+            && matches!(self.route(), Route::Thread(shown) | Route::Review(shown) | Route::History(shown) if shown == id)
     }
 
     fn alert(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -1117,9 +1260,9 @@ impl PhoneApp {
             Event::Deleted(id) => self.finish_deletion(id, cx),
             Event::NeedsYou(id) => {
                 if self.viewing(id) {
-                    if self.sheet.is_none() {
-                        self.open_sheet(Sheet::Question(id), cx);
-                    }
+                    // The question card takes the composer's place.
+                    self.questions_later.remove(&id);
+                    self.choice = None;
                 } else if prefs.notify_questions
                     && let Some(notification) = store
                         .session(id)
@@ -1172,7 +1315,7 @@ impl PhoneApp {
     fn set_visible(&mut self, visibility: WindowVisibility, cx: &mut Context<Self>) {
         self.visible = visibility.is_visible();
         if self.visible
-            && let Route::Thread(id) | Route::Review(id) = self.route()
+            && let Route::Thread(id) | Route::Review(id) | Route::History(id) = self.route()
         {
             activity::cancel_notification(alerts::question_id(id));
             activity::cancel_notification(alerts::finished_id(id));
@@ -1183,11 +1326,72 @@ impl PhoneApp {
     /// A `pi://` link from a notification.
     pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(feature = "ui-test")]
+        if let Some(seconds) = url.strip_prefix("pi://test/advance/") {
+            // Preview sessions are held still so screenshots are deterministic.
+            // Tests can move their sample-only clock explicitly to verify that
+            // mounted views react to later session updates.
+            if self.paused
+                && self.store.as_ref().is_some_and(|store| store.is_sample())
+                && let Ok(seconds) = seconds.parse::<u64>()
+                && let Some(store) = &mut self.store
+            {
+                store.tick(Duration::from_secs(seconds));
+                cx.notify();
+            }
+            return;
+        }
+        #[cfg(feature = "ui-test")]
+        if url == "pi://test/grow" && self.paused {
+            // A run writing a file while its reply streams: every step adds a
+            // diff line, an output line and words, as a live session does.
+            if let Some(session) = self
+                .store
+                .as_mut()
+                .filter(|store| store.is_sample())
+                .and_then(|store| store.sessions.iter_mut().find(|s| s.id == SessionId(1)))
+            {
+                let turn = session.turn_mut();
+                let stage = turn.stage_mut(crate::model::StageKind::Change);
+                let step = stage.added;
+                // A live edit shows its latest eight lines, as the projection does.
+                if stage.diff.len() >= 8 {
+                    stage.diff.remove(0);
+                }
+                stage.diff.push(crate::model::DiffLine::new(
+                    crate::model::LineKind::Added,
+                    300 + step,
+                    &format!("  const line{step} = render(block, {step}); // written as it streams"),
+                ));
+                stage.added += 1;
+                if stage.tools.is_empty() {
+                    stage.tools.push(crate::model::ToolActivity {
+                        id: "grow".into(),
+                        name: "write".into(),
+                        target: "notes.md".into(),
+                        output: String::new(),
+                        finished: false,
+                        failed: false,
+                    });
+                }
+                let tool = stage.tools.last_mut().unwrap();
+                tool.output.push_str(&format!("wrote line {step} of notes.md, a long line that wraps on a phone\n"));
+                let text = turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
+                turn.summary = Some(crate::model::Summary {
+                    headline: String::new(),
+                    body: String::new(),
+                    source: Some(format!("{text} Streaming word {step} of a growing reply.")),
+                });
+            }
+            self.keep_latest_in_view();
+            cx.notify();
+            return;
+        }
+        #[cfg(feature = "ui-test")]
         if url == "pi://test-state" && self.paused {
             // Only fixture mode exposes diagnostics, and only lengths/state:
             // never prompt contents, clipboard data, addresses or credentials.
             let session = match self.route() {
-                Route::Thread(id) | Route::Review(id) => {
+                Route::Thread(id) | Route::Review(id) | Route::History(id) => {
                     self.store.as_ref().and_then(|s| s.session(id))
                 }
                 _ => None,
@@ -1197,7 +1401,6 @@ impl PhoneApp {
                 serde_json::json!({
                     "route": format!("{:?}", self.route()),
                     "routes": self.routes.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>(),
-                    "drawer": self.drawer_open,
                     "sheet": self.sheet.map(|s| format!("{s:?}")),
                     "start_chars": self.start.read(cx).area.read(cx).text().chars().count(),
                     "search_chars": self.search.read(cx).text().chars().count(),
@@ -1369,10 +1572,21 @@ impl PhoneApp {
         self.swiping_session = None;
         self.threads.remove(&id);
         self.sample_models.remove(&id);
+        self.jj_histories.remove(&id);
+        if self
+            .restoring_history
+            .is_some_and(|(session, _)| session == id)
+        {
+            self.restoring_history = None;
+        }
+        if self.enabling_jj == Some(id) {
+            self.enabling_jj = None;
+        }
         self.expanded_turns.retain(|(session, _), _| *session != id);
         self.scrolls.remove(&Route::Thread(id));
         self.scrolls.remove(&Route::Review(id));
-        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) if *session == id));
+        self.scrolls.remove(&Route::History(id));
+        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) | Route::History(session) if *session == id));
         if self.sheet == Some(Sheet::Delete(id)) {
             self.close_sheet(cx);
         }
@@ -1406,6 +1620,215 @@ impl PhoneApp {
         self.push(Route::Review(id), window, cx);
     }
 
+    pub(crate) fn open_history(
+        &mut self,
+        id: SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.push(Route::History(id), window, cx);
+        self.load_jj_history(id, cx);
+    }
+
+    pub(crate) fn load_jj_history(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        let Some((connection, helper, path)) = self.store.as_ref().and_then(|store| {
+            let live = store.live.as_ref()?;
+            Some((
+                live.connection.clone(),
+                live.helper.clone(),
+                live.session_cwd(id)?.to_owned(),
+            ))
+        }) else {
+            self.jj_histories.insert(
+                id,
+                JjHistoryState::Loaded(remote::JjHistory {
+                    version: 1,
+                    path: "~/repos/sample".into(),
+                    root: Some("~/repos/sample".into()),
+                    available: true,
+                    reason: None,
+                    operations: vec![
+                        remote::JjOperation {
+                            id: "91ec735a1f22".into(),
+                            time: 0,
+                            description: "pi: tighten mobile session layout".into(),
+                            kind: "pi".into(),
+                        },
+                        remote::JjOperation {
+                            id: "82ad4c917d3b".into(),
+                            time: 0,
+                            description: "snapshot working copy".into(),
+                            kind: "snapshot".into(),
+                        },
+                    ],
+                }),
+            );
+            cx.notify();
+            return;
+        };
+        self.jj_histories.insert(id, JjHistoryState::Loading);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = remote::jj_history(&connection, &helper, &path)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            this.update(cx, |this, cx| {
+                if this
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.live.as_ref())
+                    .and_then(|live| live.session_cwd(id))
+                    != Some(path.as_str())
+                {
+                    return;
+                }
+                self::PhoneApp::set_jj_history_result(this, id, result, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn set_jj_history_result(
+        &mut self,
+        id: SessionId,
+        result: Result<remote::JjHistory, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.jj_histories.insert(
+            id,
+            match result {
+                Ok(history) => JjHistoryState::Loaded(history),
+                Err(error) => JjHistoryState::Failed(error.into()),
+            },
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn project_is_running(&self, id: SessionId) -> bool {
+        let Some(store) = &self.store else {
+            return false;
+        };
+        let Some(live) = &store.live else {
+            return store
+                .session(id)
+                .is_some_and(|session| session.state.is_running());
+        };
+        let Some(path) = live.session_cwd(id) else {
+            return false;
+        };
+        store
+            .sessions
+            .iter()
+            .any(|session| session.state.is_running() && live.session_cwd(session.id) == Some(path))
+    }
+
+    pub(crate) fn restore_jj_history(
+        &mut self,
+        id: SessionId,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.restoring_history.is_some() {
+            return;
+        }
+        if self.project_is_running(id) {
+            self.notify_user(
+                "Stop active sessions in this project before restoring files.",
+                cx,
+            );
+            return;
+        }
+        let operation = match self.jj_histories.get(&id) {
+            Some(JjHistoryState::Loaded(history)) => history.operations.get(index).cloned(),
+            _ => None,
+        };
+        let target = self.store.as_ref().and_then(|store| {
+            let live = store.live.as_ref()?;
+            Some((
+                live.connection.clone(),
+                live.helper.clone(),
+                live.session_cwd(id)?.to_owned(),
+            ))
+        });
+        let (Some(operation), Some((connection, helper, path))) = (operation, target) else {
+            self.notify_user("That history point is no longer available.", cx);
+            return;
+        };
+        self.restoring_history = Some((id, index));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = remote::restore_jj_operation(&connection, &helper, &path, &operation.id)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            this.update(cx, |this, cx| {
+                this.restoring_history = None;
+                match result {
+                    Ok(()) => {
+                        this.close_sheet(cx);
+                        this.notify_user(
+                            "Project files restored. jj recorded the restore so it can be undone.",
+                            cx,
+                        );
+                        this.load_jj_history(id, cx);
+                    }
+                    Err(error) => this.notify_user(error, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn enable_jj(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        if self.enabling_jj.is_some() {
+            return;
+        }
+        if self.project_is_running(id) {
+            self.notify_user(
+                "Stop active sessions in this project before enabling jj.",
+                cx,
+            );
+            return;
+        }
+        let Some((connection, helper, path)) = self.store.as_ref().and_then(|store| {
+            let live = store.live.as_ref()?;
+            Some((
+                live.connection.clone(),
+                live.helper.clone(),
+                live.session_cwd(id)?.to_owned(),
+            ))
+        }) else {
+            return;
+        };
+        self.enabling_jj = Some(id);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = remote::enable_jj(&connection, &helper, &path)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            this.update(cx, |this, cx| {
+                this.enabling_jj = None;
+                match result {
+                    Ok(history) => {
+                        this.jj_histories
+                            .insert(id, JjHistoryState::Loaded(history));
+                        this.close_sheet(cx);
+                        this.notify_user(
+                            "jj file history is on. Future remote turns that edit files are recorded.",
+                            cx,
+                        );
+                    }
+                    Err(error) => this.notify_user(error, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn thread_composer(
         &mut self,
         id: SessionId,
@@ -1416,6 +1839,8 @@ impl PhoneApp {
             return composer.clone();
         }
         let composer = cx.new(|cx| Composer::new("Ask a follow-up…", cx));
+        let commands = self.command_catalog_for_session(id, cx);
+        composer.update(cx, |composer, _| composer.use_commands(commands));
         // A live session offers the files Pi touched in it.
         let files = self
             .store
@@ -1531,16 +1956,6 @@ impl PhoneApp {
             ComposerEvent::ChooseModel => self.open_sheet(Sheet::Model, cx),
             ComposerEvent::ChooseThinking => self.open_sheet(Sheet::Thinking, cx),
             ComposerEvent::PreviewImage(index) => self.open_sheet(Sheet::Image(target, *index), cx),
-            ComposerEvent::Stop => {
-                let id = match target {
-                    Target::Thread(id) => Some(id),
-                    Target::Review => self.model_session(),
-                    Target::Start => None,
-                };
-                if let Some(id) = id {
-                    self.stop(id, cx);
-                }
-            }
             ComposerEvent::Send { text, attachments } => {
                 let route = self.route();
                 let Some(store) = &mut self.store else {
@@ -1839,8 +2254,10 @@ impl Render for PhoneApp {
             Route::Sessions => self.sessions_screen(window, cx).into_any_element(),
             Route::Projects => self.projects_screen(window, cx).into_any_element(),
             Route::Start => self.start_screen(window, cx).into_any_element(),
+            Route::File => self.file_screen(window, cx).into_any_element(),
             Route::Thread(id) => self.thread_screen(id, window, cx),
             Route::Review(id) => self.review_screen(id, window, cx),
+            Route::History(id) => self.history_screen(id, window, cx),
             Route::Settings => self.settings_screen(window, cx).into_any_element(),
         };
         let sheet = self.sheet.or(self.closing_sheet).map(|sheet| {
@@ -1878,6 +2295,10 @@ impl Render for PhoneApp {
                         .when(self.sheet.is_none(), |sheet| sheet.min_h(height))
                         .occlude()
                         .max_h(window.viewport_size().height - insets.top - px(24.))
+                        // The tree rolls out without the sheet growing under it.
+                        .when(sheet == Sheet::Project, |panel| {
+                            panel.h(window.viewport_size().height - insets.top - px(24.))
+                        })
                         .flex()
                         .flex_col()
                         .bg(colors.canvas)
@@ -1898,14 +2319,14 @@ impl Render for PhoneApp {
                                 .flex_none()
                                 .mx_auto()
                                 .mt(px(4.))
-                                .mb(px(14.))
-                                .w(px(36.))
+                                .mb(px(16.))
+                                .w(px(32.))
                                 .h(px(4.))
                                 .rounded_full()
                                 .bg(colors.line_strong),
                         )
                         .child(content)
-                        .child(self.dismiss_gesture(false, cx)),
+                        .child(self.dismiss_gesture(cx)),
                 )
                 // Keep the exiting panel mounted and occluding until it is offscreen.
                 .when(self.sheet.is_none(), |overlay| {
@@ -1918,8 +2339,6 @@ impl Render for PhoneApp {
                     )
                 })
         });
-        let drawer =
-            (self.drawer_open || self.drawer_motion.animating()).then(|| self.drawer(window, cx));
         let notice = self.notice.clone().map(|notice| {
             div()
                 .absolute()
@@ -1963,7 +2382,44 @@ impl Render for PhoneApp {
                     .child(screen),
             )
             .children(sheet)
-            .children(drawer)
             .children(notice)
+    }
+}
+
+impl PhoneApp {
+    /// Laid over a block of content: a long press opens `text` to select
+    /// and copy all of it or part, with the phone's buzz.
+    pub(crate) fn copyable(&self, text: impl Into<SharedString>, cx: &Context<Self>) -> impl IntoElement {
+        let text = text.into();
+        let app = cx.entity().downgrade();
+        gpui::canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+            move |_, hitbox, window, _| {
+                let text = text.clone();
+                let app = app.clone();
+                window.on_mouse_event(move |event: &gpui::LongPressEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Bubble
+                        || event.phase != gpui::TouchPhase::Started
+                        || !hitbox.is_hovered(window)
+                    {
+                        return;
+                    }
+                    window.prevent_default();
+                    activity::long_press_feedback();
+                    app.update(cx, |app, cx| {
+                        app.selectable
+                            .update(cx, |area, cx| area.show_selected(text.to_string(), cx));
+                        app.open_sheet(Sheet::SelectText, cx);
+                        // The text takes focus, so its bar shows, not the app.
+                        app.sheet_focus_pending = false;
+                        let focus = app.selectable.read(cx).focus_handle(cx);
+                        window.focus(&focus, cx);
+                    })
+                    .ok();
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
     }
 }

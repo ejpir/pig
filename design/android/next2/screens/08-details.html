@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>08 Details</title>
+<link rel="stylesheet" href="../next2.css">
+<style>
+  .legend { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 12px; }
+  .legend div { font-size: 12.5px; line-height: 16px; color: var(--muted); }
+  .legend b { display: block; width: 12px; height: 3px; border-radius: 2px; margin-bottom: 8px; }
+  .legend span { display: block; color: var(--text); font-size: 15px; line-height: 20px; margin-top: 2px; }
+  .stats { display: flex; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .stats > div { flex: 1; padding: 16px 0; }
+  .stats > div + div { padding-left: 16px; border-left: 1px solid var(--line); }
+  .stats b { display: block; font-size: 22px; line-height: 28px; font-weight: 600; margin-top: 4px; }
+  .meter { position: relative; height: 6px; border-radius: 3px; background: var(--raised); margin-top: 8px; }
+  .meter .used { position: absolute; left: 0; top: 0; bottom: 0; width: 31%; border-radius: 3px; background: var(--accent); }
+  .meter .mark { position: absolute; left: 80%; top: -4px; bottom: -4px; width: 2px; border-radius: 1px; background: var(--line-strong); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content" data-frag="done">
+    <div class="scrim"></div>
+    <div class="sheet">
+      <div class="handle"></div>
+      <div class="row">
+        <div class="grow"><div class="heading">Qwen signatures</div><div class="small" style="margin-top:4px">pi on studio-mac, started at 09:41</div></div>
+        <span class="tap" style="margin-right:-12px"><i data-i="x"></i></span>
+      </div>
+      <div style="margin-top:24px">
+        <div class="run"><b class="read" style="width:54px"></b><b class="edit" style="width:159px"></b><b class="check" style="width:125px"></b><b class="hand" style="width:28px"></b></div>
+        <div class="legend">
+          <div><b style="background:var(--read)"></b>Understand<span>0:40</span></div>
+          <div><b style="background:var(--edit)"></b>Change<span>1:58</span></div>
+          <div><b style="background:var(--check)"></b>Verify<span>1:32</span></div>
+          <div><b style="background:var(--hand)"></b>Hand off<span>0:21</span></div>
+        </div>
+      </div>
+      <div class="stats" style="margin-top:24px">
+        <div><span class="small">Cost</span><b>$0.41</b></div>
+        <div><span class="small">Turns</span><b>14</b></div>
+        <div><span class="small">Changed</span><b>2 files</b></div>
+      </div>
+      <div style="padding:16px 0 20px;border-bottom:1px solid var(--line)">
+        <div class="row"><span class="grow">Context</span><span class="small">62k of 200k tokens</span></div>
+        <div class="meter"><span class="used"></span><span class="mark"></span></div>
+        <div class="small" style="margin-top:8px;text-align:right">Pi compacts at the mark</div>
+      </div>
+      <div class="rows">
+        <div class="r56"><span class="grow">Model</span><span class="small">Opus 5.5, high thinking</span><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="r56"><span class="grow">Tools used</span><span class="small">7</span><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="r56"><span class="grow">File history</span><span class="small">4 points</span><i data-i="chev-r" class="sm faint"></i></div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../frags.js"></script><script src="../next2.js"></script>
+</body></html>

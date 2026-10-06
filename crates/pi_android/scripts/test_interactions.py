@@ -67,16 +67,30 @@ class Phone:
         self.wait(lambda state: state["fixture"] == name and state["time"] > previous, f"loaded {name}")
         return self.settled_state()
 
+    def advance_fixture(self, seconds):
+        """Move only the frozen sample session clock; unavailable in production builds."""
+        previous = self.state()["time"]
+        self.run("shell", "am", "start", "-n", ACTIVITY, "-a", "android.intent.action.VIEW",
+                 "-d", f"pi://test/advance/{seconds}")
+        self.wait(lambda state: state["time"] > previous, f"advanced sample by {seconds}s")
+
     def settled_state(self):
         # InputMethodManager can report its destination before the resize
-        # animation finishes. Wait until bounds have stayed unchanged; a static
-        # screen is allowed to stop repainting entirely.
+        # animation finishes. A sheet is also mounted just below the viewport
+        # before its opening animation starts, so do not consider it settled
+        # until its bottom edge has reached the viewport bottom. Then wait until
+        # bounds have stayed unchanged; a static screen is allowed to stop
+        # repainting entirely.
         deadline = time.monotonic() + 8
         previous = self.state()
         unchanged_since = time.monotonic()
         while time.monotonic() < deadline:
             state = self.state()
-            if state["bounds"] != previous["bounds"]:
+            sheet_bounds = state["bounds"].get("bottom-sheet")
+            sheet_settled = state["sheet"] is None or sheet_bounds is None or abs(
+                sheet_bounds[1] + sheet_bounds[3] - state["viewport"][1]
+            ) < 1
+            if not sheet_settled or state["bounds"] != previous["bounds"]:
                 unchanged_since = time.monotonic()
             elif time.monotonic() - unchanged_since >= 0.6:
                 return state
@@ -106,7 +120,7 @@ class Phone:
 
     def text(self, text):
         # The smoke text deliberately contains only shell-safe ASCII characters.
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", text):
+        if not re.fullmatch(r"[A-Za-z0-9_./-]+", text):
             raise ValueError("Use fixture data for non-ASCII or multi-line input")
         self.run("shell", "input", "text", text)
 
@@ -158,6 +172,18 @@ class Phone:
             time.sleep(0.2)
         self.capture("native-failure")
         raise AssertionError(f"System picker control not found: {label}")
+
+    def wait_native_text(self, label, description, timeout=12):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if any(label in (node.get("text"), node.get("content-desc"))
+                   for node in self.native_nodes()):
+                self.results.append({"check": description, "passed": True})
+                print(f"PASS {description}", flush=True)
+                return
+            time.sleep(0.2)
+        self.capture("native-text-failure")
+        raise AssertionError(f"Native text did not appear: {label}")
 
     def report(self):
         self.output.joinpath("report.json").write_text(json.dumps(self.results, indent=2) + "\n")
@@ -217,14 +243,22 @@ def gboard_typing(phone):
     """
     method = phone.run("shell", "settings", "get", "secure", "default_input_method").decode()
     assert "com.google.android.inputmethod.latin" in method, "The ime case requires Gboard"
-    before = phone.fixture("start")
-    viewport, _ = phone.bounds('scroll:Name("start")', state=before)
-    bottom = viewport[1] + viewport[3]
+    # New session is a sheet that sits on the keyboard: the keyboard begins
+    # under its last row (the starting points, then 12 dp of padding) and
+    # reaches the bottom of the screen.
+    phone.fixture("start")
     phone.tap("draft")
     phone.wait_keyboard(True)
+
+    def lifted(state):
+        starters, _ = phone.bounds("starters", state=state)
+        return starters[1] + starters[3] < state["viewport"][1] - 150
+
+    phone.wait(lifted, "the keyboard lifts the new-session sheet")
     shown = phone.settled_state()
-    viewport, scale = phone.bounds('scroll:Name("start")', state=shown)
-    top = viewport[1] + viewport[3]
+    starters, scale = phone.bounds("starters", state=shown)
+    top = starters[1] + starters[3] + 12
+    bottom = shown["viewport"][1]
     width = shown["viewport"][0]
     assert bottom - top > 100, "Keyboard must occlude the lower viewport"
     positions = {letter: ((i + 0.5) / 10, 0.125) for i, letter in enumerate("qwertyuiop")}
@@ -235,6 +269,8 @@ def gboard_typing(phone):
     def touch(letter):
         x, y = positions[letter]
         phone.run("shell", "input", "tap", round(width * x * scale), round((top + (bottom - top) * y) * scale))
+        # Key by key, as a person types: each tap is its own composition update.
+        time.sleep(0.15)
 
     for letter in "hello":
         touch(letter)
@@ -300,7 +336,12 @@ def model_scroll(phone):
     after, _ = phone.bounds("model-search")
     assert abs(before[1] - after[1]) < 1, "Search must stay visible while scrolling models"
     phone.capture("model-list-scrolled")
-    state = phone.settled_state()
+    # The thumb intentionally fades while idle. Reveal it again immediately
+    # before testing its direct-drag affordance.
+    phone.swipe((x + width / 2, y + height * 0.53),
+                (x + width / 2, y + height * 0.48), duration=700)
+    time.sleep(0.02)
+    state = phone.state()
     thumb, _ = phone.bounds('thumb:Name("model-list")', state=state)
     tx, ty, tw, th = thumb
     phone.swipe((tx + tw / 2, ty + th / 2), (tx + tw / 2, y + height * 0.85), duration=650)
@@ -321,6 +362,27 @@ def images(phone):
 
 
 def conversation(phone):
+    phone.fixture("working")
+    phone.wait(lambda s: any("turn-0-stage-1-live-diff-3" in key for key in s["bounds"]),
+               "expanded main activity shows the current live file diff")
+    phone.advance_fixture(4)
+    phone.wait(lambda s: any("turn-0-stage-1-live-diff-4" in key for key in s["bounds"]),
+               "expanded main activity streams the next file update")
+    phone.capture("inline-live-edit-streamed")
+
+    phone.fixture("working")
+    phone.tap("turn-0-stage-1")
+    phone.wait(lambda s: (s["sheet"] or "").startswith("Activity("),
+               "live change stage opens its detailed activity sheet")
+    phone.wait(lambda s: any("activity-live-diff-3" in key for key in s["bounds"]),
+               "live edit details show the current diff")
+    phone.advance_fixture(4)
+    phone.wait(lambda s: any("activity-live-diff-4" in key for key in s["bounds"])
+               and (s["sheet"] or "").startswith("Activity("),
+               "open edit details stream the next file update")
+    phone.capture("live-edit-streamed")
+    phone.key("KEYCODE_BACK")
+
     phone.fixture("done")
     viewport, _ = phone.bounds('scroll:NamedInteger("thread", 1)')
     x, y, width, height = viewport
@@ -357,9 +419,9 @@ def conversation(phone):
     x, y, width, height = viewport
     # Scrollbars intentionally rest hidden. A short content scroll reveals the
     # thumb before testing its direct-drag affordance.
-    phone.swipe((x + width / 2, y + height * 0.35),
-                (x + width / 2, y + height * 0.5), 180)
-    time.sleep(0.1)
+    phone.swipe((x + width / 2, y + height * 0.48),
+                (x + width / 2, y + height * 0.53), 700)
+    time.sleep(0.02)
     state = phone.state()
     thumb, _ = phone.bounds('thumb:NamedInteger("thread", 1)', state=state)
     tx, ty, tw, th = thumb
@@ -378,6 +440,62 @@ def conversation(phone):
     phone.wait(at_latest, "Latest reply returns to the end of the complete long answer")
 
 
+def rich_content(phone):
+    """Exercise the shared desktop Markdown renderer and Pi-made page viewer."""
+    phone.fixture("markdown")
+    phone.wait(lambda s: s["route"].startswith("Thread("),
+               "Markdown fixture opens as a normal conversation")
+    phone.wait(lambda s: any("markdown-image" in key for key in s["bounds"]),
+               "embedded SVG renders through the Markdown image path")
+    phone.wait(lambda s: any("markdown-mermaid" in key for key in s["bounds"]),
+               "Mermaid renders through the shared diagram engine")
+    phone.capture("markdown-shared-renderer")
+
+    phone.fixture("page")
+    phone.tap("page-0-0")
+    phone.wait_activity("dev.pi.gpui.PageActivity", "page card opens the sandboxed preview")
+    # topResumedActivity changes before WebView's first frame reaches SurfaceFlinger.
+    time.sleep(0.4)
+    phone.capture("page-preview")
+    phone.native_tap("Run interaction")
+    phone.wait_native_text("JavaScript executed", "page-local JavaScript executes")
+    phone.native_tap("Source")
+    phone.capture("page-source")
+    phone.native_tap("Page")
+    phone.key("KEYCODE_BACK")
+    phone.wait_activity("dev.pi.gpui.GpuiActivity", "closing a page returns to its conversation")
+    phone.wait(lambda s: s["fixture"] == "page" and s["route"].startswith("Thread("),
+               "page viewer preserves the source conversation")
+
+
+def history(phone):
+    phone.fixture("history")
+    phone.wait(lambda s: s["route"].startswith("History("),
+               "file history opens as a dedicated screen")
+    phone.capture("jj-history")
+    phone.tap("restore-operation", 0)
+    phone.wait(lambda s: (s["sheet"] or "").startswith("RestoreHistory("),
+               "restoring history requires confirmation")
+    phone.capture("jj-restore-confirmation")
+    phone.tap("cancel-restore")
+    phone.wait(lambda s: s["sheet"] is None and s["route"].startswith("History("),
+               "cancelling restore leaves project files and history untouched")
+
+
+def tool_images(phone):
+    state = phone.fixture("tool-image")
+    name = next(key for key in state["bounds"] if key.startswith("tool-image-"))
+    phone.tap(name)
+    phone.wait(lambda s: (s["sheet"] or "").startswith("ToolImage("),
+               "tapping a screenshot Pi read shows it whole")
+    phone.key("KEYCODE_BACK")
+    phone.wait(lambda s: s["sheet"] is None, "back closes the image")
+
+
+def shown(state, name):
+    return any(key == name or f'"{name}"' in key for key in state["bounds"])
+
+
 def projects(phone):
     state = phone.fixture("projects")
     sessions = state["sessions"]
@@ -386,11 +504,63 @@ def projects(phone):
                "choosing a recent project opens the composer without starting work")
     state = phone.fixture("project-empty")
     phone.tap("use-folder")
-    phone.wait(lambda s: s["route"] == "Start" and s["sessions"] == state["sessions"],
+    phone.wait(lambda s: s["route"] == "Start" and s["sessions"] == state["sessions"]
+               and s["project"] == "/Users/nick/repos",
                "choosing an empty folder does not create a session")
     phone.fixture("projects")
     phone.tap("view-sessions")
     phone.wait(lambda s: s["route"] == "Sessions", "project selection can be skipped to view sessions")
+
+    # The tree: the caret rolls a folder out and back in, a name picks it.
+    state = phone.fixture("project")
+    opened = state["open_folders"]
+    phone.tap("roll:~/repos/pi/packages")
+    state = phone.wait(lambda s: s["open_folders"] == opened + 1
+                       and shown(s, "node:~/repos/pi/packages/ai"),
+                       "the caret rolls a folder out in place")
+    phone.tap("roll:~/repos/pi/packages")
+    phone.wait(lambda s: s["open_folders"] == opened, "the caret rolls it back in")
+    phone.tap("node:~/repos/minivm")
+    phone.wait(lambda s: s["picked"] == "/Users/nick/repos/minivm" and s["sheet"] == "Project",
+               "tapping a folder's name picks it without leaving the sheet")
+    phone.tap("hidden-toggle")
+    phone.wait(lambda s: shown(s, "node:~/repos/pi/.gitignore"), "Hidden shows dot-files")
+    phone.swipe((192, 700), (192, 300))
+    phone.wait(lambda s: s["sheet_scroll"][0] < -100 or s["sheet_scroll"][0] > 100,
+               "the tree scrolls inside the sheet")
+    phone.tap("node:~/repos/pi/README.md")
+    phone.wait(lambda s: s["route"] == "File" and s["file"] == "README.md", "tapping a file opens it read-only")
+    phone.key("KEYCODE_BACK")
+    phone.wait(lambda s: s["route"] == "Start" and s["sheet"] == "Project"
+               and s["picked"] == "/Users/nick/repos/minivm",
+               "back from a file returns to the tree as it was")
+    phone.tap("use-folder")
+    phone.wait(lambda s: s["sheet"] is None and s["project"] == "/Users/nick/repos/minivm",
+               "New session uses the picked folder")
+
+    # Find and go to.
+    phone.fixture("project")
+    phone.tap("project-search")
+    phone.wait_keyboard(True)
+    phone.text("prov")
+    phone.wait(lambda s: any('"found"' in key for key in s["bounds"]),
+               "typing finds folders and files listed in the tree")
+    phone.tap("found", 0)
+    phone.wait(lambda s: s["picked"] == "/Users/nick/repos/pi/packages/ai/src/providers",
+               "a found folder is revealed and picked in the tree")
+    phone.tap("project-search")
+    phone.text("/Users/nick/repos/zed")
+    phone.key("KEYCODE_ENTER")
+    phone.wait(lambda s: shown(s, "node:~/repos/zed/crates"),
+               "a typed path starts the tree there")
+
+    # A file: Ask about it starts a new session with it mentioned.
+    phone.fixture("project-file")
+    phone.tap("ask-about-file")
+    phone.wait(lambda s: s["route"] == "Start" and s["sheet"] is None
+               and s["start_draft"].startswith("@packages/ai/src/retry.ts")
+               and s["project"] == "/Users/nick/repos/pi",
+               "Ask about it starts a session in the file's project with the file mentioned")
 
 
 def deletion(phone):
@@ -405,12 +575,12 @@ def deletion(phone):
 
 
 def gestures(phone):
-    phone.fixture("drawer")
-    (x, y, width, height), _ = phone.bounds("drawer-panel")
-    phone.swipe((x + width * 0.75, y + height * 0.5), (x + width * 0.75 - 30, y + height * 0.5))
-    assert phone.settled_state()["drawer"], "A short drawer drag must snap back"
-    phone.swipe((x + width * 0.85, y + height * 0.5), (x + 15, y + height * 0.5), 650)
-    phone.wait(lambda s: not s["drawer"] and s["route"] == "Sessions", "drawer swipes closed without changing the underlying screen")
+    phone.fixture("computers")
+    (x, y, width, height), _ = phone.bounds("bottom-sheet")
+    phone.swipe((x + width / 2, y + 14), (x + width / 2, y + 44))
+    assert phone.settled_state()["sheet"] == "Computers", "A short computers drag must snap back"
+    phone.swipe((x + width / 2, y + 14), (x + width / 2, y + 190), 650)
+    phone.wait(lambda s: s["sheet"] is None and s["route"] == "Sessions", "computers swipe closed without changing Home")
     phone.fixture("thinking")
     (x, y, width, height), _ = phone.bounds("bottom-sheet")
     phone.swipe((x + width / 2, y + 14), (x + width / 2, y + 44))
@@ -427,7 +597,7 @@ def gestures(phone):
     phone.tap("cancel-delete")
     phone.wait(lambda s: s["sheet"] is None and s["sessions"] == sessions, "cancelled swipe deletion keeps the original list")
     phone.tap("new-session")
-    phone.wait(lambda s: s["route"] == "Start", "floating New session opens only the new composer")
+    phone.wait(lambda s: s["route"] == "Start", "the start bar opens only the new composer")
     phone.key("KEYCODE_BACK")
     phone.wait(lambda s: s["route"] == "Sessions", "Back from New session returns directly to the list, with no clicked-through session")
 
@@ -475,7 +645,8 @@ def native_image_picker(phone):
 CASES = {"pairing": pairing_scanner, "input": input_and_selectors, "long-input": long_input_and_stop,
          "models": model_scroll, "images": images, "delete": deletion,
          "picker": native_image_picker, "gestures": gestures, "ime": gboard_typing,
-         "conversation": conversation, "projects": projects}
+         "conversation": conversation, "rich-content": rich_content, "history": history,
+         "projects": projects, "tool-images": tool_images}
 
 
 def main():
@@ -487,6 +658,20 @@ def main():
     phone = Phone(args.serial, args.output)
     try:
         phone.run("shell", "pm", "path", PACKAGE)
+        # Incremental installs can leave the previous native process alive.
+        # Start every run from this APK without clearing its paired/settings data.
+        phone.run("shell", "am", "force-stop", PACKAGE)
+        stopped_by = time.monotonic() + 5
+        while True:
+            try:
+                running = phone.run("shell", "pidof", PACKAGE).strip()
+            except subprocess.CalledProcessError:
+                running = b""
+            if not running:
+                break
+            if time.monotonic() >= stopped_by:
+                raise RuntimeError("The previous isolated app process did not stop")
+            time.sleep(0.05)
         phone.run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
         phone.run("shell", "wm", "dismiss-keyguard")
         time.sleep(0.5)

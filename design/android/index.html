@@ -24,7 +24,7 @@
 <div class="wrap">
   <div class="eyebrow">Design study · Android</div>
   <h1>Pi in your pocket</h1>
-  <p class="lede">Pi keeps running on your computer or server; the phone follows its sessions, answers its questions, reviews its changes and starts new work. Thirteen static screens in Pi Desktop's Moonstone and Evening themes.</p>
+  <p class="lede">Pi keeps running on your computer or server; the phone follows its sessions, answers its questions, reviews its changes and starts new work. Fifteen static screens in Pi Desktop's Moonstone and Evening themes.</p>
   <p class="links"><a href="README.md">Notes and phone contract</a><a href="overview.png">Overview PNG</a><a href="../../crates/gpui_android/README.md">GPUI Android backend</a></p>
   <div class="grid" id="grid"></div>
 </div>
@@ -43,6 +43,8 @@
     ["11-evening", "11 · Evening", "Working in the dark theme."],
     ["12-settings", "12 · Settings and tools", "Computers, appearance, notifications and typing."],
     ["13-drawer", "13 · Navigation drawer", "Compact computer identity, primary destinations, recent work and status."],
+    ["14-history", "14 · File history", "Built-in jj operations with explicit, recoverable restore actions."],
+    ["15-markdown-page", "15 · Markdown and pages", "Desktop-grade Markdown, syntax highlighting, and pages Pi made."],
   ];
   document.getElementById("grid").innerHTML = screens.map(([file, title, note]) =>
     `<figure><a href="screens/${file}.html"><img src="screens/${file}.png" alt="${title}" loading="lazy"></a><figcaption><b>${title}</b>${note}</figcaption></figure>`).join("");

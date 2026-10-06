@@ -7,6 +7,24 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// The part of a remote slash command the phone needs after reconnecting.
+/// Execution remains owned by the computer; this is only a cached picker label.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedCommand {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+impl From<&pi_core::protocol::SlashCommand> for SavedCommand {
+    fn from(command: &pi_core::protocol::SlashCommand) -> Self {
+        Self {
+            name: command.name.clone(),
+            description: command.description.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
@@ -25,6 +43,9 @@ pub struct Prefs {
     pub host_keys: BTreeMap<String, String>,
     /// Last explicitly chosen project per computer, independent of list order.
     pub projects: BTreeMap<String, String>,
+    /// Last command catalog reported by each computer and project. The remote
+    /// session remains authoritative and refreshes this after it attaches.
+    pub command_catalogs: BTreeMap<String, BTreeMap<String, Vec<SavedCommand>>>,
     pub model: String,
     pub model_provider: Option<String>,
     pub model_id: Option<String>,
@@ -45,6 +66,7 @@ impl Default for Prefs {
             sample: false,
             host_keys: BTreeMap::new(),
             projects: BTreeMap::new(),
+            command_catalogs: BTreeMap::new(),
             model: "Opus 5.5".into(),
             model_provider: None,
             model_id: None,

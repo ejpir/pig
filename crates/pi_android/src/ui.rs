@@ -62,7 +62,6 @@ pub fn appbar(
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(4.))
         .px(px(4.))
         .child(leading)
         .child(
@@ -72,15 +71,16 @@ pub fn appbar(
                 .px(px(4.))
                 .child(
                     div()
-                        .text_size(px(17.))
+                        .text_size(px(18.))
+                        .line_height(px(24.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .truncate()
                         .child(title.into()),
                 )
                 .children(subtitle.map(|subtitle| {
                     div()
-                        .mt(px(-2.))
                         .text_size(px(12.5))
+                        .line_height(px(16.))
                         .text_color(colors.muted)
                         .truncate()
                         .child(subtitle)
@@ -129,11 +129,24 @@ pub enum Button {
     Quiet,
 }
 
-/// A pill button, 48 dp tall (40 dp when small).
+/// A pill button, 48 dp tall (40 dp when small), with a 20 dp icon (16 dp when small).
 pub fn button(
     id: impl Into<ElementId>,
     kind: Button,
     glyph: Option<&str>,
+    text: impl Into<SharedString>,
+    small: bool,
+    colors: &Theme,
+) -> Stateful<Div> {
+    button_glyph(id, kind, glyph, if small { 16. } else { 20. }, text, small, colors)
+}
+
+/// A pill button with an icon of the given size.
+pub fn button_glyph(
+    id: impl Into<ElementId>,
+    kind: Button,
+    glyph: Option<&str>,
+    glyph_size: f32,
     text: impl Into<SharedString>,
     small: bool,
     colors: &Theme,
@@ -158,7 +171,7 @@ pub fn button(
         .relative()
         .child(probe)
         .h(px(if small { 40. } else { 48. }))
-        .px(px(if small { 16. } else { 20. }))
+        .px(px(if small { 16. } else { 24. }))
         .flex()
         .flex_none()
         .items_center()
@@ -173,7 +186,7 @@ pub fn button(
         .font_weight(FontWeight::SEMIBOLD)
         .whitespace_nowrap()
         .active(move |style| style.bg(pressed))
-        .children(glyph.map(|glyph| icon(glyph, 16., foreground)))
+        .children(glyph.map(|glyph| icon(glyph, glyph_size, foreground)))
         .child(text.into())
 }
 
@@ -242,7 +255,8 @@ pub fn row(id: impl Into<ElementId>, first: bool, colors: &Theme) -> Stateful<Di
         .items_center()
         .gap(px(14.))
         .when(!first, |row| row.border_t_1().border_color(colors.line))
-        .active(|style| style.bg(colors.selected))
+        // A card's corners don't clip what is in it: the press stays inside them.
+        .active(|style| style.bg(colors.selected).rounded(px(15.)))
 }
 
 /// A row's title and optional second line.
@@ -268,23 +282,6 @@ pub fn row_text(
                 .truncate()
                 .child(detail)
         }))
-}
-
-/// Status dots: live and waiting ones carry a soft ring.
-pub fn dot(color: Hsla, ring: bool, colors: &Theme) -> Div {
-    div()
-        .size(px(16.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .when(ring, |dot| {
-            dot.bg(colors
-                .tint(color)
-                .opacity(if colors.dark { 0.3 } else { 0.25 }))
-        })
-        .child(div().size(px(8.)).rounded_full().bg(color))
 }
 
 pub fn badge(text: impl Into<SharedString>, hue: Hsla, foreground: Hsla, colors: &Theme) -> Div {
@@ -325,77 +322,125 @@ pub fn tile_box(size: f32, radius: f32, hue: Hsla, colors: &Theme) -> Div {
         .bg(colors.tint(hue))
 }
 
-/// A run rail tile: tinted when done, outlined while live, dashed ahead.
-pub fn tile(kind: StageKind, status: StageStatus, colors: &Theme) -> Div {
-    let hue = stage_hue(kind, colors);
-    let base = div()
-        .size(px(32.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(9.));
-    match status {
-        StageStatus::Done => base
-            .bg(colors.tint(hue))
-            .child(icon(kind.glyph(), 16., hue)),
-        StageStatus::Live => base
-            .bg(colors.composer)
-            .border(px(1.5))
-            .border_color(hue.opacity(0.6))
-            .shadow(vec![gpui::BoxShadow {
-                color: colors.tint(hue),
-                offset: gpui::point(px(0.), px(0.)),
-                blur_radius: px(0.),
-                spread_radius: px(4.),
-                inset: false,
-            }])
-            .child(icon(kind.glyph(), 16., hue)),
-        StageStatus::Planned | StageStatus::Skipped => base
-            .border(px(1.5))
-            .border_dashed()
-            .border_color(colors.line_strong)
-            .child(icon(kind.glyph(), 16., colors.muted)),
-    }
-}
-
-/// "+3 −1" in mono, green and coral.
-pub fn counts(added: u32, removed: u32, colors: &Theme) -> Div {
-    div()
-        .flex()
-        .flex_none()
-        .gap(px(6.))
-        .font_family(MONO)
-        .text_size(px(12.))
-        .when(added > 0, |counts| {
-            counts.child(div().text_color(colors.green).child(format!("+{added}")))
-        })
-        .when(removed > 0, |counts| {
-            counts.child(div().text_color(colors.coral).child(format!("−{removed}")))
-        })
-}
-
 const KEYWORDS: &[&str] = &[
-    "const", "let", "if", "for", "of", "return", "function", "export", "throw", "new", "continue",
-    "import", "from", "await", "async", "fn", "pub", "use", "impl", "else",
+    "as",
+    "async",
+    "await",
+    "break",
+    "case",
+    "class",
+    "const",
+    "continue",
+    "crate",
+    "def",
+    "do",
+    "dyn",
+    "elif",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "fn",
+    "for",
+    "from",
+    "function",
+    "if",
+    "impl",
+    "import",
+    "in",
+    "interface",
+    "let",
+    "loop",
+    "match",
+    "mod",
+    "mut",
+    "new",
+    "of",
+    "pub",
+    "raise",
+    "return",
+    "self",
+    "static",
+    "struct",
+    "super",
+    "throw",
+    "trait",
+    "try",
+    "type",
+    "use",
+    "var",
+    "where",
+    "while",
+    "yield",
 ];
+
+const LITERALS: &[&str] = &["true", "false", "null", "None", "Some", "Ok", "Err"];
 
 /// A line of code colored like the desktop: keywords and strings.
 pub fn code_text(text: &str, colors: &Theme) -> AnyElement {
+    code_text_language(text, None, colors)
+}
+
+/// Native Zed tree-sitter highlighting for fenced code. The bounded lexical
+/// pass remains a fallback for missing/unknown language labels.
+pub fn code_text_language(text: &str, language: Option<&str>, colors: &Theme) -> AnyElement {
+    let native_highlights = language
+        .map(|language| pi_markdown::highlight(text, language, colors.syntax_palette()))
+        .unwrap_or_default();
     let mut spans: Vec<(String, Hsla)> = Vec::new();
     let mut push = |text: &str, color: Hsla| match spans.last_mut() {
         Some((last, last_color)) if *last_color == color => last.push_str(text),
         _ => spans.push((text.to_owned(), color)),
     };
     let mut rest = text;
+    let language = language.unwrap_or_default().to_ascii_lowercase();
+    let hash_comments = matches!(
+        language.as_str(),
+        "bash" | "sh" | "shell" | "zsh" | "python" | "py" | "yaml" | "yml" | "toml"
+    );
     while !rest.is_empty() {
+        if rest.starts_with("//")
+            || rest.starts_with("/*")
+            || (hash_comments && rest.starts_with('#'))
+        {
+            let end = if rest.starts_with("/*") {
+                rest.find("*/").map_or(rest.len(), |index| index + 2)
+            } else {
+                rest.find('\n').unwrap_or(rest.len())
+            };
+            push(&rest[..end], colors.muted);
+            rest = &rest[end..];
+            continue;
+        }
         let quote = rest
             .chars()
             .next()
             .filter(|c| matches!(c, '"' | '\'' | '`'));
         if let Some(quote) = quote {
-            let end = rest[1..].find(quote).map_or(rest.len(), |index| index + 2);
+            let mut escaped = false;
+            let mut end = rest.len();
+            for (index, character) in rest[quote.len_utf8()..].char_indices() {
+                if character == quote && !escaped {
+                    end = quote.len_utf8() + index + character.len_utf8();
+                    break;
+                }
+                escaped = character == '\\' && !escaped;
+                if character != '\\' {
+                    escaped = false;
+                }
+            }
             push(&rest[..end], colors.string);
+            rest = &rest[end..];
+            continue;
+        }
+        if rest.as_bytes()[0].is_ascii_digit() {
+            let end = rest
+                .find(|character: char| {
+                    !(character.is_ascii_alphanumeric()
+                        || matches!(character, '.' | '_' | '+' | '-'))
+                })
+                .unwrap_or(rest.len());
+            push(&rest[..end], colors.amber);
             rest = &rest[end..];
             continue;
         }
@@ -408,6 +453,10 @@ pub fn code_text(text: &str, colors: &Theme) -> AnyElement {
                 word,
                 if KEYWORDS.contains(&word) {
                     colors.keyword
+                } else if LITERALS.contains(&word) {
+                    colors.amber
+                } else if word.chars().next().is_some_and(char::is_uppercase) {
+                    colors.read
                 } else {
                     colors.plain
                 },
@@ -415,17 +464,30 @@ pub fn code_text(text: &str, colors: &Theme) -> AnyElement {
             rest = &rest[word_end..];
         } else {
             let length = rest.chars().next().map_or(1, char::len_utf8);
-            push(&rest[..length], colors.plain);
+            let punctuation = &rest[..length];
+            push(
+                punctuation,
+                if punctuation.chars().all(|character| {
+                    matches!(
+                        character,
+                        '=' | '+' | '-' | '*' | '/' | '%' | '&' | '|' | '!' | '<' | '>' | ':'
+                    )
+                }) {
+                    colors.muted
+                } else {
+                    colors.plain
+                },
+            );
             rest = &rest[length..];
         }
     }
-    let text: SharedString = spans
+    let styled_text: SharedString = spans
         .iter()
         .map(|(text, _)| text.as_str())
         .collect::<String>()
         .into();
     let mut offset = 0;
-    let highlights: Vec<_> = spans
+    let fallback_highlights: Vec<_> = spans
         .iter()
         .map(|(span, color)| {
             let range = offset..offset + span.len();
@@ -433,8 +495,12 @@ pub fn code_text(text: &str, colors: &Theme) -> AnyElement {
             (range, gpui::HighlightStyle::color(*color))
         })
         .collect();
-    gpui::StyledText::new(text)
-        .with_highlights(highlights)
+    gpui::StyledText::new(styled_text)
+        .with_highlights(if native_highlights.is_empty() {
+            fallback_highlights
+        } else {
+            native_highlights
+        })
         .into_any_element()
 }
 
@@ -473,13 +539,293 @@ pub fn diff_line(line: &DiffLine, selected: bool, colors: &Theme) -> Div {
                 .whitespace_nowrap()
                 .text_right()
                 .text_color(colors.muted)
-                .child(line.number.to_string()),
+                .child(if line.number == 0 {
+                    String::new()
+                } else {
+                    line.number.to_string()
+                }),
         )
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .pr(px(8.))
+                .child(code_text(&line.text, colors)),
+        )
+}
+
+/// A soft ring around a live mark, in its hue.
+fn ring(hue: Hsla, spread: f32, opacity: f32) -> Vec<gpui::BoxShadow> {
+    vec![gpui::BoxShadow {
+        color: hue.opacity(opacity),
+        offset: gpui::point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(spread),
+        inset: false,
+    }]
+}
+
+/// An 8 dp status dot with a 4 dp ring: a working run.
+pub fn ring_dot(hue: Hsla) -> Div {
+    div()
+        .size(px(16.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.))
+        .bg(hue.opacity(0.22))
+        .child(div().size(px(8.)).rounded(px(4.)).bg(hue))
+}
+
+/// One working run on Home's shared track: each stage as long as it took, on
+/// a track `span` wide, so a run that has gone on longer shows longer.
+pub fn track(
+    times: &[std::time::Duration; 4],
+    live: Option<StageKind>,
+    span: std::time::Duration,
+    colors: &Theme,
+) -> Div {
+    let mut left = 1f32;
+    div()
+        .h(px(4.))
+        .w_full()
+        .flex()
+        .gap(px(2.))
+        .rounded(px(2.))
+        .bg(colors.raised)
+        .children(StageKind::ALL.into_iter().filter_map(|kind| {
+            let time = times[kind.index()];
+            if time.is_zero() && live != Some(kind) {
+                return None;
+            }
+            let fraction = (time.as_secs_f32() / span.as_secs_f32())
+                .max(0.02)
+                .min(left);
+            left -= fraction;
+            let hue = stage_hue(kind, colors);
+            Some(
+                div()
+                    .h(px(4.))
+                    .w(relative(fraction))
+                    .flex_none()
+                    .rounded(px(2.))
+                    .bg(hue)
+                    .when(live == Some(kind), |segment| segment.shadow(ring(hue, 2., 0.28))),
+            )
+        }))
+}
+
+/// The stages a finished run went through, with the share of time each took.
+pub fn stretches(times: &[std::time::Duration; 4]) -> Vec<(StageKind, f32)> {
+    let total: f32 = times.iter().map(|time| time.as_secs_f32()).sum();
+    if total <= 0. {
+        return Vec::new();
+    }
+    StageKind::ALL
+        .into_iter()
+        .filter(|kind| !times[kind.index()].is_zero())
+        .map(|kind| (kind, times[kind.index()].as_secs_f32() / total))
+        .collect()
+}
+
+/// The least width of a stretch, so its time fits under it.
+const STRETCH: f32 = 36.;
+
+/// A finished run as one line: each stretch in its stage's colour and as long
+/// as the stage took, with its time under its start.
+pub fn run_line(times: &[std::time::Duration; 4], show_times: bool, colors: &Theme) -> Div {
+    let stretches = stretches(times);
+    let count = stretches.len();
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .children(stretches.iter().map(|(kind, share)| {
+                    div()
+                        .h(px(3.))
+                        .w(relative(*share))
+                        .min_w(px(STRETCH))
+                        .rounded(px(2.))
+                        .bg(stage_hue(*kind, colors))
+                })),
+        )
+        .when(show_times, |line| {
+            line.child(
+                div()
+                    .mt(px(4.))
+                    .flex()
+                    .gap(px(2.))
+                    .text_size(px(12.5))
+                    .line_height(px(16.))
+                    .text_color(colors.muted)
+                    .children(stretches.iter().enumerate().map(|(index, (kind, share))| {
+                        div()
+                            .w(relative(*share))
+                            .min_w(px(STRETCH))
+                            .flex()
+                            .whitespace_nowrap()
+                            // The last time ends with its stretch, so a short one stays inside.
+                            .when(index + 1 == count && count > 1, |time| time.justify_end())
+                            .child(crate::model::duration_label(times[kind.index()]))
+                    })),
+            )
+        })
+}
+
+/// A key under a run line: each stage's icon with a label and its time.
+pub fn run_key(entries: Vec<(StageKind, SharedString)>, times: &[std::time::Duration; 4], colors: &Theme) -> Div {
+    let entry = |(kind, label): (StageKind, SharedString)| {
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_size(px(13.))
+            .line_height(px(20.))
+            .text_color(colors.secondary)
+            .child(icon(kind.glyph(), 16., stage_hue(kind, colors)))
+            .child(div().min_w_0().truncate().child(label))
+            .child(
+                div()
+                    .ml_auto()
+                    .flex_none()
+                    .text_size(px(12.5))
+                    .text_color(colors.muted)
+                    .child(crate::model::duration_label(times[kind.index()])),
+            )
+    };
+    let mut entries = entries.into_iter();
+    let mut rows = Vec::new();
+    while let Some(first) = entries.next() {
+        let second = entries.next();
+        rows.push(
+            div()
+                .flex()
+                .gap(px(24.))
+                .child(entry(first))
+                .child(match second {
+                    Some(second) => entry(second).into_any_element(),
+                    None => div().flex_1().into_any_element(),
+                }),
+        );
+    }
+    div().mt(px(12.)).flex().flex_col().gap(px(8.)).children(rows)
+}
+
+/// A run line station: the stage's icon in a 28 dp circle; tinted when done,
+/// ringed while live, dashed ahead. `hue` overrides the stage's (waiting).
+pub fn station(glyph: &str, hue: Hsla, status: StageStatus, colors: &Theme) -> Div {
+    let base = div()
+        .size(px(28.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(14.));
+    match status {
+        StageStatus::Done => base
+            .bg(colors.canvas.blend(hue.opacity(0.16)))
+            .child(icon(glyph, 14., hue)),
+        StageStatus::Live => base
+            .bg(colors.composer)
+            .border_2()
+            .border_color(hue)
+            .shadow(ring(hue, 4., 0.16))
+            .child(icon(glyph, 14., hue)),
+        StageStatus::Planned | StageStatus::Skipped => base
+            .border(px(1.5))
+            .border_dashed()
+            .border_color(colors.line_strong)
+            .child(icon(glyph, 14., colors.faint)),
+    }
+}
+
+/// Change size as five blocks, split between added and removed.
+pub fn blocks(added: u32, removed: u32, colors: &Theme) -> Div {
+    let total = added + removed;
+    let filled = total.min(5);
+    let removed_blocks = if total == 0 {
+        0
+    } else {
+        ((removed as f32 / total as f32) * filled as f32).round() as u32
+    }
+    .min(filled);
+    let added_blocks = filled - removed_blocks;
+    div()
+        .flex()
+        .flex_none()
+        .gap(px(2.))
+        .children((0..5).map(|index| {
+            div()
+                .size(px(7.))
+                .rounded(px(2.))
+                .bg(if index < added_blocks {
+                    colors.green
+                } else if index < filled {
+                    colors.coral
+                } else {
+                    colors.raised
+                })
+        }))
+}
+
+/// A diff line as the thread and Review draw it: 22 dp lines of 12.5 dp mono,
+/// numbers in a `gutter` wide column; selected lines carry an accent edge.
+pub fn code_line(line: &DiffLine, selected: bool, gutter: f32, colors: &Theme) -> Div {
+    let background = match line.kind {
+        LineKind::Added => Some(colors.added),
+        LineKind::Removed => Some(colors.removed),
+        LineKind::Context => None,
+    };
+    div()
+        .relative()
+        .flex()
+        .w_full()
+        .min_h(px(22.))
+        .font_family(MONO)
+        .text_size(px(12.5))
+        .line_height(px(22.))
+        .text_color(colors.plain)
+        .when_some(background, |line, background| line.bg(background))
+        .when(selected, |line| {
+            line.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(3.))
+                    .bg(colors.accent),
+            )
+        })
+        .child(
+            div()
+                .w(px(gutter))
+                .flex_none()
+                .pr(px(12.))
+                .whitespace_nowrap()
+                .text_right()
+                .text_color(colors.faint)
+                .child(if line.number == 0 {
+                    String::new()
+                } else {
+                    line.number.to_string()
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .pr(px(8.))
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .child(code_text(&line.text, colors)),
         )
 }

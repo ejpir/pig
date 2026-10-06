@@ -148,6 +148,37 @@ pub fn scan_qr() -> bool {
     }
 }
 
+/// Opens an HTML page full screen: a sandboxed web view, without access to the
+/// app or its files, and the page's source a tab away. Links leave for the
+/// browser. Returns false if it could not be opened.
+pub fn show_page(title: &str, html: &str, dark: bool, source: bool, poster: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current()
+            .is_some_and(|java| java.show_page(title, html, dark, source, poster))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (title, html, dark, source, poster);
+        false
+    }
+}
+
+/// Draws a page offscreen and saves the top of it, at its card's shape, as a
+/// PNG at `path`; the file appears a moment later. False where there is no
+/// web view.
+pub fn render_poster(html: &str, path: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current().is_some_and(|java| java.render_poster(html, path))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (html, path);
+        false
+    }
+}
+
 /// A friendly hardware name shown while approving a newly paired phone.
 pub fn device_name() -> Option<String> {
     #[cfg(target_os = "android")]

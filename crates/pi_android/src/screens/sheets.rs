@@ -4,12 +4,13 @@
 
 use crate::{
     app::{PhoneApp, Route, Sheet, Target},
-    model::{Reference, Session, SessionId},
+    model::{Reference, Session, SessionId, StageKind, StageStatus},
     theme::{MONO, Theme, theme},
     ui::{self, Button, icon},
 };
 use gpui::{
-    AnyElement, Context, Div, FontWeight, SharedString, Window, div, prelude::*, px, relative,
+    AnyElement, Context, Div, ElementId, FontWeight, SharedString, Window, div, prelude::*, px,
+    relative,
 };
 
 const MODELS: [(&str, &str); 4] = [
@@ -18,6 +19,9 @@ const MODELS: [(&str, &str); 4] = [
     ("Fable 5.1", "Anthropic"),
     ("Haiku 4.5", "Anthropic · the fastest"),
 ];
+
+/// Where Pi compacts the context, as a share of the window.
+const COMPACTS_AT: f32 = 0.8;
 
 const THINKING: [&str; 6] = ["Off", "Minimal", "Low", "Medium", "High", "Max"];
 
@@ -43,18 +47,72 @@ impl PhoneApp {
         if sheet == Sheet::Model {
             return self.model_sheet(&colors, cx).into_any_element();
         }
+        if sheet == Sheet::Project {
+            return self.project_sheet(&colors, cx).into_any_element();
+        }
         let content = match sheet {
-            Sheet::Question(id) => self.question_sheet(id, &colors, cx),
             Sheet::Details(id) => self.details_sheet(id, &colors, cx),
             Sheet::Attach(target) => self.attach_sheet(target, &colors, cx),
             Sheet::Model => self.model_sheet(&colors, cx),
             Sheet::Thinking => self.thinking_sheet(&colors, cx),
-            Sheet::Project => self.project_sheet(&colors, cx),
+            Sheet::Project => div(),
             Sheet::More(id) => self.more_sheet(id, &colors, cx),
             Sheet::Models => self.models_sheet(&colors, cx),
             Sheet::Resources => self.resources_sheet(&colors, cx),
             Sheet::Activity(id, turn, stage) => self.activity_sheet(id, turn, stage, &colors, cx),
             Sheet::Delete(id) => self.delete_sheet(id, &colors, cx),
+            Sheet::RestoreHistory(id, index) => self.restore_history_sheet(id, index, &colors, cx),
+            Sheet::EnableJj(id) => self.enable_jj_sheet(id, &colors, cx),
+            Sheet::Computers => self.computers_sheet(&colors, cx),
+            Sheet::Logs => self.logs_sheet(&colors, cx),
+            Sheet::SelectText => {
+                let lines = (f32::from(window.viewport_size().height) * 0.5 / 22.) as usize;
+                self.selectable.update(cx, |area, _| area.set_max_lines(lines.max(4)));
+                let text = self.selectable.read(cx).text().to_owned();
+                div()
+                    .pb(px(8.))
+                    .child(ui::hint("Hold a word, then drag the handles to choose what to copy.", &colors).mt(px(4.)))
+                    .child(
+                        div()
+                            .mt(px(12.))
+                            .p(px(12.))
+                            .rounded(px(12.))
+                            .bg(colors.composer)
+                            .border_1()
+                            .border_color(colors.line)
+                            .child(self.selectable.clone()),
+                    )
+                    .child(
+                        ui::button("copy-all", Button::Plain, Some("copy"), "Copy all", false, &colors)
+                            .mt(px(12.))
+                            .w_full()
+                            .on_click(cx.listener(move |this, _, _, cx| this.copy(text.clone(), "all of it", cx))),
+                    )
+            }
+            Sheet::ToolImage(id, turn, n) => {
+                let image = self
+                    .session(id)
+                    .and_then(|session| session.turns.get(turn))
+                    .and_then(|turn| turn.images.get(n))
+                    .cloned();
+                let shown = image.as_ref().map(|image| self.tool_image(id, image));
+                div().pb(px(8.)).child(match shown {
+                    Some(Ok(Some(shown))) => div()
+                        .w_full()
+                        .h(window.fully_visible_bounds().size.height * 0.65)
+                        .rounded(px(12.))
+                        .overflow_hidden()
+                        .bg(colors.panel)
+                        .child(
+                            gpui::img(shown.image)
+                                .size_full()
+                                .rounded(px(12.))
+                                .object_fit(gpui::ObjectFit::Contain),
+                        ),
+                    Some(Err(error)) => ui::hint(error, &colors),
+                    _ => ui::hint("Getting the image from the computer…", &colors),
+                })
+            }
             Sheet::Image(target, index) => {
                 let attachment = self
                     .composer(target)
@@ -72,21 +130,61 @@ impl PhoneApp {
         // Every sheet keeps its identity and explicit close action visible,
         // independently of the scroll position of long output or lists.
         let header = match sheet {
-            Sheet::Question(id) if self.session(id).and_then(|s| s.question.as_ref()).is_some() => {
+            Sheet::Details(id) => {
+                let (title, subtitle) = self.session(id).map_or_else(
+                    || (SharedString::from("Details"), String::new()),
+                    |session| {
+                        let started = session
+                            .turns
+                            .first()
+                            .map(|turn| turn.at.clone())
+                            .filter(|at| !at.is_empty())
+                            .map(|at| format!(" · started {at}"))
+                            .unwrap_or_default();
+                        (
+                            session.title.clone().into(),
+                            format!("{} · {}{started}", session.project, self.computer_name()),
+                        )
+                    },
+                );
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .child(ui::badge("Needs you", colors.wait, colors.amber, &colors))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(22.))
+                                    .line_height(px(28.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(4.))
+                                    .text_size(px(12.5))
+                                    .line_height(px(16.))
+                                    .text_color(colors.muted)
+                                    .truncate()
+                                    .child(subtitle),
+                            ),
+                    )
                     .child(
                         ui::tap("close-sheet", "x", &colors)
                             .mr(px(-12.))
                             .on_click(cx.listener(|this, _, _, cx| this.close_sheet(cx))),
                     )
             }
+            Sheet::Computers => div()
+                .text_size(px(22.))
+                .line_height(px(28.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Computers"),
             _ => {
                 let title: SharedString = match sheet {
-                    Sheet::Question(_) => "Already answered".into(),
                     Sheet::Details(_) => "Details".into(),
                     Sheet::Attach(_) => "Add to the message".into(),
                     Sheet::Model => "Choose model".into(),
@@ -104,7 +202,17 @@ impl PhoneApp {
                         .map_or("Activity", |s| s.kind.name(s.status))
                         .into(),
                     Sheet::Delete(_) => "Delete session?".into(),
+                    Sheet::RestoreHistory(_, _) => "Restore project files?".into(),
+                    Sheet::EnableJj(_) => "Turn on jj file history?".into(),
                     Sheet::Image(_, _) => "Attached image".into(),
+                    Sheet::Logs => "Debug log".into(),
+                    Sheet::ToolImage(id, turn, n) => self
+                        .session(id)
+                        .and_then(|session| session.turns.get(turn))
+                        .and_then(|turn| turn.images.get(n))
+                        .map_or_else(|| "Image".into(), |image| image.name.clone().into()),
+                    Sheet::Computers => "Computers".into(),
+                    Sheet::SelectText => "Select text".into(),
                 };
                 self.sheet_title(title, &colors, cx)
             }
@@ -129,6 +237,137 @@ impl PhoneApp {
                 .child(content),
             )
             .into_any_element()
+    }
+
+    /// 13 Computers: each with its state or Connect, pairing another, the
+    /// sample sessions and Settings.
+    fn computers_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
+        let live = self.live();
+        let working = self.store.as_ref().map_or(0, |store| {
+            store.sessions.iter().filter(|s| s.state.is_running()).count()
+        });
+        let item = |id: ElementId| {
+            div()
+                .id(id.clone())
+                .relative()
+                .child(crate::testing::probe(format!("{id:?}")))
+                .min_h(px(64.))
+                .py(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .border_color(colors.line)
+                .active(|style| style.bg(colors.selected))
+        };
+        let meta = |text: SharedString| {
+            div()
+                .text_size(px(12.5))
+                .line_height(px(16.))
+                .text_color(colors.muted)
+                .child(text)
+        };
+        let computers = self
+            .store
+            .iter()
+            .flat_map(|store| store.computers.iter())
+            .enumerate()
+            .map(|(index, computer)| {
+                let current = index == 0;
+                let address = computer.address.clone();
+                item(("computer", index).into())
+                    .when(index > 0, |row| row.border_t_1())
+                    .child(icon(if current { "computer" } else { "server" }, 20., colors.muted))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(computer.name.clone()),
+                            )
+                            .child(meta(computer.address.clone().into()).mt(px(2.)).truncate()),
+                    )
+                    .child(if current {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .when(working > 0, |state| {
+                                state.child(meta(format!("{working} working").into()))
+                            })
+                            .child(
+                                meta(
+                                    if computer.connected || !live {
+                                        "Connected"
+                                    } else {
+                                        "Reconnecting…"
+                                    }
+                                    .into(),
+                                )
+                                .text_color(if computer.connected || !live {
+                                    colors.green
+                                } else {
+                                    colors.wait
+                                }),
+                            )
+                            .into_any_element()
+                    } else {
+                        ui::button(("connect-computer", index), Button::Plain, None, "Connect", true, colors)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.close_sheet(cx);
+                                this.address
+                                    .update(cx, |field, cx| field.set_text(address.clone(), cx));
+                                this.manual_setup = true;
+                                this.connect(window, cx);
+                            }))
+                            .into_any_element()
+                    })
+            })
+            .collect::<Vec<_>>();
+        let link = |id: &'static str, glyph: &'static str, text: &'static str| {
+            item(id.into())
+                .min_h(px(56.))
+                .child(icon(glyph, 20., colors.muted))
+                .child(div().flex_1().child(text))
+                .child(icon("chev_r", 16., colors.faint))
+        };
+        div()
+            .pb(px(8.))
+            .child(
+                div()
+                    .mt(px(8.))
+                    .children(computers)
+                    .child(
+                        item("pair-computer".into())
+                            .min_h(px(56.))
+                            .border_t_1()
+                            .text_color(colors.accent)
+                            .child(icon("plus", 20., colors.accent))
+                            .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("Pair another computer"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_sheet(cx);
+                                this.manual_setup = false;
+                                this.push(Route::Connect, window, cx);
+                            })),
+                    ),
+            )
+            .child(div().mt(px(8.)).mx(px(-20.)).h(px(1.)).bg(colors.line))
+            .child(
+                link("sample-sessions", "spark", "Try the sample sessions").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.close_sheet(cx);
+                        this.open_sample(window, cx);
+                    },
+                )),
+            )
+            .child(link("open-settings", "settings", "Settings").border_t_1().on_click(
+                cx.listener(|this, _, window, cx| {
+                    this.close_sheet(cx);
+                    this.push(Route::Settings, window, cx);
+                }),
+            ))
     }
 
     fn session(&self, id: SessionId) -> Option<&Session> {
@@ -160,6 +399,166 @@ impl PhoneApp {
                     .flex_1().min_w_0().bg(colors.coral).border_color(colors.coral)
                     .when(running || deleting, |button| button.opacity(0.45))
                     .when(!running && !deleting, |button| button.on_click(cx.listener(move |this, _, _, cx| this.delete_session(id, cx))))))
+    }
+
+    fn restore_history_sheet(
+        &self,
+        id: SessionId,
+        index: usize,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let operation = match self.jj_histories.get(&id) {
+            Some(crate::app::JjHistoryState::Loaded(history)) => history.operations.get(index),
+            _ => None,
+        };
+        let Some(operation) = operation else {
+            return div().child(ui::hint(
+                "That history point is no longer available.",
+                colors,
+            ));
+        };
+        let restoring = self.restoring_history == Some((id, index));
+        let running = self.project_is_running(id);
+        let short_id: String = operation.id.chars().take(12).collect();
+        div()
+            .pb(px(8.))
+            .child(
+                ui::card(colors)
+                    .p(px(14.))
+                    .my(px(12.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(operation.description.clone()),
+                    )
+                    .child(ui::hint(format!("jj operation {short_id}"), colors).mt(px(4.))),
+            )
+            .child(ui::hint(
+                "The project files on the computer will be restored to this point. jj first records the files as they are now, then records the restore, so the action remains recoverable.",
+                colors,
+            ))
+            .when(running, |body| {
+                body.child(
+                    ui::hint(
+                        "A session in this project is active. Stop it before restoring files.",
+                        colors,
+                    )
+                    .mt(px(12.))
+                    .text_color(colors.coral),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .mt(px(20.))
+                    .child(
+                        ui::button(
+                            "cancel-restore",
+                            Button::Plain,
+                            None,
+                            "Cancel",
+                            false,
+                            colors,
+                        )
+                        .flex_1()
+                        .on_click(cx.listener(|this, _, _, cx| this.close_sheet(cx))),
+                    )
+                    .child({
+                        let button = ui::button(
+                            "confirm-restore",
+                            Button::Primary,
+                            Some("clock"),
+                            if restoring { "Restoring…" } else { "Restore" },
+                            false,
+                            colors,
+                        )
+                        .flex_1()
+                        .min_w_0();
+                        if running || restoring {
+                            ui::disabled(button, colors)
+                        } else {
+                            button.on_click(cx.listener(move |this, _, _, cx| {
+                                this.restore_jj_history(id, index, cx)
+                            }))
+                        }
+                    }),
+            )
+    }
+
+    fn enable_jj_sheet(&self, id: SessionId, colors: &Theme, cx: &Context<Self>) -> Div {
+        let enabling = self.enabling_jj == Some(id);
+        let running = self.project_is_running(id);
+        div()
+            .pb(px(8.))
+            .child(
+                ui::card(colors)
+                    .p(px(14.))
+                    .my(px(12.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Recover agent edits with built-in jj"),
+                    )
+                    .child(
+                        ui::hint(
+                            "Pi initializes jj alongside this Git repository. Existing branches stay as they are; future remote turns that edit files become recoverable changes.",
+                            colors,
+                        )
+                        .mt(px(6.)),
+                    ),
+            )
+            .child(ui::hint(
+                "This writes a .jj workspace on the computer. It does not upload project files or require a separate jj executable.",
+                colors,
+            ))
+            .when(running, |body| {
+                body.child(
+                    ui::hint(
+                        "A session in this project is active. Stop it before enabling file history.",
+                        colors,
+                    )
+                    .mt(px(12.))
+                    .text_color(colors.coral),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .mt(px(20.))
+                    .child(
+                        ui::button(
+                            "cancel-enable-jj",
+                            Button::Plain,
+                            None,
+                            "Cancel",
+                            false,
+                            colors,
+                        )
+                        .flex_1()
+                        .on_click(cx.listener(|this, _, _, cx| this.close_sheet(cx))),
+                    )
+                    .child({
+                        let button = ui::button(
+                            "confirm-enable-jj",
+                            Button::Primary,
+                            Some("shield"),
+                            if enabling { "Turning on…" } else { "Turn on" },
+                            false,
+                            colors,
+                        )
+                        .flex_1();
+                        if running || enabling {
+                            ui::disabled(button, colors)
+                        } else {
+                            button.on_click(cx.listener(move |this, _, _, cx| {
+                                this.enable_jj(id, cx)
+                            }))
+                        }
+                    }),
+            )
     }
 
     fn activity_sheet(
@@ -201,6 +600,37 @@ impl PhoneApp {
                     .child(stage.what.clone())
                     .mb(px(12.)),
             )
+            .when(!stage.diff.is_empty(), |body| {
+                body.child(
+                    ui::card(colors)
+                        .id(("activity-live-diff", stage.diff.len()))
+                        .relative()
+                        .child(crate::testing::probe(format!(
+                            "activity-live-diff-{}",
+                            stage.diff.len()
+                        )))
+                        .mb(px(12.))
+                        .py(px(8.))
+                        .child(
+                            ui::label(
+                                if stage.status == StageStatus::Live {
+                                    "LIVE CHANGES"
+                                } else {
+                                    "CHANGES"
+                                },
+                                colors,
+                            )
+                            .px(px(12.))
+                            .mb(px(6.)),
+                        )
+                        .children(
+                            stage
+                                .diff
+                                .iter()
+                                .map(|line| ui::diff_line(line, false, colors)),
+                        ),
+                )
+            })
             .children(
                 stage
                     .references
@@ -216,6 +646,29 @@ impl PhoneApp {
                             .iter()
                             .position(|file| file.path == *target || file.name() == target);
                         let copied = target.clone();
+                        let action = if let Some(file) = file {
+                            ui::button(
+                                ("open-reference", index),
+                                Button::Quiet,
+                                None,
+                                "Review",
+                                true,
+                                colors,
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_review(id, file, window, cx);
+                            }))
+                            .into_any_element()
+                        } else {
+                            ui::tap(("open-reference", index), "copy", colors)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        copied.clone(),
+                                    ));
+                                    this.notify_user("Copied", cx);
+                                }))
+                                .into_any_element()
+                        };
                         ui::row(("activity-reference", index), index == 0, colors)
                             .child(icon(glyph, 18., colors.muted))
                             .child(
@@ -224,28 +677,7 @@ impl PhoneApp {
                                     .min_w_0()
                                     .child(ui::mono(target.clone(), 12.5)),
                             )
-                            .child(
-                                ui::button(
-                                    ("open-reference", index),
-                                    Button::Quiet,
-                                    None,
-                                    if file.is_some() { "Review" } else { "Copy" },
-                                    true,
-                                    colors,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        if let Some(file) = file {
-                                            this.open_review(id, file, window, cx);
-                                        } else {
-                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                                copied.clone(),
-                                            ));
-                                            this.notify_user("Copied", cx);
-                                        }
-                                    },
-                                )),
-                            )
+                            .child(action)
                     }),
             )
             .children(stage.tools.iter().enumerate().map(|(index, tool)| {
@@ -273,48 +705,43 @@ impl PhoneApp {
                                 colors.muted
                             })),
                     )
-                    .child(ui::mono(tool.target.clone(), 12.5).mt(px(8.)))
                     .child(
-                        ui::button(
-                            ("copy-command", index),
-                            Button::Quiet,
-                            Some("copy"),
-                            "Copy",
-                            true,
-                            colors,
-                        )
-                        .h(px(48.))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(target.clone()));
-                            this.notify_user("Copied", cx);
-                        })),
+                        div()
+                            .mt(px(2.))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(ui::mono(tool.target.clone(), 12.5).flex_1().min_w_0())
+                            .child(
+                                ui::tap(("copy-command", index), "copy", colors)
+                                    .aria_label("Copy command")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            target.clone(),
+                                        ));
+                                        this.notify_user("Copied", cx);
+                                    })),
+                            ),
                     )
                     .when(!tool.output.is_empty(), |card| {
-                        card.child(ui::label("Output", colors).mt(px(8.)))
-                            .child(
-                                ui::mono(tool.output.clone(), 12.)
-                                    .mt(px(6.))
-                                    .line_height(relative(1.5)),
-                            )
-                            .child(
-                                ui::button(
-                                    ("copy-output", index),
-                                    Button::Quiet,
-                                    Some("copy"),
-                                    "Copy output",
-                                    true,
-                                    colors,
-                                )
-                                .h(px(48.))
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                            output.clone(),
-                                        ));
-                                        this.notify_user("Copied output", cx);
-                                    },
-                                )),
-                            )
+                        card.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(ui::label("Output", colors).flex_1())
+                                .child(
+                                    ui::tap(("copy-output", index), "copy", colors)
+                                        .aria_label("Copy output")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                                output.clone(),
+                                            ));
+                                            this.notify_user("Copied output", cx);
+                                        })),
+                                ),
+                        )
+                        .child(ui::mono(tool.output.clone(), 12.).line_height(relative(1.5)))
                     })
                     .when(tool.output.is_empty(), |card| {
                         card.child(ui::hint(
@@ -369,7 +796,64 @@ impl PhoneApp {
         self.store.as_ref().is_some_and(|store| !store.is_sample())
     }
 
-    fn computer_name(&self) -> String {
+    /// The newest lines first; warnings and errors in their colours.
+    fn logs_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
+        /// More would make the sheet slow to draw; Copy all takes everything.
+        const SHOWN: usize = 300;
+        let lines = gpui_android::recent_logs();
+        let all = lines.join("\n");
+        let count = lines.len();
+        div()
+            .pb(px(8.))
+            .child(ui::hint(
+                format!("{count} lines since the app started, newest first. Hold one to select text."),
+                colors,
+            ))
+            .child(
+                div()
+                    .mt(px(12.))
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        ui::button("copy-logs", Button::Plain, Some("copy"), "Copy all", true, colors)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.copy(all.clone(), "the log", cx)
+                            })),
+                    )
+                    .child(
+                        ui::button("refresh-logs", Button::Plain, Some("refresh"), "Refresh", true, colors)
+                            .on_click(cx.listener(|_, _, _, cx| cx.notify())),
+                    ),
+            )
+            .when(lines.is_empty(), |body| {
+                body.child(ui::hint("Nothing logged yet.", colors).mt(px(16.)))
+            })
+            .child(
+                div()
+                    .mt(px(12.))
+                    .flex()
+                    .flex_col()
+                    .font_family(MONO)
+                    .text_size(px(11.5))
+                    .line_height(px(16.))
+                    .children(lines.into_iter().rev().take(SHOWN).enumerate().map(|(index, line)| {
+                        let level = line.split(' ').nth(1).unwrap_or("");
+                        div()
+                            .relative()
+                            .py(px(4.))
+                            .when(index > 0, |row| row.border_t_1().border_color(colors.line))
+                            .text_color(match level {
+                                "E" => colors.coral,
+                                "W" => colors.amber,
+                                _ => colors.secondary,
+                            })
+                            .child(line.clone())
+                            .child(self.copyable(line, cx))
+                    })),
+            )
+    }
+
+    pub(crate) fn computer_name(&self) -> String {
         self.store.as_ref().map_or_else(
             || "the computer".to_owned(),
             |store| store.computer.name.clone(),
@@ -390,7 +874,8 @@ impl PhoneApp {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(20.))
+                    .text_size(px(22.))
+                    .line_height(px(28.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .truncate()
                     .child(title.into()),
@@ -402,257 +887,239 @@ impl PhoneApp {
             )
     }
 
-    fn question_sheet(&self, id: SessionId, colors: &Theme, cx: &Context<Self>) -> Div {
-        let Some(question) = self
-            .session(id)
-            .and_then(|session| session.question.as_ref())
-        else {
-            return div().pb(px(8.)).child(
-                ui::hint("This question was answered, or the run ended.", colors).mt(px(4.)),
-            );
-        };
-        let choices = question.choices.iter().enumerate().map(|(index, choice)| {
-            let on = self.choice == Some(choice.answer);
-            let answer = choice.answer;
-            div()
-                .id(("choice", index))
-                .min_h(px(56.))
-                .px(px(14.))
-                .py(px(8.))
-                .flex()
-                .items_center()
-                .gap(px(14.))
-                .rounded(px(14.))
-                .when(on, |row| row.bg(colors.selected))
-                .active(|style| style.bg(colors.selected))
-                .child(
-                    div()
-                        .size(px(20.))
-                        .flex_none()
-                        .rounded_full()
-                        .border(px(if on { 6. } else { 2. }))
-                        .border_color(if on {
-                            colors.accent
-                        } else {
-                            colors.line_strong
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(div().text_size(px(15.)).child(choice.label.clone()))
-                        .children(choice.detail.clone().map(|detail| {
-                            div()
-                                .text_size(px(13.))
-                                .text_color(colors.muted)
-                                .child(detail)
-                        })),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.choice = Some(answer);
-                    cx.notify();
-                }))
-        });
-        let answer = ui::button("answer", Button::Primary, None, "Answer", false, colors).flex_1();
-        let answer = if self.choice.is_some() {
-            answer.on_click(cx.listener(move |this, _, window, cx| this.answer(id, window, cx)))
-        } else {
-            ui::disabled(answer, colors)
-        };
-        div()
-            .pb(px(10.))
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .mt(px(10.))
-                    .text_size(px(20.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(question.title.clone()),
-            )
-            .child(
-                ui::hint(question.body.clone(), colors)
-                    .mt(px(2.))
-                    .text_size(px(14.)),
-            )
-            .child(
-                div()
-                    .mt(px(14.))
-                    .px(px(14.))
-                    .py(px(12.))
-                    .rounded(px(12.))
-                    .bg(colors.panel)
-                    .font_family(MONO)
-                    .text_size(px(13.))
-                    .text_color(colors.plain)
-                    .child(question.command.clone()),
-            )
-            .child(
-                div()
-                    .mt(px(14.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .children(choices),
-            )
-            .child(
-                div()
-                    .mt(px(16.))
-                    .flex()
-                    .gap(px(8.))
-                    .child(
-                        ui::button("later", Button::Plain, None, "Later", false, colors)
-                            .flex_1()
-                            .on_click(cx.listener(|this, _, _, cx| this.close_sheet(cx))),
-                    )
-                    .child(answer),
-            )
-    }
-
     fn details_sheet(&self, id: SessionId, colors: &Theme, cx: &Context<Self>) -> Div {
         let Some(session) = self.session(id) else {
             return div();
         };
         let details = &session.details;
-        let prefs = self.prefs(cx);
-        let disclosure = |key: &'static str, title: &'static str, value: AnyElement, more: Div| {
-            let open = self.expanded.contains(key);
+        let (model, thinking) = self.model_settings(cx);
+        let meta = |text: String| {
             div()
+                .text_size(px(12.5))
+                .line_height(px(16.))
+                .text_color(colors.muted)
+                .child(text)
+        };
+        let row = |key: &'static str,
+                   glyph: &'static str,
+                   title: &'static str,
+                   value: String,
+                   open: Option<bool>| {
+            div()
+                .id(key)
+                .relative()
+                .child(crate::testing::probe(key))
+                .min_h(px(56.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
                 .border_t_1()
                 .border_color(colors.line)
-                .child(
-                    div()
-                        .id(key)
-                        .h(px(52.))
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(div().flex_1().text_size(px(15.)).child(title))
-                        .child(value)
-                        .child(icon(
-                            if open { "chev_d" } else { "chev_r" },
-                            16.,
-                            colors.muted,
-                        ))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.expanded.remove(key) {
-                                this.expanded.insert(key);
-                            }
-                            cx.notify();
-                        })),
-                )
-                .when(open, |row| row.child(more.pb(px(14.))))
+                .active(|style| style.bg(colors.selected))
+                .child(icon(glyph, 20., colors.muted))
+                .child(div().flex_1().child(title))
+                .child(meta(value))
+                .child(icon(
+                    if open == Some(true) { "chev_d" } else { "chev_r" },
+                    16.,
+                    colors.faint,
+                ))
+        };
+        let disclosure = |key: &'static str| {
+            cx.listener(move |this, _, _, cx| {
+                if !this.expanded.remove(key) {
+                    this.expanded.insert(key);
+                }
+                cx.notify();
+            })
         };
         let session_file = details.session_file.clone();
-        div()
-            .pb(px(8.))
-            .child(ui::label("Context", colors).mt(px(8.)))
-            .child(
-                div()
-                    .mt(px(2.))
-                    .flex()
-                    .items_baseline()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(28.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{}%", details.context_percent)),
-                    )
-                    .child(ui::hint(details.context_tokens.clone(), colors)),
-            )
-            .child(
-                div().mt(px(10.)).h(px(8.)).rounded(px(4.)).bg(colors.raised).child(
-                    div()
-                        .h_full()
-                        .w(relative(details.context_percent.min(100) as f32 / 100.))
-                        .rounded(px(4.))
-                        .bg(colors.accent),
-                ),
-            )
-            .child(ui::hint("Auto-compaction is on.", colors).mt(px(8.)))
-            .child(ui::label("Run history", colors).mt(px(20.)).mb(px(8.)))
+        let files = session.files.len();
+        let snapshots = details.snapshots;
+        let runs_open = self.expanded.contains("details-run");
+        let tools_open = self.expanded.contains("details-tools");
+        let history = div()
+            .pb(px(16.))
             .children(session.turns.iter().enumerate().map(|(index, turn)| {
-                div().id(("details-turn", index)).mb(px(8.))
-                    .child(ui::label(format!("Turn {} · {}", index + 1, turn.at), colors))
+                div()
+                    .id(("details-turn", index))
+                    .mb(px(12.))
+                    .child(ui::label(format!("Turn {} · {}", index + 1, turn.at), colors).mb(px(8.)))
                     .child(self.turn_activity(id, index, turn, false, colors, cx))
             }))
+            .when(session.turns.is_empty(), |history| {
+                history.child(ui::hint("No turns have been reported yet.", colors))
+            })
             .child(
-                ui::card(colors)
-                    .mt(px(18.))
+                div()
                     .flex()
-                    .child(pair("Session cost", details.cost.clone(), colors))
+                    .items_center()
+                    .gap(px(8.))
                     .child(
-                        pair("Observed edits", session.files.len().to_string(), colors)
+                        ui::mono(shorten(&details.session_file), 12.)
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(colors.muted),
+                    )
+                    .child(ui::tap("copy-file", "copy", colors).on_click(cx.listener(
+                        move |this, _, _, cx| this.copy(session_file.clone(), "the path", cx),
+                    ))),
+            );
+        // The run line, with a key that names the stages.
+        let times = session.turn().map(|turn| turn.times).unwrap_or_default();
+        let run = (times.iter().any(|time| !time.is_zero())).then(|| {
+            let entries = StageKind::ALL
+                .into_iter()
+                .filter(|kind| !times[kind.index()].is_zero())
+                .map(|kind| (kind, SharedString::from(kind.title())))
+                .collect();
+            div()
+                .mt(px(20.))
+                .child(ui::run_line(&times, false, colors))
+                .child(ui::run_key(entries, &times, colors))
+        });
+        let stat = |label: &'static str, value: String| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .py(px(16.))
+                .child(ui::label(label, colors).text_color(colors.muted))
+                .child(
+                    div()
+                        .mt(px(4.))
+                        .text_size(px(22.))
+                        .line_height(px(28.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .truncate()
+                        .child(value),
+                )
+        };
+        let used = details.context_percent.min(100) as f32 / 100.;
+        div()
+            .pb(px(8.))
+            .children(run)
+            .child(
+                div()
+                    .mt(px(20.))
+                    .flex()
+                    .border_t_1()
+                    .border_b_1()
+                    .border_color(colors.line)
+                    .child(stat("Cost", if details.cost.is_empty() { "—".into() } else { details.cost.clone() }))
+                    .child(
+                        stat("Turns", details.turns.to_string())
+                            .pl(px(16.))
                             .border_l_1()
                             .border_color(colors.line),
+                    )
+                    .child(
+                        stat(
+                            "Changed",
+                            match files {
+                                1 => "1 file".into(),
+                                count => format!("{count} files"),
+                            },
+                        )
+                        .pl(px(16.))
+                        .border_l_1()
+                        .border_color(colors.line),
                     ),
             )
             .child(
                 div()
-                    .mt(px(18.))
-                    .child(disclosure(
-                        "usage",
-                        "Usage",
-                        ui::hint(format!("{} · {} turns", prefs.model, details.turns), colors).into_any_element(),
-                        ui::hint(
-                            format!(
-                                "{} with {} thinking. {} turns so far, {} in all.",
-                                prefs.model,
-                                prefs.thinking.to_lowercase(),
-                                details.turns,
-                                details.cost
-                            ),
-                            colors,
-                        ),
-                    ))
-                    .child(disclosure(
-                        "tools",
-                        "Active tools",
-                        ui::hint(details.tools.len().to_string(), colors).into_any_element(),
-                        div().flex().flex_wrap().gap(px(8.)).children(
-                            details
-                                .tools
-                                .iter()
-                                .enumerate()
-                                .map(|(index, tool)| ui::chip(("tool", index), None, tool.clone(), colors).font_family(MONO)),
-                        ),
-                    ))
-                    .child(disclosure(
-                        "history",
-                        "File history",
-                        ui::hint(format!("on · {} snapshots", details.snapshots), colors).into_any_element(),
-                        ui::hint(
-                            "jj records each turn that edits files, so a turn can be undone on the computer.",
-                            colors,
-                        ),
-                    ))
-                    .child(disclosure(
-                        "file",
-                        "Session file",
-                        ui::mono(shorten(&details.session_file), 12.)
-                            .text_color(colors.muted)
-                            .into_any_element(),
+                    .pt(px(20.))
+                    .pb(px(24.))
+                    .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("Context"))
+                            .child(meta(details.context_tokens.clone())),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .mt(px(12.))
+                            .h(px(8.))
+                            .rounded(px(4.))
+                            .bg(colors.raised)
                             .child(
-                                ui::mono(details.session_file.clone(), 12.)
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_color(colors.secondary),
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(relative(used))
+                                    .rounded(px(4.))
+                                    .bg(colors.accent),
                             )
                             .child(
-                                ui::button("copy-file", Button::Quiet, Some("copy"), "Copy", true, colors)
-                                    .h(px(32.))
-                                    .px(px(4.))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.copy(session_file.clone(), "the path", cx)
-                                    })),
+                                div()
+                                    .absolute()
+                                    .left(relative(COMPACTS_AT))
+                                    .top(px(-4.))
+                                    .bottom(px(-4.))
+                                    .w(px(2.))
+                                    .rounded(px(1.))
+                                    .bg(colors.line_strong),
                             ),
-                    )),
+                    )
+                    .child(
+                        div()
+                            .mt(px(8.))
+                            .flex()
+                            .child(meta(format!("{}% used", details.context_percent)).flex_1())
+                            .child(meta(format!("compacts at {}%", (COMPACTS_AT * 100.) as u32))),
+                    ),
+            )
+            .child(
+                row("details-model", "spark", "Model", format!("{model} · {thinking}"), None)
+                    .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Model, cx))),
+            )
+            .child(
+                row(
+                    "details-run",
+                    "clock",
+                    "Run history",
+                    format!("{} turns", details.turns),
+                    Some(runs_open),
+                )
+                .on_click(disclosure("details-run")),
+            )
+            .when(runs_open, |body| body.child(history))
+            .child(
+                row(
+                    "details-tools",
+                    "term",
+                    "Tools used",
+                    details.tools.len().to_string(),
+                    Some(tools_open),
+                )
+                .on_click(disclosure("details-tools")),
+            )
+            .when(tools_open, |body| {
+                body.child(div().pb(px(16.)).flex().flex_wrap().gap(px(8.)).children(
+                    details.tools.iter().enumerate().map(|(index, tool)| {
+                        ui::chip(("tool", index), None, tool.clone(), colors).font_family(MONO)
+                    }),
+                ))
+            })
+            .child(
+                row(
+                    "open-jj-history",
+                    "restore",
+                    "File history",
+                    match snapshots {
+                        0 => String::new(),
+                        1 => "1 point".into(),
+                        count => format!("{count} points"),
+                    },
+                    None,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.close_sheet(cx);
+                    this.open_history(id, window, cx);
+                })),
             )
     }
 
@@ -849,9 +1316,6 @@ impl PhoneApp {
             .child(ui::hint("Higher effort can use more tokens and take longer. Available levels depend on the model.", colors).mt(px(12.)))
     }
 
-    fn project_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
-        div().pb(px(8.)).child(self.project_picker(colors, cx))
-    }
 
     fn more_sheet(&self, id: SessionId, colors: &Theme, cx: &Context<Self>) -> Div {
         let Some(session) = self.session(id) else {
@@ -888,6 +1352,12 @@ impl PhoneApp {
                 Box::new(move |this, window, cx| this.open_review(id, 0, window, cx)),
             ));
         }
+        rows.push((
+            "clock",
+            "File history",
+            colors.muted,
+            Box::new(move |this, window, cx| this.open_history(id, window, cx)),
+        ));
         if session.state.is_running() {
             rows.push((
                 "stop",
@@ -991,22 +1461,6 @@ impl PhoneApp {
                 .mx(px(4.)),
             )
     }
-}
-
-/// One of the two figures in the details card.
-fn pair(label: &'static str, value: String, colors: &Theme) -> Div {
-    div()
-        .flex_1()
-        .px(px(16.))
-        .py(px(14.))
-        .child(ui::label(label, colors))
-        .child(
-            div()
-                .mt(px(2.))
-                .text_size(px(20.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(value),
-        )
 }
 
 /// "~/.pi/…/qwen-signatures.jsonl": the start and the file name.

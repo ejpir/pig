@@ -16,7 +16,7 @@ Pi does not run on the phone. It runs on your computer or a server, as it does o
 
 Editing code, terminals and long configuration stay on the desktop.
 
-## Thirteen screens
+## Fifteen screens
 
 | Screen | What it shows |
 | --- | --- |
@@ -33,6 +33,8 @@ Editing code, terminals and long configuration stay on the desktop.
 | [11 · Evening](screens/11-evening.png) | Screen 04 in the Evening theme. The phone follows the system's dark mode unless a theme is chosen. |
 | [12 · Settings and tools](screens/12-settings.png) | Computers, appearance, notifications and typing on the phone; models and resources belong to the computer and open its settings. |
 | [13 · Navigation drawer](screens/13-drawer.png) | Compact navigation over the current screen: computer identity, New session, All sessions, recent work with quiet status dots, and Settings. It also dismisses with a left swipe. |
+| [14 · File history](screens/14-history.png) | The built-in jj operation log. Restoring requires confirmation, snapshots the current files first, and is disabled while the project is active. |
+| [15 · Markdown and pages](screens/15-markdown-page.png) | Replies use the desktop Markdown/tree-sitter stack. HTML pages Pi writes appear as compact cards and open in a sandboxed preview with selectable source. |
 
 ## Phone contract
 
@@ -49,7 +51,7 @@ Editing code, terminals and long configuration stay on the desktop.
 
 The `gpui_android` backend provides what these screens assume of the platform: touch, scrolling and flings; the on-screen keyboard with autocorrect and composing; keyboard and system-bar insets; the clipboard with images; file pickers; links; back; notifications with actions; dark mode and high refresh rates.
 
-[Pi for Android](../../crates/pi_android/README.md) builds all thirteen screens on it, connected over SSH to Pi Desktop's helper on a computer, with real notifications that open the exact session. Sample sessions that run on their own are one tap away on the first screen. `cargo run -p pi_android --example preview -- <screen>` shows each screen in a phone-sized window.
+[Pi for Android](../../crates/pi_android/README.md) builds these screens on it, connected over SSH to Pi Desktop's helper on a computer, with real notifications that open the exact session. Sample sessions that run on their own are one tap away on the first screen. `cargo run -p pi_android --example preview -- <screen>` shows each screen in a phone-sized window.
 
 Still to build: keys held in Android's keystore (the key is a file in the app's private storage for now) and staying connected in the background. QR pairing is available from the connect screen and replaces its short-lived bootstrap key with the restricted phone key after confirmation.
 

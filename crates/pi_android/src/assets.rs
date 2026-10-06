@@ -20,6 +20,7 @@ const ICONS: &[(&str, &str, &[u8])] = icons![
     back, search, plus, folder, chat, file, chev_r, chev_d, chev_u, check, x, term, pencil, eye,
     stop, clock, alert, clip, slash, send, spark, dots, settings, info, shield, computer, server,
     key, copy, image, bell, palette, layers, diff, queue, sun, moon, hand, pi, menu, trash, scan,
+    restore, chev_l, open, refresh, code,
 ];
 
 /// The asset path of a bundled icon.

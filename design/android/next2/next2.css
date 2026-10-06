@@ -1,0 +1,166 @@
+/* Pi for Android, next2.
+ * Moonstone and Evening as before; GPUI-only effects as before (solid and
+ * two-stop fills, shadows, radii, solid and dashed borders, opacity, SVG).
+ *
+ * One ornament: the run line. Everything else is ink on canvas.
+ *   serif   only when Pi speaks (its questions, its hand-off)
+ *   mono    only what the computer runs (commands, paths, code)
+ *   sans    the interface, with tabular figures
+ * Space on a 4 px grid with a 20 px gutter; type at x1.2 from 15 px;
+ * radii 8 / 12 / 16 / 24 nest; touch targets 48.
+ */
+@font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+@font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+@font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Italic.ttf"); font-style: italic; }
+@font-face { font-family: "Commit"; src: url("../../../assets/fonts/CommitMono-Regular.otf"); }
+
+:root {
+  --canvas:#faf9f7; --panel:#f0ede8; --bar:#ebe7e2; --raised:#e4ded8;
+  --line:#ddd7d0; --line-strong:#cbc3bb; --selected:#e3dfd9;
+  --composer:#ffffff; --chip:#ffffff; --text:#252f3d; --secondary:#3e4753; --muted:#665f59; --faint:#8a837c;
+  --accent:#4b607c; --on-accent:#fff; --amber:#8b631f; --coral:#a44835; --green:#2e7950;
+  --added:#e4eee5; --removed:#f2e4df; --keyword:#2f5f9e; --string:#9a5b17; --plain:#3f4854;
+  /* Stage colours: the run line's only palette. */
+  --read:#2f7fa8; --edit:#b0661a; --check:#2e7950; --wait:#a57514; --hand:#4b607c;
+  --scrim:rgba(37,47,61,.32); --lift:0 -8px 32px rgba(37,47,61,.12);
+  --g:20px;
+  --serif: Georgia, "DejaVu Serif", serif;
+  --sans: "Plex", "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "Commit", ui-monospace, monospace;
+}
+.evening {
+  --canvas:#161d27; --panel:#1a212b; --bar:#1f2630; --raised:#252f3d;
+  --line:#363d46; --line-strong:#424954; --selected:#2d3239;
+  --composer:#202731; --chip:#29313c; --text:#ebe7e4; --secondary:#d5d8db; --muted:#9ca2aa; --faint:#7d848d;
+  --accent:#8caecb; --on-accent:#111820; --amber:#e5bd73; --coral:#efa08c; --green:#80bf95;
+  --added:#243b30; --removed:#422e30; --keyword:#8fb6dc; --string:#e1b06e; --plain:#b9bec5;
+  --read:#5fa9d0; --edit:#e3a35c; --check:#80bf95; --wait:#e5bd73; --hand:#8caecb;
+  --scrim:rgba(0,0,0,.5); --lift:0 -8px 32px rgba(0,0,0,.4);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 412px; height: 915px; overflow: hidden; }
+body { font: 400 15px/20px var(--sans); font-variant-numeric: tabular-nums; color: var(--text); background: var(--canvas); -webkit-font-smoothing: antialiased; }
+.row { display: flex; align-items: center; }
+.col { display: flex; flex-direction: column; }
+.grow { flex: 1; min-width: 0; }
+.ell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.g4 { gap: 4px; } .g8 { gap: 8px; } .g12 { gap: 12px; } .g16 { gap: 16px; } .g24 { gap: 24px; } .g32 { gap: 32px; }
+
+/* Type: 12.5 / 15 / 18 / 22 / 26 / 31 */
+.small { font-size: 12.5px; line-height: 16px; color: var(--muted); }
+.strong { font-weight: 600; }
+.title { font-size: 18px; line-height: 24px; font-weight: 600; }
+.heading { font-size: 22px; line-height: 28px; font-weight: 600; }
+.pi { font-family: var(--serif); font-style: italic; font-weight: 400; letter-spacing: -.01em; }
+.pi.q { font-size: 22px; line-height: 28px; }
+.pi.hero { font-size: 26px; line-height: 32px; }
+.pi.first { font-size: 31px; line-height: 36px; letter-spacing: -.015em; }
+.prose { line-height: 22px; color: var(--secondary); max-width: 34em; }
+.cmd { font-family: var(--mono); font-size: 12.5px; line-height: 20px; }
+.muted { color: var(--muted); } .faint { color: var(--faint); } .secondary { color: var(--secondary); }
+.add { color: var(--green); } .del { color: var(--coral); }
+
+i[data-i] { width: 20px; height: 20px; flex: none; display: inline-block; color: inherit; }
+i[data-i] svg { width: 100%; height: 100%; display: block; }
+i.sm { width: 16px; height: 16px; }
+
+/* Android's status bar and gesture handle, drawn plainly. */
+.phone { position: relative; width: 412px; height: 915px; display: flex; flex-direction: column; background: var(--canvas); overflow: hidden; }
+.status { height: 32px; flex: none; display: flex; align-items: center; padding: 0 22px 0 26px; font-size: 13px; font-weight: 600; }
+.status .sp { flex: 1; } .status i[data-i] { width: 16px; height: 16px; margin-left: 6px; }
+.content { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.gesture { height: 22px; flex: none; display: flex; align-items: center; justify-content: center; }
+.gesture::after { content: ""; width: 108px; height: 4px; border-radius: 2px; background: var(--text); opacity: .5; }
+
+/* Top bar */
+.bar { height: 56px; flex: none; display: flex; align-items: center; padding: 0 4px; }
+.bar .name { flex: 1; min-width: 0; padding: 0 4px; }
+.bar .name b { display: block; font-size: 18px; line-height: 24px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar .name span { display: block; font-size: 12.5px; line-height: 16px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tap { width: 48px; height: 48px; flex: none; display: flex; align-items: center; justify-content: center; border-radius: 24px; color: var(--secondary); }
+.scroll { flex: 1; min-height: 0; overflow: hidden; padding: 0 var(--g); }
+.rule { height: 1px; background: var(--line); flex: none; }
+
+/* Rows: flat, separated by space or a hairline, never boxed. */
+.rows > * + * { border-top: 1px solid var(--line); }
+.r56 { min-height: 56px; display: flex; align-items: center; gap: 16px; }
+.r64 { min-height: 64px; display: flex; align-items: center; gap: 16px; padding: 12px 0; }
+.glyph { width: 16px; flex: none; display: flex; justify-content: center; }
+
+/* Buttons: pills, 48 or 40 tall. */
+.btn { height: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 24px; border-radius: 24px; flex: none;
+  font-size: 15px; font-weight: 600; color: var(--text); background: var(--chip); border: 1px solid var(--line); white-space: nowrap; }
+.btn.sm { height: 40px; padding: 0 16px; border-radius: 20px; font-size: 14px; }
+.btn.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+.btn.quiet { background: transparent; border-color: transparent; color: var(--accent); }
+.btn.wide { width: 100%; } .btn.grow { flex: 1; }
+.chip { height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border-radius: 16px; background: var(--chip);
+  border: 1px solid var(--line); font-size: 13px; color: var(--secondary); white-space: nowrap; flex: none; }
+.chip i[data-i] { width: 14px; height: 14px; }
+
+/* ── The run line ─────────────────────────────────────────────────────────
+ * A run drawn as one line through its stages, each stretch in its stage's
+ * colour and, across a row, as long as the time it took. It appears only
+ * while a run is alive or being summed up. */
+.run { position: relative; display: flex; align-items: center; gap: 2px; height: 16px; }
+.run > b { height: 3px; border-radius: 2px; flex: none; }
+.run .read { background: var(--read); } .run .edit { background: var(--edit); } .run .check { background: var(--check); }
+.run .hand { background: var(--hand); } .run .wait { background: var(--wait); }
+/* Where the run is now: a ring in the live stage's colour. */
+.now { width: 12px; height: 12px; flex: none; border-radius: 6px; background: var(--canvas); border: 3px solid var(--hue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--hue) 20%, transparent); }
+.run .now { margin-left: -1px; }
+/* In a thread the line runs down the gutter, a station per stage. */
+.stage { position: relative; display: grid; grid-template-columns: 16px 1fr; column-gap: 16px; }
+.stage .stn { width: 12px; height: 12px; border-radius: 6px; background: var(--hue); margin: 4px 2px 0; }
+.stage .now { margin: 4px 2px 0; }
+.stage .stn.ahead { background: transparent; border: 2px solid var(--line-strong); }
+.stage .to { position: absolute; left: 6.5px; width: 3px; top: 20px; bottom: -24px; border-radius: 2px; background: var(--hue); }
+.stage .to.ahead { left: 7px; width: 0; background: none; border-left: 2px dashed var(--line-strong); border-radius: 0; }
+.stage .now ~ .to { top: 22px; }
+/* Under a finished run, each stretch's time sits under its start. */
+.times { display: flex; gap: 2px; margin-top: 4px; font-size: 12.5px; line-height: 16px; color: var(--muted); }
+.times > span { flex: none; white-space: nowrap; }
+.stage.ahead .what { color: var(--faint); }
+
+/* Surfaces kept for things that stand alone: Pi's question, a page, code. */
+.ask { background: var(--composer); border: 1px solid color-mix(in srgb, var(--wait) 45%, var(--line)); border-radius: 24px; padding: 20px; }
+.card { background: var(--composer); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.well { background: var(--panel); border-radius: 12px; }
+
+/* The dock: what the thumb needs, at the bottom. */
+.dock { flex: none; padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.composer { background: var(--composer); border: 1px solid var(--line-strong); border-radius: 24px; padding: 12px 8px 4px 16px; }
+.composer .draft { min-height: 24px; line-height: 22px; padding-right: 8px; }
+.composer .draft.ph { color: var(--faint); }
+.composer .tools { display: flex; align-items: center; margin: 4px 0 0 -12px; }
+.control { height: 48px; padding: 0 8px; display: inline-flex; align-items: center; gap: 4px; border-radius: 12px; color: var(--secondary); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.control i[data-i] { width: 14px; height: 14px; }
+.send { width: 40px; height: 40px; border-radius: 20px; display: flex; align-items: center; justify-content: center; background: var(--accent); color: var(--on-accent); flex: none; margin: 4px; }
+.send.off { background: var(--raised); color: var(--faint); }
+.caret { display: inline-block; width: 2px; height: 19px; background: var(--accent); vertical-align: -4px; margin-left: 1px; }
+.strip { margin-bottom: -9px; padding: 0 8px 0 16px; min-height: 48px; display: flex; align-items: center; gap: 12px;
+  background: var(--panel); border: 1px solid var(--line-strong); border-bottom-color: var(--line); border-radius: 24px 24px 0 0; }
+.strip + .composer { border-radius: 0 0 24px 24px; }
+
+.you { align-self: flex-end; max-width: 86%; padding: 12px 16px; border-radius: 20px 20px 4px 20px; background: var(--panel); line-height: 22px; }
+
+.scrim { position: absolute; inset: 0; background: var(--scrim); }
+.sheet { position: absolute; left: 0; right: 0; bottom: 0; background: var(--canvas); border-radius: 24px 24px 0 0; box-shadow: var(--lift);
+  padding: 8px var(--g) 12px; display: flex; flex-direction: column; }
+.handle { width: 32px; height: 4px; border-radius: 2px; background: var(--line-strong); margin: 4px auto 20px; flex: none; }
+
+.code { font-family: var(--mono); font-size: 12.5px; line-height: 22px; color: var(--plain); }
+.code .l { display: flex; white-space: pre; }
+.code .n { width: 40px; flex: none; text-align: right; padding-right: 12px; color: var(--faint); }
+.code .l.a { background: var(--added); } .code .l.d { background: var(--removed); }
+.code .l.sel { box-shadow: inset 3px 0 0 var(--accent); }
+.code .k { color: var(--keyword); } .code .s { color: var(--string); }
+
+.kb { flex: none; background: var(--bar); padding: 8px 4px 4px; }
+.kb .sugg { display: flex; height: 40px; align-items: center; color: var(--secondary); margin-bottom: 4px; }
+.kb .sugg span { flex: 1; text-align: center; } .kb .sugg span + span { border-left: 1px solid var(--line); }
+.kb .keys { display: flex; gap: 6px; justify-content: center; margin: 0 0 10px; }
+.kb .key { width: 34px; height: 44px; border-radius: 7px; background: var(--chip); display: flex; align-items: center; justify-content: center; font-size: 18px; box-shadow: 0 1px 0 var(--line-strong); }
+.kb .key.w { width: 52px; font-size: 13px; } .kb .key.space { width: 190px; } .kb .key.act { background: var(--accent); color: var(--on-accent); }

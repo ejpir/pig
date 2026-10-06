@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>01 Pair</title>
+<link rel="stylesheet" href="../next2.css">
+<style>
+  .step { display: grid; grid-template-columns: 16px 1fr; column-gap: 16px; }
+  .step .n { font-weight: 600; color: var(--muted); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="scroll col" style="padding-top:96px">
+      <h1 class="pi first">Where does Pi run?</h1>
+      <p class="prose" style="margin-top:16px">On your computer. Pair this phone to follow its sessions, answer its questions and review what it changed.</p>
+
+      <div class="col g24" style="margin-top:48px">
+        <div class="step"><span class="n">1</span>
+          <div>On the computer, run
+            <div class="well row" style="margin-top:12px;height:44px;padding-left:12px">
+              <span class="cmd grow ell">pi-desktop-remote pair</span>
+              <span class="tap" style="width:44px;height:44px;color:var(--muted)"><i data-i="copy" class="sm"></i></span>
+            </div>
+          </div>
+        </div>
+        <div class="step"><span class="n">2</span><div>Scan the code it prints</div></div>
+        <div class="step"><span class="n">3</span><div>Check that both screens show the same six digits</div></div>
+      </div>
+    </div>
+    <div class="dock" style="padding:12px var(--g) 16px">
+      <p class="small" style="margin-bottom:8px">Pairing uses the computer's own SSH. The code works once, for two minutes.</p>
+      <span class="btn primary wide"><i data-i="scan"></i>Scan computer QR</span>
+      <span class="btn quiet wide">Set up with an SSH key instead</span>
+    </div>
+  </main>
+</div>
+<script src="../next2.js"></script>
+</body></html>

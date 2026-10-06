@@ -375,6 +375,7 @@ pub fn daemon(target: SshTarget) -> Result<()> {
         RemoteBackend::Pi => RpcClient::spawn(launch)?,
         RemoteBackend::Durable => RpcClient::spawn_forwarded(launch)?,
     };
+    let mut history = crate::history::Recorder::open(&cwd);
     let result = run(
         listener,
         &endpoint,
@@ -382,6 +383,7 @@ pub fn daemon(target: SshTarget) -> Result<()> {
         backend,
         Session::new(cwd),
         &path,
+        &mut history,
     );
     let _ = fs::remove_file(path);
     drop(lock);
@@ -394,6 +396,7 @@ fn run(
     backend: RpcClient,
     mut model: Session,
     path: &std::path::Path,
+    history: &mut crate::history::Recorder,
 ) -> Result<()> {
     let (events, incoming) = bounded::<Event>(512);
     let pi_events = backend.events();
@@ -633,6 +636,10 @@ fn run(
                     ));
                     continue;
                 }
+                let starts_turn = !model.busy() && matches!(&command, Command::Prompt { .. });
+                if starts_turn && let Command::Prompt { message, .. } = &command {
+                    history.begin(message);
+                }
                 let sent = if target.backend == RemoteBackend::Durable
                     && matches!(command, Command::Prompt { .. })
                 {
@@ -652,11 +659,15 @@ fn run(
                         );
                     }
                     Err(error) => {
+                        if starts_turn {
+                            history.cancel();
+                        }
                         attached.send(failure(original, command.name(), &error.to_string()));
                     }
                 }
             }
             Event::Backend(TransportEvent::Record(mut record)) => {
+                let was_busy = model.busy();
                 if target.backend == RemoteBackend::Durable {
                     if record["type"] == "durable_state" {
                         model = crate::durable::project(&record, &model, target)?;
@@ -681,6 +692,9 @@ fn run(
                 }
                 // Never replace the live partial with a later Pi history refresh.
                 model.apply(&record)?;
+                if was_busy && !model.busy() {
+                    history.finish();
+                }
                 let listed = path.with_extension("summary.json");
                 if let Err(error) = crate::sessions::record(&listed, &model, target, &mut summary) {
                     eprintln!("Could not update the session summary: {error}");
@@ -713,6 +727,13 @@ fn run(
                     {
                         let update = snapshot(&model, target)?;
                         clients.retain(|_, attached| attached.send(update.clone()));
+                    }
+                    let failed_prompt = record["success"] == false
+                        && requests
+                            .get(&id)
+                            .is_some_and(|request| request.command == "prompt");
+                    if failed_prompt && !model.busy() {
+                        history.cancel();
                     }
                     if let Some(request) = requests.remove(&id)
                         && let Some(attached) = clients.get(&request.connection)

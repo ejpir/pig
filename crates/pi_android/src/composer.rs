@@ -3,7 +3,7 @@
 //! suggestion or a model only edits the draft; only Send sends.
 
 use crate::{
-    prefs::Prefs,
+    prefs::{Prefs, SavedCommand},
     text_area::{TextArea, TextAreaEvent},
     theme::{MONO, theme},
     ui::{self, icon},
@@ -49,7 +49,6 @@ pub enum ComposerEvent {
     /// Independent controls, shared by new sessions, follow-ups and reviews.
     ChooseModel,
     ChooseThinking,
-    Stop,
     PreviewImage(usize),
 }
 
@@ -83,15 +82,22 @@ pub struct Composer {
     /// A session's actual model, instead of the default for new sessions.
     model_label: Option<String>,
     thinking_label: Option<String>,
-    running: bool,
-    stopping: bool,
+    /// A strip sits on the composer's top edge (Working and Stop).
+    joined: bool,
+    /// The `/` button, on New session only.
+    command_button: bool,
+    /// The draft's least height: taller for a new task.
+    draft_height: f32,
     imports: usize,
     import_generation: u64,
     /// What `@` offers: the files a session touched; `None` for the sample's
-    /// files and commands.
+    /// built-in files.
     files: Option<Vec<String>>,
     files_loading: bool,
     files_error: Option<String>,
+    /// What `/` offers. `None` selects the deterministic sample catalog;
+    /// remote sessions always supply `Some`, including an authoritative empty list.
+    commands: Option<Vec<SavedCommand>>,
     _area: Subscription,
 }
 
@@ -102,20 +108,22 @@ impl Composer {
         let area = cx.new(|cx| TextArea::multiline(placeholder.to_owned(), 8, cx));
         let subscription = cx.subscribe(&area, |this, _, event: &TextAreaEvent, cx| match event {
             TextAreaEvent::Submit => this.send(cx),
-            TextAreaEvent::Changed => cx.notify(),
+            TextAreaEvent::Changed | TextAreaEvent::Copied => cx.notify(),
         });
         Self {
             area,
             attachments: Vec::new(),
             model_label: None,
             thinking_label: None,
-            running: false,
-            stopping: false,
+            joined: false,
+            command_button: false,
+            draft_height: 24.,
             imports: 0,
             import_generation: 0,
             files: None,
             files_loading: false,
             files_error: None,
+            commands: None,
             _area: subscription,
         }
     }
@@ -139,14 +147,30 @@ impl Composer {
         self.files_error = Some(error);
     }
 
+    pub fn use_commands(&mut self, commands: Option<Vec<SavedCommand>>) {
+        self.commands = commands;
+    }
+
+    fn has_commands(&self) -> bool {
+        self.commands
+            .as_ref()
+            .map_or(!COMMANDS.is_empty(), |commands| !commands.is_empty())
+    }
+
     pub fn set_model_label(&mut self, model: String, thinking: String) {
         self.model_label = Some(model);
         self.thinking_label = Some(thinking);
     }
 
-    pub fn set_running(&mut self, running: bool, stopping: bool) {
-        self.running = running;
-        self.stopping = stopping;
+    /// A strip on the composer's top edge shares its border.
+    pub fn set_joined(&mut self, joined: bool) {
+        self.joined = joined;
+    }
+
+    /// New session's composer: the `/` button and a taller draft.
+    pub fn set_new_task(&mut self) {
+        self.command_button = true;
+        self.draft_height = 66.;
     }
 
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -318,11 +342,26 @@ impl Composer {
         }
         if let Some((range, word)) = area.token_before_caret('/')
             && range.start == 0
-            && self.files.is_none()
         {
-            let commands: Vec<_> = COMMANDS
-                .iter()
-                .filter(|(name, _)| name.starts_with(word))
+            let offered: Vec<(&str, Option<&str>)> = match &self.commands {
+                Some(commands) => commands
+                    .iter()
+                    .map(|command| {
+                        (
+                            command.name.trim_start_matches('/'),
+                            command.description.as_deref(),
+                        )
+                    })
+                    .collect(),
+                None => COMMANDS
+                    .iter()
+                    .map(|(name, description)| (*name, Some(*description)))
+                    .collect(),
+            };
+            let commands: Vec<_> = offered
+                .into_iter()
+                .filter(|(name, _)| !name.is_empty() && name.starts_with(word))
+                .take(6)
                 .map(|(name, _)| (format!("/{name}"), format!("/{name} "), "slash"))
                 .collect();
             return (!commands.is_empty()).then_some(("Commands".into(), commands));
@@ -392,11 +431,11 @@ impl Render for Composer {
                     })
                     .child(icon(
                         "send",
-                        19.,
+                        20.,
                         if can_send {
                             colors.on_accent
                         } else {
-                            colors.muted
+                            colors.faint
                         },
                     )),
             )
@@ -414,13 +453,13 @@ impl Render for Composer {
             .h(px(48.))
             .min_w_0()
             .max_w(px(136.))
-            .px(px(7.))
+            .px(px(8.))
             .flex()
             .items_center()
             .gap(px(4.))
-            .rounded(px(10.))
+            .rounded(px(12.))
             .text_size(px(12.5))
-            .font_weight(FontWeight::MEDIUM)
+            .font_weight(FontWeight::SEMIBOLD)
             .text_color(colors.secondary)
             .active(|style| style.bg(colors.selected))
             .child(
@@ -429,7 +468,7 @@ impl Render for Composer {
                     .truncate()
                     .child(self.model_label.clone().unwrap_or(prefs.model)),
             )
-            .child(icon("chev_d", 12., colors.muted))
+            .child(icon("chev_d", 14., colors.secondary))
             .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::ChooseModel)));
         let thinking = div()
             .id("thinking")
@@ -438,19 +477,69 @@ impl Render for Composer {
             .debug_selector(|| "composer-thinking".into())
             .h(px(48.))
             .flex_none()
-            .px(px(7.))
+            .px(px(8.))
             .flex()
             .items_center()
             .gap(px(4.))
-            .rounded(px(10.))
+            .rounded(px(12.))
             .text_size(px(12.5))
-            .font_weight(FontWeight::MEDIUM)
+            .font_weight(FontWeight::SEMIBOLD)
             .text_color(colors.secondary)
             .child(self.thinking_label.clone().unwrap_or(prefs.thinking))
-            .child(icon("chev_d", 12., colors.muted))
+            .child(icon("chev_d", 14., colors.secondary))
             .active(|style| style.bg(colors.selected))
             .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::ChooseThinking)));
-        let attachments = (!self.attachments.is_empty()).then(|| {
+        // Lines picked in Review sit in a strip on the composer's top edge.
+        let lines = self
+            .attachments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, attachment)| match attachment {
+                Attachment::Lines(lines) => Some((index, lines.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let lines_strip = (!lines.is_empty()).then(|| {
+            div()
+                .mx(px(12.))
+                .mb(px(-1.))
+                .min_h(px(48.))
+                .pl(px(16.))
+                .pr(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .bg(colors.panel)
+                .border_1()
+                .border_b_0()
+                .border_color(colors.line_strong)
+                .rounded_t(px(24.))
+                .children(lines.into_iter().map(|(index, lines)| {
+                    let mut label = lines;
+                    if let Some(first) = label.get_mut(0..1) {
+                        first.make_ascii_uppercase();
+                    }
+                    ui::chip(("attachment", index), Some("file"), label, &colors)
+                        .h(px(28.))
+                        .px(px(10.))
+                        .bg(colors.selected)
+                        .border_color(colors.selected)
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(colors.text)
+                        .child(icon("x", 14., colors.muted))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.attachments.remove(index);
+                            cx.notify();
+                        }))
+                }))
+        });
+        let has_body_attachments = self
+            .attachments
+            .iter()
+            .any(|attachment| !matches!(attachment, Attachment::Lines(_)));
+        let attachments = has_body_attachments.then(|| {
             div()
                 .flex()
                 .flex_wrap()
@@ -461,6 +550,7 @@ impl Render for Composer {
                     self.attachments
                         .iter()
                         .enumerate()
+                        .filter(|(_, attachment)| !matches!(attachment, Attachment::Lines(_)))
                         .map(|(index, attachment)| {
                             let remove = cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
@@ -518,17 +608,7 @@ impl Render for Composer {
                                 .child(icon("x", 14., colors.muted))
                                 .on_click(remove)
                                 .into_any_element(),
-                                Attachment::Lines(lines) => ui::chip(
-                                    ("attachment", index),
-                                    Some("file"),
-                                    lines.clone(),
-                                    &colors,
-                                )
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(colors.text)
-                                .child(icon("x", 14., colors.muted))
-                                .on_click(remove)
-                                .into_any_element(),
+                                Attachment::Lines(_) => div().into_any_element(),
                             }
                         }),
                 )
@@ -569,7 +649,7 @@ impl Render for Composer {
                         )),
                 )
         });
-        let attached = strip.is_some();
+        let attached = strip.is_some() || lines_strip.is_some() || self.joined;
         // A press on the box around the draft types into the draft; stop the
         // app, which also takes focus on a press, from taking it back.
         let focus_area = cx.listener(|this, _, window, cx| {
@@ -583,7 +663,7 @@ impl Render for Composer {
             .pl(px(16.))
             .pr(px(8.))
             .pt(px(12.))
-            .pb(px(8.))
+            .pb(px(4.))
             .children(attachments)
             .child(
                 div()
@@ -591,22 +671,20 @@ impl Render for Composer {
                     .debug_selector(|| "composer-draft".into())
                     .relative()
                     .child(crate::testing::probe("draft"))
-                    .min_h(px(48.))
+                    .min_h(px(self.draft_height))
                     .pr(px(8.))
                     .on_mouse_down(MouseButton::Left, focus_area)
                     .child(area),
             )
             .child(
                 div()
-                    .mt(px(6.))
-                    .ml(px(-8.))
+                    .mt(px(4.))
+                    .ml(px(-12.))
                     .flex()
                     .items_center()
-                    .gap(px(2.))
                     .child(clip)
-                    // Durable sessions have no commands to start.
-                    .when(self.files.is_none(), |row| {
-                        row.child(ui::tap("command", "slash", &colors).size(px(40.)).on_click(
+                    .when(self.command_button && self.has_commands(), |row| {
+                        row.child(ui::tap("command", "slash", &colors).w(px(40.)).on_click(
                             cx.listener(|this, _, window, cx| this.start_command(window, cx)),
                         ))
                     })
@@ -616,32 +694,9 @@ impl Render for Composer {
                     .when(self.imports > 0, |row| {
                         row.child(ui::hint("Preparing…", &colors))
                     })
-                    .when(self.running, |row| {
-                        row.child(
-                            div()
-                                .id("stop")
-                                .relative()
-                                .child(crate::testing::probe("stop"))
-                                .debug_selector(|| "composer-stop".into())
-                                .size(px(48.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .child(icon("stop", 18., colors.coral))
-                                .active(|style| style.bg(colors.selected))
-                                .when(self.stopping, |button| button.opacity(0.5))
-                                .when(!self.stopping, |button| {
-                                    button.on_click(
-                                        cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Stop)),
-                                    )
-                                }),
-                        )
-                    })
                     .child(send),
             );
-        div().flex().flex_col().children(strip).child(
+        div().flex().flex_col().children(strip).children(lines_strip).child(
             div()
                 .id("composer")
                 .occlude()
@@ -655,9 +710,9 @@ impl Render for Composer {
                 })
                 .map(|composer| {
                     if attached {
-                        composer.rounded_b(px(20.))
+                        composer.rounded_b(px(24.))
                     } else {
-                        composer.rounded(px(20.))
+                        composer.rounded(px(24.))
                     }
                 })
                 .child(body),
@@ -720,6 +775,34 @@ mod tests {
             let (title, items) = composer.suggestions(cx).expect("error state");
             assert_eq!(title, "Project files unavailable");
             assert!(items.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn remote_commands_are_independent_from_remote_file_mentions(cx: &mut TestAppContext) {
+        let composer = cx.new(|cx| Composer::new("", cx));
+        composer.update(cx, |composer, cx| {
+            composer.use_files(Some(vec!["README.md".into()]));
+            composer.use_commands(Some(vec![SavedCommand {
+                name: "review".into(),
+                description: Some("Review the local changes".into()),
+            }]));
+            composer.set_text("/rev", cx);
+        });
+        composer.read_with(cx, |composer, cx| {
+            let (title, items) = composer.suggestions(cx).expect("remote commands");
+            assert_eq!(title, "Commands");
+            assert_eq!(items[0].0, "/review");
+            assert!(composer.has_commands());
+        });
+
+        composer.update(cx, |composer, cx| {
+            composer.use_commands(Some(Vec::new()));
+            composer.set_text("/", cx);
+        });
+        composer.read_with(cx, |composer, cx| {
+            assert!(composer.suggestions(cx).is_none());
+            assert!(!composer.has_commands());
         });
     }
 }

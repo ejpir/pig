@@ -29,6 +29,7 @@ pi_editor = { path = "../pi_editor" }
 pi_lsp_bridge = { path = "../pi_lsp_bridge" }
 pi_settings = { path = "../pi_settings" }
 pi_terminal = { path = "../pi_terminal" }
+pi_markdown = { path = "../pi_markdown" }
 serde_json.workspace = true
 base64 = "0.22"
 dirs = "6"

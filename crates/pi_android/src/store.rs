@@ -67,10 +67,10 @@ impl Store {
                 .map(|(name, folder)| Project {
                     name: (*name).into(),
                     folder: (*folder).into(),
-                    path: (*folder).into(),
+                    path: folder.replacen('~', crate::projects::SAMPLE_HOME, 1),
                 })
                 .collect(),
-            next_id: 7,
+            next_id: 8,
             live: None,
             recency: HashMap::new(),
         }
@@ -251,10 +251,10 @@ impl Store {
         {
             return index;
         }
-        let folder = self
-            .live
-            .as_ref()
-            .map_or_else(|| path.to_owned(), |live| live.helper.short(path));
+        let folder = self.live.as_ref().map_or_else(
+            || path.replacen(crate::projects::SAMPLE_HOME, "~", 1),
+            |live| live.helper.short(path),
+        );
         self.projects.push(Project::new(path, folder));
         self.projects.len() - 1
     }

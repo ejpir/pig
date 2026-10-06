@@ -208,6 +208,13 @@ impl PhoneApp {
                     .child(div().flex_1().child("Resources"))
                     .child(icon("chev_r", 16., colors.muted))
                     .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Resources, cx))),
+            )
+            .child(
+                ui::row("debug-log", false, &colors)
+                    .child(icon("term", 20., colors.muted))
+                    .child(div().flex_1().child("Debug log"))
+                    .child(icon("chev_r", 16., colors.muted))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Logs, cx))),
             );
         div()
             .flex_1()

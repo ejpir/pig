@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>01 Pair</title>
+<link rel="stylesheet" href="../next3.css">
+<style>
+  .step { display: flex; gap: 12px; padding: 16px; }
+  .step + .step { border-top: 1px solid var(--line); }
+  .num { width: 24px; height: 24px; flex: none; border-radius: 12px; display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600; background: var(--selected); color: var(--secondary); }
+  .step .grow { padding-top: 2px; }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="scroll col" style="padding-top:64px">
+      <span class="tile lg" style="--hue:var(--accent)"><i data-i="pi"></i></span>
+      <h1 class="display" style="margin-top:24px">Where does Pi run?</h1>
+      <p class="prose" style="margin-top:12px">On your computer. This phone follows its sessions, answers its questions and reviews what it changed.</p>
+
+      <div class="label" style="margin-top:32px">Pair in under a minute</div>
+      <div class="card" style="margin-top:8px">
+        <div class="step"><span class="num">1</span>
+          <div class="grow">On the computer, run
+            <div class="well row" style="margin-top:8px;height:40px;padding:0 0 0 12px">
+              <code class="grow ell">pi-desktop-remote pair</code>
+              <span class="tap" style="width:40px;height:40px;color:var(--muted)"><i data-i="copy" class="sm"></i></span>
+            </div>
+          </div>
+        </div>
+        <div class="step"><span class="num">2</span><div class="grow">Scan the code it prints</div></div>
+        <div class="step"><span class="num">3</span><div class="grow">Check both screens show the same six digits</div></div>
+      </div>
+    </div>
+    <div class="dock g8" style="padding:12px var(--g) 16px">
+      <div class="row g8 meta" style="align-items:flex-start;margin-bottom:4px">
+        <i data-i="shield" class="sm" style="color:var(--green)"></i>
+        <span>Uses the computer's own SSH. The code works once, for two minutes, and pins the computer's key.</span>
+      </div>
+      <span class="btn primary wide"><i data-i="scan"></i>Scan computer QR</span>
+      <span class="btn quiet wide">Set up with an SSH key instead</span>
+    </div>
+  </main>
+</div>
+<script src="../next3.js"></script>
+</body></html>

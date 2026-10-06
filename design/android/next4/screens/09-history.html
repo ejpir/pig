@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>09 File history</title>
+<link rel="stylesheet" href="../next4.css">
+<style>
+  .points { position: relative; }
+  .points::before { content: ""; position: absolute; left: 7px; top: 24px; bottom: 36px; border-left: 2px solid var(--line); }
+  .point { display: grid; grid-template-columns: 16px 1fr auto; column-gap: 16px; align-items: start; padding: 12px 0; position: relative; }
+  .node { width: 12px; height: 12px; border-radius: 6px; margin: 4px 2px 0; background: var(--canvas); border: 2px solid var(--text); }
+  .node.here { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, var(--canvas)); }
+  .node.quiet { width: 8px; height: 8px; margin: 6px 4px 0; border-color: var(--line-strong); }
+  .point .btn { margin-top: -10px; }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="bar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="title"><b>File history</b><span>~/repos/pi on studio-mac</span></div>
+    </div>
+    <div class="scroll">
+      <p class="prose" style="padding:8px 0 16px;font-size:14px;line-height:20px">Each turn that edits files leaves a point to return to. Restoring saves the current files first, so you can undo it.</p>
+      <div class="points">
+        <div class="point"><span class="node here"></span>
+          <div><div class="strong">Now</div><div class="meta">The same files as after turn 3</div></div><span></span></div>
+        <div class="point"><span class="node"></span>
+          <div style="min-width:0"><div class="ell">Accept empty signatures for OpenCode</div>
+            <div class="row g8 meta"><span>Turn 3, 4 min ago</span><span class="add">+21</span><span class="del">−1</span></div></div>
+          <span class="btn sm quiet" style="padding:0 8px">Restore</span></div>
+        <div class="point"><span class="node quiet"></span>
+          <div><div class="muted">Your edits on the computer</div>
+            <div class="row g8 meta"><span>Saved 18 min ago</span><span class="add">+2</span></div></div>
+          <span class="btn sm quiet" style="padding:0 8px">Restore</span></div>
+        <div class="point"><span class="node"></span>
+          <div style="min-width:0"><div class="ell">Add a regression test for thinking signatures</div>
+            <div class="row g8 meta"><span>Turn 2, 1 h ago</span><span class="add">+18</span></div></div>
+          <span class="btn sm quiet" style="padding:0 8px">Restore</span></div>
+        <div class="point"><span class="node quiet"></span>
+          <div><div class="muted">Before this session</div><div class="meta">From git, yesterday</div></div>
+          <span class="btn sm quiet" style="padding:0 8px">Restore</span></div>
+      </div>
+    </div>
+    <p class="meta" style="padding:8px var(--g) 16px">Restore is off while Pi is working in this project.</p>
+  </main>
+</div>
+<script src="../next4.js"></script>
+</body></html>

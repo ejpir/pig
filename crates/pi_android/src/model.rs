@@ -57,6 +57,15 @@ pub enum StageKind {
 impl StageKind {
     pub const ALL: [Self; 4] = [Self::Understand, Self::Change, Self::Verify, Self::HandOff];
 
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The stage's name in a key: "Understand".
+    pub fn title(self) -> &'static str {
+        self.name(StageStatus::Planned)
+    }
+
     pub fn glyph(self) -> &'static str {
         match self {
             Self::Understand => "eye",
@@ -235,6 +244,18 @@ impl Summary {
     }
 }
 
+/// An image a tool returned. A durable session keeps the bytes on the
+/// computer and sends `key`, its id there; others send them inline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolImage {
+    pub key: String,
+    /// The file it came from, when the tool read one: "shot.png".
+    pub name: String,
+    pub mime: String,
+    /// Base64, when the session sent the bytes.
+    pub inline: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Turn {
     pub prompt: String,
@@ -244,6 +265,12 @@ pub struct Turn {
     pub attachments: Vec<String>,
     pub stages: Vec<Stage>,
     pub summary: Option<Summary>,
+    /// HTML pages Pi wrote or changed, shown as cards that open them.
+    pub pages: Vec<crate::pages::Page>,
+    /// Pictures Pi looked at, such as a screenshot it took and read.
+    pub images: Vec<ToolImage>,
+    /// Working time spent in each stage, in `StageKind::ALL` order: the run line's stretches.
+    pub times: [Duration; 4],
 }
 
 impl Turn {
@@ -254,7 +281,27 @@ impl Turn {
             attachments: Vec::new(),
             stages: StageKind::ALL.into_iter().map(Stage::planned).collect(),
             summary: None,
+            pages: Vec::new(),
+            images: Vec::new(),
+            times: [Duration::ZERO; 4],
         }
+    }
+
+    /// The working time spent in a stage.
+    pub fn time(&self, kind: StageKind) -> Duration {
+        self.times[kind.index()]
+    }
+
+    pub fn add_time(&mut self, kind: StageKind, time: Duration) {
+        self.times[kind.index()] += time;
+    }
+
+    /// The stage Pi is in now, if the turn is running.
+    pub fn live_stage(&self) -> Option<StageKind> {
+        self.stages
+            .iter()
+            .find(|stage| stage.status == StageStatus::Live)
+            .map(|stage| stage.kind)
     }
 
     pub fn stage_mut(&mut self, kind: StageKind) -> &mut Stage {
@@ -269,32 +316,6 @@ impl Turn {
         &mut self.stages[index]
     }
 
-    /// "Read 2 · changed 2 · checked", for a finished turn's collapsed rail.
-    pub fn digest(&self) -> String {
-        let mut parts = Vec::new();
-        for stage in &self.stages {
-            if stage.status != StageStatus::Done {
-                continue;
-            }
-            match stage.kind {
-                StageKind::Understand => parts.push(match stage.references.len() {
-                    0 => "read".to_owned(),
-                    count => format!("read {count}"),
-                }),
-                StageKind::Change => parts.push(match stage.references.len() {
-                    0 => "changed".to_owned(),
-                    count => format!("changed {count}"),
-                }),
-                StageKind::Verify => parts.push("checked".into()),
-                StageKind::HandOff => {}
-            }
-        }
-        let mut digest = parts.join(" · ");
-        if let Some(first) = digest.get_mut(0..1) {
-            first.make_ascii_uppercase();
-        }
-        digest
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>08 Details</title>
+<link rel="stylesheet" href="../next3.css">
+<style>
+  .stats { display: flex; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .stats > div { flex: 1; padding: 16px 0; }
+  .stats > div + div { padding-left: 16px; border-left: 1px solid var(--line); }
+  .stats b { display: block; font-size: var(--t4); line-height: 28px; font-weight: 600; margin-top: 4px; }
+  .meter { position: relative; height: 8px; border-radius: 4px; background: var(--raised); margin-top: 12px; }
+  .meter .used { position: absolute; left: 0; top: 0; bottom: 0; width: 31%; border-radius: 4px; background: var(--accent); }
+  .meter .mark { position: absolute; left: 80%; top: -4px; bottom: -4px; width: 2px; border-radius: 1px; background: var(--line-strong); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content" data-frag="done">
+    <div class="scrim"></div>
+    <div class="sheet" style="padding-bottom:8px">
+      <div class="handle"></div>
+      <div class="row">
+        <div class="grow"><div class="t4">Qwen signatures</div><div class="meta" style="margin-top:4px">pi · studio-mac · started 09:41</div></div>
+        <span class="tap" style="margin-right:-12px"><i data-i="x"></i></span>
+      </div>
+      <div style="margin-top:20px">
+        <div class="run"><b class="r" style="width:54px"></b><b class="e" style="width:159px"></b><b class="c" style="width:125px"></b><b class="h" style="width:28px"></b></div>
+        <div class="key">
+          <div style="--hue:var(--h-read)"><i data-i="eye"></i>Understand<span class="tm">0:40</span></div>
+          <div style="--hue:var(--h-edit)"><i data-i="pencil"></i>Change<span class="tm">1:58</span></div>
+          <div style="--hue:var(--h-check)"><i data-i="shield"></i>Verify<span class="tm">1:32</span></div>
+          <div style="--hue:var(--accent)"><i data-i="send"></i>Hand off<span class="tm">0:21</span></div>
+        </div>
+      </div>
+      <div class="stats" style="margin-top:20px">
+        <div><span class="label">Cost</span><b>$0.41</b></div>
+        <div><span class="label">Turns</span><b>14</b></div>
+        <div><span class="label">Changed</span><b>2 files</b></div>
+      </div>
+      <div style="padding:20px 0 24px;border-bottom:1px solid var(--line)">
+        <div class="row"><span class="strong grow">Context</span><span class="meta">62k of 200k tokens</span></div>
+        <div class="meter"><span class="used"></span><span class="mark"></span></div>
+        <div class="row meta" style="margin-top:8px"><span class="grow">31% used</span><span>compacts at 80%</span></div>
+      </div>
+      <div class="list">
+        <div class="item one"><i data-i="spark" class="muted"></i><span class="grow">Model</span><span class="meta">Opus 5.5 · High</span><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="item one"><i data-i="clock" class="muted"></i><span class="grow">Run history</span><span class="meta">14 turns</span><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="item one"><i data-i="term" class="muted"></i><span class="grow">Tools used</span><span class="meta">7</span><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="item one"><i data-i="restore" class="muted"></i><span class="grow">File history</span><span class="meta">4 points</span><i data-i="chev-r" class="sm faint"></i></div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../frags.js"></script><script src="../next3.js"></script>
+</body></html>

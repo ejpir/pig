@@ -37,6 +37,20 @@ def main():
         parser.error(f"unknown screens: {sorted(unknown)}")
     args.output.mkdir(parents=True, exist_ok=True)
     run("shell", "pm", "path", PACKAGE)
+    # Incremental installs can keep the previous native process alive. Start
+    # from a clean process without clearing pairing or any other app data.
+    run("shell", "am", "force-stop", PACKAGE)
+    stopped_by = time.monotonic() + 5
+    while True:
+        try:
+            running = run("shell", "pidof", PACKAGE).strip()
+        except subprocess.CalledProcessError:
+            running = b""
+        if not running:
+            break
+        if time.monotonic() >= stopped_by:
+            raise RuntimeError("the previous isolated app process did not stop")
+        time.sleep(0.05)
     for name in screens:
         try:
             before = json.loads(run("exec-out", "run-as", PACKAGE, "cat", "files/ui-test-state.json"))

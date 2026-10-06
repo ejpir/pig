@@ -1,0 +1,35 @@
+/* The project browser: the same tokens and proportions as ../next4/next4.css,
+ * plus a folder tree whose rows roll out in place. */
+.search { height: 48px; display: flex; align-items: center; gap: 12px; padding: 0 16px; border-radius: 24px;
+  background: var(--panel); color: var(--faint); flex: none; }
+.search i[data-i] { color: var(--muted); }
+.search .q { color: var(--text); }
+.search .q b { font-weight: 600; }
+
+/* Where the tree is: each folder up to here, tappable. */
+.crumbs { display: flex; align-items: center; gap: 4px; min-height: 40px; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+.crumbs span { padding: 0 4px; }
+.crumbs .here { color: var(--text); font-weight: 600; }
+.crumbs i[data-i] { width: 14px; height: 14px; color: var(--faint); }
+
+/* A row of the tree: 48 tall; the caret rolls a folder out, the name picks it. */
+.tree { display: flex; flex-direction: column; }
+.node { position: relative; min-height: 48px; display: flex; align-items: center; gap: 8px;
+  padding-left: calc(var(--d, 0) * 20px); border-radius: 12px; }
+.node .roll { width: 32px; height: 48px; flex: none; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.node .roll i[data-i] { width: 16px; height: 16px; }
+.node .roll.none { visibility: hidden; }
+.node > i[data-i] { width: 18px; height: 18px; color: var(--muted); }
+.node .name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.node .tag { font-size: var(--t1); color: var(--faint); flex: none; padding-right: 12px; }
+.node.project > i[data-i] { color: var(--accent); }
+.node.project .name { font-weight: 600; }
+.node.file .name { color: var(--secondary); }
+.node.file > i[data-i] { color: var(--faint); }
+.node.picked { background: color-mix(in srgb, var(--accent) 10%, var(--canvas)); }
+.node.picked .name { color: var(--accent); }
+/* A rolled-out folder's children hang off a guide under its caret. */
+.node .guide { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); }
+
+/* Matches: the part typed, in the text's own colour. */
+mark { background: none; color: var(--text); font-weight: 600; }

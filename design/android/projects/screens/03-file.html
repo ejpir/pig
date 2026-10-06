@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>03 A file</title>
+<link rel="stylesheet" href="../../next4/next4.css"><link rel="stylesheet" href="../projects.css"></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="bar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="title"><b>retry.ts</b><span>pi · packages/ai/src</span></div>
+      <span class="tap"><i data-i="copy"></i></span>
+    </div>
+    <div class="row meta" style="padding:4px var(--g) 12px"><span class="grow">25 lines · 2 KB · read-only</span><span>Edited by Pi 2 min ago</span></div>
+    <div class="col" style="flex:1;min-height:0;overflow:hidden;border-top:1px solid var(--line)">
+      <div class="code" style="padding:8px 0">
+<div class="l"><span class="n">1</span><span><span class="k">import</span> { sleep } <span class="k">from</span> <span class="s">"./time"</span>;</span></div>
+<div class="l"><span class="n">2</span><span></span></div>
+<div class="l"><span class="n">3</span><span><span class="k">export interface</span> RetryOptions {</span></div>
+<div class="l"><span class="n">4</span><span>  attempts: number;</span></div>
+<div class="l"><span class="n">5</span><span>  baseDelayMs: number;</span></div>
+<div class="l"><span class="n">6</span><span>  maxDelayMs: number;</span></div>
+<div class="l"><span class="n">7</span><span>}</span></div>
+<div class="l"><span class="n">8</span><span></span></div>
+<div class="l"><span class="n">9</span><span><span class="k">export async function</span> withRetry&lt;T&gt;(</span></div>
+<div class="l"><span class="n">10</span><span>  run: () =&gt; Promise&lt;T&gt;,</span></div>
+<div class="l"><span class="n">11</span><span>  { attempts, baseDelayMs, maxDelayMs }: RetryOptions,</span></div>
+<div class="l"><span class="n">12</span><span>) {</span></div>
+<div class="l"><span class="n">13</span><span>  <span class="k">for</span> (<span class="k">let</span> attempt = 0; ; attempt++) {</span></div>
+<div class="l"><span class="n">14</span><span>    <span class="k">try</span> {</span></div>
+<div class="l"><span class="n">15</span><span>      <span class="k">return await</span> run();</span></div>
+<div class="l"><span class="n">16</span><span>    } <span class="k">catch</span> (error) {</span></div>
+<div class="l"><span class="n">17</span><span>      <span class="k">if</span> (attempt + 1 &gt;= attempts) <span class="k">throw</span> error;</span></div>
+<div class="l"><span class="n">18</span><span>      <span class="k">const</span> delay = Math.min(</span></div>
+<div class="l"><span class="n">19</span><span>        maxDelayMs,</span></div>
+<div class="l"><span class="n">20</span><span>        baseDelayMs * 2 ** attempt,</span></div>
+<div class="l"><span class="n">21</span><span>      );</span></div>
+<div class="l"><span class="n">22</span><span>      <span class="k">await</span> sleep(delay);</span></div>
+<div class="l"><span class="n">23</span><span>    }</span></div>
+<div class="l"><span class="n">24</span><span>  }</span></div>
+<div class="l"><span class="n">25</span><span>}</span></div>
+      </div>
+    </div>
+    <div class="dock g8">
+      <div class="row g8">
+        <span class="btn grow"><i data-i="restore"></i>File history</span>
+        <span class="btn primary grow"><i data-i="plus"></i>Ask about it</span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../frag.js"></script><script src="../../next4/next4.js"></script>
+</body></html>

@@ -38,6 +38,8 @@ pub struct Theme {
     pub text: Hsla,
     pub secondary: Hsla,
     pub muted: Hsla,
+    /// Placeholders, stages ahead and quiet chevrons.
+    pub faint: Hsla,
     pub accent: Hsla,
     pub on_accent: Hsla,
     pub amber: Hsla,
@@ -80,6 +82,7 @@ impl Theme {
             text: color(0xebe7e4, 0x252f3d),
             secondary: color(0xd5d8db, 0x3e4753),
             muted: color(0x9ca2aa, 0x665f59),
+            faint: color(0x7d848d, 0x8a837c),
             accent: color(0x8caecb, 0x4b607c),
             on_accent: color(0x111820, 0xffffff),
             amber: color(0xe5bd73, 0x8b631f),
@@ -109,6 +112,25 @@ impl Theme {
         let rgba = self.accent.to_rgb();
         let channel = |value: f32| (value * 255.).round() as u32;
         channel(rgba.r) << 16 | channel(rgba.g) << 8 | channel(rgba.b)
+    }
+
+    pub fn syntax_palette(self) -> pi_markdown::SyntaxPalette {
+        pi_markdown::SyntaxPalette {
+            text: self.text,
+            plain: self.plain,
+            muted: self.muted,
+            faint: self.faint,
+            accent: self.accent,
+            steel: self.read,
+            amber: self.amber,
+            coral: self.coral,
+            green: self.green,
+            keyword: self.keyword,
+            string: self.string,
+            added: self.added,
+            removed: self.removed,
+            selected: self.selected,
+        }
     }
 }
 

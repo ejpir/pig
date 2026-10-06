@@ -10,6 +10,7 @@ use crate::{
     },
     theme::Appearance,
 };
+use base64::Engine as _;
 use gpui::{Context, Window};
 use std::time::Duration;
 
@@ -20,11 +21,13 @@ const QWEN: SessionId = SessionId(1);
 pub const SCREENS: &[&str] = &[
     "connect",
     "sessions",
+    "computers",
     "search",
     "start",
     "working",
     "waiting",
     "done",
+    "many-files",
     "review",
     "typing",
     "details",
@@ -49,9 +52,11 @@ pub const SCREENS: &[&str] = &[
     "empty-search",
     "failed",
     "stopped",
-    "drawer",
     "activity",
     "markdown",
+    "page",
+    "html-page",
+    "history",
     "multi-turn",
     "tool-output",
     "follow-up-input",
@@ -62,6 +67,11 @@ pub const SCREENS: &[&str] = &[
     "project-error",
     "project-loading",
     "project-long-path",
+    "project-tree",
+    "project-search",
+    "project-file",
+    "tool-image",
+    "logs",
 ];
 
 impl PhoneApp {
@@ -73,13 +83,15 @@ impl PhoneApp {
             state.fixture = name.to_owned();
             state.bounds.clear();
         }
+        // A cold launch may start reconnecting from saved preferences before
+        // Android delivers this explicit preview URL. Its late result must not
+        // replace the fixture's store or navigation.
+        self.cancel_connection_attempt();
         self.paused = true;
         self.routes = vec![Route::Connect];
         self.sheet = None;
-        self.drawer_open = false;
         self.closing_sheet = None;
         self.sheet_motion = crate::motion::SwipeMotion::at(1.);
-        self.drawer_motion = crate::motion::SwipeMotion::at(1.);
         self.expanded_turns.clear();
         self.searching = false;
         self.preview_models.clear();
@@ -95,6 +107,7 @@ impl PhoneApp {
         self.apply_theme(window, cx);
         window.dismiss_virtual_keyboard();
         window.focus(&self.focus, cx);
+        self.manual_setup = false;
         if name == "connect" {
             self.address
                 .update(cx, |address, cx| address.set_text(ADDRESS, cx));
@@ -130,17 +143,45 @@ impl PhoneApp {
             "projects" | "project-empty" | "project-error" | "project-loading"
             | "project-long-path" => {
                 self.routes = vec![Route::Sessions, Route::Projects];
-                self.browse_projects(None, cx);
+                let home = crate::projects::SAMPLE_HOME;
                 match name {
                     "project-empty" => {
                         self.store.as_mut().unwrap().projects.clear();
-                        self.project_browser.directory.as_mut().unwrap().entries.clear();
+                        self.go_to_folder(format!("{home}/repos"), cx);
                     }
-                    "project-error" => self.project_browser.error = Some("Cannot read this folder: permission denied. Choose another location or retry.".into()),
-                    "project-loading" => self.project_browser.loading = true,
                     "project-long-path" => {
-                        self.project_browser.directory.as_mut().unwrap().path = format!("/Users/nick/{}", "a-very-long-folder-name/".repeat(12));
-                        self.project_browser.manual = true;
+                        let path = format!("{home}/{}", "a-very-long-folder-name/".repeat(12));
+                        self.go_to_folder(path.trim_end_matches('/').to_owned(), cx);
+                    }
+                    _ => self.open_project_browser(true, cx),
+                }
+                let browser = &mut self.project_browser;
+                match name {
+                    "project-error" => {
+                        let path = format!("{home}/Documents");
+                        browser.open.insert(path.clone());
+                        browser.fail(&path, "Cannot read this folder: permission denied. Choose another location or retry.");
+                    }
+                    "project-loading" => {
+                        let path = format!("{home}/Desktop");
+                        browser.open.insert(path.clone());
+                        browser.wait(&path);
+                    }
+                    _ => {}
+                }
+            }
+            "project-tree" | "project-search" | "project-file" => {
+                self.push(Route::Start, window, cx);
+                self.open_sheet(Sheet::Project, cx);
+                let pi = format!("{}/repos/pi", crate::projects::SAMPLE_HOME);
+                for folder in ["packages", "packages/ai", "packages/ai/src"] {
+                    self.project_browser.open.insert(format!("{pi}/{folder}"));
+                }
+                match name {
+                    "project-search" => self.folder.update(cx, |area, cx| area.set_text("prov", cx)),
+                    "project-file" => {
+                        let node = self.project_browser.find("retry.ts").into_iter().next().unwrap();
+                        self.open_file(&node, window, cx);
                     }
                     _ => {}
                 }
@@ -157,9 +198,15 @@ impl PhoneApp {
                 }
                 self.open_sheet(Sheet::Delete(QWEN), cx);
             }
-            "drawer" => {
+            "logs" => {
+                log::info!("Showing the debug log");
+                log::warn!("A sample warning, so its colour shows");
+                self.routes = vec![Route::Sessions, Route::Settings];
+                self.open_sheet(Sheet::Logs, cx);
+            }
+            "computers" => {
                 self.entered_preview(window, cx);
-                self.open_drawer(window, cx);
+                self.open_sheet(Sheet::Computers, cx);
             }
             "activity" | "tool-output" => {
                 finish(self);
@@ -226,7 +273,8 @@ impl PhoneApp {
                     area.set_text("no-matching-session-".repeat(20), cx)
                 });
             }
-            "long-reply" | "streaming-reply" | "failed" | "stopped" | "markdown" | "multi-turn" => {
+            "long-reply" | "streaming-reply" | "failed" | "stopped" | "markdown" | "page"
+            | "multi-turn" => {
                 finish(self);
                 if let Some(session) = self
                     .store
@@ -242,7 +290,12 @@ impl PhoneApp {
                     let turn = session.turns.last_mut().unwrap();
                     turn.prompt = "Please explain each change and include the entire reply.".into();
                     let source = if matches!(name, "markdown" | "multi-turn") {
-                        "## Ready to review\n\n**All changes are saved.** This is an *explanation* with `inline code`.\n\n1. Read the files.\n2. Run the checks.\n\n```rust\nfn main() {\n    println!(\"hello, café 中文 👩🏽‍💻\");\n}\n```\n\nSee the [documentation](https://example.com).".to_owned()
+                        let svg = base64::engine::general_purpose::STANDARD.encode(
+                            br##"<svg xmlns="http://www.w3.org/2000/svg" width="320" height="96" viewBox="0 0 320 96"><rect width="320" height="96" rx="18" fill="#253d50"/><circle cx="54" cy="48" r="25" fill="#80bf95"/><path d="M105 29h166M105 48h128M105 67h148" stroke="#ebe7e4" stroke-width="9" stroke-linecap="round"/></svg>"##,
+                        );
+                        format!(
+                            "## Ready to review\n\n**All changes are saved.** This is an *explanation* with `inline code` and ~~old text~~.\n\n1. Read the files.\n2. Run the checks.\n\n```rust\nfn main() {{\n    println!(\"hello, café 中文 👩🏽‍💻\");\n}}\n```\n\n![Generated SVG](data:image/svg+xml;base64,{svg})\n\n```mermaid\ngraph LR\n  Prompt --> Work\n  Work --> Review\n```\n\nSee the [documentation](https://example.com)."
+                        )
                     } else {
                         long_text()
                     };
@@ -251,6 +304,12 @@ impl PhoneApp {
                         headline: "A complete, long reply".into(),
                         body: long_text(),
                     });
+                    if name == "page" {
+                        turn.pages = vec![crate::pages::Page {
+                            path: "demo/aurora.html".into(),
+                            html: Some("<!doctype html><html><head><title>Aurora</title></head><body style=\"font-family:sans-serif;padding:2rem\"><h1>Aurora</h1><p>A page Pi made.</p><button style=\"min-height:48px;padding:0 16px\" onclick=\"document.getElementById('js-status').textContent='JavaScript executed'\">Run interaction</button><p id=\"js-status\">Waiting for interaction</p></body></html>".into()),
+                        }];
+                    }
                     if name == "streaming-reply" {
                         session.activity = "Writing the reply".into();
                         turn.stage_mut(StageKind::HandOff).status = StageStatus::Live;
@@ -278,12 +337,63 @@ impl PhoneApp {
                 self.show_session(QWEN, window, cx);
                 self.choice = Some(Answer::AllowOnce);
             }
-            "done" | "evening" => {
+            "html-page" => self.show_session(crate::model::SessionId(7), window, cx),
+            "tool-image" => {
                 finish(self);
-                if name == "evening" {
-                    self.update_prefs(cx, |prefs| prefs.appearance = Appearance::Evening);
-                    self.apply_theme(window, cx);
+                // A page screenshot: a header, a hero and three cards.
+                let pixels = image::ImageBuffer::from_fn(640, 400, |x, y| {
+                    let card = y > 250 && y < 370 && (x % 210) > 20 && (x % 210) < 200;
+                    image::Rgb(match (y, card) {
+                        (0..48, _) => [24, 28, 38],
+                        (_, true) => [250, 250, 252],
+                        (48..230, _) => [40 + (x / 8) as u8, 60 + (y / 4) as u8, 140],
+                        _ => [232, 234, 240],
+                    })
+                });
+                let mut png = std::io::Cursor::new(Vec::new());
+                image::DynamicImage::ImageRgb8(pixels).write_to(&mut png, image::ImageFormat::Png).unwrap();
+                use base64::Engine as _;
+                let data = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+                if let Some(turn) = self
+                    .store
+                    .as_mut()
+                    .and_then(|store| store.sessions.iter_mut().find(|s| s.id == QWEN))
+                    .and_then(|session| session.turns.last_mut())
+                {
+                    turn.images.push(crate::model::ToolImage {
+                        key: "sample-screenshot".into(),
+                        name: "localhost-3000.png".into(),
+                        mime: "image/png".into(),
+                        inline: Some(data),
+                    });
                 }
+                self.show_session(QWEN, window, cx);
+            }
+            "done" => {
+                finish(self);
+                self.show_session(QWEN, window, cx);
+            }
+            "many-files" => {
+                finish(self);
+                if let Some(session) = self
+                    .store
+                    .as_mut()
+                    .and_then(|store| store.sessions.iter_mut().find(|s| s.id == QWEN))
+                {
+                    let file = session.files[0].clone();
+                    session.files.extend((1..=7).map(|n| {
+                        let mut file = file.clone();
+                        file.path = format!("packages/ai/src/providers/provider-{n}.ts");
+                        file.added = n;
+                        file.removed = n % 3;
+                        file
+                    }));
+                }
+                self.show_session(QWEN, window, cx);
+            }
+            "evening" => {
+                self.update_prefs(cx, |prefs| prefs.appearance = Appearance::Evening);
+                self.apply_theme(window, cx);
                 self.show_session(QWEN, window, cx);
             }
             "review" => {
@@ -339,6 +449,11 @@ impl PhoneApp {
                 finish(self);
                 self.show_session(QWEN, window, cx);
                 self.open_sheet(Sheet::Details(QWEN), cx);
+            }
+            "history" => {
+                finish(self);
+                self.show_session(QWEN, window, cx);
+                self.open_history(QWEN, window, cx);
             }
             "settings" => self.push(Route::Settings, window, cx),
             "model" | "model-long-list" | "model-no-match" | "thinking" => {
@@ -429,7 +544,11 @@ impl PhoneApp {
             "scale": probes.scale, "bounds": probes.bounds, "viewport": probes.viewport,
             "pointer": probes.pointer,
             "route": format!("{:?}", self.route()), "sheet": self.sheet.map(|s| format!("{s:?}")),
-            "drawer": self.drawer_open,
+            "project": self.store.as_ref().and_then(|s| s.projects.get(self.project)).map(|p| p.path.clone()),
+            "picked": self.project_browser.picked.clone(),
+            "open_folders": self.project_browser.open.len(),
+            "file": self.file_view.as_ref().map(|view| view.path.clone()),
+            "start_draft": self.start.read(cx).area.read(cx).text().to_owned(),
             "sample": self.store.as_ref().is_some_and(|store| store.is_sample()),
             "draft_chars": composer.map(|c| c.read(cx).area.read(cx).text().chars().count()),
             "draft_attachments": composer.map(|c| c.read(cx).attachments().len()),
@@ -467,6 +586,33 @@ mod tests {
     use gpui::{Focusable, TestAppContext};
 
     #[gpui::test]
+    fn preview_fixtures_never_replace_persisted_phone_settings(cx: &mut TestAppContext) {
+        let directory =
+            std::env::temp_dir().join(format!("pi-android-preview-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        let persisted = crate::prefs::Prefs {
+            computer: Some("nick@real-computer.local".into()),
+            sample: true,
+            host_keys: [("nick@real-computer.local".into(), "SHA256:real".into())]
+                .into_iter()
+                .collect(),
+            ..crate::prefs::Prefs::default()
+        };
+        persisted.save(&path);
+        let original = std::fs::read(&path).unwrap();
+
+        let (app, cx) =
+            cx.add_window_view(|window, cx| PhoneApp::new(Some(path.clone()), window, cx));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("evening", window, cx)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("long-labels", window, cx)));
+        cx.run_until_parked();
+
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[gpui::test]
     fn every_screen_renders(cx: &mut TestAppContext) {
         for (width, height) in [(320., 640.), (384., 854.), (640., 360.)] {
             for name in SCREENS {
@@ -477,15 +623,20 @@ mod tests {
                 app.read_with(cx, |app, _| {
                     let expected = match *name {
                         "connect" => Route::Connect,
-                        "sessions" | "search" | "empty-search" | "drawer" | "delete"
+                        "sessions" | "computers" | "search" | "empty-search" | "delete"
                         | "delete-running" => Route::Sessions,
                         "start" | "model" | "model-long-list" | "model-no-match" | "thinking"
                         | "mentions" | "image-input" | "image-only" | "attach" | "project"
-                        | "long-input" | "long-labels" => Route::Start,
+                        | "long-input" | "long-labels" | "project-tree" | "project-search" => {
+                            Route::Start
+                        }
+                        "project-file" => Route::File,
                         "review" => Route::Review(QWEN),
+                        "html-page" => Route::Thread(crate::model::SessionId(7)),
+                        "history" => Route::History(QWEN),
                         "projects" | "project-empty" | "project-error" | "project-loading"
                         | "project-long-path" => Route::Projects,
-                        "settings" | "models" | "resources" => Route::Settings,
+                        "settings" | "models" | "resources" | "logs" => Route::Settings,
                         _ => Route::Thread(QWEN),
                     };
                     assert_eq!(app.route(), expected, "{name}");
@@ -580,6 +731,51 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_tree_rolls_out_opens_files_and_comes_back(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("project", window, cx)));
+        cx.run_until_parked();
+        let click = |cx: &mut gpui::VisualTestContext, name: &'static str| {
+            let bounds = cx.debug_bounds(name).unwrap_or_else(|| panic!("{name} is shown"));
+            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+        };
+        // pi is rolled out and picked; its README is a file in it.
+        assert!(cx.debug_bounds("node:~/repos/pi/README.md").is_some());
+        assert!(cx.debug_bounds("node:~/repos/pi/packages/ai").is_none());
+        click(cx, "roll:~/repos/pi/packages");
+        assert!(cx.debug_bounds("node:~/repos/pi/packages/ai").is_some());
+        click(cx, "roll:~/repos/pi/packages");
+        assert!(cx.debug_bounds("node:~/repos/pi/packages/ai").is_none());
+        click(cx, "node:~/repos/minivm");
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.project_browser.picked.as_deref(), Some("/Users/nick/repos/minivm"));
+            assert_eq!(app.route(), Route::Start);
+        });
+        click(cx, "node:~/repos/pi/README.md");
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.route(), Route::File);
+            assert_eq!(app.file_view.as_ref().unwrap().path, "README.md");
+        });
+        cx.update(|window, cx| app.update(cx, |app, cx| app.back(window, cx)));
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.route(), Route::Start);
+            assert_eq!(app.sheet, Some(Sheet::Project));
+        });
+        let count = app.read_with(cx, |app, _| app.store.as_ref().unwrap().sessions.len());
+        click(cx, "use-folder");
+        app.read_with(cx, |app, _| {
+            let store = app.store.as_ref().unwrap();
+            assert_eq!(store.projects[app.project].path, "/Users/nick/repos/minivm");
+            assert_eq!(store.sessions.len(), count);
+            assert_eq!(app.sheet, None);
+        });
+    }
+
+    #[gpui::test]
     fn partial_and_cancelled_swipes_do_not_delete_or_navigate(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
         for (distance, finish) in [
@@ -590,7 +786,7 @@ mod tests {
             cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
             cx.update(|window, cx| app.update(cx, |app, cx| app.preview("sessions", window, cx)));
             cx.run_until_parked();
-            let row = cx.debug_bounds("session-row-1").unwrap();
+            let row = cx.debug_bounds("session-row-2").unwrap();
             let from = gpui::point(gpui::px(45.), row.center().y);
             drag(
                 cx,
@@ -602,7 +798,7 @@ mod tests {
                 assert_eq!(app.route(), Route::Sessions);
                 assert!(app.sheet.is_none());
                 assert!(app.swiping_session.is_none());
-                assert!(app.store.as_ref().unwrap().session(QWEN).is_some());
+                assert!(app.store.as_ref().unwrap().session(crate::model::SessionId(2)).is_some());
             });
         }
     }
@@ -610,35 +806,19 @@ mod tests {
     #[gpui::test]
     fn panels_remain_mounted_and_follow_the_finger_until_release(cx: &mut TestAppContext) {
         use gpui::InputEvent;
-        for fixture in ["drawer", "model"] {
+        for fixture in ["computers", "model"] {
             let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
             cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
             cx.update(|window, cx| {
                 app.update(cx, |app, cx| {
                     app.preview(fixture, window, cx);
-                    app.drawer_motion.finish();
                     app.sheet_motion.finish();
                 })
             });
             cx.run_until_parked();
-            let drawer = fixture == "drawer";
-            let bounds = cx
-                .debug_bounds(if drawer {
-                    "navigation-drawer"
-                } else {
-                    "bottom-sheet"
-                })
-                .unwrap();
-            let from = if drawer {
-                gpui::point(gpui::px(260.), gpui::px(100.))
-            } else {
-                gpui::point(bounds.center().x, bounds.top() + gpui::px(14.))
-            };
-            let delta = if drawer {
-                gpui::point(gpui::px(-180.), gpui::px(0.))
-            } else {
-                gpui::point(gpui::px(0.), gpui::px(160.))
-            };
+            let bounds = cx.debug_bounds("bottom-sheet").unwrap();
+            let from = gpui::point(bounds.center().x, bounds.top() + gpui::px(14.));
+            let delta = gpui::point(gpui::px(0.), gpui::px(160.));
             for step in 0..=12 {
                 cx.update(|window, cx| {
                     window.dispatch_event(
@@ -661,26 +841,14 @@ mod tests {
                 cx.run_until_parked();
                 if step < 12 {
                     app.read_with(cx, |app, _| {
-                        assert!(
-                            if drawer {
-                                app.drawer_open
-                            } else {
-                                app.sheet.is_some()
-                            },
-                            "must wait for release"
-                        )
+                        assert!(app.sheet.is_some(), "must wait for release")
                     });
                 }
             }
             app.read_with(cx, |app, _| {
-                if drawer {
-                    assert!(!app.drawer_open);
-                    assert!(app.drawer_motion.animating());
-                } else {
-                    assert!(app.sheet.is_none());
-                    assert!(app.closing_sheet.is_some());
-                    assert!(app.sheet_motion.animating());
-                }
+                assert!(app.sheet.is_none());
+                assert!(app.closing_sheet.is_some());
+                assert!(app.sheet_motion.animating());
             });
         }
     }
@@ -751,19 +919,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn drawer_and_bottom_sheet_close_by_swipe_without_navigation(cx: &mut TestAppContext) {
+    fn bottom_sheets_close_by_swipe_without_navigation(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
-        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("drawer", window, cx)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("computers", window, cx)));
         cx.run_until_parked();
-        swipe(
-            cx,
-            gpui::point(gpui::px(230.), gpui::px(100.)),
-            gpui::point(gpui::px(40.), gpui::px(100.)),
-        );
+        let sheet = cx.debug_bounds("bottom-sheet").unwrap();
+        let from = gpui::point(sheet.center().x, sheet.top() + gpui::px(14.));
+        swipe(cx, from, from + gpui::point(gpui::px(0.), gpui::px(150.)));
         app.read_with(cx, |app, _| {
-            assert!(!app.drawer_open);
+            assert!(app.sheet.is_none());
             assert_eq!(app.route(), Route::Sessions);
         });
         // A fresh window isolates this second gesture from the first swipe's
@@ -1040,16 +1206,15 @@ mod tests {
     }
 
     #[gpui::test]
-    fn back_closes_drawer_without_leaving_session(cx: &mut TestAppContext) {
+    fn back_closes_the_computers_without_leaving_home(cx: &mut TestAppContext) {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
-                app.preview("done", window, cx);
-                app.open_drawer(window, cx);
-                assert!(app.drawer_open);
+                app.preview("computers", window, cx);
+                assert_eq!(app.sheet, Some(Sheet::Computers));
                 assert!(app.back(window, cx));
-                assert!(!app.drawer_open);
-                assert_eq!(app.route(), Route::Thread(QWEN));
+                assert!(app.sheet.is_none());
+                assert_eq!(app.route(), Route::Sessions);
             })
         });
     }

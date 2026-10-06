@@ -82,6 +82,16 @@ pub fn models() -> Result<()> {
     Ok(())
 }
 
+pub fn commands() -> Result<()> {
+    let status = std::process::Command::new(program()?)
+        .arg("--list-commands")
+        .stdin(std::process::Stdio::null())
+        .status()
+        .context("Could not read the computer's command catalog")?;
+    ensure!(status.success(), "Command catalog discovery failed");
+    Ok(())
+}
+
 pub fn launch(target: &SshTarget, cwd: PathBuf) -> Result<Launch> {
     ensure!(
         cfg!(unix),

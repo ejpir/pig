@@ -2,7 +2,10 @@
 //! the bottom sheets together.
 
 mod connect;
-mod drawer;
+mod files;
+mod history;
+mod pages;
+pub(crate) use pages::ShownImage;
 mod projects;
 mod review;
 mod sessions;
@@ -22,11 +25,6 @@ fn scroll_area(id: impl Into<ElementId>, handle: &ScrollHandle) -> crate::scroll
 /// A section's heading above a card.
 fn section(text: &'static str, colors: &Theme) -> Div {
     ui::label(text, colors).mt(px(20.)).mb(px(8.)).mx(px(4.))
-}
-
-/// The serif italic headline of the connect and start screens.
-fn heading(text: &'static str, size: f32) -> Div {
-    ui::serif(text, size).line_height(gpui::relative(1.15))
 }
 
 /// An on/off switch, 44 by 26.

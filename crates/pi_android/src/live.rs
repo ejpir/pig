@@ -30,6 +30,7 @@ pub enum Update {
     /// A fresh listing of the computer's sessions.
     Listed(Result<Vec<Listed>, String>),
     ModelCatalog(Result<Vec<pi_core::protocol::Model>, String>),
+    CommandCatalog(Result<Vec<pi_core::protocol::SlashCommand>, String>),
 }
 
 /// What a request was for, to act on its response.
@@ -37,10 +38,13 @@ enum Request {
     Prompt(String),
     Models,
     AvailableModels,
+    Commands,
     SetModel,
     SetThinking(String),
     InitialThinkingLevels(String),
     Stop,
+    /// A tool's image, by its id in the durable session.
+    Image(String),
     /// Its failure doesn't matter: a model without thinking levels refuses one.
     Quiet,
     Other,
@@ -63,9 +67,19 @@ struct Watch {
     sent: HashMap<String, Request>,
     /// Pi's open questions, oldest first.
     dialogs: Vec<Value>,
+    /// Tool images fetched from the computer, by id: absent until asked for,
+    /// `None` while on the way.
+    images: HashMap<String, Option<Result<ToolImageBytes, String>>>,
     ended: Option<String>,
     /// When the phone began watching, in seconds since 1970.
     since: u64,
+}
+
+/// A tool image's bytes and type.
+#[derive(Clone)]
+pub struct ToolImageBytes {
+    pub mime: String,
+    pub bytes: std::sync::Arc<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -94,6 +108,7 @@ impl Watch {
             failed: Vec::new(),
             sent: HashMap::new(),
             dialogs: Vec::new(),
+            images: HashMap::new(),
             ended: None,
             since: seconds_now(),
         }
@@ -108,6 +123,8 @@ impl Watch {
         // Requests on the old pipe cannot be acknowledged by the new pipe.
         // Prompts remain in the outbox with their stable admission identities.
         self.sent.clear();
+        // Images asked for on the old pipe are asked for again.
+        self.images.retain(|_, image| image.is_some());
     }
 
     fn accepts(&self, update: &Update) -> bool {
@@ -115,7 +132,7 @@ impl Watch {
             Update::Opened(generation, _)
             | Update::Record(generation, _)
             | Update::Ended(generation, _) => *generation == self.generation,
-            Update::Listed(_) | Update::ModelCatalog(_) => false,
+            Update::Listed(_) | Update::ModelCatalog(_) | Update::CommandCatalog(_) => false,
         }
     }
 }
@@ -146,6 +163,11 @@ pub struct Live {
     pub models: Vec<pi_core::protocol::Model>,
     pub models_loading: bool,
     pub models_error: Option<String>,
+    /// Commands available before a new session exists. A session-specific
+    /// catalog replaces this once that session attaches.
+    pub commands: Vec<pi_core::protocol::SlashCommand>,
+    pub commands_loading: bool,
+    pub commands_error: Option<String>,
 }
 
 fn request_id() -> String {
@@ -171,6 +193,9 @@ impl Live {
             models: Vec::new(),
             models_loading: false,
             models_error: None,
+            commands: Vec::new(),
+            commands_loading: false,
+            commands_error: None,
         }
     }
 
@@ -215,6 +240,25 @@ impl Live {
                 .await
                 .map_err(|error| format!("{error:#}"));
             let _ = sender.send((None, Update::ModelCatalog(models))).await;
+        });
+    }
+
+    pub fn refresh_commands(&mut self) {
+        if self.commands_loading {
+            return;
+        }
+        self.commands_loading = true;
+        self.commands_error = None;
+        let (connection, helper, sender) = (
+            self.connection.clone(),
+            self.helper.clone(),
+            self.sender.clone(),
+        );
+        ssh::spawn(async move {
+            let commands = remote::commands(&connection, &helper)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = sender.send((None, Update::CommandCatalog(commands))).await;
         });
     }
 
@@ -482,6 +526,22 @@ impl Live {
         )
     }
 
+    pub fn commands(&self, id: SessionId) -> Option<&[pi_core::protocol::SlashCommand]> {
+        let watch = self.watches.get(&id)?;
+        watch
+            .pi
+            .commands_loaded
+            .then_some(watch.pi.commands.as_slice())
+    }
+
+    pub fn commands_for_path(&self, path: &str) -> Option<&[pi_core::protocol::SlashCommand]> {
+        self.watches
+            .values()
+            .find(|watch| watch.target.cwd == path && watch.pi.commands_loaded)
+            .map(|watch| watch.pi.commands.as_slice())
+            .or_else(|| (!self.commands_loading).then_some(self.commands.as_slice()))
+    }
+
     pub fn is_stopping(&self, id: SessionId) -> bool {
         self.watches.get(&id).is_some_and(|watch| {
             watch
@@ -654,6 +714,17 @@ impl Live {
         update: Update,
     ) -> (Vec<SessionId>, Option<Problem>) {
         let Some(id) = id else {
+            if let Update::CommandCatalog(commands) = update {
+                self.commands_loading = false;
+                match commands {
+                    Ok(commands) => {
+                        self.commands = commands;
+                        self.commands_error = None;
+                    }
+                    Err(error) => self.commands_error = Some(error),
+                }
+                return (Vec::new(), None);
+            }
             if let Update::ModelCatalog(models) = update {
                 self.models_loading = false;
                 match models {
@@ -722,7 +793,7 @@ impl Live {
                     text,
                 });
             }
-            Update::Listed(_) | Update::ModelCatalog(_) => {}
+            Update::Listed(_) | Update::ModelCatalog(_) | Update::CommandCatalog(_) => {}
         }
         (vec![id], problem)
     }
@@ -749,6 +820,7 @@ impl Live {
         if let Err(error) = watch.pi.apply(record) {
             log::warn!("Skipping a record Pi's session model refused: {error:#}");
         }
+        Self::fetch_images(watch);
         if kind == "remote_snapshot" && !watch.current {
             watch.current = true;
             if watch.pi.state.model.is_none() && watch.target.backend == RemoteBackend::Durable {
@@ -773,6 +845,9 @@ impl Live {
                     Request::Quiet,
                 );
             }
+            // The computer owns slash-command semantics. Refresh on every
+            // attachment while retaining the last catalog in the snapshot.
+            Self::send(watch, json!({"type":"get_commands"}), Request::Commands);
         }
         if kind != "response" {
             return None;
@@ -902,11 +977,40 @@ impl Live {
                 );
                 None
             }
+            Request::Commands => {
+                if failed {
+                    // An older backend may not expose commands. Treat that as
+                    // an authoritative empty catalog without breaking prompts.
+                    watch.pi.commands.clear();
+                    watch.pi.commands_loaded = true;
+                }
+                None
+            }
             Request::Stop => {
                 if !failed {
                     Self::send(watch, json!({"type":"get_state"}), Request::Quiet);
                 }
                 failed.then_some(error)
+            }
+            Request::Image(id) => {
+                use base64::Engine as _;
+                let image = &record["data"]["image"];
+                let fetched = if failed {
+                    Err(error)
+                } else {
+                    image["data"]
+                        .as_str()
+                        .and_then(|data| {
+                            base64::engine::general_purpose::STANDARD.decode(data).ok()
+                        })
+                        .map(|bytes| ToolImageBytes {
+                            mime: image["mimeType"].as_str().unwrap_or("image/png").into(),
+                            bytes: std::sync::Arc::new(bytes),
+                        })
+                        .ok_or_else(|| "The computer sent an unreadable image".to_owned())
+                };
+                watch.images.insert(id, Some(fetched));
+                None
             }
             Request::Quiet => None,
             Request::Other => failed.then_some(error),
@@ -929,6 +1033,35 @@ impl Live {
             ids.push(id);
         }
         ids
+    }
+
+    /// A tool image fetched from the computer: `None` while on the way.
+    pub fn image(&self, id: SessionId, key: &str) -> Option<&Result<ToolImageBytes, String>> {
+        self.watches.get(&id)?.images.get(key)?.as_ref()
+    }
+
+    /// Asks once for each image a tool returned that the stream left out.
+    fn fetch_images(watch: &mut Watch) {
+        if watch.input.is_none() {
+            return;
+        }
+        let wanted: Vec<String> = watch
+            .pi
+            .tools
+            .iter()
+            .flat_map(|tool| &tool.images)
+            .filter_map(|block| block["imageId"].as_str())
+            .filter(|id| !watch.images.contains_key(*id))
+            .map(str::to_owned)
+            .collect();
+        for id in wanted {
+            watch.images.insert(id.clone(), None);
+            Self::send(
+                watch,
+                json!({"type": "get_image", "imageId": id}),
+                Request::Image(id),
+            );
+        }
     }
 
     /// The session as the phone shows it.
@@ -1182,7 +1315,18 @@ mod tests {
         assert!(Live::record(&mut watch, &snapshot, "Opus 5.5", "", &mut models).is_none());
         let ask = sent.try_recv().unwrap();
         assert_eq!(ask["type"], "get_available_models");
+        let commands = sent.try_recv().unwrap();
+        assert_eq!(commands["type"], "get_commands");
         assert!(sent.try_recv().is_err(), "no prompt before a model");
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":commands["id"],"command":"get_commands","success":true,"data":{"commands":[{"name":"review","description":"Review changes","source":"prompt","sourceInfo":null}]}}),
+            "Opus 5.5",
+            "",
+            &mut models,
+        );
+        assert!(watch.pi.commands_loaded);
+        assert_eq!(watch.pi.commands[0].name, "review");
         let offered = json!({"type":"response","id":ask["id"],"command":"get_available_models","success":true,"data":{"models":[
             {"provider":"anthropic","id":"claude-opus-5-5","name":"Claude Opus 5.5"}
         ]}});
@@ -1236,6 +1380,7 @@ mod tests {
             sent.try_recv().unwrap()["type"],
             "get_available_thinking_levels"
         );
+        assert_eq!(sent.try_recv().unwrap()["type"], "get_commands");
         Live::record(
             &mut watch,
             &json!({"type":"response","id":ask["id"],"command":"get_available_models","success":true,"data":{"models":[{"provider":"host","id":"other"}]}}),

@@ -211,6 +211,14 @@ def manifest(app, debuggable):
                 attribute("theme", REFERENCE, THEME_NO_ACTION_BAR),
                 attribute("configChanges", INT_HEX, CONFIG_CHANGES),
             ])] if app.qr_scanner else []),
+            # HTML pages an app shows full screen (activity::show_page).
+            element("activity", [
+                attribute("name", STRING, "dev.pi.gpui.PageActivity"),
+                attribute("exported", BOOLEAN, False),
+                attribute("label", STRING, "Page"),
+                attribute("theme", REFERENCE, THEME_NO_ACTION_BAR),
+                attribute("configChanges", INT_HEX, CONFIG_CHANGES),
+            ]),
             # Serves copied images to the apps that paste them.
             element("provider", [
                 attribute("name", STRING, "dev.pi.gpui.ClipboardProvider"),

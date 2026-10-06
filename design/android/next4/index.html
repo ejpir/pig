@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi in your pocket</title>
+<style>
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+  :root { --bg:#ece7e1; --card:#faf9f7; --text:#252f3d; --muted:#665f59; --line:#ddd7d0; --accent:#4b607c; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0d1116; --card:#161d27; --text:#ebe7e4; --muted:#9ca2aa; --line:#363d46; --accent:#8caecb; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Plex", "IBM Plex Sans", system-ui, sans-serif; }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 48px 24px 80px; }
+  h1 { font: italic 400 44px/1.1 Georgia, "DejaVu Serif", serif; margin: 0 0 12px; letter-spacing: -.01em; }
+  .lede { font-size: 17px; color: var(--muted); max-width: 760px; margin: 0 0 8px; }
+  .links a { color: var(--accent); margin-right: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 28px 20px; margin-top: 36px; }
+  figure { margin: 0; }
+  figure a { display: block; }
+  figure img { width: 100%; display: block; border-radius: 22px; border: 1px solid var(--line); background: var(--card); }
+  figcaption { margin-top: 10px; font-size: 14px; color: var(--muted); }
+  figcaption b { display: block; color: var(--text); font-size: 15px; }
+</style></head>
+<body>
+<div class="wrap">
+  <h1>Pi in your pocket</h1>
+  <p class="lede">Pi keeps working on your computer; the phone follows its sessions, answers its questions, reviews its changes and starts new work. Thirteen screens in the Moonstone and Evening themes.</p>
+  <p class="links"><a href="README.md">Notes and ratios</a><a href="overview.png">Overview PNG</a></p>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+  const screens = [
+    ["01-pair", "Pair", "Three steps to pair by QR code, and what pairing trusts, above the button."],
+    ["02-home", "Home", "Pi's question first, then working runs drawn to time, then today's results."],
+    ["03-new", "New session", "A sheet with the composer on the keyboard and starting points under the draft."],
+    ["04-working", "Working", "The run line down the gutter, with what Pi read and changed under each stage."],
+    ["05-answer", "Answer in place", "The question takes the composer's place; the run so far stays readable."],
+    ["06-done", "Done", "Where the time went, Pi's hand-off, and a report of files and checks."],
+    ["07-review", "Review", "One file at a time, edge to edge; tap lines to ask about them."],
+    ["08-details", "Details", "The run line with its key, cost, turns, context and the session's tools."],
+    ["09-history", "File history", "Points named by your prompts, and where the files are now."],
+    ["10-page", "A page Pi made", "What Pi did, and the page itself as a card that opens it."],
+    ["11-viewer", "Page viewer", "The page on the whole screen, its controls within reach of the thumb."],
+    ["12-evening", "Evening", "Working in the dark theme."],
+    ["13-computers", "Computers", "Switch, connect or pair computers from the title."],
+  ];
+  document.getElementById("grid").innerHTML = screens.map(([file, title, note]) =>
+    `<figure><a href="screens/${file}.html"><img src="screens/${file}.png" alt="${title}" loading="lazy"></a><figcaption><b>${title}</b>${note}</figcaption></figure>`).join("");
+</script>
+</body></html>

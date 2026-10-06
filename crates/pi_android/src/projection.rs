@@ -53,6 +53,13 @@ pub fn project(pi: &Pi, facts: Facts) -> Session {
     }
     if let Some(turn) = turns.last_mut() {
         settle(turn, state, pi, facts.cwd);
+        // The stage Pi is in has gone on since the last message.
+        if state.is_running()
+            && let Some(live) = turn.live_stage()
+            && let Some(since) = pi.messages.iter().rev().find_map(timestamp)
+        {
+            turn.add_time(live, now().saturating_sub(since));
+        }
     }
     let started = pi
         .messages
@@ -198,7 +205,19 @@ fn kind(tool: &str) -> StageKind {
 
 fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
+    let mut pages = crate::pages::Pages::default();
+    // The run line's stretches: the time up to each message goes to what that
+    // message did, and a tool's result to the tool's stage.
+    let mut clock: Option<Duration> = None;
+    let mut last_kind = StageKind::Understand;
     for message in &pi.messages {
+        let at = timestamp(message);
+        let spent = at
+            .zip(clock)
+            .map_or(Duration::ZERO, |(at, clock)| at.saturating_sub(clock));
+        if at.is_some() {
+            clock = at;
+        }
         match message["role"].as_str() {
             Some("user") => {
                 let mut turn = Turn::new(
@@ -217,6 +236,12 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                 }
                 turns.push(turn);
             }
+            Some("toolResult") => {
+                let tool = message["toolName"].as_str().map_or(last_kind, kind);
+                if let Some(turn) = turns.last_mut() {
+                    turn.add_time(tool, spent);
+                }
+            }
             Some("assistant") => {
                 if turns.is_empty() {
                     let mut turn = Turn::new("", "");
@@ -224,6 +249,16 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                     turns.push(turn);
                 }
                 let turn = turns.last_mut().expect("a turn");
+                let first_tool = message["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|block| block["type"] == "toolCall")
+                    .map(|block| kind(block["name"].as_str().unwrap_or("")));
+                if let Some(first_tool) = first_tool {
+                    last_kind = first_tool;
+                }
+                turn.add_time(first_tool.unwrap_or(StageKind::HandOff), spent);
                 for block in message["content"].as_array().into_iter().flatten() {
                     if block["type"] != "toolCall" {
                         continue;
@@ -231,8 +266,18 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                     let id = block["id"].as_str().unwrap_or("");
                     let name = block["name"].as_str().unwrap_or("");
                     let observed = tool(pi, id);
+                    if let Some(observed) = observed {
+                        let path = observed.args["path"].as_str();
+                        turn.images.extend(tool_images(&observed.images, path));
+                    }
                     let args = observed.map_or(&block["arguments"], |tool| &tool.args);
                     add_tool(turn, id, name, args, observed, cwd);
+                    if observed.is_some_and(|tool| tool.finished && !tool.is_error)
+                        && let Some(path) = args["path"].as_str()
+                        && let Some(page) = pages.follow(name, args, &relative(path, cwd))
+                    {
+                        crate::pages::show(&mut turn.pages, page);
+                    }
                 }
                 let text = text_of(message);
                 if !text.trim().is_empty() {
@@ -249,6 +294,42 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
         }
     }
     turns
+}
+
+/// The images in a tool's result, named by the file it read.
+fn tool_images(images: &[Value], path: Option<&str>) -> Vec<crate::model::ToolImage> {
+    let count = images.len();
+    images
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, image)| {
+            let mime = image["mimeType"].as_str()?.to_owned();
+            let data = image["data"].as_str().filter(|data| !data.is_empty());
+            let key = match (image["imageId"].as_str(), data) {
+                (Some(id), _) => id.to_owned(),
+                (None, Some(data)) => {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    data.hash(&mut hasher);
+                    format!("inline-{:016x}", hasher.finish())
+                }
+                (None, None) => return None,
+            };
+            let file = path
+                .map(|path| path.rsplit('/').next().unwrap_or(path).to_owned())
+                .unwrap_or_else(|| "Image".into());
+            Some(crate::model::ToolImage {
+                key,
+                name: if count > 1 {
+                    format!("{file} ({})", index + 1)
+                } else {
+                    file
+                },
+                mime,
+                inline: data.map(str::to_owned),
+            })
+        })
+        .collect()
 }
 
 fn add_tool(
@@ -292,19 +373,27 @@ fn add_tool(
                 Reference::File(_) => (f + 1, s),
                 Reference::Search(_) => (f, s + 1),
             });
-            stage.what = [(files, "file", "files"), (searches, "search", "searches")]
-                .into_iter()
-                .filter(|(count, _, _)| *count > 0)
-                .map(|(count, one, many)| {
-                    format!("{count} {}", if count == 1 { one } else { many })
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            if stage.what.is_empty() {
-                stage.what = "Looked around".into();
-            } else {
-                stage.what = format!("Read {}", stage.what);
-            }
+            let read = match files {
+                0 => None,
+                1 => Some("Read 1 file".to_owned()),
+                count => Some(format!("Read {count} files")),
+            };
+            let searched = match searches {
+                0 => None,
+                1 => Some("searched once".to_owned()),
+                2 => Some("searched twice".to_owned()),
+                count => Some(format!("searched {count} times")),
+            };
+            stage.what = match (read, searched) {
+                (Some(read), Some(searched)) => format!("{read} · {searched}"),
+                (Some(read), None) => read,
+                (None, Some(searched)) => {
+                    let mut searched = searched;
+                    searched[..1].make_ascii_uppercase();
+                    searched
+                }
+                (None, None) => "Looked around".into(),
+            };
         }
         StageKind::Change => {
             if let Some(path) = &path {
@@ -517,10 +606,14 @@ fn tool_lines(tool: &Tool) -> Vec<DiffLine> {
             .flat_map(|hunk| hunk.lines)
             .collect();
     }
-    if tool.name == "write" {
-        return written(tool);
+    match tool.name.as_str() {
+        "write" => written(tool),
+        // The result diff often arrives only when the tool finishes. Its
+        // requested replacements are still authoritative live input, so show
+        // them in the expanded activity rail while execution is in progress.
+        "edit" => requested_edits(tool),
+        _ => Vec::new(),
     }
-    Vec::new()
 }
 
 /// A file Pi wrote in full: every line is new.
@@ -531,6 +624,41 @@ fn written(tool: &Tool) -> Vec<DiffLine> {
         .lines()
         .enumerate()
         .map(|(index, line)| DiffLine::new(LineKind::Added, index as u32 + 1, line))
+        .collect()
+}
+
+/// A live edit preview before Pi reports the applied diff. Line numbers are
+/// intentionally unknown (zero); the row renderer leaves that gutter blank.
+fn requested_edits(tool: &Tool) -> Vec<DiffLine> {
+    let parsed;
+    let edits = match &tool.args["edits"] {
+        Value::String(source) => {
+            parsed = serde_json::from_str::<Value>(source).unwrap_or(Value::Null);
+            &parsed
+        }
+        Value::Null => &tool.args,
+        edits => edits,
+    };
+    let edits: Vec<&Value> = match edits {
+        Value::Array(edits) => edits.iter().collect(),
+        Value::Object(_) => vec![edits],
+        _ => Vec::new(),
+    };
+    edits
+        .into_iter()
+        .flat_map(|edit| {
+            let removed = edit["oldText"]
+                .as_str()
+                .unwrap_or("")
+                .lines()
+                .map(|line| DiffLine::new(LineKind::Removed, 0, line));
+            let added = edit["newText"]
+                .as_str()
+                .unwrap_or("")
+                .lines()
+                .map(|line| DiffLine::new(LineKind::Added, 0, line));
+            removed.chain(added).collect::<Vec<_>>()
+        })
         .collect()
 }
 
@@ -549,6 +677,10 @@ fn files(pi: &Pi, cwd: &str) -> Vec<FileChange> {
             None if tool.name == "write" => vec![Hunk {
                 header: "Written in full".into(),
                 lines: written(tool),
+            }],
+            None if tool.name == "edit" => vec![Hunk {
+                header: "Requested replacements".into(),
+                lines: requested_edits(tool),
             }],
             None => Vec::new(),
         };
@@ -795,7 +927,7 @@ mod tests {
                 (StageKind::HandOff, StageStatus::Done),
             ]
         );
-        assert_eq!(turn.stages[0].what, "Read 1 file · 1 search");
+        assert_eq!(turn.stages[0].what, "Read 1 file · searched once");
         assert_eq!(turn.stages[1].what, "Edited app.rs");
         assert_eq!((turn.stages[1].added, turn.stages[1].removed), (3, 1));
         assert_eq!(turn.stages[2].what, "Ran cargo test -p app");
@@ -824,7 +956,7 @@ mod tests {
             ]}}),
             json!({"type":"agent_start"}),
             json!({"type":"message_start","message":{"role":"assistant","content":[]}}),
-            json!({"type":"tool_execution_start","toolCallId":"e","toolName":"edit","args":{"path":"/Users/nick/repos/pi/src/lib.rs"}}),
+            json!({"type":"tool_execution_start","toolCallId":"e","toolName":"edit","args":{"path":"/Users/nick/repos/pi/src/lib.rs","edits":[{"oldText":"old();","newText":"new();\nmore();"}]}}),
         ]);
         let shown = project(&pi, facts(&[]));
         assert_eq!(shown.state, State::Working);
@@ -851,6 +983,48 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].target, "/Users/nick/repos/pi/src/lib.rs");
         assert!(!tools[0].finished);
+        let change = shown.turns[0]
+            .stages
+            .iter()
+            .find(|stage| stage.kind == StageKind::Change)
+            .unwrap();
+        assert_eq!((change.added, change.removed), (2, 1));
+        assert_eq!(
+            change
+                .diff
+                .iter()
+                .map(|line| (line.kind, line.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (LineKind::Removed, "old();"),
+                (LineKind::Added, "new();"),
+                (LineKind::Added, "more();"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_running_write_previews_its_content() {
+        let tool = Tool {
+            id: "w".into(),
+            name: "write".into(),
+            args: json!({"path":"src/new.rs","content":"first\nsecond"}),
+            output: String::new(),
+            diff: None,
+            finished: false,
+            is_error: false,
+            images: Vec::new(),
+        };
+        assert_eq!(
+            tool_lines(&tool)
+                .iter()
+                .map(|line| (line.kind, line.number, line.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (LineKind::Added, 1, "first"),
+                (LineKind::Added, 2, "second"),
+            ]
+        );
     }
 
     #[test]
@@ -965,6 +1139,79 @@ mod tests {
         assert_eq!(super::question(&select).unwrap().choices[1].label, "Allow");
         assert_eq!(answer(&select, Answer::AllowSession)["value"], "Allow");
         assert_eq!(answer(&select, Answer::Deny)["cancelled"], true);
+    }
+
+    #[test]
+    fn images_tools_return_show_under_their_turn_named_by_the_file() {
+        let id = "a".repeat(64);
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":"Take a screenshot of the page"},
+                {"role":"assistant","content":[
+                    {"type":"toolCall","id":"r","name":"read","arguments":{"path":"/tmp/shots/page.png"}},
+                    {"type":"toolCall","id":"b","name":"bash","arguments":{"command":"chrome --screenshot"}}
+                ],"stopReason":"toolUse"},
+                {"role":"toolResult","toolCallId":"r","toolName":"read","content":[
+                    {"type":"text","text":"Read image file [image/png]"},
+                    {"type":"image","data":"","imageId":id,"mimeType":"image/png","bytes":10}
+                ],"isError":false},
+                {"role":"toolResult","toolCallId":"b","toolName":"bash","content":[
+                    {"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"}
+                ],"isError":false},
+                {"role":"assistant","content":[{"type":"text","text":"Here it is."}],"stopReason":"stop"}
+            ]}}),
+        ]);
+        let images = &project(&pi, facts(&[])).turns[0].images;
+        assert_eq!(images.len(), 2);
+        assert_eq!((images[0].key.as_str(), images[0].name.as_str()), (id.as_str(), "page.png"));
+        assert_eq!(images[0].inline, None);
+        assert_eq!(images[1].name, "Image");
+        assert_eq!(images[1].inline.as_deref(), Some("iVBORw0KGgo="));
+    }
+
+    #[test]
+    fn pages_pi_wrote_show_under_their_turn() {
+        let page = "<html><title>Aurora</title><body>blue</body></html>";
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":"Make me something cool"},
+                {"role":"assistant","content":[
+                    {"type":"toolCall","id":"w","name":"write","arguments":{"path":"/Users/nick/repos/pi/aurora.html","content":page}},
+                    {"type":"toolCall","id":"x","name":"write","arguments":{"path":"broken.html","content":"<p>"}}
+                ],"stopReason":"toolUse"},
+                {"role":"toolResult","toolCallId":"w","toolName":"write","content":[],"isError":false},
+                {"role":"toolResult","toolCallId":"x","toolName":"write","content":[],"isError":true},
+                {"role":"assistant","content":[{"type":"text","text":"Done."}],"stopReason":"stop"},
+                {"role":"user","content":"Make it green"},
+                {"role":"assistant","content":[
+                    {"type":"toolCall","id":"e","name":"edit","arguments":{"path":"aurora.html","edits":[{"oldText":"blue","newText":"green"}]}}
+                ],"stopReason":"toolUse"},
+                {"role":"toolResult","toolCallId":"e","toolName":"edit","content":[],"isError":false},
+                {"role":"assistant","content":[{"type":"text","text":"Green now."}],"stopReason":"stop"}
+            ]}}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        let pages: Vec<Vec<(&str, Option<&str>)>> = shown
+            .turns
+            .iter()
+            .map(|turn| {
+                turn.pages
+                    .iter()
+                    .map(|page| (page.path.as_str(), page.html.as_deref()))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            pages,
+            [
+                vec![("aurora.html", Some(page))],
+                vec![(
+                    "aurora.html",
+                    Some("<html><title>Aurora</title><body>green</body></html>")
+                )],
+            ]
+        );
+        assert_eq!(shown.turns[0].pages[0].title(), "Aurora");
     }
 
     #[test]

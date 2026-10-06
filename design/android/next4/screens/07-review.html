@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>07 Review</title>
+<link rel="stylesheet" href="../next4.css">
+<style>
+  .hunk { height: 32px; display: flex; align-items: center; padding: 0 var(--g); background: var(--panel); font-family: var(--mono); font-size: 12px; color: var(--faint); }
+  .fold { height: 32px; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: var(--t1); color: var(--accent);
+    border-top: 1px dashed var(--line-strong); border-bottom: 1px dashed var(--line-strong); }
+  .code .n { width: 48px; }
+  .files { display: flex; gap: 4px; padding: 12px var(--g); }
+  .files span { flex: 1; height: 3px; border-radius: 2px; background: var(--raised); }
+  .files span.on { background: var(--accent); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="bar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="title"><b>openai-completions.ts</b><span>packages/ai/src/providers</span></div>
+      <span class="tap" style="color:var(--faint)"><i data-i="chev-l"></i></span>
+      <span class="tap"><i data-i="chev-r"></i></span>
+    </div>
+    <div class="files"><span class="on"></span><span></span></div>
+    <div class="row meta" style="padding:0 var(--g) 12px"><span class="grow">Tap a line to ask Pi about it</span><span class="add">+3</span><span class="del" style="width:28px;text-align:right">−1</span></div>
+    <div class="col" style="flex:1;min-height:0;overflow:hidden">
+      <div class="hunk">@@ 204 readThinking</div>
+      <div class="code" style="padding:4px 0">
+        <div class="l"><span class="n">204</span><span><span class="k">export function</span> readThinking(blocks, model) {</span></div>
+        <div class="l"><span class="n">205</span><span>  <span class="k">const</span> signatures: string[] = [];</span></div>
+        <div class="l"><span class="n">206</span><span>  <span class="k">for</span> (<span class="k">const</span> block <span class="k">of</span> blocks) {</span></div>
+        <div class="l"><span class="n">207</span><span>    <span class="k">if</span> (block.type !== <span class="s">"thinking"</span>) <span class="k">continue</span>;</span></div>
+        <div class="l"><span class="n">208</span><span>    <span class="k">const</span> sig = block.signature;</span></div>
+        <div class="l d sel"><span class="n">209</span><span>    <span class="k">if</span> (!sig) {</span></div>
+        <div class="l a sel"><span class="n">209</span><span>    <span class="k">if</span> (!sig &amp;&amp; isAnthropic(model)) {</span></div>
+        <div class="l"><span class="n">210</span><span>      <span class="k">throw new</span> Error(<span class="s">"Missing signature"</span>);</span></div>
+        <div class="l"><span class="n">211</span><span>    }</span></div>
+        <div class="l"><span class="n">212</span><span>    signatures.push(sig ?? <span class="s">""</span>);</span></div>
+        <div class="l"><span class="n">213</span><span>  }</span></div>
+      </div>
+      <div class="fold"><i data-i="chev-d" class="sm"></i>Show 27 unchanged lines</div>
+      <div class="hunk">@@ 241 isAnthropic</div>
+      <div class="code" style="padding:4px 0">
+        <div class="l"><span class="n">241</span><span><span class="k">function</span> isAnthropic(model) {</span></div>
+        <div class="l a"><span class="n">242</span><span>  <span class="k">return</span> model.api === <span class="s">"anthropic"</span></span></div>
+        <div class="l a"><span class="n">243</span><span>    || model.provider === <span class="s">"anthropic"</span>;</span></div>
+        <div class="l"><span class="n">244</span><span>}</span></div>
+      </div>
+    </div>
+    <div class="dock">
+      <div class="strip">
+        <span class="chip sm on"><i data-i="file"></i>Line 209<i data-i="x"></i></span>
+      </div>
+      <div class="composer">
+        <div class="draft">Also accept it for DeepSeek<span class="caret"></span></div>
+        <div class="tools"><span class="tap"><i data-i="clip"></i></span>
+          <span class="control">Opus 5.5<i data-i="chev-d"></i></span><span class="control">High<i data-i="chev-d"></i></span>
+          <span class="grow"></span><span class="send"><i data-i="send"></i></span></div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../next4.js"></script>
+</body></html>

@@ -4,6 +4,7 @@ mod directories;
 mod durable;
 mod executable;
 mod files;
+mod history;
 mod pairing;
 mod server;
 mod sessions;
@@ -45,7 +46,7 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
         ),
         Some("--capabilities") => println!(
             "{}",
-            serde_json::json!({"pi":true,"durable":cfg!(unix),"durableExperimental":true,"watchers":true,"sessions":true,"directories":true,"deleteSessions":cfg!(unix),"imagePrompts":cfg!(feature = "bundled-durable")})
+            serde_json::json!({"pi":true,"durable":cfg!(unix),"durableExperimental":true,"watchers":true,"sessions":true,"directories":true,"commands":true,"jjHistory":true,"deleteSessions":cfg!(unix),"imagePrompts":cfg!(feature = "bundled-durable")})
         ),
         Some("discover") => {
             anyhow::ensure!(args.next().is_none(), "Unexpected discover argument");
@@ -91,6 +92,10 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
             anyhow::ensure!(args.next().is_none(), "Unexpected models argument");
             durable::models()?;
         }
+        Some("commands") => {
+            anyhow::ensure!(args.next().is_none(), "Unexpected commands argument");
+            durable::commands()?;
+        }
         Some("directories") if args.next().as_deref() == Some("--path") => {
             let path = args.next().context("directories needs a path")?;
             let show_hidden = match args.next().as_deref() {
@@ -102,12 +107,32 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
             directories::print(&path, show_hidden)?;
         }
         Some("files") if args.next().as_deref() == Some("--stdio") => files::serve()?,
+        Some("jj-history") if args.next().as_deref() == Some("--path") => {
+            let path = args.next().context("jj-history needs a path")?;
+            anyhow::ensure!(args.next().is_none(), "Unexpected jj-history argument");
+            history::print(&path)?;
+        }
+        Some("jj-enable") if args.next().as_deref() == Some("--path") => {
+            let path = args.next().context("jj-enable needs a path")?;
+            anyhow::ensure!(args.next().is_none(), "Unexpected jj-enable argument");
+            history::enable(&path)?;
+        }
+        Some("jj-restore") if args.next().as_deref() == Some("--path") => {
+            let path = args.next().context("jj-restore needs a path")?;
+            anyhow::ensure!(
+                args.next().as_deref() == Some("--operation"),
+                "jj-restore needs --operation"
+            );
+            let operation = args.next().context("jj-restore needs an operation")?;
+            anyhow::ensure!(args.next().is_none(), "Unexpected jj-restore argument");
+            history::restore(&path, &operation)?;
+        }
         Some("daemon") => {
             let target = serde_json::from_str(&args.next().context("daemon needs a target")?)?;
             server::daemon(target)?;
         }
         _ => bail!(
-            "Usage: pi-desktop-remote pair [OPTIONS] | connect --stdio | files --stdio | sessions | models | directories --path PATH [--show-hidden] | pi [ARGS] | --version | --licenses"
+            "Usage: pi-desktop-remote pair [OPTIONS] | connect --stdio | files --stdio | sessions | models | commands | directories --path PATH [--show-hidden] | jj-history --path PATH | jj-enable --path PATH | jj-restore --path PATH --operation ID | pi [ARGS] | --version | --licenses"
         ),
     }
     Ok(())

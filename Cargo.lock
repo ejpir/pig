@@ -4978,6 +4978,7 @@ dependencies = [
  "gpui",
  "gpui_wgpu",
  "jni",
+ "libc",
  "log",
  "memmap2",
  "ndk",
@@ -9264,6 +9265,7 @@ dependencies = [
  "pi_editor",
  "pi_jj",
  "pi_lsp_bridge",
+ "pi_markdown",
  "pi_settings",
  "pi_terminal",
  "serde_json",
@@ -9291,7 +9293,7 @@ dependencies = [
  "libc",
  "log",
  "pi_core",
- "pulldown-cmark",
+ "pi_markdown",
  "rand 0.10.3",
  "russh",
  "serde",
@@ -9382,6 +9384,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi_markdown"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "gpui",
+ "grammars",
+ "language",
+ "markdown",
+ "mermaid_render",
+ "pulldown-cmark",
+ "settings",
+ "streaming-iterator",
+ "theme",
+ "theme_settings",
+ "tree-sitter",
+ "util",
+]
+
+[[package]]
 name = "pi_remote"
 version = "0.1.0"
 dependencies = [
@@ -9393,6 +9414,7 @@ dependencies = [
  "fs2",
  "libc",
  "pi_core",
+ "pi_jj",
  "qrcode",
  "rand 0.9.4",
  "serde",

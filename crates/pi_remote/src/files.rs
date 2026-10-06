@@ -140,6 +140,10 @@ impl Files {
                 tree.entries.push(Entry {
                     path: relative,
                     directory: kind.is_dir(),
+                    size: kind
+                        .is_file()
+                        .then(|| child.metadata().ok().map(|metadata| metadata.len()))
+                        .flatten(),
                 });
             }
         }
@@ -272,14 +276,11 @@ mod tests {
         assert!(files.read("binary").is_err());
         assert!(files.read("huge").is_err());
         assert!(files.read("src").is_err());
-        assert!(
-            !files
-                .list()
-                .unwrap()
-                .entries
-                .iter()
-                .any(|e| e.path.starts_with(".git"))
-        );
+        let tree = files.list().unwrap();
+        assert!(!tree.entries.iter().any(|e| e.path.starts_with(".git")));
+        let size = |path: &str| tree.entries.iter().find(|e| e.path == path).unwrap().size;
+        assert_eq!(size("src/code.rs"), Some(12));
+        assert_eq!(size("src"), None);
     }
     #[cfg(unix)]
     #[test]

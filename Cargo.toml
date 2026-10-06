@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/pi_core", "crates/pi_desktop", "crates/pi_jj", "crates/pi_editor", "crates/pi_lsp_bridge", "crates/pi_settings", "crates/pi_terminal", "crates/pi_remote", "crates/gpui_android", "crates/pi_android"]
+members = ["crates/pi_core", "crates/pi_desktop", "crates/pi_jj", "crates/pi_editor", "crates/pi_lsp_bridge", "crates/pi_settings", "crates/pi_terminal", "crates/pi_remote", "crates/gpui_android", "crates/pi_android", "crates/pi_markdown"]
 resolver = "3"
 
 [workspace.package]
@@ -12,6 +12,8 @@ anyhow = "1.0"
 async-channel = "2.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+streaming-iterator = "0.1"
+tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18" }
 gpui = { path = "../zed/crates/gpui", default-features = false, features = ["x11", "wayland"] }
 gpui_platform = { path = "../zed/crates/gpui_platform", features = ["font-kit", "x11", "wayland"] }
 grammars = { path = "../zed/crates/grammars", features = ["load-grammars"] }
@@ -19,6 +21,7 @@ fuzzy = { path = "../zed/crates/fuzzy" }
 zed_path = { path = "../zed/crates/path", package = "path" }
 language = { path = "../zed/crates/language" }
 markdown = { path = "../zed/crates/markdown" }
+mermaid_render = { path = "../zed/crates/mermaid_render" }
 menu = { path = "../zed/crates/menu" }
 settings = { path = "../zed/crates/settings" }
 theme_settings = { path = "../zed/crates/theme_settings" }

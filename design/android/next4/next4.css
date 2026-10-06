@@ -1,0 +1,222 @@
+/* Pi for Android: the approved screens.
+ * Same Moonstone and Evening palettes, fonts and GPUI-only effects as
+ * ../screens/phone.css (solid and two-stop fills, shadows, radii, solid and
+ * dashed borders, opacity, SVG icons), on one proportion system:
+ *
+ *   space   4 px grid: 4 8 12 16 20 24 32 48; one 20 px screen gutter
+ *   type    1.2 ratio from 15 px: 12.5 15 18 22 26 31
+ *   radius  8 12 16 24 and pills; a nested radius is the outer minus its padding
+ *   height  48 touch targets; rows of 56 (one line) and 64 (two lines)
+ */
+@font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+@font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+@font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Italic.ttf"); font-style: italic; }
+@font-face { font-family: "Commit"; src: url("../../../assets/fonts/CommitMono-Regular.otf"); }
+
+:root {
+  /* Moonstone (light), from crates/pi_desktop/src/theme.rs */
+  --deep:#eef0f2; --canvas:#faf9f7; --panel:#f0ede8; --bar:#ebe7e2; --raised:#e4ded8;
+  --line:#ddd7d0; --line-strong:#cbc3bb; --selected:#e3dfd9;
+  --composer:#ffffff; --chip:#ffffff; --text:#252f3d; --secondary:#3e4753; --muted:#665f59; --faint:#8a837c;
+  --accent:#4b607c; --on-accent:#fff; --amber:#8b631f; --coral:#a44835; --green:#2e7950;
+  --added:#e4eee5; --removed:#f2e4df; --keyword:#2f5f9e; --string:#9a5b17; --plain:#3f4854;
+  --h-read:#2f7fa8; --h-edit:#b0661a; --h-check:#2e7950; --h-wait:#a57514;
+  --scrim:rgba(37,47,61,.32); --lift:0 -8px 32px rgba(37,47,61,.12);
+
+  --g:20px;
+  --t1:12.5px; --t2:15px; --t3:18px; --t4:22px; --t5:26px; --t6:31px;
+  --r1:8px; --r2:12px; --r3:16px; --r4:24px;
+  --serif: Georgia, "DejaVu Serif", serif;
+  --sans: "Plex", "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "Commit", ui-monospace, monospace;
+}
+.evening {
+  --deep:#0d1116; --canvas:#161d27; --panel:#1a212b; --bar:#1f2630; --raised:#252f3d;
+  --line:#363d46; --line-strong:#424954; --selected:#2d3239;
+  --composer:#202731; --chip:#29313c; --text:#ebe7e4; --secondary:#d5d8db; --muted:#9ca2aa; --faint:#7d848d;
+  --accent:#8caecb; --on-accent:#111820; --amber:#e5bd73; --coral:#efa08c; --green:#80bf95;
+  --added:#243b30; --removed:#422e30; --keyword:#8fb6dc; --string:#e1b06e; --plain:#b9bec5;
+  --h-read:#5fa9d0; --h-edit:#e3a35c; --h-check:#80bf95; --h-wait:#e5bd73;
+  --scrim:rgba(0,0,0,.5); --lift:0 -8px 32px rgba(0,0,0,.4);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 412px; height: 915px; overflow: hidden; }
+body { font: 400 var(--t2)/20px var(--sans); color: var(--text); background: var(--canvas); -webkit-font-smoothing: antialiased; }
+.mono { font-family: var(--mono); }
+.row { display: flex; align-items: center; }
+.col { display: flex; flex-direction: column; }
+.grow { flex: 1; min-width: 0; }
+.ell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wrap { flex-wrap: wrap; }
+.g4 { gap: 4px; } .g8 { gap: 8px; } .g12 { gap: 12px; } .g16 { gap: 16px; } .g24 { gap: 24px; }
+
+/* Type: one scale, three voices (sans for UI, serif for Pi's voice, mono for the computer's). */
+.t1 { font-size: var(--t1); line-height: 16px; }
+.t3 { font-size: var(--t3); line-height: 24px; font-weight: 600; }
+.t4 { font-size: var(--t4); line-height: 28px; font-weight: 600; }
+.serif { font-family: var(--serif); font-style: italic; font-weight: 400; letter-spacing: -.01em; }
+.display { font: italic 400 var(--t6)/36px var(--serif); letter-spacing: -.015em; }
+.headline { font: italic 400 var(--t4)/28px var(--serif); letter-spacing: -.01em; }
+.prose { line-height: 22px; color: var(--secondary); }
+.label { font-size: var(--t1); line-height: 16px; font-weight: 600; color: var(--muted); }
+.meta { font-size: var(--t1); line-height: 16px; color: var(--muted); }
+.strong { font-weight: 600; }
+.muted { color: var(--muted); } .faint { color: var(--faint); } .secondary { color: var(--secondary); }
+.add { color: var(--green); } .del { color: var(--coral); }
+code, .cmd { font-family: var(--mono); font-size: 12.5px; }
+
+/* Icons: 16 / 20 / 24 */
+i[data-i] { width: 20px; height: 20px; flex: none; display: inline-block; color: inherit; }
+i[data-i] svg { width: 100%; height: 100%; display: block; }
+i.sm { width: 16px; height: 16px; } i.lg { width: 24px; height: 24px; }
+
+/* Phone: Android status bar and gesture handle, drawn plainly. */
+.phone { position: relative; width: 412px; height: 915px; display: flex; flex-direction: column; background: var(--canvas); overflow: hidden; }
+.status { height: 32px; flex: none; display: flex; align-items: center; padding: 0 22px 0 26px; font-size: 13px; font-weight: 600; }
+.status .sp { flex: 1; } .status i[data-i] { width: 16px; height: 16px; margin-left: 6px; }
+.content { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.gesture { height: 22px; flex: none; display: flex; align-items: center; justify-content: center; }
+.gesture::after { content: ""; width: 108px; height: 4px; border-radius: 2px; background: var(--text); opacity: .5; }
+
+/* Top bar: 56 tall, 48 targets, title 18/24 over 12.5/16. */
+.bar { height: 56px; flex: none; display: flex; align-items: center; padding: 0 4px; }
+.bar .title { flex: 1; min-width: 0; padding: 0 4px; }
+.bar .title b { display: block; font-size: var(--t3); line-height: 24px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar .title span { display: block; font-size: var(--t1); line-height: 16px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tap { width: 48px; height: 48px; flex: none; display: flex; align-items: center; justify-content: center; border-radius: 24px; color: var(--secondary); }
+.scroll { flex: 1; min-height: 0; overflow: hidden; padding: 0 var(--g); }
+.hair { height: 1px; background: var(--line); flex: none; }
+
+/* Surfaces */
+.card { background: var(--composer); border: 1px solid var(--line); border-radius: var(--r3); }
+.well { background: var(--panel); border-radius: var(--r2); }
+.list > * + * { border-top: 1px solid var(--line); }
+.item { min-height: 64px; display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+.item.one { min-height: 56px; }
+.item .t { font-weight: 600; }
+.lead { width: 32px; flex: none; display: flex; justify-content: center; }
+
+/* Buttons: 48 / 40 tall, always pills. */
+.btn { height: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 24px; border-radius: 24px;
+  font-size: var(--t2); font-weight: 600; color: var(--text); background: var(--chip); border: 1px solid var(--line); white-space: nowrap; flex: none; }
+.btn.sm { height: 40px; padding: 0 16px; border-radius: 20px; font-size: 14px; }
+.btn.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+.btn.tonal { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); border-color: transparent; }
+.btn.quiet { background: transparent; border-color: transparent; color: var(--accent); }
+.btn.wide { width: 100%; } .btn.grow { flex: 1; }
+
+/* Chips: 32 / 28 */
+.chip { height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border-radius: 16px; background: var(--chip);
+  border: 1px solid var(--line); font-size: 13px; color: var(--secondary); white-space: nowrap; flex: none; }
+.chip.sm { height: 28px; padding: 0 10px; border-radius: 14px; font-size: var(--t1); }
+.chip.on { background: var(--selected); border-color: transparent; color: var(--text); font-weight: 600; }
+.chip i[data-i] { width: 14px; height: 14px; }
+
+/* State: dots, badges, tiles, stage segments */
+.dot { width: 8px; height: 8px; border-radius: 4px; flex: none; background: var(--hue, var(--muted)); }
+.dot.ring { box-shadow: 0 0 0 4px color-mix(in srgb, var(--hue) 22%, transparent); }
+.badge { height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 12px; font-size: 12px; font-weight: 600;
+  background: color-mix(in srgb, var(--hue) 15%, transparent); color: var(--hue); flex: none; }
+.tile { width: 32px; height: 32px; flex: none; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--hue) 14%, transparent); color: var(--hue); }
+.tile i[data-i] { width: 16px; height: 16px; }
+.tile.live { background: var(--composer); border: 1.5px solid color-mix(in srgb, var(--hue) 60%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--hue) 14%, transparent); }
+.tile.todo { background: transparent; border: 1.5px dashed var(--line-strong); color: var(--faint); }
+.tile.lg { width: 48px; height: 48px; border-radius: 14px; } .tile.lg i[data-i] { width: 24px; height: 24px; }
+/* The run rail in one line: four stages, each a 4 px segment. */
+.segs { display: flex; gap: 3px; width: 72px; flex: none; }
+.segs span { flex: 1; height: 4px; border-radius: 2px; background: var(--raised); }
+.segs .r { background: var(--h-read); } .segs .e { background: var(--h-edit); } .segs .c { background: var(--h-check); } .segs .h { background: var(--accent); }
+.segs .w { background: var(--h-wait); }
+.segs .live { box-shadow: 0 0 0 2px color-mix(in srgb, var(--h-edit) 25%, transparent); }
+/* Change size as five blocks, split by ratio. */
+.blocks { display: flex; gap: 2px; flex: none; }
+.blocks span { width: 7px; height: 7px; border-radius: 2px; background: var(--raised); }
+.blocks .a { background: var(--green); } .blocks .d { background: var(--coral); }
+
+/* Run rail */
+.stage { display: flex; gap: 12px; position: relative; }
+.stage .body { flex: 1; min-width: 0; padding-top: 6px; }
+.stage .rail { position: absolute; left: 15.5px; top: 36px; bottom: -20px; width: 0; border-left: 1px solid var(--line); }
+.stage .rail.ahead { border-left-style: dashed; border-color: var(--line-strong); }
+.stage.todo { align-items: center; } .stage.todo .body { padding-top: 0; }
+.stage.todo .t { color: var(--faint); font-weight: 400; }
+
+/* The dock: everything the thumb needs, stacked at the bottom. */
+.dock { flex: none; padding: 8px 12px 12px; display: flex; flex-direction: column; }
+.composer { background: var(--composer); border: 1px solid var(--line-strong); border-radius: 24px; padding: 12px 8px 4px 16px; }
+.composer .draft { min-height: 24px; line-height: 22px; padding-right: 8px; }
+.composer .draft.ph { color: var(--faint); }
+.composer .tools { display: flex; align-items: center; margin: 4px 0 0 -12px; }
+.control { height: 48px; padding: 0 8px; display: inline-flex; align-items: center; gap: 4px; border-radius: 12px;
+  color: var(--secondary); font-size: var(--t1); font-weight: 600; white-space: nowrap; }
+.control i[data-i] { width: 14px; height: 14px; }
+.send { width: 40px; height: 40px; border-radius: 20px; display: flex; align-items: center; justify-content: center; background: var(--accent); color: var(--on-accent); flex: none; margin: 4px; }
+.send.off { background: var(--raised); color: var(--faint); }
+.caret { display: inline-block; width: 2px; height: 19px; background: var(--accent); vertical-align: -4px; margin-left: 1px; }
+/* A strip that belongs to the composer sits on it, sharing its border. */
+.strip { margin-bottom: -1px; padding: 0 8px 0 16px; min-height: 48px; display: flex; align-items: center; gap: 12px;
+  background: var(--panel); border: 1px solid var(--line-strong); border-bottom-color: var(--line); border-radius: 24px 24px 0 0; }
+.strip + .composer { border-radius: 0 0 24px 24px; }
+
+/* Turns */
+.you { align-self: flex-end; max-width: 86%; padding: 12px 16px; border-radius: 20px 20px 4px 20px; background: var(--panel); line-height: 22px; }
+
+/* Sheets */
+.scrim { position: absolute; inset: 0; background: var(--scrim); }
+.sheet { position: absolute; left: 0; right: 0; bottom: 0; background: var(--canvas); border-radius: 24px 24px 0 0; box-shadow: var(--lift);
+  padding: 8px var(--g) 0; display: flex; flex-direction: column; }
+.handle { width: 32px; height: 4px; border-radius: 2px; background: var(--line-strong); margin: 4px auto 16px; flex: none; }
+
+/* Code and diffs */
+.code { font-family: var(--mono); font-size: 12.5px; line-height: 22px; color: var(--plain); }
+.code .l { display: flex; white-space: pre; }
+.code .n { width: 40px; flex: none; text-align: right; padding-right: 12px; color: var(--faint); }
+.code .l.a { background: var(--added); } .code .l.d { background: var(--removed); }
+.code .l.sel { box-shadow: inset 3px 0 0 var(--accent); }
+.code .k { color: var(--keyword); } .code .s { color: var(--string); }
+
+/* Android's keyboard, drawn plainly */
+.kb { flex: none; background: var(--bar); padding: 8px 4px 4px; }
+.kb .sugg { display: flex; height: 40px; align-items: center; font-size: 15px; color: var(--secondary); margin-bottom: 4px; }
+.kb .sugg span { flex: 1; text-align: center; } .kb .sugg span + span { border-left: 1px solid var(--line); }
+.kb .keys { display: flex; gap: 6px; justify-content: center; margin: 0 0 10px; }
+.kb .key { width: 34px; height: 44px; border-radius: 7px; background: var(--chip); display: flex; align-items: center; justify-content: center;
+  font-size: 18px; box-shadow: 0 1px 0 var(--line-strong); }
+.kb .key.w { width: 52px; font-size: 13px; } .kb .key.space { width: 190px; } .kb .key.act { background: var(--accent); color: var(--on-accent); }
+
+/* The run line: a run drawn through its stages, each stretch in
+ * its stage's colour and, across a row, as long as the stage took. A key under
+ * a finished line says what each stretch did. */
+.run { display: flex; align-items: center; gap: 2px; height: 12px; }
+.run > b { height: 3px; border-radius: 2px; flex: none; }
+.run .r { background: var(--h-read); } .run .e { background: var(--h-edit); } .run .c { background: var(--h-check); } .run .h { background: var(--accent); }
+.key { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; margin-top: 12px; }
+.key > div { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; line-height: 20px; color: var(--secondary); }
+.key i[data-i] { width: 16px; height: 16px; color: var(--hue); }
+.key .tm { margin-left: auto; font-size: var(--t1); color: var(--muted); }
+
+/* In a thread the line runs down the gutter through a station per stage,
+ * each carrying its stage's icon, so the colour is never the only cue. */
+.st { position: relative; display: flex; gap: 12px; }
+.st .stn { width: 28px; height: 28px; flex: none; border-radius: 14px; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--hue) 16%, var(--canvas)); color: var(--hue); }
+.st .stn i[data-i] { width: 14px; height: 14px; }
+.st .stn.live { background: var(--composer); border: 2px solid var(--hue); box-shadow: 0 0 0 4px color-mix(in srgb, var(--hue) 16%, transparent); }
+.st .stn.ahead { background: transparent; border: 1.5px dashed var(--line-strong); color: var(--faint); }
+.st .to { position: absolute; left: 12.5px; width: 3px; top: 32px; bottom: -20px; border-radius: 2px; background: var(--hue); }
+.st .to.ahead { left: 13px; width: 0; background: none; border-left: 2px dashed var(--line-strong); border-radius: 0; }
+.st .body { flex: 1; min-width: 0; padding-top: 4px; }
+.st.ahead { align-items: center; } .st.ahead .body { padding-top: 0; }
+
+/* Under a finished line, each stretch's time sits under its start. */
+.times { display: flex; gap: 2px; margin-top: 4px; font-size: var(--t1); line-height: 16px; color: var(--muted); }
+.times > span { flex: none; white-space: nowrap; }
+/* Home: each working run drawn to time on one shared track (five minutes
+ * wide), so the longest run shows longest. */
+.track { display: flex; gap: 2px; height: 4px; border-radius: 2px; background: var(--raised); }
+.track b { height: 4px; border-radius: 2px; flex: none; }
+.track .r { background: var(--h-read); } .track .e { background: var(--h-edit); } .track .c { background: var(--h-check); }
+.track .live { box-shadow: 0 0 0 2px color-mix(in srgb, var(--hue) 28%, transparent); }

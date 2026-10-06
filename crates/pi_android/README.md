@@ -1,15 +1,16 @@
 # Pi for Android
 
-The [Android screens](../../design/android/README.md) as an app, in GPUI on
+The [Android screens](../../design/android/next4/README.md) as an app, in GPUI on
 [gpui_android](../gpui_android/README.md): follow the sessions on a
 computer, answer Pi's questions, review its changes and start new work.
 
 The phone connects to a computer over SSH with its own key and uses Pi
 Desktop's helper there (`pi-desktop-remote`). Sessions it starts are
 **durable**: their state lives in a database on the computer, so they carry on
-while the phone is away and pick up where they were. “Look around with sample
-sessions” on the first screen opens sample sessions that run on their own
-instead, with no computer.
+while the phone is away and pick up where they were. Sample sessions that run
+on their own, with no computer, are under “Set up with an SSH key instead” on
+the first screen, and in the computer switcher (tap the computer's name on
+Home).
 
 ## Set up the computer
 
@@ -52,7 +53,7 @@ computer's existing SSH server—there is no extra listening port or pairing
 daemon. The QR also pins the SSH host fingerprint, so the first connection is
 not trust-on-first-use.
 
-Manual setup remains available below the scanner. Enter `you@computer` (an IP
+Manual setup is behind **Set up with an SSH key instead**. Enter `you@computer` (an IP
 address or a Tailscale name works where `.local` names don't), and tap Connect.
 The first time, the computer turns the phone's key down: copy it from the second
 step into `~/.ssh/authorized_keys` there, and connect again. The computer's host
@@ -97,10 +98,15 @@ shows an update message and leaves recent projects available.
   updates are ignored. Rejected prompts stay available as **Edit and retry**;
   recovery never replaces a draft already being edited.
 - **Back, notifications, links, selecting text, settings:** as in the sample.
-- **Navigation drawer:** open the left menu from Sessions or a conversation
-  to start work, switch sessions or reach Settings. Swipe left to close it;
-  swipe down from a sheet's handle (or its content when scrolled to the top)
-  to dismiss the sheet. Back and close buttons remain available.
+- **Computers, sheets and the dock:** Home's title is the computer; tap it to
+  switch computers, pair another, try the sample sessions or reach Settings.
+  What moves work forward sits at the bottom: the start bar on Home, Working
+  and Stop on the composer, Pi's question in the composer's place, Review over
+  the follow-up. Swipe down from a sheet's handle (or its content when
+  scrolled to the top) to dismiss it. Back and close buttons remain available.
+- **Copying:** long-press a prompt, a reply, a question's command or a line in
+  Review to open it as selectable text: hold a word and drag the handles to
+  copy part of it, or copy all of it.
   Panels follow the finger until release, then settle smoothly; partial and
   cancelled drags return to their starting position. Reduced motion is honored.
   Sheet headers and close buttons remain visible while long content scrolls.
@@ -116,6 +122,14 @@ shows an update message and leaves recent projects available.
   Tap a stage for commands, full tool output and file details. Live commentary
   and tool previews stay visible while the run works; scrolling up pauses
   following, and **Latest reply** returns to the bottom.
+- **Pages Pi makes:** when Pi writes an `.html` file, a card under the turn
+  opens it full screen, with a Preview tab (a web view) and a Code tab. The
+  phone already has the page from Pi's `write`, and applies later exact edits
+  itself; an edit it can't follow says so instead of showing an old page. Ask
+  for one self-contained file: other files next to it aren't loaded. The page
+  runs its scripts and may use the network, but has no access to the app, its
+  files or a native bridge; links it follows on a tap open in the browser. The
+  desktop preview opens pages in the browser.
 - **Long drafts:** bounded, scrollable composers; horizontal scrolling for
   one-line inputs; Unicode-aware cursor/deletion. Return adds a line by
   default. With Return sends enabled, Shift+Return still adds a line.
@@ -167,9 +181,9 @@ The named states use the sample sessions and match the design's screens:
 `review`, `typing`, `details`, `evening`, `settings`, and the sheets `model`,
 `attach`, `more`, `project`, `models` and `resources`. Stress states include
 `long-input`, `long-reply`, `streaming-reply`, `long-labels`, `empty-search`,
-`failed`, `stopped`, `drawer`, `activity`, `markdown`, `multi-turn` and
+`failed`, `stopped`, `computers`, `many-files`, `activity`, `markdown`, `multi-turn` and
 `tool-output`, `follow-up-input`, `delete`, `delete-running`, `projects`,
-`project-empty`, `project-error`, `project-loading`, `project-long-path`,
+`project-empty`, `project-error`, `project-loading`, `project-long-path`, `project-tree`, `project-search`, `project-file`, `tool-image`,
 `model-long-list`, `model-no-match`, `thinking`, `mentions`, `image-input`
 and `image-only`. The tests
 render every state at 320×640, 384×854 and 640×360.
@@ -199,7 +213,7 @@ inspection: the script checks process survival and crash logs, not appearance.
 `test_interactions.py` waits for settled layouts and asserts the QR connect screen
 and native camera scanner, typing, model search, thinking selection, long Unicode
 edits, Stop, actual system-picker image import, image preview/send, scrollbars,
-drawer/sheet drags, confirmed swipe deletion, completed activity details, long
+sheet drags, confirmed swipe deletion, completed activity details, long
 tool/reply scrolling and project selection.
 It saves screenshots and a JSON report. Use `--case input`, `--case picker`,
 `--case models`, etc. to repeat a case. The picker case supports English AOSP
@@ -210,11 +224,14 @@ and switching fields. It expects English portrait Gboard with four rows and
 no extra number row or toolbar; other layouts can run the remaining cases
 without changing the phone's keyboard settings.
 Fixture sessions are paused intentionally. Restart the app
-or use Connect → sample sessions to try animated sample runs.
+or use the computer switcher's sample sessions to try animated sample runs.
+`pi://test/grow` (UI-test build only) streams a growing write and reply into
+the paused Qwen sample, to check that growing content does not move the
+thread.
 
 Check short/empty/multiline drafts, switching from a populated field to an
 empty field, long-paste editing and scrolling, send with the keyboard open,
-back from New session, drawer/sheet scrims, completed activity expansion,
+back from New session, sheet scrims, completed activity expansion,
 tool-output scrolling, and reading earlier text while updates arrive.
 
 `test_ssh.py` runs both the durable-session regression and the complete QR

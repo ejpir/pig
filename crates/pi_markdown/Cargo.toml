@@ -1,0 +1,24 @@
+[package]
+name = "pi_markdown"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared Pi Desktop and Android Markdown rendering and syntax highlighting."
+
+[dependencies]
+base64 = "0.22"
+gpui.workspace = true
+grammars.workspace = true
+mermaid_render.workspace = true
+pulldown-cmark = { version = "0.13", default-features = false }
+streaming-iterator.workspace = true
+tree-sitter.workspace = true
+# Embed Zed's grammar queries in debug builds as well as release/APK builds.
+util.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+language.workspace = true
+markdown.workspace = true
+settings.workspace = true
+theme_settings.workspace = true
+zed_theme.workspace = true

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi in your pocket, next3</title>
+<style>
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+  :root { --bg:#ece7e1; --card:#faf9f7; --text:#252f3d; --muted:#665f59; --line:#ddd7d0; --accent:#4b607c; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0d1116; --card:#161d27; --text:#ebe7e4; --muted:#9ca2aa; --line:#363d46; --accent:#8caecb; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Plex", "IBM Plex Sans", system-ui, sans-serif; }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 48px 24px 80px; }
+  .eyebrow { font-size: 11px; color: var(--muted); }
+  h1 { font: italic 400 44px/1.1 Georgia, "DejaVu Serif", serif; margin: 10px 0 12px; letter-spacing: -.01em; }
+  .lede { font-size: 17px; color: var(--muted); max-width: 760px; margin: 0 0 8px; }
+  .links a { color: var(--accent); margin-right: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(720px, 1fr)); gap: 40px 32px; margin-top: 36px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  .pair a { display: block; position: relative; }
+  .pair img { width: 100%; display: block; border-radius: 20px; border: 1px solid var(--line); background: var(--card); }
+  .pair .before img { opacity: .72; }
+  .pair .none { border: 1px dashed var(--line); border-radius: 20px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 14px; aspect-ratio: 412 / 915; }
+  .tag { font-size: 11px; color: var(--muted); margin-bottom: 6px; display: block; }
+  h2 { font-size: 17px; margin: 14px 0 4px; }
+  ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 14px; }
+  li + li { margin-top: 2px; }
+</style></head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">Design study, Android, third pass</div>
+  <h1>Pi in your pocket, next3</h1>
+  <p class="lede">Each screen taken from the pass you preferred, with your changes: next’s detail and icons, next2’s run line, with stage icons and a key so colour is never the only cue. next and next2 on the left, next3 on the right.</p>
+  <p class="links"><a href="README.md">Notes and ratios</a><a href="overview.png">Overview PNG</a><a href="../next2/index.html">next2</a><a href="../next/index.html">next</a><a href="../index.html">The current screens</a></p>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+  const screens = [
+    ["01-pair", "next, with the note above the button as in next2"],
+    ["02-home", "next, without the summary line or the rule between working sessions, and each working run drawn to time on a shared track"],
+    ["03-new", "next2"],
+    ["04-working", "next2's run line with stage icons, next's detail with at most three chips then a count, and the dot back in the Working strip"],
+    ["05-answer", "next2's thread with next's stage detail, and next's question card"],
+    ["06-done", "next2's finished line with each stretch's time, and next's report card"],
+    ["07-review", "next2"],
+    ["08-details", "next, with the run line and its key added"],
+    ["09-history", "next2"],
+    ["10-page", "next, with the run line and a key that says what Pi did"],
+    ["11-viewer", "next2"],
+    ["12-evening", "next3's Working in the dark theme"],
+    ["13-computers", "next2"],
+  ];
+  const titles = { "01-pair": "Pair", "02-home": "Home", "03-new": "New session", "04-working": "Working", "05-answer": "Answer in place",
+    "06-done": "Done", "07-review": "Review", "08-details": "Details", "09-history": "File history", "10-page": "A page Pi made",
+    "11-viewer": "Page viewer", "12-evening": "Evening", "13-computers": "Computers" };
+  const shot = (dir, name, label) => `<div class="${dir ? "before" : ""}"><span class="tag">${label}</span><a href="${dir}screens/${name}.html"><img src="${dir}screens/${name}.png" alt="${titles[name]}, ${label}" loading="lazy"></a></div>`;
+  document.getElementById("grid").innerHTML = screens.map(([name, note]) => `
+    <section>
+      <div class="pair">${shot("../next/", name, "next")}${shot("../next2/", name, "next2")}${shot("", name, "next3")}</div>
+      <h2>${titles[name]}</h2>
+      <ul><li>From ${note}</li></ul>
+    </section>`).join("");
+</script>
+</body></html>

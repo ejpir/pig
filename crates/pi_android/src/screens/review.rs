@@ -1,15 +1,16 @@
-//! 07 Review: the edits Pi made, file by file. Tapping lines attaches them to
-//! a follow-up, which goes back to the session.
+//! 07 Review: one file at a time with arrows between files, an edge-to-edge
+//! diff, and tapped lines attached to the follow-up, which goes back to the
+//! session.
 
 use super::scroll_area;
 use crate::{
-    app::{PhoneApp, Route, Sheet},
+    app::{PhoneApp, Route},
     composer::Attachment,
     model::{FileChange, SessionId},
-    theme::theme,
+    theme::{MONO, theme},
     ui::{self, icon},
 };
-use gpui::{AnyElement, Context, FontWeight, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Window, div, prelude::*, px};
 use std::collections::BTreeSet;
 
 impl PhoneApp {
@@ -21,6 +22,9 @@ impl PhoneApp {
     ) -> AnyElement {
         let colors = theme(cx);
         let scroll = self.scroll(Route::Review(id));
+        let commands = self.command_catalog_for_session(id, cx);
+        self.review
+            .update(cx, |composer, _| composer.use_commands(commands));
         let (model, thinking) = self.model_settings(cx);
         self.review
             .update(cx, |composer, _| composer.set_model_label(model, thinking));
@@ -40,100 +44,124 @@ impl PhoneApp {
         let Some(session) = self.store.as_ref().and_then(|store| store.session(id)) else {
             return div().into_any_element();
         };
-        let stopping = self
-            .store
-            .as_ref()
-            .and_then(|store| store.live.as_ref())
-            .is_some_and(|live| live.is_stopping(id));
-        self.review.update(cx, |composer, _| {
-            composer.set_running(session.state.is_running(), stopping)
-        });
-        let computer = self
-            .store
-            .as_ref()
-            .map(|store| store.computer.name.clone())
-            .unwrap_or_default();
         let count = session.files.len();
-        let subtitle = match count {
-            1 => format!("{} · 1 file", session.title),
-            count => format!("{} · {count} files", session.title),
-        };
-        let appbar = ui::appbar(back, "Changes", Some(subtitle.into()), &colors).child(
-            ui::tap("more", "dots", &colors)
-                .on_click(cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx))),
-        );
         let shown = self.review_file.min(count.saturating_sub(1));
-        let files = div()
-            .id("files")
+        let file = session.files.get(shown);
+        let (name, folder) = file.map_or_else(
+            || ("Changes".to_owned(), session.title.clone()),
+            |file| {
+                let folder = file
+                    .path
+                    .rsplit_once('/')
+                    .map_or_else(String::new, |(folder, _)| folder.to_owned());
+                (file.name().to_owned(), folder)
+            },
+        );
+        let step = |id: &'static str, glyph: &'static str, to: Option<usize>| {
+            let tap = ui::tap(id, glyph, &colors);
+            match to {
+                Some(to) => tap.on_click(cx.listener(move |this, _, _, cx| {
+                    this.review_file = to;
+                    this.review_lines.clear();
+                    this.review.update(cx, |review, cx| review.set_lines(None, cx));
+                    cx.notify();
+                })),
+                None => tap.opacity(0.45),
+            }
+        };
+        let appbar = ui::appbar(back, name, Some(folder.into()), &colors)
+            .child(step("previous-file", "chev_l", shown.checked_sub(1)))
+            .child(step("next-file", "chev_r", (shown + 1 < count).then_some(shown + 1)));
+        let progress = div()
             .flex_none()
             .flex()
-            .gap(px(8.))
-            .px(px(16.))
-            .pt(px(2.))
-            .pb(px(12.))
-            .overflow_x_scroll()
-            .children(session.files.iter().enumerate().map(|(index, file)| {
-                ui::chip(
-                    ("file", index),
-                    Some("file"),
-                    file.name().to_owned(),
-                    &colors,
-                )
-                .when(index == shown, |chip| {
-                    chip.bg(colors.selected)
-                        .border_color(colors.selected)
-                        .text_color(colors.text)
-                        .font_weight(FontWeight::SEMIBOLD)
-                })
-                .child(ui::counts(file.added, file.removed, &colors))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.review_file = index;
-                    this.review_lines.clear();
-                    this.review
-                        .update(cx, |review, cx| review.set_lines(None, cx));
-                    cx.notify();
-                }))
+            .gap(px(4.))
+            .px(px(20.))
+            .py(px(12.))
+            .children((0..count).map(|index| {
+                div()
+                    .flex_1()
+                    .h(px(3.))
+                    .rounded(px(2.))
+                    .bg(if index == shown { colors.accent } else { colors.raised })
             }));
-        let diff = session.files.get(shown).map(|file| {
-            ui::card(&colors)
-                .rounded(px(14.))
+        let summary = file.map(|file| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .px(px(20.))
+                .pb(px(12.))
+                .text_size(px(12.5))
+                .line_height(px(16.))
+                .text_color(colors.muted)
+                .child(div().flex_1().child("Tap a line to ask Pi about it"))
+                .when(file.added > 0, |row| {
+                    row.child(div().text_color(colors.green).child(format!("+{}", file.added)))
+                })
                 .child(
                     div()
-                        .px(px(12.))
-                        .py(px(10.))
-                        .border_b_1()
-                        .border_color(colors.line)
-                        .child(
-                            ui::mono(file.path.clone(), 12.)
-                                .text_color(colors.secondary)
-                                .truncate(),
-                        ),
+                        .w(px(28.))
+                        .flex()
+                        .justify_end()
+                        .text_color(colors.coral)
+                        .when(file.removed > 0, |removed| removed.child(format!("−{}", file.removed))),
                 )
-                .children(file.hunks.iter().enumerate().map(|(hunk_index, hunk)| {
-                    div()
-                        .child(
-                            ui::mono(hunk.header.clone(), 11.5)
-                                .px(px(12.))
-                                .py(px(6.))
-                                .bg(colors.panel)
-                                .text_color(colors.muted),
-                        )
-                        .child(div().py(px(2.)).children(hunk.lines.iter().enumerate().map(
-                            |(index, line)| {
-                                let selected = self.review_lines.contains(&(hunk_index, index));
-                                div()
-                                    .id(("line", hunk_index * 10_000 + index))
-                                    .child(
-                                        ui::diff_line(line, selected, &colors)
-                                            .text_size(px(12.5))
-                                            .line_height(px(22.)),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_line(id, hunk_index, index, cx)
-                                    }))
-                            },
-                        )))
-                }))
+        });
+        let diff = file.map(|file| {
+            let hunks = &file.hunks;
+            div().children(hunks.iter().enumerate().map(|(hunk_index, hunk)| {
+                // The lines between this hunk and the one before stay folded.
+                let gap = hunk_index
+                    .checked_sub(1)
+                    .and_then(|before| hunks[before].lines.last())
+                    .zip(hunk.lines.first())
+                    .map(|(last, first)| first.number.saturating_sub(last.number + 1))
+                    .filter(|gap| *gap > 0);
+                div()
+                    .children(gap.map(|gap| {
+                        div()
+                            .h(px(32.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .border_t_1()
+                            .border_b_1()
+                            .border_dashed()
+                            .border_color(colors.line_strong)
+                            .text_size(px(12.5))
+                            .text_color(colors.muted)
+                            .child(match gap {
+                                1 => "1 unchanged line".to_owned(),
+                                gap => format!("{gap} unchanged lines"),
+                            })
+                    }))
+                    .child(
+                        div()
+                            .h(px(32.))
+                            .px(px(20.))
+                            .flex()
+                            .items_center()
+                            .bg(colors.panel)
+                            .font_family(MONO)
+                            .text_size(px(12.))
+                            .text_color(colors.faint)
+                            .child(hunk_title(&hunk.header)),
+                    )
+                    .child(div().py(px(4.)).children(hunk.lines.iter().enumerate().map(
+                        |(index, line)| {
+                            let selected = self.review_lines.contains(&(hunk_index, index));
+                            div()
+                                .id(("line", hunk_index * 10_000 + index))
+                                .relative()
+                                .child(ui::code_line(line, selected, 48., &colors))
+                                .child(self.copyable(line.text.clone(), cx))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_line(id, hunk_index, index, cx)
+                                }))
+                        },
+                    )))
+            }))
         });
         div()
             .flex_1()
@@ -141,30 +169,24 @@ impl PhoneApp {
             .flex()
             .flex_col()
             .child(appbar)
-            .child(files)
-            .child(
-                ui::hint(
-                    format!("Edits Pi made in this session, already on {computer}. Tap a line to ask about it."),
-                    &colors,
-                )
-                .px(px(20.))
-                .pb(px(10.)),
-            )
+            .when(count > 1, |screen| screen.child(progress))
+            .when(count <= 1, |screen| screen.child(div().h(px(12.))))
+            .children(summary)
             .child(
                 scroll_area(("review", id.0 as usize), &scroll)
-                    .child(div().px(px(12.)).pb(px(12.)).children(diff).when(count == 0, |list| {
+                    .child(div().pb(px(12.)).children(diff).when(count == 0, |list| {
                         list.child(
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(10.))
-                                .px(px(8.))
+                                .gap(px(12.))
+                                .px(px(20.))
                                 .child(icon("info", 16., colors.muted))
                                 .child(ui::hint("Pi changed no files in this session.", &colors)),
                         )
                     })),
             )
-            .child(div().flex_none().pt(px(10.)).pb(px(10.)).child(self.review.clone()))
+            .child(div().flex_none().pt(px(8.)).pb(px(12.)).child(self.review.clone()))
             .into_any_element()
     }
 
@@ -187,6 +209,17 @@ impl PhoneApp {
         self.review
             .update(cx, |review, cx| review.set_lines(label, cx));
         cx.notify();
+    }
+}
+
+/// "@@ 204 readThinking", from "@@ 204,13 · readThinking".
+fn hunk_title(header: &str) -> String {
+    let (start, rest) = header.split_once(" · ").unwrap_or((header, ""));
+    let start = start.split(',').next().unwrap_or(start);
+    if rest.is_empty() {
+        start.to_owned()
+    } else {
+        format!("{start} {rest}")
     }
 }
 

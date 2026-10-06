@@ -80,6 +80,8 @@ pub enum TextAreaEvent {
     Changed,
     /// Enter in a field that sends.
     Submit,
+    /// The selection was copied from read-only text.
+    Copied,
 }
 
 pub struct TextArea {
@@ -113,6 +115,9 @@ pub struct TextArea {
     mouse_anchor: Option<usize>,
     /// Where the bar is in the window, while it shows.
     menu_bounds: Option<Bounds<Pixels>>,
+    /// Text to read and copy from, not to edit: no keyboard, and the bar
+    /// offers Copy and Select all.
+    read_only: bool,
 }
 
 impl EventEmitter<TextAreaEvent> for TextArea {}
@@ -156,7 +161,27 @@ impl TextArea {
             dragging: None,
             mouse_anchor: None,
             menu_bounds: None,
+            read_only: false,
         }
+    }
+
+    /// Text to select and copy parts of, such as Pi's reply.
+    pub fn read_only(max_lines: usize, cx: &mut Context<Self>) -> Self {
+        Self {
+            read_only: true,
+            ..Self::multiline("", max_lines, cx)
+        }
+    }
+
+    /// Shows `text` with all of it selected and the bar over it.
+    pub fn show_selected(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.content = normalize_input(&text.into(), self.multiline);
+        self.selection = 0..self.content.len();
+        self.marked = None;
+        self.scroll = px(0.);
+        self.menu = !self.content.is_empty();
+        self.reveal_caret = false;
+        cx.notify();
     }
 
     /// One line that submits on enter, configured for the keyboard as given.
@@ -267,6 +292,9 @@ impl TextArea {
     /// The field's own edit: replaces the selection, never the keyboard's
     /// composing word, which it ends.
     fn edit_selection(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         self.marked = None;
         self.replace_text_in_range(None, text, window, cx);
     }
@@ -376,9 +404,14 @@ impl TextArea {
     fn menu_items(&self) -> Vec<MenuItem> {
         let mut items = Vec::new();
         if !self.selection.is_empty() {
-            items.extend([MenuItem::Cut, MenuItem::Copy]);
+            if !self.read_only {
+                items.push(MenuItem::Cut);
+            }
+            items.push(MenuItem::Copy);
         }
-        items.push(MenuItem::Paste);
+        if !self.read_only {
+            items.push(MenuItem::Paste);
+        }
         if !self.content.is_empty() && self.selection != (0..self.content.len()) {
             items.push(MenuItem::SelectAll);
         }
@@ -391,6 +424,9 @@ impl TextArea {
             MenuItem::Copy => {
                 self.copy(&CopySelection, window, cx);
                 self.move_to(self.selection.end, cx);
+                if self.read_only {
+                    cx.emit(TextAreaEvent::Copied);
+                }
             }
             MenuItem::Paste => self.paste_text(&Paste, window, cx),
             MenuItem::SelectAll => {
@@ -568,7 +604,9 @@ impl TextArea {
     ) {
         let focused = self.focus.is_focused(window);
         window.focus(&self.focus, cx);
-        window.request_virtual_keyboard();
+        if !self.read_only {
+            window.request_virtual_keyboard();
+        }
         let offset = self.offset_at(event.position);
         if event.click_count >= 2 && !self.content.is_empty() {
             self.select(self.word_at(offset), cx);
@@ -883,6 +921,9 @@ impl EntityInputHandler for TextArea {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         self.menu = false;
         let range = self.replaced_range(range_utf16);
         let text = normalize_input(text, self.multiline);
@@ -903,6 +944,9 @@ impl EntityInputHandler for TextArea {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         self.menu = false;
         let range = self.replaced_range(range_utf16);
         let text = normalize_input(text, self.multiline);
@@ -1410,11 +1454,13 @@ impl Element for TextBody {
         cx: &mut App,
     ) {
         let focus = self.area.read(cx).focus.clone();
-        window.handle_input(
-            &focus,
-            ElementInputHandler::new(bounds, self.area.clone()),
-            cx,
-        );
+        if !self.area.read(cx).read_only {
+            window.handle_input(
+                &focus,
+                ElementInputHandler::new(bounds, self.area.clone()),
+                cx,
+            );
+        }
         let layout = &prepaint.layout;
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for quad in prepaint.mentions.drain(..) {

@@ -16,6 +16,9 @@ pub const MAX_TREE_ENTRIES: usize = 20_000;
 pub struct Entry {
     pub path: String,
     pub directory: bool,
+    /// A file's size in bytes. Older helpers don't send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tree {

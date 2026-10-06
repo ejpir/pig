@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>05 Answer in place</title>
+<link rel="stylesheet" href="../next2.css">
+<style>
+  .ask { box-shadow: var(--lift); padding: 20px 16px 12px; }
+  .choice { min-height: 48px; display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-radius: 12px; }
+  .choice.on { background: var(--selected); }
+  .radio { width: 20px; height: 20px; flex: none; border-radius: 10px; border: 2px solid var(--line-strong); }
+  .choice.on .radio { border: 6px solid var(--accent); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="bar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="name"><b>Qwen signatures</b><span>pi on studio-mac</span></div>
+      <span class="tap"><i data-i="info"></i></span>
+      <span class="tap"><i data-i="dots"></i></span>
+    </div>
+    <div class="scroll col g32" style="justify-content:flex-end;padding-bottom:20px">
+      <div class="you">qwen3.8-flash on OpenCode returns empty thinking signatures and we reject the response. Accept empty signatures there, but keep the check strict for Anthropic.</div>
+      <div class="col g24">
+        <div class="stage" style="--hue:var(--read)">
+          <span class="stn"></span><span class="to"></span>
+          <div class="row"><span class="strong grow">Understood</span><span class="small">0:21</span></div>
+        </div>
+        <div class="stage" style="--hue:var(--edit)">
+          <span class="stn"></span><span class="to"></span>
+          <div><div class="row"><span class="strong grow">Changed</span><span class="add">+3</span><span class="del" style="width:28px;text-align:right">−1</span></div>
+            <div class="cmd muted" style="margin-top:4px">openai-completions.ts</div></div>
+        </div>
+        <div class="stage" style="--hue:var(--wait)">
+          <span class="now"></span>
+          <div class="row"><span class="strong grow">Waiting for you</span><span class="small">2:04</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="dock">
+      <div class="ask">
+        <p class="pi q" style="padding:0 4px">Run the provider tests?</p>
+        <div class="well cmd" style="margin-top:16px;padding:10px 12px">pnpm test --filter @pi/ai -- qwen</div>
+        <div class="small" style="margin:8px 4px 0">Runs in ~/repos/pi on studio-mac</div>
+        <div class="col g4" style="margin-top:12px">
+          <div class="choice on"><span class="radio"></span><span class="grow">Allow once</span></div>
+          <div class="choice"><span class="radio"></span><div class="grow">Allow for this session<div class="small">Pi won't ask again for this command</div></div></div>
+          <div class="choice"><span class="radio"></span><div class="grow">Don't run it<div class="small">Tell Pi why in your next message</div></div></div>
+        </div>
+        <div class="row g8" style="margin-top:12px">
+          <span class="btn quiet" style="padding:0 20px">Later</span>
+          <span class="btn primary grow">Answer</span>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../next2.js"></script>
+</body></html>

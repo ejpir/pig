@@ -781,13 +781,80 @@ impl Platform for AndroidPlatform {
     fn on_keyboard_layout_change(&self, _callback: Box<dyn FnMut()>) {}
 }
 
+/// The newest log lines kept in memory, so an app can show them.
+const RECENT_LOGS: usize = 1000;
+
+static RECENT: std::sync::Mutex<std::collections::VecDeque<String>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// What was logged lately, oldest first: "15:53:50 W live: …".
+pub fn recent_logs() -> Vec<String> {
+    RECENT
+        .lock()
+        .map(|lines| lines.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Logcat, plus the newest lines in memory.
+struct Logger {
+    logcat: android_logger::AndroidLogger,
+}
+
+impl log::Log for Logger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.logcat.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        self.logcat.log(record);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs()) as libc::time_t;
+        // SAFETY: `localtime_r` reads `now` and writes only into `tm`.
+        let tm = unsafe {
+            let mut tm: libc::tm = std::mem::zeroed();
+            libc::localtime_r(&now, &mut tm);
+            tm
+        };
+        let module = record
+            .module_path()
+            .map(|path| path.rsplit("::").next().unwrap_or(path))
+            .unwrap_or("");
+        let line = format!(
+            "{:02}:{:02}:{:02} {} {module}: {}",
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec,
+            &record.level().as_str()[..1],
+            record.args()
+        );
+        if let Ok(mut lines) = RECENT.lock() {
+            if lines.len() == RECENT_LOGS {
+                lines.pop_front();
+            }
+            lines.push_back(line);
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 /// Logs to logcat under `tag` and reports panics there, which otherwise vanish.
+/// The newest lines also stay in memory: see `recent_logs`.
 pub fn init_logging(tag: &str, level: log::LevelFilter) {
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(level)
-            .with_tag(tag),
-    );
+    let logger = Logger {
+        logcat: android_logger::AndroidLogger::new(
+            android_logger::Config::default()
+                .with_max_level(level)
+                .with_tag(tag),
+        ),
+    };
+    if log::set_boxed_logger(Box::new(logger)).is_ok() {
+        log::set_max_level(level);
+    }
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         log::error!("{info}");

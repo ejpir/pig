@@ -1,6 +1,8 @@
-//! 04–06 A session: each prompt, the stages Pi went through, and the hand-off.
-//! The run that is going shows its stages in full; finished ones fold into a
-//! row of tiles with the summary under it.
+//! 04–06 A session: each prompt, the run line through the stages Pi went
+//! through, and the hand-off. The run that is going runs down the gutter, a
+//! station per stage; a finished one is drawn as one line with each stretch's
+//! time, with the report card under it. What moves the work forward sits in the
+//! dock: Working and Stop on the composer, the question in its place, Review.
 
 use super::scroll_area;
 use crate::{
@@ -9,10 +11,21 @@ use crate::{
         CheckResult, Reference, Session, SessionId, Stage, StageKind, StageStatus, State, Turn,
         duration_label,
     },
-    theme::{Theme, theme},
+    theme::{MONO, Theme, theme},
     ui::{self, Button, icon},
 };
-use gpui::{AnyElement, Context, Div, FontWeight, Window, div, prelude::*, px, relative};
+use gpui::{
+    AnyElement, Context, Div, FontWeight, Hsla, SharedString, Window, div, prelude::*, px,
+    relative,
+};
+use std::time::Duration;
+
+/// How many files and searches a stage shows before "+4 more".
+const CHIPS: usize = 3;
+/// How many lines of a running tool's output its stage shows.
+const TAIL: usize = 4;
+/// How many changed files the report card lists before "Show 5 more files".
+const FILES: usize = 3;
 
 impl PhoneApp {
     pub(crate) fn thread_screen(
@@ -25,12 +38,13 @@ impl PhoneApp {
         let scroll = self.scroll(Route::Thread(id));
         let away_from_bottom = scroll.max_offset().y + scroll.offset().y > px(80.);
         let composer = self.thread_composer(id, window, cx);
+        let commands = self.command_catalog_for_session(id, cx);
+        composer.update(cx, |composer, _| composer.use_commands(commands));
         let (model, thinking) = self.model_settings(cx);
         composer.update(cx, |composer, _| composer.set_model_label(model, thinking));
-        let back =
-            ui::tap("navigation", "menu", &colors).on_click(cx.listener(|this, _, window, cx| {
-                this.open_drawer(window, cx);
-            }));
+        let back = ui::tap("back", "back", &colors).on_click(cx.listener(|this, _, window, cx| {
+            this.back(window, cx);
+        }));
         let Some(store) = &self.store else {
             return div().into_any_element();
         };
@@ -43,11 +57,18 @@ impl PhoneApp {
         };
         let running = session.state.is_running();
         let stopping = store.live.as_ref().is_some_and(|live| live.is_stopping(id));
-        composer.update(cx, |composer, _| composer.set_running(running, stopping));
+        let asking = session.state == State::NeedsYou
+            && session.question.is_some()
+            && !self.questions_later.contains(&id);
+        let working = running && !asking;
+        composer.update(cx, |composer, _| composer.set_joined(working));
+        let pages = session.turn().is_some_and(|turn| !turn.pages.is_empty());
         let area = composer.read(cx).area.clone();
         area.update(cx, |area, _| {
             area.set_placeholder(if running {
                 "Queue a follow-up…"
+            } else if pages {
+                "Ask for a change…"
             } else {
                 "Ask a follow-up…"
             })
@@ -64,15 +85,15 @@ impl PhoneApp {
             State::Stopped => format!("{} · stopped by you", session.project),
             State::Failed => format!("{} · {}", session.project, session.status_line()),
         };
-        let appbar =
-            ui::appbar(back, session.title.clone(), Some(subtitle.into()), &colors)
-                .child(ui::tap("details", "info", &colors).on_click(
-                    cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::Details(id), cx)),
-                ))
-                .child(ui::tap("more", "dots", &colors).on_click(
-                    cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
-                ));
+        let appbar = ui::appbar(back, session.title.clone(), Some(subtitle.into()), &colors)
+            .child(ui::tap("details", "info", &colors).on_click(
+                cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::Details(id), cx)),
+            ))
+            .child(ui::tap("more", "dots", &colors).on_click(
+                cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
+            ));
         let last = session.turns.len().saturating_sub(1);
+        let many = session.turns.len() > 1;
         let turns = session
             .turns
             .iter()
@@ -85,15 +106,22 @@ impl PhoneApp {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap(px(16.))
+                    .gap(px(24.))
                     .when(index > 0, |turn| {
-                        turn.pt(px(24.))
-                            .border_t_1()
-                            .border_color(colors.line_strong)
+                        turn.pt(px(24.)).border_t_1().border_color(colors.line)
                     })
-                    .child(prompt(turn, index, &colors))
-                    .child(self.turn_activity(id, index, turn, live, &colors, cx))
-                    .children(reply(turn, index == last, &colors))
+                    .child(self.prompt(id, index, turn, live, many, &colors, cx))
+                    .child(if live {
+                        self.stations(session, index, turn, true, &colors, cx)
+                    } else {
+                        self.turn_activity(id, index, turn, false, &colors, cx)
+                    })
+                    .children(reply(turn, index == last, &colors).map(|reply| {
+                        let text = turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
+                        reply.relative().child(self.copyable(text, cx))
+                    }))
+                    .children(self.image_cards(id, index, turn, &colors, cx))
+                    .children(self.page_cards(index, turn, &colors, cx))
                     .children(ending)
             })
             .collect::<Vec<_>>();
@@ -128,7 +156,6 @@ impl PhoneApp {
                     )),
                 )
         });
-        let status = running.then(|| status_bar(session, &colors, cx));
         let failed = store
             .live
             .as_ref()
@@ -139,12 +166,9 @@ impl PhoneApp {
             .map(|(index, failed)| {
                 let request_id = failed.prompt.request_id.clone();
                 ui::card(&colors)
-                    .p(px(14.))
+                    .p(px(16.))
                     .border_color(colors.coral)
-                    .child(ui::label(
-                        "Message not sent · text and images kept",
-                        &colors,
-                    ))
+                    .child(ui::label("Message not sent · text and images kept", &colors))
                     .child(ui::hint(failed.error.clone(), &colors).my(px(8.)))
                     .child(
                         div()
@@ -171,6 +195,37 @@ impl PhoneApp {
                     )
             })
             .collect::<Vec<_>>();
+        let review = (!running && !session.files.is_empty()).then(|| {
+            let text = match session.files.len() {
+                1 => "Review the changed file".to_owned(),
+                count => format!("Review {count} changed files"),
+            };
+            ui::button_glyph("review", Button::Primary, Some("diff"), 16., text, false, &colors)
+                .mx(px(12.))
+                .on_click(cx.listener(move |this, _, window, cx| this.open_review(id, 0, window, cx)))
+        });
+        let dock = if asking {
+            div()
+                .px(px(12.))
+                .child(self.question_card(session, &store.computer.name.clone(), &colors, cx))
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .children(review)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .when(running, |dock| {
+                            dock.child(working_strip(session, stopping, &colors, cx))
+                        })
+                        .child(composer),
+                )
+                .into_any_element()
+        };
         div()
             .flex_1()
             .min_h_0()
@@ -178,51 +233,135 @@ impl PhoneApp {
             .flex_col()
             .child(appbar)
             .child(
-                scroll_area(("thread", id.0 as usize), &scroll).child(
-                    div()
-                        .px(px(20.))
-                        .pt(px(6.))
-                        .min_w_0()
-                        .pb(px(20.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(28.))
-                        .children(turns)
-                        .children(failed)
-                        .children(queued),
-                ),
-            )
-            .when(away_from_bottom, |screen| {
-                screen.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .justify_end()
-                        .px(px(16.))
-                        .pb(px(4.))
-                        .child(
-                            ui::button(
-                                "latest",
-                                Button::Quiet,
-                                Some("chev_d"),
-                                "Latest reply",
-                                true,
-                                &colors,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
+                // Latest reply floats over the thread: as a row of its own it
+                // would resize the thread whenever growing content let the
+                // reader fall behind, which moved the content under them.
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        scroll_area(("thread", id.0 as usize), &scroll).child(
+                            div()
+                                .px(px(20.))
+                                .pt(px(8.))
+                                .min_w_0()
+                                .pb(px(16.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(24.))
+                                .children(turns)
+                                .children(failed)
+                                .children(queued),
+                        ),
+                    )
+                    .when(away_from_bottom, |thread| {
+                        thread.child(
+                            div().absolute().right(px(16.)).bottom(px(4.)).child(
+                                ui::button(
+                                    "latest",
+                                    Button::Plain,
+                                    Some("chev_d"),
+                                    "Latest reply",
+                                    true,
+                                    &colors,
+                                )
+                                .shadow(vec![gpui::BoxShadow {
+                                    color: colors.shadow,
+                                    offset: gpui::point(px(0.), px(4.)),
+                                    blur_radius: px(12.),
+                                    spread_radius: px(0.),
+                                    inset: false,
+                                }])
+                                .on_click(cx.listener(move |this, _, _, cx| {
                                     this.scroll(Route::Thread(id)).scroll_to_bottom();
                                     cx.notify();
-                                },
-                            )),
-                        ),
-                )
-            })
-            .children(status)
-            .child(div().flex_none().pb(px(10.)).child(composer))
+                                })),
+                            ),
+                        )
+                    }),
+            )
+            .child(div().flex_none().pt(px(8.)).pb(px(12.)).child(dock))
             .into_any_element()
     }
 
+    /// What was asked, on the right. A finished prompt rests on one line and
+    /// opens in full when tapped.
+    #[allow(clippy::too_many_arguments)]
+    fn prompt(
+        &self,
+        id: SessionId,
+        index: usize,
+        turn: &Turn,
+        live: bool,
+        numbered: bool,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let folded = !live && !self.expanded_prompts.contains(&(id, index));
+        div().flex().justify_end().child(
+            div()
+                .id(("prompt", index))
+                .max_w(relative(0.86))
+                .min_w_0()
+                .px(px(16.))
+                .py(px(12.))
+                .rounded_tl(px(20.))
+                .rounded_tr(px(20.))
+                .rounded_bl(px(20.))
+                .rounded_br(px(4.))
+                .relative()
+                .bg(colors.panel)
+                .line_height(px(22.))
+                .when(numbered || !turn.pages.is_empty(), |prompt| {
+                    prompt.child(
+                        div()
+                            .mb(px(4.))
+                            .text_size(px(12.5))
+                            .line_height(px(16.))
+                            .text_color(colors.muted)
+                            .child(format!("Turn {} · {}", index + 1, turn.at)),
+                    )
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .when(folded, |text| text.truncate())
+                        .child(if folded {
+                            turn.prompt.lines().next().unwrap_or("").to_owned()
+                        } else {
+                            turn.prompt.clone()
+                        }),
+                )
+                .when(!turn.attachments.is_empty(), |prompt| {
+                    prompt.child(
+                        div().mt(px(8.)).flex().flex_wrap().gap(px(8.)).children(
+                            turn.attachments
+                                .iter()
+                                .enumerate()
+                                .map(|(index, attachment)| {
+                                    small_chip(("sent", index), Some("clip"), attachment.clone(), colors)
+                                }),
+                        ),
+                    )
+                })
+                .child(self.copyable(turn.prompt.clone(), cx))
+                .when(!live, |prompt| {
+                    prompt.on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.expanded_prompts.remove(&(id, index)) {
+                            this.expanded_prompts.insert((id, index));
+                        }
+                        cx.notify();
+                    }))
+                }),
+        )
+    }
+
+    /// A finished run as one line, with each stretch's time under it, or a key
+    /// that says what each did when nothing else does (a page). Tapping it
+    /// opens the stations.
     pub(crate) fn turn_activity(
         &self,
         id: SessionId,
@@ -232,95 +371,198 @@ impl PhoneApp {
         colors: &Theme,
         cx: &Context<Self>,
     ) -> Div {
+        if turn.stages.is_empty() {
+            return div();
+        }
         let expanded = self
             .expanded_turns
             .get(&(id, index))
             .copied()
             .unwrap_or(live);
-        let toggle = div()
-            .id(("expand-turn", index))
-            .debug_selector(|| "expand-turn".into())
-            .relative()
-            .child(crate::testing::probe(format!("turn-{index}-activity")))
-            .min_h(px(48.))
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .rounded(px(10.))
-            .active(|style| style.bg(colors.selected))
-            .child(icon(
-                if expanded { "chev_d" } else { "chev_r" },
-                16.,
-                colors.muted,
-            ))
+        let (times, timed) = run_times(turn);
+        let summary = if turn.pages.is_empty() {
+            ui::run_line(&times, timed, colors)
+        } else {
+            let entries = turn
+                .stages
+                .iter()
+                .filter(|stage| stage.status == StageStatus::Done && !times[stage.kind.index()].is_zero())
+                .map(|stage| (stage.kind, key_label(stage)))
+                .collect();
+            ui::run_line(&times, false, colors).child(ui::run_key(entries, &times, colors))
+        };
+        div()
+            .min_w_0()
             .child(
-                div().flex_1().min_w_0().child(
-                    ui::label(
-                        if live {
-                            "Live activity".to_owned()
-                        } else {
-                            format!("Activity · {}", turn.digest())
-                        },
-                        colors,
-                    )
-                    .truncate(),
-                ),
+                div()
+                    .id(("expand-turn", index))
+                    .debug_selector(|| "expand-turn".into())
+                    .relative()
+                    .child(crate::testing::probe(format!("turn-{index}-activity")))
+                    .rounded(px(8.))
+                    .active(|style| style.bg(colors.selected))
+                    .child(summary)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.expanded_turns.insert((id, index), !expanded);
+                        cx.notify();
+                    })),
             )
-            .child(ui::hint(format!("{} stages", turn.stages.len()), colors))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.expanded_turns.insert((id, index), !expanded);
-                cx.notify();
-            }));
-        div().min_w_0().when(!turn.stages.is_empty(), |body| {
-            body.child(toggle).when(expanded, |body| {
-                body.child(div().pt(px(8.)).flex().flex_col().gap(px(16.)).children(
-                    turn.stages.iter().enumerate().map(|(stage_index, stage)| {
-                        div()
-                            .id(("stage-details", stage_index))
-                            .debug_selector(|| "stage-details".into())
-                            .relative()
-                            .child(crate::testing::probe(format!(
-                                "turn-{index}-stage-{stage_index}"
-                            )))
-                            .rounded(px(12.))
-                            .active(|style| style.bg(colors.selected))
-                            .child(stage_row(
-                                stage,
-                                stage_index + 1 < turn.stages.len(),
-                                colors,
-                            ))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_sheet(Sheet::Activity(id, index, stage_index), cx)
-                            }))
-                    }),
-                ))
+            .when(expanded, |body| {
+                body.child(
+                    self.stations_of(id, None, index, turn, false, colors, cx)
+                        .mt(px(16.)),
+                )
             })
-        })
     }
 
-    /// Under a finished run: the changed files, the check, and Review.
+    fn stations(
+        &self,
+        session: &Session,
+        index: usize,
+        turn: &Turn,
+        live: bool,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        self.stations_of(session.id, Some(session), index, turn, live, colors, cx)
+    }
+
+    /// The run line down the gutter: a station per stage with its icon, and
+    /// under each what Pi did. Stages ahead are dashed; a hand marks a run
+    /// waiting for you.
+    #[allow(clippy::too_many_arguments)]
+    fn stations_of(
+        &self,
+        id: SessionId,
+        session: Option<&Session>,
+        index: usize,
+        turn: &Turn,
+        live: bool,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let waiting = live && session.is_some_and(|session| session.state == State::NeedsYou);
+        // Waiting for you is where the run stands: nothing after it shows yet.
+        let shown = if waiting {
+            turn.stages
+                .iter()
+                .position(|stage| stage.status == StageStatus::Live)
+                .map_or(turn.stages.len(), |live| live + 1)
+        } else {
+            turn.stages.len()
+        };
+        let stages = &turn.stages[..shown];
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(24.))
+            .children(stages.iter().enumerate().map(|(stage_index, stage)| {
+                let next = stages.get(stage_index + 1);
+                let waits = waiting && stage.status == StageStatus::Live;
+                let row = if waits {
+                    let session = session.expect("a waiting session");
+                    waiting_row(session, next.is_some(), colors)
+                } else {
+                    stage_row(stage, turn, index, stage_index, next.is_some(), colors)
+                };
+                div()
+                    .id(("stage-details", stage_index))
+                    .debug_selector(|| "stage-details".into())
+                    .relative()
+                    .child(crate::testing::probe(format!(
+                        "turn-{index}-stage-{stage_index}"
+                    )))
+                    .rounded(px(12.))
+                    .active(|style| style.bg(colors.selected))
+                    .child(row)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_sheet(Sheet::Activity(id, index, stage_index), cx)
+                    }))
+            }))
+    }
+
+    /// The report card under a finished run: each file with its change size,
+    /// and the check.
     fn ending(&self, session: &Session, cx: &Context<Self>) -> Div {
         let colors = theme(cx);
         let id = session.id;
+        let has_files = !session.files.is_empty();
         let check = session.check.as_ref().map(|check| {
             let (color, result) = match check.result {
-                CheckResult::Passed => (colors.green, "passed"),
-                CheckResult::Failed => (colors.coral, "failed"),
-                CheckResult::NotRun => (colors.muted, "not run"),
+                CheckResult::Passed => (colors.green, "Passed"),
+                CheckResult::Failed => (colors.coral, "Failed"),
+                CheckResult::NotRun => (colors.muted, "Not run"),
             };
-            ui::row("check", session.files.is_empty(), &colors)
+            div()
+                .id("check")
+                .min_h(px(56.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .when(has_files, |row| row.border_t_1().border_color(colors.line))
                 .child(icon("shield", 16., color))
                 .child(
-                    div()
+                    ui::mono(check.command.clone(), 12.5)
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .child(check.command.clone()),
+                        .text_color(colors.secondary),
                 )
-                .child(ui::hint(result, &colors))
+                .child(plain_badge(result, color, &colors))
         });
-        let files = session.files.iter().enumerate().map(|(index, file)| {
-            ui::row(("file", index), index == 0, &colors)
+        let all = self.all_files.contains(&id);
+        let hidden = session.files.len().saturating_sub(FILES);
+        let shown = if all { session.files.len() } else { FILES };
+        let fold = (hidden > 0).then(|| {
+            div()
+                .id("more-files")
+                .relative()
+                .child(crate::testing::probe("more-files"))
+                .min_h(px(48.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .border_t_1()
+                .border_color(colors.line)
+                .text_size(px(14.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.accent)
+                .active(|style| style.bg(colors.selected))
+                .child(icon(if all { "chev_u" } else { "chev_d" }, 16., colors.accent))
+                .child(if all {
+                    "Show fewer".to_owned()
+                } else if hidden == 1 {
+                    "Show 1 more file".to_owned()
+                } else {
+                    format!("Show {hidden} more files")
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.all_files.remove(&id) {
+                        this.all_files.insert(id);
+                    }
+                    cx.notify();
+                }))
+        });
+        let files = session.files.iter().take(shown).enumerate().map(|(index, file)| {
+            let figure = |text: String, width: f32, color: Hsla| {
+                div()
+                    .w(px(width))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .font_family(MONO)
+                    .text_size(px(12.5))
+                    .text_color(color)
+                    .child(text)
+            };
+            div()
+                .id(("file", index))
+                .min_h(px(56.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .when(index > 0, |row| row.border_t_1().border_color(colors.line))
+                .active(|style| style.bg(colors.selected))
                 .child(icon("file", 16., colors.muted))
                 .child(
                     div()
@@ -329,31 +571,25 @@ impl PhoneApp {
                         .truncate()
                         .child(file.name().to_owned()),
                 )
-                .child(ui::counts(file.added, file.removed, &colors))
+                .child(ui::blocks(file.added, file.removed, &colors))
+                .child(figure(
+                    if file.added > 0 { format!("+{}", file.added) } else { String::new() },
+                    32.,
+                    colors.green,
+                ))
+                .child(figure(
+                    if file.removed > 0 { format!("−{}", file.removed) } else { String::new() },
+                    20.,
+                    colors.coral,
+                ))
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.open_review(id, index, window, cx)),
                 )
         });
-        let review = (!session.files.is_empty()).then(|| {
-            let text = match session.files.len() {
-                1 => "Review the changed file".to_owned(),
-                count => format!("Review {count} changed files"),
-            };
-            ui::button(
-                "review",
-                Button::Primary,
-                Some("diff"),
-                text,
-                false,
-                &colors,
-            )
-            .w_full()
-            .on_click(cx.listener(move |this, _, window, cx| this.open_review(id, 0, window, cx)))
-        });
         let failure = (session.state == State::Failed).then(|| {
             ui::card(&colors)
                 .border_color(colors.coral.opacity(0.4))
-                .p(px(14.))
+                .p(px(16.))
                 .flex()
                 .gap(px(12.))
                 .child(icon("alert", 16., colors.coral))
@@ -380,97 +616,416 @@ impl PhoneApp {
                     &colors,
                 ))
             })
-            .when(!session.files.is_empty() || check.is_some(), |ending| {
-                ending.child(ui::card(&colors).children(files).children(check))
+            .when(has_files || check.is_some(), |ending| {
+                ending.child(
+                    ui::card(&colors)
+                        .px(px(16.))
+                        .children(files)
+                        .children(fold)
+                        .children(check),
+                )
             })
-            .children(review)
+    }
+
+    /// Pi's question in the composer's place, so the run so far stays
+    /// readable. Only Answer answers.
+    fn question_card(
+        &self,
+        session: &Session,
+        computer: &str,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let id = session.id;
+        let Some(question) = session.question.as_ref() else {
+            return div().into_any_element();
+        };
+        let choices = question.choices.iter().enumerate().map(|(index, choice)| {
+            let on = self.choice == Some(choice.answer);
+            let answer = choice.answer;
+            div()
+                .id(("choice", index))
+                .min_h(px(48.))
+                .px(px(12.))
+                .py(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .rounded(px(12.))
+                .when(on, |row| row.bg(colors.selected))
+                .active(|style| style.bg(colors.selected))
+                .child(
+                    div()
+                        .size(px(20.))
+                        .flex_none()
+                        .rounded(px(10.))
+                        .border(px(if on { 6. } else { 2. }))
+                        .border_color(if on { colors.accent } else { colors.line_strong }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(choice.label.clone())
+                        .children(choice.detail.clone().map(|detail| {
+                            div()
+                                .text_size(px(12.5))
+                                .line_height(px(16.))
+                                .text_color(colors.muted)
+                                .child(detail)
+                        })),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.choice = Some(answer);
+                    cx.notify();
+                }))
+        });
+        let answer = ui::button("answer", Button::Primary, None, "Answer", false, colors).flex_1();
+        let answer = if self.choice.is_some() {
+            answer.on_click(cx.listener(move |this, _, window, cx| this.answer(id, window, cx)))
+        } else {
+            ui::disabled(answer, colors)
+        };
+        div()
+            .id("question-card")
+            .relative()
+            .child(crate::testing::probe("question-card"))
+            .occlude()
+            .pt(px(16.))
+            .px(px(16.))
+            .pb(px(12.))
+            .rounded(px(24.))
+            .bg(colors.composer)
+            .border_1()
+            .border_color(colors.line.blend(colors.wait.opacity(0.5)))
+            .shadow(vec![gpui::BoxShadow {
+                color: colors.shadow,
+                offset: gpui::point(px(0.), px(-8.)),
+                blur_radius: px(32.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(ui::badge("Needs you", colors.wait, colors.amber, colors))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .justify_end()
+                            .text_size(px(12.5))
+                            .line_height(px(16.))
+                            .text_color(colors.muted)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(format!("{computer} · {}", session.folder)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(12.))
+                    .text_size(px(18.))
+                    .line_height(px(24.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(question.title.clone()),
+            )
+            .when(!question.command.is_empty(), |card| {
+                card.child(
+                    div()
+                        .relative()
+                        .child(self.copyable(question.command.clone(), cx))
+                        .mt(px(12.))
+                        .px(px(12.))
+                        .py(px(9.))
+                        .rounded(px(12.))
+                        .bg(colors.panel)
+                        .font_family(MONO)
+                        .text_size(px(12.5))
+                        .line_height(px(22.))
+                        .text_color(colors.plain)
+                        .child(question.command.clone()),
+                )
+            })
+            .child(
+                div()
+                    .mt(px(12.))
+                    .mx(px(-4.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .children(choices),
+            )
+            .child(
+                div()
+                    .mt(px(12.))
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        ui::button("later", Button::Quiet, None, "Later", false, colors)
+                            .px(px(20.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.questions_later.insert(id);
+                                cx.notify();
+                            })),
+                    )
+                    .child(answer),
+            )
+            .into_any_element()
     }
 }
 
-/// "You · 09:41" and what was asked.
-fn prompt(turn: &Turn, index: usize, colors: &Theme) -> Div {
-    div().flex().justify_end().child(
+/// Each stage's time, or equal stretches for the stages done when the
+/// computer gave no times.
+fn run_times(turn: &Turn) -> ([Duration; 4], bool) {
+    if turn.times.iter().any(|time| !time.is_zero()) {
+        return (turn.times, true);
+    }
+    let mut times = [Duration::ZERO; 4];
+    for stage in &turn.stages {
+        if stage.status == StageStatus::Done {
+            times[stage.kind.index()] = Duration::from_secs(1);
+        }
+    }
+    (times, false)
+}
+
+/// What a stage did, for a key under a finished line: "Wrote aurora.html".
+fn key_label(stage: &Stage) -> SharedString {
+    match stage.kind {
+        StageKind::HandOff => stage.kind.name(StageStatus::Done).into(),
+        _ => stage.what.clone().into(),
+    }
+}
+
+/// A 28 dp chip for a file or a search.
+fn small_chip(
+    id: impl Into<gpui::ElementId>,
+    glyph: Option<&str>,
+    text: impl Into<SharedString>,
+    colors: &Theme,
+) -> gpui::Stateful<Div> {
+    ui::chip(id, glyph, text, colors)
+        .h(px(28.))
+        .px(px(10.))
+        .text_size(px(12.5))
+}
+
+/// A badge without its dot: "Passed".
+fn plain_badge(text: &'static str, hue: Hsla, colors: &Theme) -> Div {
+    div()
+        .h(px(24.))
+        .px(px(10.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded(px(12.))
+        .bg(colors.tint(hue))
+        .text_color(hue)
+        .text_size(px(12.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(text)
+}
+
+/// The stretch of line from a station down to the next: solid in the stage's
+/// colour once done, dashed ahead.
+fn connector(hue: Hsla, done: bool, colors: &Theme) -> Div {
+    let line = div().absolute().top(px(32.)).bottom(px(-20.));
+    if done {
+        line.left(px(12.5)).w(px(3.)).rounded(px(2.)).bg(hue)
+    } else {
+        // Dashed: a one-sided dashed border does not draw this thin.
+        line.left(px(13.))
+            .w(px(2.))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .children((0..80).map(|_| div().flex_none().h(px(4.)).bg(colors.line_strong)))
+    }
+}
+
+fn meta(text: impl Into<SharedString>, colors: &Theme) -> Div {
+    div()
+        .text_size(px(12.5))
+        .line_height(px(16.))
+        .text_color(colors.muted)
+        .child(text.into())
+}
+
+fn counts(stage: &Stage, colors: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .gap(px(8.))
+        .font_family(MONO)
+        .text_size(px(12.5))
+        .when(stage.added > 0, |counts| {
+            counts.child(div().text_color(colors.green).child(format!("+{}", stage.added)))
+        })
+        .when(stage.removed > 0, |counts| {
+            counts.child(div().text_color(colors.coral).child(format!("−{}", stage.removed)))
+        })
+}
+
+fn stage_row(
+    stage: &Stage,
+    turn: &Turn,
+    turn_index: usize,
+    stage_index: usize,
+    line_below: bool,
+    colors: &Theme,
+) -> Div {
+    let hue = ui::stage_hue(stage.kind, colors);
+    let ahead = matches!(stage.status, StageStatus::Planned | StageStatus::Skipped);
+    let row = div()
+        .relative()
+        .flex()
+        .gap(px(12.))
+        .when(line_below, |row| {
+            row.child(connector(hue, stage.status == StageStatus::Done, colors))
+        })
+        .child(ui::station(stage.kind.glyph(), hue, stage.status, colors));
+    if ahead {
+        return row.items_center().child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_baseline()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(colors.faint)
+                        .child(stage.kind.name(stage.status)),
+                )
+                .child(meta(stage.what.clone(), colors).text_color(colors.faint).truncate()),
+        );
+    }
+    let changed = stage.added > 0 || stage.removed > 0;
+    let time = turn.time(stage.kind);
+    let live_diff = stage.kind == StageKind::Change
+        && stage.status == StageStatus::Live
+        && !stage.diff.is_empty();
+    let references = if live_diff { &[][..] } else { &stage.references[..] };
+    let more = references.len().saturating_sub(CHIPS);
+    let chips = (!references.is_empty()).then(|| {
         div()
-            .max_w(relative(0.88))
-            .px(px(12.))
-            .py(px(10.))
-            .rounded(px(14.))
-            .bg(colors.panel)
-            .child(ui::label(
-                format!("You · Turn {} · {}", index + 1, turn.at),
-                colors,
-            ))
+            .mt(px(12.))
+            .flex()
+            .flex_wrap()
+            .gap(px(8.))
+            .children(references.iter().take(CHIPS).enumerate().map(|(index, reference)| {
+                let (glyph, text) = match reference {
+                    Reference::File(file) => ("file", file.rsplit('/').next().unwrap_or(file).to_owned()),
+                    Reference::Search(search) => ("search", search.clone()),
+                };
+                small_chip(("reference", index), Some(glyph), text, colors)
+            }))
+            .when(more > 0, |chips| {
+                chips.child(
+                    small_chip("more-references", None, format!("+{more} more"), colors)
+                        .text_color(colors.accent)
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+            })
+    });
+    let diff = live_diff.then(|| {
+        ui::card(colors)
+            .relative()
+            .child(crate::testing::probe(format!(
+                "turn-{turn_index}-stage-{stage_index}-live-diff-{}",
+                stage.diff.len()
+            )))
+            .mt(px(12.))
+            .py(px(4.))
+            .rounded(px(12.))
+            .children(stage.diff.iter().map(|line| ui::code_line(line, false, 40., colors)))
+    });
+    let output = (stage.status == StageStatus::Live)
+        .then(|| stage.tools.iter().rev().find(|t| !t.output.is_empty()))
+        .flatten()
+        .map(|tool| {
+            // The last lines, each on one line, in a box that never changes
+            // height: streaming output must not move the thread under it.
+            let lines: Vec<&str> = tool.output.lines().rev().take(TAIL).collect();
+            div()
+                .mt(px(12.))
+                .px(px(12.))
+                .py(px(8.))
+                .h(px(TAIL as f32 * 18. + 16.))
+                .overflow_hidden()
+                .rounded(px(8.))
+                .bg(colors.panel)
+                .flex()
+                .flex_col()
+                .justify_end()
+                .children(lines.into_iter().rev().map(|line| {
+                    ui::mono(line.to_owned(), 12.)
+                        .h(px(18.))
+                        .line_height(px(18.))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_color(colors.secondary)
+                }))
+        });
+    row.child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .pt(px(4.))
             .child(
                 div()
-                    .mt(px(4.))
-                    .line_height(relative(1.4))
-                    .child(turn.prompt.clone()),
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(stage.kind.name(stage.status)),
+                    )
+                    .map(|title| {
+                        if changed {
+                            title.child(counts(stage, colors))
+                        } else if !time.is_zero() {
+                            title.child(meta(duration_label(time), colors))
+                        } else {
+                            title
+                        }
+                    }),
             )
-            .when(!turn.attachments.is_empty(), |prompt| {
-                prompt.child(
-                    div().mt(px(6.)).flex().flex_wrap().gap(px(6.)).children(
-                        turn.attachments
-                            .iter()
-                            .enumerate()
-                            .map(|(index, attachment)| {
-                                ui::chip(("sent", index), Some("clip"), attachment.clone(), colors)
-                            }),
-                    ),
-                )
-            }),
+            .child(meta(stage.what.clone(), colors).mt(px(2.)))
+            .children(output)
+            .children(chips)
+            .children(diff),
     )
 }
 
-fn stage_row(stage: &Stage, line_below: bool, colors: &Theme) -> Div {
-    let ahead = matches!(stage.status, StageStatus::Planned | StageStatus::Skipped);
-    let references = match (stage.kind, stage.status) {
-        (StageKind::Change, StageStatus::Live) if !stage.diff.is_empty() => Vec::new(),
-        _ => stage.references.clone(),
-    };
-    let diff = (stage.kind == StageKind::Change
-        && stage.status == StageStatus::Live
-        && !stage.diff.is_empty())
-    .then(|| {
-        ui::card(colors)
-            .mt(px(10.))
-            .py(px(6.))
-            .rounded(px(12.))
-            .children(
-                stage
-                    .diff
-                    .iter()
-                    .map(|line| ui::diff_line(line, false, colors)),
-            )
-    });
+/// A run paused on a question: the hand, in the waiting colour.
+fn waiting_row(session: &Session, line_below: bool, colors: &Theme) -> Div {
+    let command = session
+        .question
+        .as_ref()
+        .is_some_and(|question| !question.command.is_empty());
     div()
         .relative()
         .flex()
-        .items_start()
         .gap(px(12.))
-        .when(line_below, |row| {
-            let line = div()
-                .absolute()
-                .left(px(15.))
-                .top(px(36.))
-                .bottom(px(-14.))
-                .w(px(1.))
-                .overflow_hidden();
-            row.child(if stage.status == StageStatus::Done {
-                line.bg(colors.line)
-            } else {
-                // Dashed ahead; a one-sided dashed border does not draw this thin.
-                line.flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .children((0..80).map(|_| div().flex_none().h(px(3.)).bg(colors.line_strong)))
-            })
-        })
-        .child(ui::tile(stage.kind, stage.status, colors))
+        .when(line_below, |row| row.child(connector(colors.wait, false, colors)))
+        .child(ui::station("hand", colors.wait, StageStatus::Live, colors))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .pt(px(5.))
+                .pt(px(4.))
                 .child(
                     div()
                         .flex()
@@ -478,78 +1033,46 @@ fn stage_row(stage: &Stage, line_below: bool, colors: &Theme) -> Div {
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(px(14.))
-                                .font_weight(if ahead {
-                                    FontWeight::NORMAL
-                                } else {
-                                    FontWeight::SEMIBOLD
-                                })
-                                .text_color(if ahead { colors.muted } else { colors.text })
-                                .child(stage.kind.name(stage.status)),
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Waiting for you"),
                         )
-                        .child(ui::counts(stage.added, stage.removed, colors))
-                        .child(icon("chev_r", 14., colors.muted).ml(px(8.))),
+                        .child(meta(duration_label(session.elapsed), colors)),
                 )
                 .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(colors.muted)
-                        .child(stage.what.clone()),
-                )
-                .when(stage.status == StageStatus::Live, |body| {
-                    let output = stage.tools.iter().rev().find(|t| !t.output.is_empty());
-                    body.children(output.map(|tool| {
-                        let tail: String = tool.output.chars().rev().take(220).collect();
-                        let tail: String = tail.chars().rev().collect();
-                        ui::mono(tail, 12.)
-                            .mt(px(8.))
-                            .p(px(10.))
-                            .rounded(px(8.))
-                            .bg(colors.panel)
-                            .text_color(colors.secondary)
-                    }))
-                })
-                .when(!references.is_empty(), |body| {
-                    body.child(
-                        div().mt(px(8.)).flex().flex_wrap().gap(px(8.)).children(
-                            references
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, reference)| {
-                                    let (glyph, text) = match reference {
-                                        Reference::File(file) => ("file", file),
-                                        Reference::Search(search) => ("search", search),
-                                    };
-                                    ui::chip(("reference", index), Some(glyph), text, colors)
-                                }),
-                        ),
+                    meta(
+                        if command {
+                            "Pi paused before running a command"
+                        } else {
+                            "Pi paused for your answer"
+                        },
+                        colors,
                     )
-                })
-                .children(diff),
+                    .mt(px(2.)),
+                ),
         )
 }
 
 fn reply(turn: &Turn, latest: bool, colors: &Theme) -> Option<Div> {
     turn.summary.as_ref().map(|summary| {
-        if let Some(source) = &summary.source {
-            return div()
-                .min_w_0()
-                .child(ui::label("Pi", colors).mb(px(10.)))
-                .child(crate::message::render(source, colors));
+        if let Some(source) = summary.source.as_deref() {
+            return div().min_w_0().child(crate::message::render(source, colors));
         }
         div()
             .min_w_0()
-            .child(
-                ui::serif(summary.headline.clone(), if latest { 21. } else { 18. })
-                    .line_height(relative(1.3)),
-            )
+            .when(!summary.headline.is_empty(), |reply| {
+                reply.child(
+                    ui::serif(summary.headline.clone(), if latest { 22. } else { 18. })
+                        .line_height(px(if latest { 28. } else { 24. }))
+                        .text_color(colors.text),
+                )
+            })
             .when(!summary.body.is_empty(), |reply| {
                 reply.child(
                     div()
-                        .mt(px(10.))
+                        .when(!summary.headline.is_empty(), |body| body.mt(px(12.)))
                         .min_w_0()
                         .text_size(px(15.))
-                        .line_height(relative(1.5))
+                        .line_height(px(22.))
                         .text_color(colors.secondary)
                         .child(summary.body.clone()),
                 )
@@ -557,57 +1080,71 @@ fn reply(turn: &Turn, latest: bool, colors: &Theme) -> Option<Div> {
     })
 }
 
-/// Above the composer while a run goes: what it does, and Stop or Answer.
-fn status_bar(session: &Session, colors: &Theme, cx: &Context<PhoneApp>) -> Div {
+/// Working, the time and Stop, on the composer's top edge.
+fn working_strip(
+    session: &Session,
+    stopping: bool,
+    colors: &Theme,
+    cx: &Context<PhoneApp>,
+) -> Div {
     let id = session.id;
     let waiting = session.state == State::NeedsYou;
-    let (title, detail) = if waiting {
-        (
-            "Needs you",
-            session
-                .question
-                .as_ref()
-                .map_or_else(String::new, |question| question.title.clone()),
-        )
-    } else {
-        (
-            "Working",
-            format!("{} · {}", session.activity, duration_label(session.elapsed)),
-        )
-    };
-    let action = waiting.then(|| {
-        ui::button("answer", Button::Primary, None, "Answer", true, colors)
-            .on_click(cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::Question(id), cx)))
-            .into_any_element()
-    });
-    div()
+    let stop = div()
+        .id("stop")
+        .relative()
+        .child(crate::testing::probe("stop"))
+        .debug_selector(|| "composer-stop".into())
+        .h(px(40.))
+        .px(px(12.))
+        .flex()
         .flex_none()
-        .px(px(16.))
-        .pt(px(10.))
-        .pb(px(8.))
+        .items_center()
+        .gap(px(8.))
+        .rounded(px(20.))
+        .text_size(px(14.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(colors.coral)
+        .active(|style| style.bg(colors.selected))
+        .child(icon("stop", 16., colors.coral))
+        .child("Stop")
+        .when(stopping, |button| button.opacity(0.5))
+        .when(!stopping, |button| {
+            button.on_click(cx.listener(move |this, _, _, cx| this.stop(id, cx)))
+        });
+    div()
+        .mx(px(12.))
+        .mb(px(-1.))
+        .min_h(px(48.))
+        .pl(px(16.))
+        .pr(px(8.))
         .flex()
         .items_center()
         .gap(px(12.))
-        .border_t_1()
-        .border_color(colors.line)
-        .child(if waiting {
-            ui::dot(colors.wait, true, colors).into_any_element()
-        } else {
-            ui::working_indicator(colors).into_any_element()
-        })
+        .bg(colors.panel)
+        .border_1()
+        .border_b_0()
+        .border_color(colors.line_strong)
+        .rounded_t(px(24.))
+        .child(ui::ring_dot(if waiting { colors.wait } else { colors.read }))
         .child(
             div()
-                .flex_1()
-                .min_w_0()
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(title),
-                )
-                .child(ui::hint(detail, colors).mt(px(-2.)).truncate()),
+                .flex_none()
+                .text_size(px(14.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(if waiting { "Needs you" } else { "Working" }),
         )
-        .children(action)
+        .child(meta(duration_label(session.elapsed), colors).flex_1())
+        .when(waiting, |strip| {
+            strip.child(
+                ui::button("answer", Button::Primary, None, "Answer", true, colors).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.questions_later.remove(&id);
+                        cx.notify();
+                    }),
+                ),
+            )
+        })
+        .child(stop)
 }
 
 fn capitalized(text: &str) -> String {

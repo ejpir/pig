@@ -21,6 +21,7 @@ qrcode = { version = "0.14", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 pi_core = { path = "../pi_core" }
+pi_jj = { path = "../pi_jj" }
 dirs = "6"
 rand = "0.9"
 sha2 = "0.10"

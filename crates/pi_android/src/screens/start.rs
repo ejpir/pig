@@ -1,16 +1,17 @@
-//! 03 New session: the task first, then files and details as needed.
+//! 03 New session: a sheet from Home's start bar with the project, the
+//! composer, and starting points that fill the draft but never send it.
 
-use super::{heading, scroll_area};
+use super::scroll_area;
 use crate::{
     app::{PhoneApp, Route, Sheet},
-    theme::theme,
+    theme::{MONO, theme},
     ui::{self, icon},
 };
 use gpui::{Context, Focusable, Window, div, prelude::*, px};
 
 /// Starting points: what they put in the draft, and a command they use.
 const STARTERS: [(&str, Option<&str>); 3] = [
-    ("Review the local changes", None),
+    ("Review local changes", None),
     ("Explain this project", None),
     ("Fix the failing tests", Some("/fix-tests")),
 ];
@@ -42,6 +43,9 @@ impl PhoneApp {
             scroll.scroll_to_item(1);
         }
         let live = self.store.as_ref().is_some_and(|store| !store.is_sample());
+        let commands = self.command_catalog_for_project(self.project, cx);
+        self.start
+            .update(cx, |composer, _| composer.use_commands(commands));
         let computer = self
             .store
             .as_ref()
@@ -55,19 +59,16 @@ impl PhoneApp {
                 || ("Choose a project".to_owned(), String::new()),
                 |project| (project.name.clone(), project.folder.clone()),
             );
-        let appbar = ui::appbar(
-            ui::tap("close", "x", &colors).on_click(cx.listener(|this, _, window, cx| {
-                this.back(window, cx);
-            })),
-            "New session",
-            None,
-            &colors,
-        );
-        let project_picker = div().px(px(16.)).pb(px(8.)).flex().child(
+        let home = self.sessions_screen(window, cx).into_any_element();
+        let project_picker = div().flex().child(
             ui::chip(
                 "project",
                 Some("folder"),
-                format!("{project} · {computer}"),
+                if folder.is_empty() {
+                    project
+                } else {
+                    format!("{project} on {computer}")
+                },
                 &colors,
             )
             .max_w_full()
@@ -78,23 +79,12 @@ impl PhoneApp {
             // Durable sessions have no commands: the words go instead.
             let command = command.filter(|_| !live);
             let draft = command.map_or_else(|| text.to_string(), |command| format!("{command} "));
-            div()
-                .id(("starter", index))
+            ui::chip(("starter", index), None, command.unwrap_or(text).to_owned(), &colors)
                 .debug_selector(move || format!("starter-{index}").into())
-                .h(px(52.))
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .border_b_1()
-                .border_color(colors.line)
-                .active(|style| style.bg(colors.selected))
-                .child(icon("chat", 16., colors.muted))
-                .child(div().flex_1().min_w_0().truncate().child(*text))
-                .children(command.map(|command| ui::mono(command, 12.).text_color(colors.muted)))
-                .child(icon("chev_r", 16., colors.muted))
-                .when(!can_use_starter, |row| row.opacity(0.55))
-                .when(can_use_starter, |row| {
-                    row.on_click(cx.listener(move |this, _, window, cx| {
+                .when(command.is_some(), |chip| chip.font_family(MONO).text_size(px(12.5)))
+                .when(!can_use_starter, |chip| chip.opacity(0.55))
+                .when(can_use_starter, |chip| {
+                    chip.on_click(cx.listener(move |this, _, window, cx| {
                         if !this.start.read(cx).area.read(cx).is_empty() {
                             return;
                         }
@@ -104,80 +94,75 @@ impl PhoneApp {
                         });
                     }))
                 })
-        });
+        }).collect::<Vec<_>>();
+        let sheet = div()
+            .id("start-sheet")
+            .child(crate::testing::probe("start-sheet"))
+            .occlude()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .max_h_full()
+            .flex()
+            .flex_col()
+            .bg(colors.canvas)
+            .rounded_t(px(24.))
+            .shadow(vec![gpui::BoxShadow {
+                color: colors.shadow,
+                offset: gpui::point(px(0.), px(-8.)),
+                blur_radius: px(32.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
+            .pt(px(8.))
+            .pb(px(12.))
+            .child(
+                div()
+                    .flex_none()
+                    .mx_auto()
+                    .mt(px(4.))
+                    .mb(px(16.))
+                    .w(px(32.))
+                    .h(px(4.))
+                    .rounded_full()
+                    .bg(colors.line_strong),
+            )
+            .child(
+                scroll_area("start", &scroll)
+                    .child(div().px(px(20.)).child(project_picker))
+                    .child(div().mt(px(12.)).child(self.start.clone()))
+                    .child(
+                        div()
+                            .id("starters")
+                            .relative()
+                            .child(crate::testing::probe("starters"))
+                            .mt(px(12.))
+                            .px(px(20.))
+                            .flex()
+                            .gap(px(8.))
+                            .overflow_x_scroll()
+                            .children(starters),
+                    ),
+            );
         div()
+            .relative()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .child(appbar)
-            .child(project_picker)
+            .child(home)
             .child(
-                scroll_area("start", &scroll)
-                    .child(
-                        div()
-                            .px(px(20.))
-                            .pt(px(28.))
-                            .child(heading("What should we change?", 32.))
-                            .child(
-                                ui::hint("Start with the task. Bring in files and details as you need them.", &colors)
-                                    .mt(px(10.))
-                                    .text_size(px(15.)),
-                            ),
-                    )
-                    .child(div().mt(px(22.)).child(self.start.clone()))
-                    .child(
-                        ui::hint(
-                            if live {
-                                "Name files by their path in the project; Pi reads them on the computer."
-                            } else {
-                                "Type / for commands or @ to reference a project file."
-                            },
-                            &colors,
-                        )
-                            .px(px(24.))
-                            .mt(px(10.)),
-                    )
-                    .child(
-                    div()
-                        .pb(px(20.))
-                        .child(
-                            div()
-                                .px(px(20.))
-                                .pt(px(34.))
-                                .child(ui::label("A starting point", &colors).mb(px(4.)))
-                                .children(starters)
-                                .child(
-                                    div()
-                                        .mt(px(30.))
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(8.))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(12.))
-                                                .child(ui::label("Project", &colors))
-                                                .child(
-                                                    ui::mono(format!("{folder} on {computer}"), 12.5)
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .truncate()
-                                                        .text_color(colors.muted),
-                                                ),
-                                        )
-                                        .child(ui::hint(
-                                            if live {
-                                                "A durable session: its state is kept on the computer, so it carries on and picks up where it was."
-                                            } else {
-                                                "File history is on. jj records each turn that edits files."
-                                            },
-                                            &colors,
-                                        )),
-                                ),
-                        ),
-                ),
+                div()
+                    .id("start-scrim")
+                    .occlude()
+                    .absolute()
+                    .inset_0()
+                    .bg(colors.scrim)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.back(window, cx);
+                    })),
             )
+            .child(sheet)
     }
 }

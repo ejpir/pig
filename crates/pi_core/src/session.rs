@@ -37,6 +37,11 @@ pub struct Tool {
     pub diff: Option<String>,
     pub finished: bool,
     pub is_error: bool,
+    /// Image blocks in its result, such as a screenshot it read. A durable
+    /// session sends each with empty `data` and an `imageId` to fetch it by.
+    /// Snapshots from helpers older than this field leave it out.
+    #[serde(default)]
+    pub images: Vec<Value>,
 }
 
 impl Tool {
@@ -515,6 +520,7 @@ impl Session {
                 diff: None,
                 finished: false,
                 is_error: false,
+                images: Vec::new(),
             });
         }
     }
@@ -522,6 +528,13 @@ impl Session {
     fn tool_result(&mut self, id: &str, result: &Value, finished: bool, is_error: bool) {
         if let Some(tool) = self.tools.iter_mut().find(|tool| tool.id == id) {
             tool.output = content_text(&result["content"]);
+            tool.images = result["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|block| block["type"] == "image")
+                .cloned()
+                .collect();
             tool.diff = result["details"]["diff"].as_str().map(str::to_owned);
             tool.finished = finished;
             tool.is_error = is_error;
@@ -674,4 +687,19 @@ pub fn content_text(content: &Value) -> String {
                 .join("\n")
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshots_from_older_helpers_still_load() {
+        let tool: Tool = serde_json::from_value(serde_json::json!({
+            "id": "t", "name": "read", "args": {}, "output": "", "diff": null,
+            "finished": true, "is_error": false
+        }))
+        .unwrap();
+        assert!(tool.images.is_empty());
+    }
 }

@@ -29,6 +29,7 @@ quircs = "0.10"
 gpui_wgpu = { path = "../../../zed/crates/gpui_wgpu" }
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
+libc = "0.2"
 futures = "0.3"
 jni = "0.22"
 memmap2 = "0.9"

@@ -39,4 +39,10 @@ mod window;
 #[cfg(target_os = "android")]
 pub use android_activity::AndroidApp;
 #[cfg(target_os = "android")]
-pub use platform::{AndroidPlatform, init_logging};
+pub use platform::{AndroidPlatform, init_logging, recent_logs};
+
+/// Off Android nothing is kept: logs go wherever the host sends them.
+#[cfg(not(target_os = "android"))]
+pub fn recent_logs() -> Vec<String> {
+    Vec::new()
+}

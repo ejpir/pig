@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi in your pocket, next2</title>
+<style>
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+  :root { --bg:#ece7e1; --card:#faf9f7; --text:#252f3d; --muted:#665f59; --line:#ddd7d0; --accent:#4b607c; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0d1116; --card:#161d27; --text:#ebe7e4; --muted:#9ca2aa; --line:#363d46; --accent:#8caecb; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Plex", "IBM Plex Sans", system-ui, sans-serif; }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 48px 24px 80px; }
+  .eyebrow { font-size: 11px; color: var(--muted); }
+  h1 { font: italic 400 44px/1.1 Georgia, "DejaVu Serif", serif; margin: 10px 0 12px; letter-spacing: -.01em; }
+  .lede { font-size: 17px; color: var(--muted); max-width: 760px; margin: 0 0 8px; }
+  .links a { color: var(--accent); margin-right: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)); gap: 40px 32px; margin-top: 36px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .pair a { display: block; position: relative; }
+  .pair img { width: 100%; display: block; border-radius: 20px; border: 1px solid var(--line); background: var(--card); }
+  .pair .before img { opacity: .72; }
+  .pair .none { border: 1px dashed var(--line); border-radius: 20px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 14px; aspect-ratio: 412 / 915; }
+  .tag { font-size: 11px; color: var(--muted); margin-bottom: 6px; display: block; }
+  h2 { font-size: 17px; margin: 14px 0 4px; }
+  ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 14px; }
+  li + li { margin-top: 2px; }
+</style></head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">Design study, Android, second pass</div>
+  <h1>Pi in your pocket, next2</h1>
+  <p class="lede">One ornament, the run line: a run drawn through its four stages, each stretch in its stage's colour and as long as it took. Everything else is ink on canvas. Serif when Pi speaks, mono for what the computer runs. The first pass on the left, this one on the right.</p>
+  <p class="links"><a href="README.md">Notes and ratios</a><a href="overview.png">Overview PNG</a><a href="../next/index.html">The first pass</a><a href="../index.html">The current screens</a></p>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+  const screens = [
+    ["01-pair", "01-pair", "Pair", ["The first-run question is the only serif outside Pi's own words", "Steps are plain numbers on the canvas, without a box", "What pairing trusts is said once, above the button"]],
+    ["02-home", "02-home", "Home", ["Pi's question is the hero, in Pi's voice", "Working sessions are drawn to time on one scale, so they compare at a glance", "Projects move to a right-hand column instead of a dotted meta line"]],
+    ["03-new", "03-new", "New session", ["No heading: the composer is the question", "The project chip reads as a sentence"]],
+    ["04-working", "04-working", "Working", ["The run line runs down the gutter, a station per stage", "Each stretch is its stage's colour; stages ahead are dashed", "Paths and searches are set in mono, without chips"]],
+    ["05-answer", "05-answer", "Answer in place", ["The line stops at an amber ring: waiting for you", "Pi's question is set in Pi's voice", "No badge; the colour and the ring already say it"]],
+    ["06-done", "06-done", "Done", ["The finished line divides your prompt from Pi's answer", "Each stretch shows its time, so you can see where the minutes went", "Files and the check are flat rows with numbers in columns"]],
+    ["07-review", "07-review", "Review", ["The hint says what tapping does", "The attached line is the only thing on the strip"]],
+    ["08-details", "08-details", "Details", ["The run line, with its key: stage names and their times", "Model in words, not a dotted pair"]],
+    ["09-history", "09-history", "File history", ["Points are dots on a rule, the current one filled", "Meta in plain words: Turn 3, 4 min ago"]],
+    ["10-page", "10-page", "A page Pi made", ["Pi's reply in Pi's voice above the page", "Open and Source, named for what they show"]],
+    ["11-viewer", "11-viewer", "Page viewer", ["Page and Source, the same words as on the card"]],
+    ["12-evening", "12-evening", "Evening", ["The run line holds its colours on the dark canvas"]],
+    ["13-computers", "13-computers", "Computers", ["State sits in the right-hand column, as on Home", "Icons without tiles"]],
+  ];
+  document.getElementById("grid").innerHTML = screens.map(([after, before, title, notes]) => `
+    <section>
+      <div class="pair">
+        <div class="before"><span class="tag">next</span>${before
+          ? `<a href="../next/screens/${before}.html"><img src="../next/screens/${before}.png" alt="${title}, current" loading="lazy"></a>`
+          : `<div class="none">New screen</div>`}</div>
+        <div><span class="tag">next2</span><a href="screens/${after}.html"><img src="screens/${after}.png" alt="${title}, next" loading="lazy"></a></div>
+      </div>
+      <h2>${title}</h2>
+      <ul>${notes.map((n) => `<li>${n}</li>`).join("")}</ul>
+    </section>`).join("");
+</script>
+</body></html>

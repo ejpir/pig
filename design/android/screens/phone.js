@@ -17,6 +17,7 @@ const P = {
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  restore: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
   alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.5"/>',
   clip: '<path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.3 3.3 0 0 1 4.7 4.7L9.2 17.2a1.7 1.7 0 0 1-2.4-2.4L14.5 7"/>',
   slash: '<rect x="3" y="3" width="18" height="18" rx="4"/><path d="m14.5 7-5 10"/>',

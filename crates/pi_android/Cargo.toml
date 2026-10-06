@@ -28,8 +28,8 @@ gpui.workspace = true
 gpui_android = { path = "../gpui_android" }
 libc = "0.2"
 log = "0.4"
-pulldown-cmark = { version = "0.13", default-features = false }
 pi_core = { path = "../pi_core" }
+pi_markdown = { path = "../pi_markdown" }
 # The SSH key; the same rand as russh's ssh-key.
 rand = "0.10"
 # SSH in pure Rust, with ring for its crypto: it builds for Android with the NDK alone.

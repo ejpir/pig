@@ -16,6 +16,8 @@ import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { authProviders, publicModel } from "./catalog.ts";
 import { findImage, imageReferences, promptContent } from "./images.ts";
+import { expandPromptCommand, promptCommands } from "./commands.ts";
+import { imageRead } from "./read.ts";
 
 const context = BACKGROUND_CONTEXT;
 const MAX_RECORD = 16 * 1024 * 1024;
@@ -72,6 +74,10 @@ function string(record: Record<string, unknown>, key: string): string {
 
 export async function run(models: Models, extensions: readonly Extension[] = []): Promise<void> {
   const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === "--list-commands") {
+    console.log(JSON.stringify({ version: 1, commands: promptCommands }));
+    return;
+  }
   if (args.length === 1 && args[0] === "--list-models") {
     // Discovery is independent of session admission/storage. Only public
     // metadata is returned; no provider call or conversation is created.
@@ -111,7 +117,7 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
   }
   const registry = createRegistry();
   registry.install(CodingTools);
-  registry.install(defineExtension({ name: "desktop-coding", sections: [
+  registry.install(defineExtension({ name: "desktop-coding", wraps: [imageRead], sections: [
     section("preamble", () => "You are a coding assistant. Inspect the project with your tools. Do not repeat an interrupted unsafe operation without checking its effects first.", { tag: false }),
     section("cwd", (input) => input.env?.cwd),
   ] }));
@@ -167,7 +173,7 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
         return { image };
       }
       case "get_session_stats": return {};
-      case "get_commands": return { commands: [] };
+      case "get_commands": return { commands: promptCommands };
       case "get_settings": return { effective: { compaction: { enabled: autoCompaction } }, durable: true };
       case "get_active_tools": return { activeTools: (await root.agent(context)).tools.map((tool) => ({ name: tool.name, description: tool.description })) };
       case "get_available_models": {
@@ -205,7 +211,7 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
         return {};
       }
       case "prompt": {
-        const message = string(record, "message"), requestId = string(record, "requestId");
+        const message = expandPromptCommand(string(record, "message")), requestId = string(record, "requestId");
         if (!/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) throw new Error("Invalid persistent requestId");
         if (!chosenModel()) throw new Error("Choose a configured model before submitting a durable prompt");
         const content = promptContent(message, record.images, chosenModel()!.input.includes("image"));

@@ -64,6 +64,7 @@ pub(crate) fn sessions() -> Vec<Session> {
         mistral(SessionId(4)),
         kimi(SessionId(5)),
         snapshot_restore(SessionId(6)),
+        aurora(SessionId(7)),
     ]
 }
 
@@ -167,9 +168,11 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
         // Time left over from one wait goes on to the next.
         if script.wait > left {
             script.wait -= left;
+            spend(session, left);
             break;
         }
         left -= script.wait;
+        spend(session, script.wait);
         script.wait = Duration::ZERO;
         let Some(beat) = script.beats.get(script.next).cloned() else {
             break;
@@ -188,7 +191,10 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
             }
             Beat::Changed(path, added, removed) => {
                 let stage = session.turn_mut().stage_mut(StageKind::Change);
-                stage.references.push(Reference::File(path.into()));
+                let reference = Reference::File(path.into());
+                if !stage.references.contains(&reference) {
+                    stage.references.push(reference);
+                }
                 stage.added += added;
                 stage.removed += removed;
             }
@@ -227,6 +233,14 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
         session.script = Some(script);
     }
     event
+}
+
+/// Working time goes to the stage Pi is in.
+fn spend(session: &mut Session, time: Duration) {
+    let turn = session.turn_mut();
+    if let Some(kind) = turn.live_stage() {
+        turn.add_time(kind, time);
+    }
 }
 
 /// Any new task or follow-up: the preview cannot run it, and says so.
@@ -293,6 +307,10 @@ fn session(id: u32, title: &str, project: usize, state: State, turn: Turn) -> Se
     }
 }
 
+fn times(seconds: [u64; 4]) -> [Duration; 4] {
+    seconds.map(Duration::from_secs)
+}
+
 fn line(kind: LineKind, number: u32, text: &str) -> DiffLine {
     DiffLine::new(kind, number, text)
 }
@@ -310,10 +328,15 @@ fn qwen(id: SessionId) -> Session {
          response. Accept empty signatures there, but keep the check strict for Anthropic.",
         "09:41",
     );
-    let mut understood = stage(Understand, Done, "Read 1 file · 1 search");
+    let mut understood = stage(Understand, Done, "Read 5 files · searched twice");
     understood.references = vec![
         Reference::File("openai-completions.ts".into()),
-        Reference::Search("“signature” in packages/ai".into()),
+        Reference::File("anthropic.ts".into()),
+        Reference::Search("“signature”".into()),
+        Reference::File("thinking.ts".into()),
+        Reference::Search("“isAnthropic”".into()),
+        Reference::File("models.ts".into()),
+        Reference::File("qwen.ts".into()),
     ];
     let mut changing = stage(Change, Live, "Editing openai-completions.ts");
     changing.references = vec![Reference::File("openai-completions.ts".into())];
@@ -330,6 +353,7 @@ fn qwen(id: SessionId) -> Session {
         Stage::planned(Verify),
         Stage::planned(HandOff),
     ];
+    turn.times = times([21, 51, 0, 0]);
     let mut session = session(id.0, "Qwen signatures", 0, State::Working, turn);
     session.activity = "Editing a file".into();
     session.elapsed = Duration::from_secs(72);
@@ -369,7 +393,15 @@ fn qwen(id: SessionId) -> Session {
     {
         use Beat::*;
         session.script = Some(Script::new(vec![
-            Wait(9),
+            Wait(4),
+            Diff(vec![
+                line(Context, 210, "const signature = block.signature;"),
+                line(Removed, 211, "if (!signature) {"),
+                line(Added, 211, "if (!signature && isAnthropic(model)) {"),
+                line(Added, 212, "  signatures.push(signature);"),
+            ]),
+            Changed("openai-completions.ts", 1, 0),
+            Wait(5),
             Changed("qwen.test.ts", 18, 0),
             Files(vec![qwen_completions(), qwen_test()]),
             Stage(Change, Done, "Edited 2 files"),
@@ -522,6 +554,7 @@ fn streaming_retry(id: SessionId) -> Session {
         Stage::planned(Verify),
         Stage::planned(HandOff),
     ];
+    turn.times = times([24, 136, 0, 0]);
     let mut session = session(id.0, "Streaming retry", 0, State::Working, turn);
     session.activity = "Changing · 2 files so far".into();
     session.elapsed = Duration::from_secs(160);
@@ -586,6 +619,7 @@ fn gutter_blame(id: SessionId) -> Session {
         stage(Verify, Live, "cargo test -p editor gutter"),
         Stage::planned(HandOff),
     ];
+    turn.times = times([12, 24, 16, 0]);
     let mut session = session(id.0, "Gutter blame width", 1, State::Working, turn);
     session.activity = "Verifying · cargo test".into();
     session.elapsed = Duration::from_secs(52);
@@ -659,6 +693,7 @@ fn mistral(id: SessionId) -> Session {
         stage(Verify, Done, "Provider tests passed"),
         stage(HandOff, Done, "Summary and 3 changed files"),
     ];
+    turn.times = times([60, 200, 100, 28]);
     let mut session = session(id.0, "Mistral thinking", 0, State::Done, turn);
     session.elapsed = Duration::from_secs(388);
     session.files = vec![
@@ -695,6 +730,7 @@ fn kimi(id: SessionId) -> Session {
         stage(Verify, Skipped, "Nothing to check"),
         stage(HandOff, Done, "Answered"),
     ];
+    turn.times = times([30, 0, 0, 11]);
     let mut session = session(id.0, "Kimi K3 default", 0, State::Done, turn);
     session.elapsed = Duration::from_secs(41);
     finished(
@@ -705,6 +741,39 @@ fn kimi(id: SessionId) -> Session {
             headline: "Kimi K3 is the default because it is the newest with tool calls.".into(),
             body: "The default lives in models.ts and only applies when a provider offers \
                    several Kimi models."
+                .into(),
+        },
+    )
+}
+
+/// A page Pi made, which the thread shows as a card.
+fn aurora(id: SessionId) -> Session {
+    use StageKind::*;
+    use StageStatus::*;
+    let mut turn = Turn::new("Make me something cool to look at", "10:12");
+    let mut changed = stage(Change, Done, "Wrote aurora.html");
+    changed.references = vec![Reference::File("demo/aurora.html".into())];
+    turn.stages = vec![
+        stage(Understand, Skipped, "Nothing to read"),
+        changed,
+        stage(Verify, Skipped, "Nothing to check"),
+        stage(HandOff, Done, "Summary and a page"),
+    ];
+    turn.pages = vec![crate::pages::Page {
+        path: "demo/aurora.html".into(),
+        html: Some(include_str!("../assets/samples/aurora.html").into()),
+    }];
+    turn.times = times([0, 40, 0, 14]);
+    let mut session = session(id.0, "Aurora", 0, State::Done, turn);
+    session.elapsed = Duration::from_secs(54);
+    finished(
+        session,
+        "10:13",
+        Summary {
+            source: None,
+            headline: String::new(),
+            body: "An aurora over a starfield, drawn on a canvas. Touch it to stir the sky. \
+                   It's one file with nothing to download, so it works offline."
                 .into(),
         },
     )
@@ -722,6 +791,7 @@ fn snapshot_restore(id: SessionId) -> Session {
         Stage::planned(Verify),
         Stage::planned(HandOff),
     ];
+    turn.times = times([95, 0, 0, 0]);
     let mut session = session(id.0, "VM snapshot restore", 2, State::Failed, turn);
     session.elapsed = Duration::from_secs(95);
     session.finished_at = Some("09:15".into());
@@ -763,9 +833,10 @@ mod tests {
         assert_eq!(session.state, State::Done);
         assert_eq!(session.check.as_ref().unwrap().result, CheckResult::Passed);
         assert_eq!(session.status_line(), "2 files changed · checks passed");
+        // Each stage's working time, for the run line.
         assert_eq!(
-            session.turn().unwrap().digest(),
-            "Read 2 · changed 2 · checked"
+            session.turn().unwrap().times,
+            [21, 60, 6, 3].map(Duration::from_secs)
         );
     }
 
@@ -846,6 +917,6 @@ mod tests {
             ["Qwen signatures"]
         );
         assert_eq!(working.len(), 2);
-        assert_eq!(finished.len(), 3);
+        assert_eq!(finished.len(), 4);
     }
 }

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi in your pocket, next</title>
+<style>
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+  :root { --bg:#ece7e1; --card:#faf9f7; --text:#252f3d; --muted:#665f59; --line:#ddd7d0; --accent:#4b607c; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0d1116; --card:#161d27; --text:#ebe7e4; --muted:#9ca2aa; --line:#363d46; --accent:#8caecb; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Plex", "IBM Plex Sans", system-ui, sans-serif; }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 48px 24px 80px; }
+  .eyebrow { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  h1 { font: italic 400 44px/1.1 Georgia, "DejaVu Serif", serif; margin: 10px 0 12px; letter-spacing: -.01em; }
+  .lede { font-size: 17px; color: var(--muted); max-width: 760px; margin: 0 0 8px; }
+  .links a { color: var(--accent); margin-right: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)); gap: 40px 32px; margin-top: 36px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .pair a { display: block; position: relative; }
+  .pair img { width: 100%; display: block; border-radius: 20px; border: 1px solid var(--line); background: var(--card); }
+  .pair .before img { opacity: .72; }
+  .pair .none { border: 1px dashed var(--line); border-radius: 20px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 14px; aspect-ratio: 412 / 915; }
+  .tag { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; display: block; }
+  h2 { font-size: 17px; margin: 14px 0 4px; }
+  ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 14px; }
+  li + li { margin-top: 2px; }
+</style></head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">Design study · Android · next pass</div>
+  <h1>Pi in your pocket, next</h1>
+  <p class="lede">The same Moonstone and Evening themes, rebuilt on one proportion system: a 4 px grid, a 1.2 type scale and radii that nest. The thumb zone carries every action that moves work forward. Before on the left, after on the right.</p>
+  <p class="links"><a href="README.md">Notes and ratios</a><a href="overview.png">Overview PNG</a><a href="../index.html">The current screens</a></p>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+  const screens = [
+    ["01-pair", "01-connect", "Pair", ["QR pairing leads; the SSH key setup is one tap below", "Three short steps with the exact command to run", "What pairing trusts, said in one line"]],
+    ["02-home", "02-sessions", "Home", ["The computer is the title and switches computers", "One summary line in Pi's serif voice", "The question is on the card, with Answer next to the command", "Working rows show the run rail as four segments", "A start bar replaces the floating button"]],
+    ["03-new", "03-starting", "New session", ["A sheet from the start bar, not a separate screen", "The composer sits on the keyboard as soon as it opens", "Starting points are chips under the draft, and still only fill it"]],
+    ["04-working", "04-working", "Working", ["Status and Stop sit on the composer as one strip", "Stop is a labelled button, not a small red square", "Stages ahead take one line each"]],
+    ["05-answer", "05-waiting", "Answer in place", ["The question takes the composer's place instead of covering the thread", "The run so far stays readable and scrollable while you decide", "Answer is still the only thing that answers"]],
+    ["06-done", "06-done", "Done", ["Review sits in the thumb zone, above the follow-up", "Change size as five blocks, so files compare at a glance", "A check reads Passed only when it passed"]],
+    ["07-review", "07-review", "Review", ["The file is the title; arrows move between files", "The diff goes edge to edge, with folded unchanged lines", "Attached lines sit on the composer, like @ suggestions"]],
+    ["08-details", "09-details", "Details", ["Three numbers in one row, separated by rules instead of boxes", "Context shows where compaction starts", "No second Review button"]],
+    ["09-history", "14-history", "File history", ["Points are named by your prompt, not an operation id", "A timeline shows where the files are now", "Snapshots and imports are quieter than turns"]],
+    ["10-page", "15-markdown-page", "A page Pi made", ["The card shows the page itself, captured after it loads", "Open and View source are separate, explicit actions"]],
+    ["11-viewer", null, "Page viewer", ["The page gets the whole screen", "Close, Preview or Code, and Reload sit at the bottom, within reach of the thumb"]],
+    ["12-evening", "11-evening", "Evening", ["The Working screen in the dark theme, from the same tokens"]],
+    ["13-computers", "13-drawer", "Computers", ["A sheet from the title replaces the drawer", "Recent sessions already live on Home", "Sample sessions stay one tap away"]],
+  ];
+  document.getElementById("grid").innerHTML = screens.map(([after, before, title, notes]) => `
+    <section>
+      <div class="pair">
+        <div class="before"><span class="tag">Before</span>${before
+          ? `<a href="../screens/${before}.html"><img src="../screens/${before}.png" alt="${title}, current" loading="lazy"></a>`
+          : `<div class="none">New screen</div>`}</div>
+        <div><span class="tag">After</span><a href="screens/${after}.html"><img src="screens/${after}.png" alt="${title}, next" loading="lazy"></a></div>
+      </div>
+      <h2>${title}</h2>
+      <ul>${notes.map((n) => `<li>${n}</li>`).join("")}</ul>
+    </section>`).join("");
+</script>
+</body></html>

@@ -166,6 +166,97 @@ pub async fn models(
     Ok(serde_json::from_value(catalog["models"].clone())?)
 }
 
+pub async fn commands(
+    connection: &Connection,
+    helper: &Helper,
+) -> Result<Vec<pi_core::protocol::SlashCommand>> {
+    let output = connection.run(helper.command("commands")?).await?;
+    if output.status != Some(0) {
+        if output.stderr.contains("Usage:") || output.stderr.contains("cannot run that command") {
+            // The session-level get_commands request still discovers commands
+            // after attaching to older helpers.
+            return Ok(Vec::new());
+        }
+        bail!("Could not load commands: {}", output.stderr.trim());
+    }
+    let catalog: Value = serde_json::from_str(&output.stdout)?;
+    if catalog["version"] != 1 {
+        bail!("Unsupported command catalog format");
+    }
+    Ok(serde_json::from_value(catalog["commands"].clone())?)
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JjHistory {
+    pub version: u32,
+    pub path: String,
+    pub root: Option<String>,
+    pub available: bool,
+    pub reason: Option<String>,
+    pub operations: Vec<JjOperation>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JjOperation {
+    pub id: String,
+    pub time: i64,
+    pub description: String,
+    pub kind: String,
+}
+
+pub async fn jj_history(connection: &Connection, helper: &Helper, path: &str) -> Result<JjHistory> {
+    let arguments = format!("jj-history --path {}", quote(path)?);
+    let output = connection.run(helper.command(&arguments)?).await?;
+    if output.status != Some(0) {
+        if output.stderr.contains("Usage:") || output.stderr.contains("cannot run that command") {
+            bail!("Update the computer's helper to browse jj file history.");
+        }
+        bail!("Could not load jj history: {}", output.stderr.trim());
+    }
+    let history: JjHistory = serde_json::from_str(&output.stdout)?;
+    ensure!(history.version == 1, "Unsupported jj history format");
+    Ok(history)
+}
+
+pub async fn restore_jj_operation(
+    connection: &Connection,
+    helper: &Helper,
+    path: &str,
+    operation: &str,
+) -> Result<()> {
+    let arguments = format!(
+        "jj-restore --path {} --operation {}",
+        quote(path)?,
+        quote(operation)?
+    );
+    let output = connection.run(helper.command(&arguments)?).await?;
+    if output.status != Some(0) {
+        bail!("Could not restore jj history: {}", output.stderr.trim());
+    }
+    let response: Value = serde_json::from_str(&output.stdout)?;
+    ensure!(
+        response["version"] == 1 && response["restored"].is_string(),
+        "Invalid jj restore response"
+    );
+    Ok(())
+}
+
+pub async fn enable_jj(connection: &Connection, helper: &Helper, path: &str) -> Result<JjHistory> {
+    let arguments = format!("jj-enable --path {}", quote(path)?);
+    let output = connection.run(helper.command(&arguments)?).await?;
+    if output.status != Some(0) {
+        bail!("Could not enable jj: {}", output.stderr.trim());
+    }
+    let history: JjHistory = serde_json::from_str(&output.stdout)?;
+    ensure!(
+        history.version == 1 && history.available,
+        "Invalid jj enable response"
+    );
+    Ok(history)
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Directory {
     pub version: u32,
@@ -180,6 +271,9 @@ pub struct Folder {
     pub name: String,
     pub path: String,
     pub project: bool,
+    /// What makes it a project: "git", "jj" or "package". Older helpers don't say.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 pub fn parse_directory(output: &str) -> Result<Directory> {
@@ -243,14 +337,13 @@ async fn file_request(pipe: &Pipe, id: &str, request: FileRequest) -> Result<Val
     bail!("{ended}")
 }
 
-/// Lists the bounded project tree through the helper's existing file channel.
-/// Paths stay relative to `cwd`, which is exactly what a prompt mention needs.
-pub async fn project_files(
+/// Opens the helper's file channel on a project.
+async fn files_channel(
     connection: &Connection,
     helper: &Helper,
     host: &str,
     cwd: &str,
-) -> Result<Vec<String>> {
+) -> Result<Pipe> {
     let pipe = connection.pipe(helper.command("files --stdio")?).await?;
     let target = SshTarget::new(host.to_owned(), cwd.to_owned())?;
     file_request(
@@ -262,10 +355,32 @@ pub async fn project_files(
         },
     )
     .await?;
-    let tree: Tree = serde_json::from_value(
+    Ok(pipe)
+}
+
+/// The bounded project tree, folders and files, relative to `cwd`.
+pub async fn project_tree(
+    connection: &Connection,
+    helper: &Helper,
+    host: &str,
+    cwd: &str,
+) -> Result<Tree> {
+    let pipe = files_channel(connection, helper, host, cwd).await?;
+    Ok(serde_json::from_value(
         file_request(&pipe, "phone-files-list", FileRequest::FilesList).await?,
-    )?;
-    Ok(tree
+    )?)
+}
+
+/// Lists the bounded project tree through the helper's existing file channel.
+/// Paths stay relative to `cwd`, which is exactly what a prompt mention needs.
+pub async fn project_files(
+    connection: &Connection,
+    helper: &Helper,
+    host: &str,
+    cwd: &str,
+) -> Result<Vec<String>> {
+    Ok(project_tree(connection, helper, host, cwd)
+        .await?
         .entries
         .into_iter()
         .map(|entry| {
@@ -276,6 +391,26 @@ pub async fn project_files(
             }
         })
         .collect())
+}
+
+/// A text file in a project, up to 1 MB, read-only.
+pub async fn read_file(
+    connection: &Connection,
+    helper: &Helper,
+    host: &str,
+    cwd: &str,
+    path: &str,
+) -> Result<String> {
+    let pipe = files_channel(connection, helper, host, cwd).await?;
+    let document: pi_core::remote_files::Document = serde_json::from_value(
+        file_request(
+            &pipe,
+            "phone-files-read",
+            FileRequest::FilesRead { path: path.into() },
+        )
+        .await?,
+    )?;
+    Ok(document.text)
 }
 
 /// Attaches to a session, starting its daemon if it isn't up. Records from

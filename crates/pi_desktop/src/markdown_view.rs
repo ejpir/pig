@@ -1,86 +1,26 @@
 //! Chat Markdown through Zed's `markdown` crate, styled with the Evening/Moonstone
 //! palette. Zed components inside it (code blocks, tables, copy buttons, tooltips)
 //! read Zed's global theme, so that theme mirrors the app palette.
-use std::{borrow::Cow, collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClipboardItem, ElementId, Entity, FontStyle, FontWeight,
-    Global, HighlightStyle, Hsla, IntoElement as _, KeyBinding, Refineable as _, SharedString,
-    StyleRefinement, Styled as _, TextStyleRefinement, UnderlineStyle, Window, point, px, relative,
-    rgb,
+    AnyElement, App, ClipboardItem, ElementId, Entity, FontWeight, Hsla, IntoElement as _,
+    KeyBinding, Refineable as _, SharedString, StyleRefinement, Styled as _, TextStyleRefinement,
+    UnderlineStyle, Window, point, px, relative, rgb,
 };
-use language::{LanguageRegistry, LoadedLanguage};
-use markdown::{
-    BlockQuoteKindColors, CodeBlockRenderer, CopyButtonVisibility, HeadingLevelStyles, Markdown,
-    MarkdownElement, MarkdownStyle, WrapButtonVisibility,
-};
+use markdown::{BlockQuoteKindColors, HeadingLevelStyles, Markdown, MarkdownStyle};
 use ui::{ContextMenu, prelude::FluentBuilder as _, right_click_menu};
-use zed_theme::{ActiveTheme as _, Appearance, GlobalTheme, SyntaxTheme};
+use zed_theme::{ActiveTheme as _, Appearance, GlobalTheme};
+
+pub use pi_markdown::{Documents, LinkHandler, Source, element};
 
 use crate::theme::{MONO, SANS, Theme};
 
-/// Languages for highlighting code blocks: Zed's bundled tree-sitter grammars and
-/// highlight queries, without language servers.
-struct CodeLanguages(Arc<LanguageRegistry>);
-
-impl Global for CodeLanguages {}
-
-/// Every language in Zed's `grammars` crate except the Zed-internal and git ones.
-const CODE_LANGUAGES: [&str; 20] = [
-    "bash",
-    "c",
-    "cpp",
-    "css",
-    "diff",
-    "go",
-    "gomod",
-    "gowork",
-    "javascript",
-    "jsdoc",
-    "json",
-    "jsonc",
-    "markdown",
-    "markdown-inline",
-    "python",
-    "regex",
-    "rust",
-    "tsx",
-    "typescript",
-    "yaml",
-];
-
 /// Requires the app `Theme` global.
 pub fn init(cx: &mut App) {
-    settings::init(cx);
-    theme_settings::init(zed_theme::LoadThemes::JustBase, cx);
-    let languages = Arc::new(LanguageRegistry::new(cx.background_executor().clone()));
-    languages.register_native_grammars(grammars::native_grammars());
-    for name in CODE_LANGUAGES {
-        let config = grammars::load_config(name);
-        languages.register_language(
-            config.name.clone(),
-            config.grammar.clone(),
-            config.matcher.clone(),
-            config.hidden,
-            None,
-            Arc::new(move || {
-                let config = config.clone();
-                Box::pin(async move {
-                    Ok(LoadedLanguage {
-                        config,
-                        queries: grammars::load_queries(name),
-                        context_provider: None,
-                        toolchain_provider: None,
-                        manifest_name: None,
-                    })
-                })
-            }),
-        );
-    }
-    cx.set_global(CodeLanguages(languages));
+    pi_markdown::init(cx);
     let menu = Some("menu");
     cx.bind_keys([
-        KeyBinding::new("secondary-c", markdown::Copy, Some("Markdown")),
         // Zed's context menus act on `menu::*` actions; Zed binds them in its keymap.
         KeyBinding::new("up", menu::SelectPrevious, menu),
         KeyBinding::new("down", menu::SelectNext, menu),
@@ -252,86 +192,26 @@ pub fn sync_theme(cx: &mut App) {
     status.deleted = palette.coral;
     status.info = palette.steel;
     status.hint = palette.muted;
-    theme.styles.syntax = Arc::new(syntax(palette));
+    theme.styles.syntax = Arc::new(pi_markdown::syntax(pi_markdown::SyntaxPalette {
+        text: palette.text,
+        plain: palette.plain,
+        muted: palette.muted,
+        faint: palette.faint,
+        accent: palette.code,
+        steel: palette.steel,
+        amber: palette.amber,
+        coral: palette.coral,
+        green: palette.green,
+        keyword: palette.keyword,
+        string: palette.string,
+        added: palette.added,
+        removed: palette.removed,
+        selected: palette.selected,
+    }));
     let theme = Arc::new(theme);
     // Languages resolve highlight captures against the theme they were given.
-    cx.global::<CodeLanguages>().0.set_theme(theme.clone());
+    pi_markdown::set_language_theme(theme.clone(), cx);
     GlobalTheme::update_theme(cx, theme);
-}
-
-fn syntax(palette: Theme) -> SyntaxTheme {
-    let color = |color: Hsla| HighlightStyle {
-        color: Some(color),
-        ..Default::default()
-    };
-    SyntaxTheme::new(
-        [
-            ("attribute", color(palette.amber)),
-            ("boolean", color(palette.keyword)),
-            (
-                "comment",
-                HighlightStyle {
-                    font_style: Some(FontStyle::Italic),
-                    ..color(palette.faint)
-                },
-            ),
-            ("constant", color(palette.amber)),
-            ("constructor", color(palette.steel)),
-            (
-                "diff.plus",
-                HighlightStyle {
-                    background_color: Some(palette.added),
-                    ..color(palette.green)
-                },
-            ),
-            (
-                "diff.minus",
-                HighlightStyle {
-                    background_color: Some(palette.removed),
-                    ..color(palette.coral)
-                },
-            ),
-            ("embedded", color(palette.plain)),
-            (
-                "emphasis",
-                HighlightStyle {
-                    font_style: Some(FontStyle::Italic),
-                    ..Default::default()
-                },
-            ),
-            (
-                "emphasis.strong",
-                HighlightStyle {
-                    font_weight: Some(FontWeight::SEMIBOLD),
-                    ..Default::default()
-                },
-            ),
-            ("function", color(palette.code)),
-            ("keyword", color(palette.keyword)),
-            ("label", color(palette.amber)),
-            ("link_text", color(palette.accent)),
-            ("link_uri", color(palette.accent)),
-            ("number", color(palette.amber)),
-            ("operator", color(palette.muted)),
-            ("property", color(palette.plain)),
-            ("punctuation", color(palette.muted)),
-            ("string", color(palette.string)),
-            ("string.escape", color(palette.amber)),
-            ("string.special", color(palette.string)),
-            ("tag", color(palette.keyword)),
-            (
-                "title",
-                HighlightStyle {
-                    font_weight: Some(FontWeight::SEMIBOLD),
-                    ..color(palette.text)
-                },
-            ),
-            ("type", color(palette.steel)),
-            ("variable", color(palette.plain)),
-            ("variable.special", color(palette.keyword)),
-        ]
-        .map(|(name, style)| (name.to_owned(), style)),
-    )
 }
 
 /// Text style for one transcript block. `color` is the body color; headings use `text`.
@@ -460,70 +340,6 @@ pub fn output_style(palette: Theme, window: &Window, cx: &App) -> MarkdownStyle 
     }
 }
 
-pub type LinkHandler = std::rc::Rc<dyn Fn(SharedString, &mut Window, &mut App)>;
-
-#[derive(gpui::IntoElement)]
-pub struct DocumentElement {
-    document: Entity<Markdown>,
-    style: MarkdownStyle,
-    wrap_control: bool,
-    on_link: Option<LinkHandler>,
-}
-impl DocumentElement {
-    pub fn without_wrap_control(mut self) -> Self {
-        self.wrap_control = false;
-        self
-    }
-
-    /// Handles clicked links instead of opening them in the browser.
-    pub fn on_link(mut self, handler: LinkHandler) -> Self {
-        self.on_link = Some(handler);
-        self
-    }
-}
-
-impl gpui::RenderOnce for DocumentElement {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl gpui::IntoElement {
-        use gpui::{Focusable as _, InteractiveElement as _, ParentElement as _};
-        // MarkdownElement installs focus and copy handlers on its current dispatch node.
-        // Every document needs its own node: otherwise a later output block can replace
-        // the selected diff's keyboard handlers, especially when a cached row is reused.
-        let focus = self.document.focus_handle(cx);
-        gpui::div()
-            .id(ElementId::View(self.document.entity_id()))
-            .w_full()
-            .key_context("Markdown")
-            .track_focus(&focus)
-            .child({
-                let element = MarkdownElement::new(self.document, self.style);
-                let element = match self.on_link {
-                    Some(handler) => {
-                        element.on_url_click(move |url, window, cx| handler(url, window, cx))
-                    }
-                    None => element,
-                };
-                element.code_block_renderer(CodeBlockRenderer::Default {
-                    copy_button_visibility: CopyButtonVisibility::VisibleOnHover,
-                    wrap_button_visibility: if self.wrap_control {
-                        WrapButtonVisibility::VisibleOnHover
-                    } else {
-                        WrapButtonVisibility::Hidden
-                    },
-                    border: false,
-                })
-            })
-    }
-}
-
-pub fn element(markdown: &Entity<Markdown>, style: MarkdownStyle) -> DocumentElement {
-    DocumentElement {
-        document: markdown.clone(),
-        style,
-        wrap_control: true,
-        on_link: None,
-    }
-}
-
 /// Right-click menu for one transcript block. The Markdown element records the
 /// clicked link and the selection before the menu is built.
 pub fn with_menu(
@@ -577,130 +393,6 @@ pub fn copy(text: &str, cx: &mut App) {
     cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
 }
 
-/// How a transcript block is parsed.
-pub enum Source<'a> {
-    Markdown(Cow<'a, str>),
-    /// Plain text such as tool output: whitespace is kept and only URLs become links.
-    Text(&'a str),
-    Code {
-        text: &'a str,
-        language: &'a str,
-    },
-}
-
-/// One Markdown entity per transcript block. Entities own selection and code-block
-/// state; a streaming reply updates its source in place instead of recreating it.
-#[derive(Default)]
-pub struct Documents {
-    entities: HashMap<SharedString, Entity<Markdown>>,
-    code: HashMap<SharedString, (String, std::ops::Range<usize>)>,
-}
-
-impl Documents {
-    /// Blocks missing from `sources` are dropped.
-    /// Sources are borrowed; only new or changed blocks copy their text.
-    pub fn sync(&mut self, sources: Vec<(SharedString, Source)>, cx: &mut App) {
-        let keys: std::collections::HashSet<_> =
-            sources.iter().map(|(key, _)| key.clone()).collect();
-        self.entities.retain(|key, _| keys.contains(key));
-        self.code.retain(|key, _| keys.contains(key));
-        self.update(sources, cx);
-    }
-
-    /// Update only the affected row's documents, retaining all other selections.
-    pub fn update(&mut self, sources: Vec<(SharedString, Source)>, cx: &mut App) {
-        let languages = cx.global::<CodeLanguages>().0.clone();
-        for (key, source) in sources {
-            let (source, plain) = match source {
-                Source::Markdown(source) => {
-                    self.code.remove(&key);
-                    (source, false)
-                }
-                Source::Text(source) => {
-                    self.code.remove(&key);
-                    (Cow::Borrowed(source), true)
-                }
-                Source::Code { text, language } => {
-                    if self
-                        .code
-                        .get(&key)
-                        .is_some_and(|(previous_language, range)| {
-                            previous_language == language
-                                && self.entities.get(&key).is_some_and(|entity| {
-                                    entity.read(cx).source().get(range.clone()) == Some(text)
-                                })
-                        })
-                    {
-                        continue;
-                    }
-                    let (source, range) = code_source(text, language);
-                    self.code.insert(key.clone(), (language.to_owned(), range));
-                    (Cow::Owned(source), false)
-                }
-            };
-            let entity = match self.entities.remove(&key) {
-                Some(entity) => {
-                    entity.update(cx, |markdown, cx| {
-                        let previous = markdown.source();
-                        if previous.as_ref() != source {
-                            match source.strip_prefix(previous.as_ref()) {
-                                Some(delta) => markdown.append(delta, cx),
-                                None => markdown.replace(source.into_owned(), cx),
-                            }
-                        }
-                    });
-                    entity
-                }
-                None if plain => cx.new(|cx| Markdown::new_text(source.into_owned().into(), cx)),
-                None => cx.new(|cx| {
-                    Markdown::new(
-                        source.into_owned().into(),
-                        Some(languages.clone()),
-                        None,
-                        cx,
-                    )
-                }),
-            };
-            self.entities.insert(key, entity);
-        }
-    }
-
-    pub fn remove(&mut self, key: &str) {
-        self.entities.remove(key);
-        self.code.remove(key);
-    }
-
-    pub fn get(&self, key: &str) -> Option<&Entity<Markdown>> {
-        self.entities.get(key)
-    }
-    pub fn copy_range(&self, key: &str) -> Option<std::ops::Range<usize>> {
-        self.code.get(key).map(|(_, range)| range.clone())
-    }
-    #[cfg(test)]
-    pub fn copy_source<'a>(&'a self, key: &str, cx: &'a App) -> Option<&'a str> {
-        let source = self.get(key)?.read(cx).source();
-        match self.copy_range(key) {
-            Some(range) => source.get(range),
-            None => Some(source.as_ref()),
-        }
-    }
-}
-
-fn code_source(text: &str, language: &str) -> (String, std::ops::Range<usize>) {
-    // Tool text can itself contain Markdown fences. It must remain literal, not become
-    // an image, link, or other Markdown structure by closing our wrapper early.
-    let longest = text.split(|ch| ch != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest.max(2) + 1);
-    let language: String = language
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
-        .take(32)
-        .collect();
-    let prefix = format!("{fence}{language}\n");
-    let range = prefix.len()..prefix.len() + text.len();
-    (format!("{prefix}{text}\n{fence}"), range)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,7 +402,7 @@ mod tests {
     #[gpui::test]
     fn code_previews_keep_fences_literal_and_copy_exact_unicode_source(cx: &mut TestAppContext) {
         let raw = "  π🐈\n```text\n![literal](https://example.invalid/image)\n```\n";
-        let (source, range) = code_source(raw, "text\n`bad");
+        let (source, range) = pi_markdown::code_source(raw, "text\n`bad");
         assert!(source.starts_with("````textbad\n"));
         assert_eq!(&source[range], raw);
         cx.update(|cx| {
@@ -755,7 +447,7 @@ mod tests {
             cx.set_global(Theme::new(false));
             init(cx);
         });
-        let languages = cx.update(|cx| cx.global::<CodeLanguages>().0.clone());
+        let languages = cx.update(|cx| pi_markdown::languages(cx));
         let typescript = languages
             .language_for_name_or_extension("ts")
             .await
