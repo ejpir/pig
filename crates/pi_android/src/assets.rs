@@ -31,8 +31,17 @@ pub fn icon_path(name: &str) -> &'static str {
         .map_or("icons/missing.svg", |(_, path, _)| path)
 }
 
+const PLEX_SANS: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexSans-Regular.ttf");
+
+/// The font GPUI draws text in SVGs with, such as diagram labels: Android has
+/// no system fonts it can find, so without it the labels are left out.
+const SVG_FONT: &str = "fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf";
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        if path == SVG_FONT {
+            return Ok(Some(Cow::Borrowed(PLEX_SANS)));
+        }
         Ok(ICONS
             .iter()
             .find(|(_, icon, _)| *icon == path)
@@ -47,9 +56,7 @@ impl AssetSource for Assets {
 /// IBM Plex Sans and Commit Mono, as on the desktop.
 pub fn load_fonts(cx: &App) -> anyhow::Result<()> {
     cx.text_system().add_fonts(vec![
-        Cow::Borrowed(include_bytes!(
-            "../../../assets/fonts/IBMPlexSans-Regular.ttf"
-        )),
+        Cow::Borrowed(PLEX_SANS),
         Cow::Borrowed(include_bytes!(
             "../../../assets/fonts/IBMPlexSans-SemiBold.ttf"
         )),

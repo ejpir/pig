@@ -12,6 +12,8 @@ pub struct Script {
     next: usize,
     /// Working time left before the next beat.
     wait: Duration,
+    /// Runs for the follow-ups to come, in order; then the sample run.
+    follow_ups: Vec<Vec<Beat>>,
 }
 
 impl Script {
@@ -20,6 +22,15 @@ impl Script {
             beats,
             next: 0,
             wait: Duration::ZERO,
+            follow_ups: Vec::new(),
+        }
+    }
+
+    /// Nothing to run now; these answer the next follow-ups.
+    fn follow_ups(follow_ups: Vec<Vec<Beat>>) -> Self {
+        Self {
+            follow_ups,
+            ..Self::new(Vec::new())
         }
     }
 }
@@ -27,6 +38,8 @@ impl Script {
 #[derive(Clone, Debug, PartialEq)]
 enum Beat {
     Wait(u64),
+    /// A shorter wait, in milliseconds.
+    Pause(u64),
     Activity(&'static str),
     Stage(StageKind, StageStatus, &'static str),
     Changed(&'static str, u32, u32),
@@ -36,6 +49,8 @@ enum Beat {
     Ask(Question, Vec<Beat>),
     Check(&'static str, CheckResult),
     Summary(&'static str, &'static str),
+    /// The reply so far, in Markdown, as it streams in.
+    Reply(String),
     Finish,
 }
 
@@ -155,7 +170,19 @@ pub(crate) fn begin_turn(session: &mut Session, prompt: String, attachments: Vec
     session.state = State::Working;
     session.finished_at = None;
     session.details.turns += 1;
-    session.script = Some(Script::new(sample_run()));
+    let mut follow_ups = session
+        .script
+        .take()
+        .map(|script| script.follow_ups)
+        .unwrap_or_default();
+    let beats = if follow_ups.is_empty() {
+        sample_run()
+    } else {
+        follow_ups.remove(0)
+    };
+    let mut script = Script::new(beats);
+    script.follow_ups = follow_ups;
+    session.script = Some(script);
     advance(session, Duration::ZERO);
 }
 
@@ -180,6 +207,14 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
         script.next += 1;
         match beat {
             Beat::Wait(seconds) => script.wait = Duration::from_secs(seconds),
+            Beat::Pause(millis) => script.wait = Duration::from_millis(millis),
+            Beat::Reply(text) => {
+                session.turn_mut().summary = Some(Summary {
+                    source: Some(text),
+                    headline: String::new(),
+                    body: String::new(),
+                })
+            }
             Beat::Activity(activity) => session.activity = activity.into(),
             Beat::Stage(kind, status, what) => {
                 let stage = session.turn_mut().stage_mut(kind);
@@ -229,10 +264,47 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
             }
         }
     }
-    if session.state.is_running() {
+    if session.state.is_running() || !script.follow_ups.is_empty() {
         session.script = Some(script);
     }
     event
+}
+
+/// A reply that streams in a few words at a time, as a model writes it.
+fn stream(markdown: &str) -> Vec<Beat> {
+    let mut beats = Vec::new();
+    let mut words = 0;
+    for (index, char) in markdown.char_indices() {
+        if char.is_whitespace() && !markdown[..index].ends_with(char::is_whitespace) {
+            words += 1;
+            if words % 3 == 0 {
+                beats.push(Beat::Reply(markdown[..index].to_owned()));
+                beats.push(Beat::Pause(110));
+            }
+        }
+    }
+    beats.push(Beat::Reply(markdown.to_owned()));
+    beats
+}
+
+/// A follow-up Pi answers by reading, without changing anything.
+fn answer(reading: &'static str, read: &'static str, reply: &str) -> Vec<Beat> {
+    use Beat::*;
+    use StageKind::*;
+    use StageStatus::*;
+    let mut beats = vec![
+        Activity(reading),
+        Stage(Understand, Live, reading),
+        Wait(2),
+        Stage(Understand, Done, read),
+        Stage(Change, Skipped, "Nothing changed"),
+        Stage(Verify, Skipped, "Nothing to check"),
+        Activity("Writing the reply"),
+        Stage(HandOff, Live, "Writing the reply"),
+    ];
+    beats.extend(stream(reply));
+    beats.extend([Stage(HandOff, Done, "Answered"), Finish]);
+    beats
 }
 
 /// Working time goes to the stage Pi is in.
@@ -257,15 +329,16 @@ fn sample_run() -> Vec<Beat> {
         Stage(Verify, Skipped, "Nothing to check"),
         Activity("Writing the summary"),
         Stage(HandOff, Live, "Writing the summary"),
-        Wait(2),
-        Summary(
-            "This is a sample session, so nothing ran.",
-            "The preview does not connect to the computer yet. Once it does, Pi \
-             works on this in the project's folder there, and the phone follows along.",
-        ),
-        Stage(HandOff, Done, "Summary"),
-        Finish,
+        Wait(1),
     ]
+    .into_iter()
+    .chain(stream(
+        "**This is a sample session, so nothing ran.** The preview does not connect to \
+         the computer yet. Once it does, Pi works on this in the project's folder there, \
+         and the phone follows along.",
+    ))
+    .chain([Stage(HandOff, Done, "Summary"), Finish])
+    .collect()
 }
 
 fn tools() -> Vec<String> {
@@ -733,11 +806,39 @@ fn kimi(id: SessionId) -> Session {
     turn.times = times([30, 0, 0, 11]);
     let mut session = session(id.0, "Kimi K3 default", 0, State::Done, turn);
     session.elapsed = Duration::from_secs(41);
+    // A conversation to carry on: whatever is asked next, these answer it.
+    session.script = Some(Script::follow_ups(vec![
+        answer(
+            "Reading the settings",
+            "Read settings.ts",
+            "Set it for the provider in your settings, so nothing else changes:\n\n\
+             ```json\n{\n  \"providers\": {\n    \"moonshot\": { \"defaultModel\": \
+             \"kimi-k2\" }\n  }\n}\n```\n\nPi reads this when a session starts, so **new \
+             sessions** use K2 and running ones keep K3. For a single session, pick it from \
+             the model menu instead.",
+        ),
+        answer(
+            "Comparing the models",
+            "Read models.ts",
+            "## K2 next to K3\n\n- **Context:** 128k tokens instead of 256k.\n- **Speed:** \
+             a little faster on short answers.\n- **Tools:** both call tools, but K2 slips \
+             more often on long argument lists.\n\nFor big refactors I'd keep K3. For quick \
+             questions, K2 is fine.",
+        ),
+    ]));
     finished(
         session,
         "11:40",
         Summary {
-            source: None,
+            source: Some(
+                "## Kimi K3\n\nIt's the newest Kimi model that can **call tools**, and \
+                 `models.ts` picks it like this:\n\n```ts\nconst kimi = models\n  \
+                 .filter((m) => m.family === \"kimi\" && m.tools)\n  .sort(byRelease)\n  \
+                 .at(-1);\n```\n\n```mermaid\ngraph LR\n  A[Provider models] --> B[Kimi \
+                 with tools]\n  B --> C[Newest: K3]\n```\n\nThis only applies when a provider \
+                 offers several Kimi models."
+                    .into(),
+            ),
             headline: "Kimi K3 is the default because it is the newest with tool calls.".into(),
             body: "The default lives in models.ts and only applies when a provider offers \
                    several Kimi models."
@@ -763,6 +864,27 @@ fn aurora(id: SessionId) -> Session {
         path: "demo/aurora.html".into(),
         html: Some(include_str!("../assets/samples/aurora.html").into()),
     }];
+    use base64::Engine as _;
+    turn.images = vec![ToolImage {
+        key: "sample-aurora".into(),
+        name: "aurora.png".into(),
+        mime: "image/png".into(),
+        inline: Some(
+            base64::engine::general_purpose::STANDARD
+                .encode(include_bytes!("../assets/samples/aurora.png")),
+        ),
+    }];
+    // Words, the screenshot Pi checked it with, then the page, in order.
+    turn.flow = vec![
+        Flow::Text("I'll draw it on a canvas, then take a screenshot to check it.".into()),
+        Flow::Image(0),
+        Flow::Text(
+            "An aurora over a starfield. Touch it to stir the sky. It's one file with \
+             nothing to download, so it works offline."
+                .into(),
+        ),
+        Flow::Page(0),
+    ];
     turn.times = times([0, 40, 0, 14]);
     let mut session = session(id.0, "Aurora", 0, State::Done, turn);
     session.elapsed = Duration::from_secs(54);
@@ -902,9 +1024,39 @@ mod tests {
                 .summary
                 .as_ref()
                 .unwrap()
-                .headline
+                .text()
                 .contains("sample")
         );
+    }
+
+    #[test]
+    fn a_conversation_carries_on_with_replies_that_stream_in() {
+        let mut store = store();
+        let kimi = SessionId(5);
+        let reply = |store: &Store| {
+            store
+                .session(kimi)
+                .unwrap()
+                .turn()
+                .unwrap()
+                .summary
+                .as_ref()
+                .map(|s| s.text())
+        };
+        for (prompt, end) in [
+            ("How do I switch it to K2?", "model menu instead."),
+            ("What changes?", "K2 is fine."),
+        ] {
+            let prompt = crate::prompt::Prompt::new(prompt.into(), Vec::new());
+            store.send(kimi, prompt, Vec::new()).unwrap();
+            store.tick(Duration::from_millis(2_500));
+            let partial = reply(&store).unwrap();
+            assert!(!partial.is_empty() && !partial.ends_with(end), "{partial}");
+            store.tick(Duration::from_secs(10));
+            assert_eq!(store.session(kimi).unwrap().state, State::Done);
+            assert!(reply(&store).unwrap().ends_with(end));
+        }
+        assert_eq!(store.session(kimi).unwrap().turns.len(), 3);
     }
 
     #[test]

@@ -181,6 +181,8 @@ pub struct PhoneApp {
     last_tick: Instant,
     /// Holds the sample sessions still, for previews.
     pub(crate) paused: bool,
+    /// A paused fixture whose sample sessions run anyway, for recording.
+    pub(crate) playing: bool,
     subscriptions: Vec<Subscription>,
     _ticker: Task<()>,
 }
@@ -284,9 +286,15 @@ impl PhoneApp {
                 this.set_visible(visibility, cx)
             }),
         ];
+        // Tests read the screen from what each tick writes, so it stays current.
+        let interval = if cfg!(feature = "ui-test") {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_secs(1)
+        };
         let ticker = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
+                cx.background_executor().timer(interval).await;
                 if this.update(cx, |this, cx| this.tick(cx)).is_err() {
                     break;
                 }
@@ -376,6 +384,7 @@ impl PhoneApp {
             working_posted: None,
             last_tick: Instant::now(),
             paused: false,
+            playing: false,
             subscriptions,
             _ticker: ticker,
         };
@@ -1241,10 +1250,11 @@ impl PhoneApp {
         let now = Instant::now();
         let elapsed = now - self.last_tick;
         self.last_tick = now;
-        if !self.paused {
+        let paused = self.paused && !self.playing;
+        if !paused {
             self.keep_latest_in_view();
         }
-        let Some(store) = self.store.as_mut().filter(|_| !self.paused) else {
+        let Some(store) = self.store.as_mut().filter(|_| !paused) else {
             return;
         };
         if let Some(live) = &store.live {
@@ -1386,6 +1396,13 @@ impl PhoneApp {
                     activity::notify(&alerts::finished(session, &store.computer.name, accent));
                 log::info!("Test notification posted: {posted}");
             }
+            return;
+        }
+        #[cfg(feature = "ui-test")]
+        if url == "pi://test/play" {
+            // Lets the sample sessions run in real time, as they do before
+            // pairing, for recording a walkthrough.
+            self.playing = true;
             return;
         }
         #[cfg(feature = "ui-test")]

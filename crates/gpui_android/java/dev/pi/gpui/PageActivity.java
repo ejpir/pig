@@ -105,11 +105,8 @@ public final class PageActivity extends Activity {
         preview.getSettings().setGeolocationEnabled(false);
         preview.getSettings().setMediaPlaybackRequiresUserGesture(true);
         preview.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        // Pages made for a desktop browser are laid out wide and fit to the
-        // screen, and any page can be pinched to zoom and panned in both
-        // directions.
-        preview.getSettings().setUseWideViewPort(true);
-        preview.getSettings().setLoadWithOverviewMode(true);
+        // Pages are laid out at the phone's width, so one without a viewport
+        // tag stays readable; anything wider can be pinched and panned.
         preview.getSettings().setSupportZoom(true);
         preview.getSettings().setBuiltInZoomControls(true);
         preview.getSettings().setDisplayZoomControls(false);

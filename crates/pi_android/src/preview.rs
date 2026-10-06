@@ -88,6 +88,7 @@ impl PhoneApp {
         // replace the fixture's store or navigation.
         self.cancel_connection_attempt();
         self.paused = true;
+        self.playing = false;
         self.routes = vec![Route::Connect];
         self.sheet = None;
         self.closing_sheet = None;
