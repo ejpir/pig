@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Records a tour of the offline demo (--demo: sample sessions, never a provider)
-# and writes docs/pi-desktop-showcase.gif and artifacts/macos-demo/pi-desktop-demo.mp4.
+# and writes docs/pi-desktop-showcase.gif and, in artifacts/macos-demo, an MP4 and
+# the raw capture.
 #
 # Needs a release build (see the README), ffmpeg, and for the terminal running
 # this: Screen Recording and Accessibility in System Settings → Privacy & Security.
@@ -43,7 +44,7 @@ osascript -e "tell application \"System Events\" to tell ($app) to set frontmost
 move 1200 620
 # Interrupting screencapture loses the last seconds, so it records for a fixed
 # time, longer than the tour, and the end is trimmed.
-screencapture -v -C -k -V 100 -R$X0,$Y0,$W,$H $WORK/raw.mov &
+screencapture -v -C -k -V 100 -R$X0,$Y0,$W,$H $OUT/raw.mov &
 recorder=$!
 started=$SECONDS
 sleep 2
@@ -96,8 +97,8 @@ click 1282 274; sleep 3
 
 length=$((SECONDS - started))
 wait $recorder
-ffmpeg -v error -y -ss 1 -t $((length - 1)) -i $WORK/raw.mov -vf "setpts=PTS/1.3,fps=60,scale=1440:-2" \
+ffmpeg -v error -y -ss 1 -t $((length - 1)) -i $OUT/raw.mov -vf "setpts=PTS/1.3,fps=60,scale=1440:-2" \
   -c:v libx264 -crf 24 -preset slow -pix_fmt yuv420p -movflags +faststart -an $OUT/pi-desktop-demo.mp4
-ffmpeg -v error -y -ss 1 -t $((length - 1)) -i $WORK/raw.mov -vf "setpts=PTS/1.3,fps=12,scale=1344:-2:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \
+ffmpeg -v error -y -ss 1 -t $((length - 1)) -i $OUT/raw.mov -vf "setpts=PTS/1.3,fps=15,scale=1920:-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \
   $ROOT/docs/pi-desktop-showcase.gif
 print "Wrote $OUT/pi-desktop-demo.mp4 and docs/pi-desktop-showcase.gif"
