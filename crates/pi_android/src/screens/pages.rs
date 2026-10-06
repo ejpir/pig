@@ -26,132 +26,147 @@ impl PhoneApp {
         cx: &Context<Self>,
     ) -> Option<Div> {
         (!turn.pages.is_empty()).then(|| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(12.))
-                .children(turn.pages.iter().enumerate().map(|(n, page)| {
-                    let detail = match &page.html {
-                        Some(html) => format!("{} · {}", page.file_name(), size_label(html.len())),
-                        None => format!("{} · changed on the computer", page.file_name()),
-                    };
-                    let poster = self.poster_path(page).filter(|path| path.exists());
-                    if poster.is_none() {
-                        self.draw_poster(page, cx);
-                    }
-                    let (opened, source) = (page.clone(), page.clone());
-                    let picture = div()
-                        .id(ElementId::Name(format!("page-poster-{index}-{n}").into()))
-                        .relative()
-                        .h(px(POSTER))
-                        .overflow_hidden()
-                        // Inside the card's border, so one less than its 16.
-                        .rounded_t(px(15.))
-                        .bg(rgb(0x05070d))
-                        .map(|picture| match poster {
-                            Some(path) => picture.child(
-                                img(path)
-                                    .size_full()
-                                    .rounded_t(px(15.))
-                                    .object_fit(ObjectFit::Cover),
-                            ),
-                            None => picture.child(
-                                div()
-                                    .size_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap(px(8.))
-                                    .text_size(px(12.5))
-                                    .text_color(rgba(0xe8edf2a0))
-                                    .child(ui::working_indicator(colors))
-                                    .child("Drawing the page…"),
-                            ),
-                        })
-                        .child(
+            div().flex().flex_col().gap(px(12.)).children(
+                (0..turn.pages.len()).filter_map(|n| self.page_card(index, turn, n, colors, cx)),
+            )
+        })
+    }
+
+    /// Page `n` of a turn: how it looks, its name, Source and Open.
+    pub(crate) fn page_card(
+        &self,
+        index: usize,
+        turn: &Turn,
+        n: usize,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Option<Div> {
+        let page = turn.pages.get(n)?;
+        Some({
+            {
+                let detail = match &page.html {
+                    Some(html) => format!("{} · {}", page.file_name(), size_label(html.len())),
+                    None => format!("{} · changed on the computer", page.file_name()),
+                };
+                let poster = self.poster_path(page).filter(|path| path.exists());
+                if poster.is_none() {
+                    self.draw_poster(page, cx);
+                }
+                let (opened, source) = (page.clone(), page.clone());
+                let picture = div()
+                    .id(ElementId::Name(format!("page-poster-{index}-{n}").into()))
+                    .relative()
+                    .h(px(POSTER))
+                    .overflow_hidden()
+                    // Inside the card's border, so one less than its 16.
+                    .rounded_t(px(15.))
+                    .bg(rgb(0x05070d))
+                    .map(|picture| match poster {
+                        Some(path) => picture.child(
+                            img(path)
+                                .size_full()
+                                .rounded_t(px(15.))
+                                .object_fit(ObjectFit::Cover),
+                        ),
+                        None => picture.child(
                             div()
-                                .absolute()
-                                .left(px(12.))
-                                .top(px(12.))
-                                .h(px(24.))
-                                .px(px(10.))
+                                .size_full()
                                 .flex()
                                 .items_center()
-                                .gap(px(6.))
-                                .rounded(px(12.))
-                                .bg(rgba(0x05070d8c))
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xe8edf2))
-                                .child(icon("spark", 12., rgb(0xe8edf2).into()))
-                                .child("Page"),
-                        )
-                        .on_click({
-                            let page = page.clone();
-                            cx.listener(move |this, _, _, cx| this.open_page(&page, false, cx))
-                        });
-                    ui::card(colors)
-                        .child(picture)
+                                .justify_center()
+                                .gap(px(8.))
+                                .text_size(px(12.5))
+                                .text_color(rgba(0xe8edf2a0))
+                                .child(ui::working_indicator(colors))
+                                .child("Drawing the page…"),
+                        ),
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(12.))
+                            .top(px(12.))
+                            .h(px(24.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .rounded(px(12.))
+                            .bg(rgba(0x05070d8c))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xe8edf2))
+                            .child(icon("spark", 12., rgb(0xe8edf2).into()))
+                            .child("Page"),
+                    )
+                    .on_click({
+                        let page = page.clone();
+                        cx.listener(move |this, _, _, cx| this.open_page(&page, false, cx))
+                    });
+                ui::card(colors).child(picture).child(
+                    div()
+                        .pl(px(16.))
+                        .pr(px(12.))
+                        .py(px(12.))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
                         .child(
                             div()
-                                .pl(px(16.))
-                                .pr(px(12.))
-                                .py(px(12.))
-                                .flex()
-                                .items_center()
-                                .gap(px(12.))
+                                .flex_1()
+                                .min_w_0()
                                 .child(
                                     div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .truncate()
-                                                .child(page.title()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(12.5))
-                                                .line_height(px(16.))
-                                                .text_color(colors.muted)
-                                                .truncate()
-                                                .child(detail),
-                                        ),
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .truncate()
+                                        .child(page.title()),
                                 )
                                 .child(
-                                    ui::button(
-                                        ElementId::Name(format!("page-source-{index}-{n}").into()),
-                                        Button::Plain,
-                                        Some("code"),
-                                        "",
-                                        true,
-                                        colors,
-                                    )
-                                    .px(px(12.))
-                                    .gap(px(0.))
-                                    .bg(colors.tint(colors.accent))
-                                    .border_color(gpui::transparent_black())
-                                    .aria_label("Source")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_page(&source, true, cx)
-                                    })),
-                                )
-                                .child(
-                                    ui::button(
-                                        ElementId::Name(format!("page-{index}-{n}").into()),
-                                        Button::Primary,
-                                        Some("open"),
-                                        "Open",
-                                        true,
-                                        colors,
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_page(&opened, false, cx)
-                                    })),
+                                    div()
+                                        .text_size(px(12.5))
+                                        .line_height(px(16.))
+                                        .text_color(colors.muted)
+                                        .truncate()
+                                        .child(detail),
                                 ),
                         )
-                }))
+                        .child(
+                            ui::button(
+                                ElementId::Name(format!("page-source-{index}-{n}").into()),
+                                Button::Plain,
+                                Some("code"),
+                                "",
+                                true,
+                                colors,
+                            )
+                            .px(px(12.))
+                            .gap(px(0.))
+                            .bg(colors.tint(colors.accent))
+                            .border_color(gpui::transparent_black())
+                            .aria_label("Source")
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.open_page(&source, true, cx)
+                                }),
+                            ),
+                        )
+                        .child(
+                            ui::button(
+                                ElementId::Name(format!("page-{index}-{n}").into()),
+                                Button::Primary,
+                                Some("open"),
+                                "Open",
+                                true,
+                                colors,
+                            )
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.open_page(&opened, false, cx)
+                                }),
+                            ),
+                        ),
+                )
+            }
         })
     }
 
@@ -166,69 +181,86 @@ impl PhoneApp {
         cx: &Context<Self>,
     ) -> Option<Div> {
         (!turn.images.is_empty()).then(|| {
-            div().flex().flex_col().gap(px(12.)).children(turn.images.iter().enumerate().map(
-                |(n, image)| {
-                    let picture = match self.tool_image(id, image) {
-                        Ok(Some(shown)) => div()
-                            .w_full()
-                            .max_h(px(420.))
-                            .aspect_ratio(shown.ratio)
-                            .rounded_t(px(15.))
-                            .overflow_hidden()
-                            .bg(colors.panel)
-                            .child(
-                                img(shown.image)
-                                    .size_full()
-                                    .rounded_t(px(15.))
-                                    .object_fit(ObjectFit::Contain),
-                            ),
-                        Ok(None) => div()
-                            .h(px(160.))
+            div().flex().flex_col().gap(px(12.)).children(
+                (0..turn.images.len())
+                    .filter_map(|n| self.image_card(id, index, turn, n, colors, cx)),
+            )
+        })
+    }
+
+    /// Image `n` of a turn, as a card; tapping it shows it whole.
+    pub(crate) fn image_card(
+        &self,
+        id: SessionId,
+        index: usize,
+        turn: &Turn,
+        n: usize,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Option<gpui::Stateful<Div>> {
+        let image = turn.images.get(n)?;
+        Some({
+            {
+                let picture = match self.tool_image(id, image) {
+                    Ok(Some(shown)) => div()
+                        .w_full()
+                        .max_h(px(420.))
+                        .aspect_ratio(shown.ratio)
+                        .rounded_t(px(15.))
+                        .overflow_hidden()
+                        .bg(colors.panel)
+                        .child(
+                            img(shown.image)
+                                .size_full()
+                                .rounded_t(px(15.))
+                                .object_fit(ObjectFit::Contain),
+                        ),
+                    Ok(None) => div()
+                        .h(px(160.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(8.))
+                        .bg(colors.panel)
+                        .rounded_t(px(15.))
+                        .child(ui::working_indicator(colors))
+                        .child(ui::hint("Getting the image from the computer…", colors)),
+                    Err(error) => div()
+                        .p(px(16.))
+                        .bg(colors.panel)
+                        .rounded_t(px(15.))
+                        .child(ui::hint(error, colors).text_color(colors.coral)),
+                };
+                ui::card(colors)
+                    .id(ElementId::Name(format!("tool-image-{index}-{n}").into()))
+                    .relative()
+                    .child(crate::testing::probe(format!("tool-image-{index}-{n}")))
+                    .child(picture)
+                    .child(
+                        div()
+                            .pl(px(16.))
+                            .pr(px(12.))
+                            .py(px(12.))
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .gap(px(8.))
-                            .bg(colors.panel)
-                            .rounded_t(px(15.))
-                            .child(ui::working_indicator(colors))
-                            .child(ui::hint("Getting the image from the computer…", colors)),
-                        Err(error) => div()
-                            .p(px(16.))
-                            .bg(colors.panel)
-                            .rounded_t(px(15.))
-                            .child(ui::hint(error, colors).text_color(colors.coral)),
-                    };
-                    ui::card(colors)
-                        .id(ElementId::Name(format!("tool-image-{index}-{n}").into()))
-                        .relative()
-                        .child(crate::testing::probe(format!("tool-image-{index}-{n}")))
-                        .child(picture)
-                        .child(
-                            div()
-                                .pl(px(16.))
-                                .pr(px(12.))
-                                .py(px(12.))
-                                .flex()
-                                .items_center()
-                                .gap(px(12.))
-                                .border_t_1()
-                                .border_color(colors.line)
-                                .child(icon("image", 18., colors.muted))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .truncate()
-                                        .child(image.name.clone()),
-                                )
-                                .child(icon("open", 18., colors.muted)),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_sheet(crate::app::Sheet::ToolImage(id, index, n), cx)
-                        }))
-                },
-            ))
+                            .gap(px(12.))
+                            .border_t_1()
+                            .border_color(colors.line)
+                            .child(icon("image", 18., colors.muted))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(image.name.clone()),
+                            )
+                            .child(icon("open", 18., colors.muted)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_sheet(crate::app::Sheet::ToolImage(id, index, n), cx)
+                    }))
+            }
         })
     }
 
@@ -324,8 +356,7 @@ impl PhoneApp {
             .poster_path(page)
             .map(|path| path.display().to_string())
             .unwrap_or_default();
-        if gpui_android::activity::show_page(&page.title(), html, theme(cx).dark, source, &poster)
-        {
+        if gpui_android::activity::show_page(&page.title(), html, theme(cx).dark, source, &poster) {
             return;
         }
         if cfg!(target_os = "android") {

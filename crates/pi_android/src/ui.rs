@@ -138,7 +138,15 @@ pub fn button(
     small: bool,
     colors: &Theme,
 ) -> Stateful<Div> {
-    button_glyph(id, kind, glyph, if small { 16. } else { 20. }, text, small, colors)
+    button_glyph(
+        id,
+        kind,
+        glyph,
+        if small { 16. } else { 20. },
+        text,
+        small,
+        colors,
+    )
 }
 
 /// A pill button with an icon of the given size.
@@ -611,7 +619,9 @@ pub fn track(
                     .flex_none()
                     .rounded(px(2.))
                     .bg(hue)
-                    .when(live == Some(kind), |segment| segment.shadow(ring(hue, 2., 0.28))),
+                    .when(live == Some(kind), |segment| {
+                        segment.shadow(ring(hue, 2., 0.28))
+                    }),
             )
         }))
 }
@@ -679,7 +689,11 @@ pub fn run_line(times: &[std::time::Duration; 4], show_times: bool, colors: &The
 }
 
 /// A key under a run line: each stage's icon with a label and its time.
-pub fn run_key(entries: Vec<(StageKind, SharedString)>, times: &[std::time::Duration; 4], colors: &Theme) -> Div {
+pub fn run_key(
+    entries: Vec<(StageKind, SharedString)>,
+    times: &[std::time::Duration; 4],
+    colors: &Theme,
+) -> Div {
     let entry = |(kind, label): (StageKind, SharedString)| {
         div()
             .flex_1()
@@ -716,7 +730,12 @@ pub fn run_key(entries: Vec<(StageKind, SharedString)>, times: &[std::time::Dura
                 }),
         );
     }
-    div().mt(px(12.)).flex().flex_col().gap(px(8.)).children(rows)
+    div()
+        .mt(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .children(rows)
 }
 
 /// A run line station: the stage's icon in a 28 dp circle; tinted when done,
@@ -778,7 +797,8 @@ pub fn blocks(added: u32, removed: u32, colors: &Theme) -> Div {
 
 /// A diff line as the thread and Review draw it: 22 dp lines of 12.5 dp mono,
 /// numbers in a `gutter` wide column; selected lines carry an accent edge.
-pub fn code_line(line: &DiffLine, selected: bool, gutter: f32, colors: &Theme) -> Div {
+/// Long lines wrap, or run on past the edge for a scrolling parent to show.
+pub fn code_line(line: &DiffLine, selected: bool, gutter: f32, wrap: bool, colors: &Theme) -> Div {
     let background = match line.kind {
         LineKind::Added => Some(colors.added),
         LineKind::Removed => Some(colors.removed),
@@ -821,11 +841,14 @@ pub fn code_line(line: &DiffLine, selected: bool, gutter: f32, colors: &Theme) -
         )
         .child(
             div()
-                .flex_1()
-                .min_w_0()
                 .pr(px(8.))
-                .overflow_hidden()
-                .whitespace_nowrap()
+                .map(|text| {
+                    if wrap {
+                        text.flex_1().min_w_0()
+                    } else {
+                        text.flex_none().whitespace_nowrap()
+                    }
+                })
                 .child(code_text(&line.text, colors)),
         )
 }

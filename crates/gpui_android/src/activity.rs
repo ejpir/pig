@@ -154,8 +154,7 @@ pub fn scan_qr() -> bool {
 pub fn show_page(title: &str, html: &str, dark: bool, source: bool, poster: &str) -> bool {
     #[cfg(target_os = "android")]
     {
-        crate::java::current()
-            .is_some_and(|java| java.show_page(title, html, dark, source, poster))
+        crate::java::current().is_some_and(|java| java.show_page(title, html, dark, source, poster))
     }
     #[cfg(not(target_os = "android"))]
     {

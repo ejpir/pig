@@ -70,29 +70,29 @@ impl Files {
             let relative = entry.path.trim_end_matches('/');
             let folder = parent(relative);
             let package = entry.directory && packages.contains(relative);
-            children
-                .entry(join(root, folder))
-                .or_default()
-                .push(Node {
-                    name: file_name(relative).to_owned(),
-                    path: join(root, relative),
-                    folder: entry.directory,
-                    project: package,
-                    tag: if entry.directory {
-                        package.then(|| "package".into())
-                    } else {
-                        entry.size.map(size_label)
-                    },
-                    size: entry.size,
-                    root: Some(root.to_owned()),
-                });
+            children.entry(join(root, folder)).or_default().push(Node {
+                name: file_name(relative).to_owned(),
+                path: join(root, relative),
+                folder: entry.directory,
+                project: package,
+                tag: if entry.directory {
+                    package.then(|| "package".into())
+                } else {
+                    entry.size.map(size_label)
+                },
+                size: entry.size,
+                root: Some(root.to_owned()),
+            });
         }
         let counts: HashMap<String, usize> = children
             .iter()
             .map(|(folder, nodes)| (folder.clone(), nodes.len()))
             .collect();
         for nodes in children.values_mut() {
-            for node in nodes.iter_mut().filter(|node| node.folder && node.tag.is_none()) {
+            for node in nodes
+                .iter_mut()
+                .filter(|node| node.folder && node.tag.is_none())
+            {
                 node.tag = counts.get(&node.path).map(usize::to_string);
             }
             sort(nodes);
@@ -123,7 +123,7 @@ fn file_name(path: &str) -> &str {
 
 fn join(root: &str, relative: &str) -> String {
     match (root.trim_end_matches('/'), relative) {
-        (root, "") if root.is_empty() => "/".into(),
+        ("", "") => "/".into(),
         (root, "") => root.into(),
         (root, relative) => format!("{root}/{relative}"),
     }
@@ -146,12 +146,28 @@ pub(crate) enum Children<'a> {
 
 /// One line of the tree as drawn.
 pub(crate) enum Row {
-    Node { node: Node, depth: usize, open: bool },
-    Loading { depth: usize },
-    Failed { depth: usize, path: String, error: String },
-    More { depth: usize, path: String, count: usize },
+    Node {
+        node: Node,
+        depth: usize,
+        open: bool,
+    },
+    Loading {
+        depth: usize,
+    },
+    Failed {
+        depth: usize,
+        path: String,
+        error: String,
+    },
+    More {
+        depth: usize,
+        path: String,
+        count: usize,
+    },
     /// The computer listed only part of the folder.
-    Partial { depth: usize },
+    Partial {
+        depth: usize,
+    },
 }
 
 #[derive(Default)]
@@ -301,7 +317,9 @@ impl ProjectBrowser {
         let mut found: Vec<(bool, &Node)> = listed
             .flatten()
             .filter(|node| within(&node.path, root) && node.path != *root)
-            .filter(|node| self.show_hidden || !node.path.split('/').any(|part| part.starts_with('.')))
+            .filter(|node| {
+                self.show_hidden || !node.path.split('/').any(|part| part.starts_with('.'))
+            })
             .filter_map(|node| {
                 let name = node.name.to_lowercase();
                 name.contains(&query)
@@ -313,7 +331,12 @@ impl ProjectBrowser {
             b_start
                 .cmp(a_start)
                 .then_with(|| b.folder.cmp(&a.folder))
-                .then_with(|| a.path.matches('/').count().cmp(&b.path.matches('/').count()))
+                .then_with(|| {
+                    a.path
+                        .matches('/')
+                        .count()
+                        .cmp(&b.path.matches('/').count())
+                })
                 .then_with(|| a.path.cmp(&b.path))
         });
         found
@@ -463,7 +486,9 @@ impl PhoneApp {
     pub(crate) fn retry_folder(&mut self, path: String, cx: &mut Context<Self>) {
         let browser = &mut self.project_browser;
         let project = matches!(browser.projects.get(&path), Some(Load::Failed(_)));
-        browser.projects.retain(|_, files| !matches!(files, Load::Failed(_)));
+        browser
+            .projects
+            .retain(|_, files| !matches!(files, Load::Failed(_)));
         browser.folders.remove(&path);
         if project {
             self.load_project_tree(path, cx);
@@ -489,7 +514,9 @@ impl PhoneApp {
         };
         let (connection, helper) = (live.connection.clone(), live.helper.clone());
         let generation = self.project_browser.generation;
-        self.project_browser.folders.insert(path.clone(), Load::Loading);
+        self.project_browser
+            .folders
+            .insert(path.clone(), Load::Loading);
         cx.spawn(async move |this, cx| {
             // Hidden folders come too, so showing them needs no new request.
             let result = remote::directories(&connection, &helper, &path, true).await;
@@ -549,7 +576,9 @@ impl PhoneApp {
         let (connection, helper) = (live.connection.clone(), live.helper.clone());
         let host = store.computer.address.clone();
         let generation = self.project_browser.generation;
-        self.project_browser.projects.insert(root.clone(), Load::Loading);
+        self.project_browser
+            .projects
+            .insert(root.clone(), Load::Loading);
         cx.spawn(async move |this, cx| {
             let result = remote::project_tree(&connection, &helper, &host, &root).await;
             this.update(cx, |this, cx| {
@@ -601,7 +630,9 @@ impl PhoneApp {
     }
 
     pub(crate) fn open_file(&mut self, node: &Node, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = node.root.clone() else { return };
+        let Some(root) = node.root.clone() else {
+            return;
+        };
         let path = node.path[root.len()..].trim_start_matches('/').to_owned();
         self.file_view = Some(FileView {
             root: root.clone(),
@@ -876,9 +907,10 @@ mod tests {
             Load::Ready((sample_folders("/Users/nick/repos"), false)),
         );
         let root = "/Users/nick/repos/pi";
-        browser
-            .projects
-            .insert(root.into(), Load::Ready(Files::new(root, sample_tree(root).unwrap())));
+        browser.projects.insert(
+            root.into(),
+            Load::Ready(Files::new(root, sample_tree(root).unwrap())),
+        );
         browser
     }
 
@@ -897,12 +929,25 @@ mod tests {
     #[test]
     fn folders_roll_out_in_place_with_files_inside_projects() {
         let mut browser = browser();
-        assert_eq!(names(&browser.rows()), ["dotfiles", "minivm", "pi", "scratch", "zed"]);
+        assert_eq!(
+            names(&browser.rows()),
+            ["dotfiles", "minivm", "pi", "scratch", "zed"]
+        );
         browser.open.insert("/Users/nick/repos/pi".into());
         browser.open.insert("/Users/nick/repos/zed".into());
         assert_eq!(
             names(&browser.rows()),
-            ["dotfiles", "minivm", "pi", "  apps", "  packages", "  README.md", "scratch", "zed", "…"]
+            [
+                "dotfiles",
+                "minivm",
+                "pi",
+                "  apps",
+                "  packages",
+                "  README.md",
+                "scratch",
+                "zed",
+                "…"
+            ]
         );
         browser.show_hidden = true;
         assert!(names(&browser.rows()).contains(&"  .gitignore".into()));
@@ -929,8 +974,15 @@ mod tests {
     #[test]
     fn search_finds_listed_names_starting_with_the_query_first() {
         let browser = browser();
-        let found: Vec<_> = browser.find("prov").into_iter().map(|node| node.name).collect();
-        assert_eq!(found[..3], ["providers", "provider-registry.ts", "providers.test.ts"]);
+        let found: Vec<_> = browser
+            .find("prov")
+            .into_iter()
+            .map(|node| node.name)
+            .collect();
+        assert_eq!(
+            found[..3],
+            ["providers", "provider-registry.ts", "providers.test.ts"]
+        );
         assert!(browser.find("  ").is_empty());
         assert!(browser.find(".gitignore").is_empty());
     }

@@ -8,15 +8,14 @@ use super::scroll_area;
 use crate::{
     app::{PhoneApp, Route, Sheet},
     model::{
-        CheckResult, Reference, Session, SessionId, Stage, StageKind, StageStatus, State, Turn,
-        duration_label,
+        CheckResult, Flow, Reference, Session, SessionId, Stage, StageKind, StageStatus, State,
+        Turn, duration_label,
     },
     theme::{MONO, Theme, theme},
     ui::{self, Button, icon},
 };
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Hsla, SharedString, Window, div, prelude::*, px,
-    relative,
+    AnyElement, Context, Div, FontWeight, Hsla, SharedString, Window, div, prelude::*, px, relative,
 };
 use std::time::Duration;
 
@@ -85,13 +84,14 @@ impl PhoneApp {
             State::Stopped => format!("{} · stopped by you", session.project),
             State::Failed => format!("{} · {}", session.project, session.status_line()),
         };
-        let appbar = ui::appbar(back, session.title.clone(), Some(subtitle.into()), &colors)
-            .child(ui::tap("details", "info", &colors).on_click(
-                cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::Details(id), cx)),
-            ))
-            .child(ui::tap("more", "dots", &colors).on_click(
-                cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
-            ));
+        let appbar =
+            ui::appbar(back, session.title.clone(), Some(subtitle.into()), &colors)
+                .child(ui::tap("details", "info", &colors).on_click(
+                    cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::Details(id), cx)),
+                ))
+                .child(ui::tap("more", "dots", &colors).on_click(
+                    cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
+                ));
         let last = session.turns.len().saturating_sub(1);
         let many = session.turns.len() > 1;
         let turns = session
@@ -116,12 +116,20 @@ impl PhoneApp {
                     } else {
                         self.turn_activity(id, index, turn, false, &colors, cx)
                     })
-                    .children(reply(turn, index == last, &colors).map(|reply| {
-                        let text = turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
-                        reply.relative().child(self.copyable(text, cx))
-                    }))
-                    .children(self.image_cards(id, index, turn, &colors, cx))
-                    .children(self.page_cards(index, turn, &colors, cx))
+                    .map(|column| {
+                        if turn.interleaved() {
+                            column.children(self.flow(id, index, turn, &colors, cx))
+                        } else {
+                            column
+                                .children(reply(turn, index == last, &colors).map(|reply| {
+                                    let text =
+                                        turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
+                                    reply.relative().child(self.copyable(text, cx))
+                                }))
+                                .children(self.image_cards(id, index, turn, &colors, cx))
+                                .children(self.page_cards(index, turn, &colors, cx))
+                        }
+                    })
                     .children(ending)
             })
             .collect::<Vec<_>>();
@@ -168,7 +176,10 @@ impl PhoneApp {
                 ui::card(&colors)
                     .p(px(16.))
                     .border_color(colors.coral)
-                    .child(ui::label("Message not sent · text and images kept", &colors))
+                    .child(ui::label(
+                        "Message not sent · text and images kept",
+                        &colors,
+                    ))
                     .child(ui::hint(failed.error.clone(), &colors).my(px(8.)))
                     .child(
                         div()
@@ -200,9 +211,17 @@ impl PhoneApp {
                 1 => "Review the changed file".to_owned(),
                 count => format!("Review {count} changed files"),
             };
-            ui::button_glyph("review", Button::Primary, Some("diff"), 16., text, false, &colors)
-                .mx(px(12.))
-                .on_click(cx.listener(move |this, _, window, cx| this.open_review(id, 0, window, cx)))
+            ui::button_glyph(
+                "review",
+                Button::Primary,
+                Some("diff"),
+                16.,
+                text,
+                false,
+                &colors,
+            )
+            .mx(px(12.))
+            .on_click(cx.listener(move |this, _, window, cx| this.open_review(id, 0, window, cx)))
         });
         let dock = if asking {
             div()
@@ -275,16 +294,49 @@ impl PhoneApp {
                                     spread_radius: px(0.),
                                     inset: false,
                                 }])
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.scroll(Route::Thread(id)).scroll_to_bottom();
-                                    cx.notify();
-                                })),
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.scroll(Route::Thread(id)).scroll_to_bottom();
+                                        cx.notify();
+                                    },
+                                )),
                             ),
                         )
                     }),
             )
             .child(div().flex_none().pt(px(8.)).pb(px(12.)).child(dock))
             .into_any_element()
+    }
+
+    /// A reply with pictures or pages between Pi's words, in the order Pi
+    /// made them.
+    fn flow(
+        &self,
+        id: SessionId,
+        index: usize,
+        turn: &Turn,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        turn.flow
+            .iter()
+            .filter_map(|step| match step {
+                Flow::Text(text) => Some(
+                    div()
+                        .relative()
+                        .min_w_0()
+                        .child(crate::message::render(text, colors))
+                        .child(self.copyable(text.clone(), cx))
+                        .into_any_element(),
+                ),
+                Flow::Image(n) => self
+                    .image_card(id, index, turn, *n, colors, cx)
+                    .map(IntoElement::into_any_element),
+                Flow::Page(n) => self
+                    .page_card(index, turn, *n, colors, cx)
+                    .map(IntoElement::into_any_element),
+            })
+            .collect()
     }
 
     /// What was asked, on the right. A finished prompt rests on one line and
@@ -342,7 +394,12 @@ impl PhoneApp {
                                 .iter()
                                 .enumerate()
                                 .map(|(index, attachment)| {
-                                    small_chip(("sent", index), Some("clip"), attachment.clone(), colors)
+                                    small_chip(
+                                        ("sent", index),
+                                        Some("clip"),
+                                        attachment.clone(),
+                                        colors,
+                                    )
                                 }),
                         ),
                     )
@@ -386,7 +443,9 @@ impl PhoneApp {
             let entries = turn
                 .stages
                 .iter()
-                .filter(|stage| stage.status == StageStatus::Done && !times[stage.kind.index()].is_zero())
+                .filter(|stage| {
+                    stage.status == StageStatus::Done && !times[stage.kind.index()].is_zero()
+                })
                 .map(|stage| (stage.kind, key_label(stage)))
                 .collect();
             ui::run_line(&times, false, colors).child(ui::run_key(entries, &times, colors))
@@ -528,7 +587,11 @@ impl PhoneApp {
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors.accent)
                 .active(|style| style.bg(colors.selected))
-                .child(icon(if all { "chev_u" } else { "chev_d" }, 16., colors.accent))
+                .child(icon(
+                    if all { "chev_u" } else { "chev_d" },
+                    16.,
+                    colors.accent,
+                ))
                 .child(if all {
                     "Show fewer".to_owned()
                 } else if hidden == 1 {
@@ -543,49 +606,62 @@ impl PhoneApp {
                     cx.notify();
                 }))
         });
-        let files = session.files.iter().take(shown).enumerate().map(|(index, file)| {
-            let figure = |text: String, width: f32, color: Hsla| {
-                div()
-                    .w(px(width))
-                    .flex_none()
-                    .flex()
-                    .justify_end()
-                    .font_family(MONO)
-                    .text_size(px(12.5))
-                    .text_color(color)
-                    .child(text)
-            };
-            div()
-                .id(("file", index))
-                .min_h(px(56.))
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .when(index > 0, |row| row.border_t_1().border_color(colors.line))
-                .active(|style| style.bg(colors.selected))
-                .child(icon("file", 16., colors.muted))
-                .child(
+        let files = session
+            .files
+            .iter()
+            .take(shown)
+            .enumerate()
+            .map(|(index, file)| {
+                let figure = |text: String, width: f32, color: Hsla| {
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(file.name().to_owned()),
-                )
-                .child(ui::blocks(file.added, file.removed, &colors))
-                .child(figure(
-                    if file.added > 0 { format!("+{}", file.added) } else { String::new() },
-                    32.,
-                    colors.green,
-                ))
-                .child(figure(
-                    if file.removed > 0 { format!("−{}", file.removed) } else { String::new() },
-                    20.,
-                    colors.coral,
-                ))
-                .on_click(
-                    cx.listener(move |this, _, window, cx| this.open_review(id, index, window, cx)),
-                )
-        });
+                        .w(px(width))
+                        .flex_none()
+                        .flex()
+                        .justify_end()
+                        .font_family(MONO)
+                        .text_size(px(12.5))
+                        .text_color(color)
+                        .child(text)
+                };
+                div()
+                    .id(("file", index))
+                    .min_h(px(56.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .when(index > 0, |row| row.border_t_1().border_color(colors.line))
+                    .active(|style| style.bg(colors.selected))
+                    .child(icon("file", 16., colors.muted))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(file.name().to_owned()),
+                    )
+                    .child(ui::blocks(file.added, file.removed, &colors))
+                    .child(figure(
+                        if file.added > 0 {
+                            format!("+{}", file.added)
+                        } else {
+                            String::new()
+                        },
+                        32.,
+                        colors.green,
+                    ))
+                    .child(figure(
+                        if file.removed > 0 {
+                            format!("−{}", file.removed)
+                        } else {
+                            String::new()
+                        },
+                        20.,
+                        colors.coral,
+                    ))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_review(id, index, window, cx)
+                    }))
+            });
         let failure = (session.state == State::Failed).then(|| {
             ui::card(&colors)
                 .border_color(colors.coral.opacity(0.4))
@@ -660,7 +736,11 @@ impl PhoneApp {
                         .flex_none()
                         .rounded(px(10.))
                         .border(px(if on { 6. } else { 2. }))
-                        .border_color(if on { colors.accent } else { colors.line_strong }),
+                        .border_color(if on {
+                            colors.accent
+                        } else {
+                            colors.line_strong
+                        }),
                 )
                 .child(
                     div()
@@ -867,10 +947,18 @@ fn counts(stage: &Stage, colors: &Theme) -> Div {
         .font_family(MONO)
         .text_size(px(12.5))
         .when(stage.added > 0, |counts| {
-            counts.child(div().text_color(colors.green).child(format!("+{}", stage.added)))
+            counts.child(
+                div()
+                    .text_color(colors.green)
+                    .child(format!("+{}", stage.added)),
+            )
         })
         .when(stage.removed > 0, |counts| {
-            counts.child(div().text_color(colors.coral).child(format!("−{}", stage.removed)))
+            counts.child(
+                div()
+                    .text_color(colors.coral)
+                    .child(format!("−{}", stage.removed)),
+            )
         })
 }
 
@@ -906,7 +994,11 @@ fn stage_row(
                         .text_color(colors.faint)
                         .child(stage.kind.name(stage.status)),
                 )
-                .child(meta(stage.what.clone(), colors).text_color(colors.faint).truncate()),
+                .child(
+                    meta(stage.what.clone(), colors)
+                        .text_color(colors.faint)
+                        .truncate(),
+                ),
         );
     }
     let changed = stage.added > 0 || stage.removed > 0;
@@ -914,7 +1006,11 @@ fn stage_row(
     let live_diff = stage.kind == StageKind::Change
         && stage.status == StageStatus::Live
         && !stage.diff.is_empty();
-    let references = if live_diff { &[][..] } else { &stage.references[..] };
+    let references = if live_diff {
+        &[][..]
+    } else {
+        &stage.references[..]
+    };
     let more = references.len().saturating_sub(CHIPS);
     let chips = (!references.is_empty()).then(|| {
         div()
@@ -922,13 +1018,21 @@ fn stage_row(
             .flex()
             .flex_wrap()
             .gap(px(8.))
-            .children(references.iter().take(CHIPS).enumerate().map(|(index, reference)| {
-                let (glyph, text) = match reference {
-                    Reference::File(file) => ("file", file.rsplit('/').next().unwrap_or(file).to_owned()),
-                    Reference::Search(search) => ("search", search.clone()),
-                };
-                small_chip(("reference", index), Some(glyph), text, colors)
-            }))
+            .children(
+                references
+                    .iter()
+                    .take(CHIPS)
+                    .enumerate()
+                    .map(|(index, reference)| {
+                        let (glyph, text) = match reference {
+                            Reference::File(file) => {
+                                ("file", file.rsplit('/').next().unwrap_or(file).to_owned())
+                            }
+                            Reference::Search(search) => ("search", search.clone()),
+                        };
+                        small_chip(("reference", index), Some(glyph), text, colors)
+                    }),
+            )
             .when(more > 0, |chips| {
                 chips.child(
                     small_chip("more-references", None, format!("+{more} more"), colors)
@@ -947,7 +1051,14 @@ fn stage_row(
             .mt(px(12.))
             .py(px(4.))
             .rounded(px(12.))
-            .children(stage.diff.iter().map(|line| ui::code_line(line, false, 40., colors)))
+            // A glance at the change: long lines are cut, Review shows them.
+            .overflow_hidden()
+            .children(
+                stage
+                    .diff
+                    .iter()
+                    .map(|line| ui::code_line(line, false, 40., false, colors)),
+            )
     });
     let output = (stage.status == StageStatus::Live)
         .then(|| stage.tools.iter().rev().find(|t| !t.output.is_empty()))
@@ -1019,7 +1130,9 @@ fn waiting_row(session: &Session, line_below: bool, colors: &Theme) -> Div {
         .relative()
         .flex()
         .gap(px(12.))
-        .when(line_below, |row| row.child(connector(colors.wait, false, colors)))
+        .when(line_below, |row| {
+            row.child(connector(colors.wait, false, colors))
+        })
         .child(ui::station("hand", colors.wait, StageStatus::Live, colors))
         .child(
             div()
@@ -1055,7 +1168,9 @@ fn waiting_row(session: &Session, line_below: bool, colors: &Theme) -> Div {
 fn reply(turn: &Turn, latest: bool, colors: &Theme) -> Option<Div> {
     turn.summary.as_ref().map(|summary| {
         if let Some(source) = summary.source.as_deref() {
-            return div().min_w_0().child(crate::message::render(source, colors));
+            return div()
+                .min_w_0()
+                .child(crate::message::render(source, colors));
         }
         div()
             .min_w_0()
@@ -1081,12 +1196,7 @@ fn reply(turn: &Turn, latest: bool, colors: &Theme) -> Option<Div> {
 }
 
 /// Working, the time and Stop, on the composer's top edge.
-fn working_strip(
-    session: &Session,
-    stopping: bool,
-    colors: &Theme,
-    cx: &Context<PhoneApp>,
-) -> Div {
+fn working_strip(session: &Session, stopping: bool, colors: &Theme, cx: &Context<PhoneApp>) -> Div {
     let id = session.id;
     let waiting = session.state == State::NeedsYou;
     let stop = div()
@@ -1125,7 +1235,11 @@ fn working_strip(
         .border_b_0()
         .border_color(colors.line_strong)
         .rounded_t(px(24.))
-        .child(ui::ring_dot(if waiting { colors.wait } else { colors.read }))
+        .child(ui::ring_dot(if waiting {
+            colors.wait
+        } else {
+            colors.read
+        }))
         .child(
             div()
                 .flex_none()

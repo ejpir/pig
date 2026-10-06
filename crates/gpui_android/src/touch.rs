@@ -35,6 +35,18 @@ pub(crate) struct Touches {
     next: u64,
     /// Contacts that are down: Android's id, GPUI's id, last reported position.
     active: Vec<(i32, TouchId, Point<Pixels>)>,
+    /// While two fingers are down: their middle and how far apart they are.
+    spread: Option<(Point<Pixels>, f32)>,
+}
+
+/// Two fingers spreading or closing: GPUI's recognizers leave the second
+/// finger alone, so the platform reports pinches itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Pinch {
+    pub phase: TouchPhase,
+    pub center: Point<Pixels>,
+    /// The change in spread since the last pinch, as a fraction: 0.1 is 10% wider.
+    pub delta: f32,
 }
 
 impl Touches {
@@ -84,6 +96,42 @@ impl Touches {
             Action::Other => {}
         }
         events
+    }
+
+    /// The pinch the last translated motion made, if two fingers are or were down.
+    pub fn pinch(&mut self) -> Option<Pinch> {
+        let now = match self.active.as_slice() {
+            [(_, _, a), (_, _, b), ..] => Some((
+                Point::new((a.x + b.x) / 2., (a.y + b.y) / 2.),
+                (*a - *b).magnitude() as f32,
+            )),
+            _ => None,
+        };
+        let pinch = |phase, center, delta| {
+            Some(Pinch {
+                phase,
+                center,
+                delta,
+            })
+        };
+        match (self.spread, now) {
+            (None, Some(now)) => {
+                self.spread = Some(now);
+                pinch(TouchPhase::Started, now.0, 0.)
+            }
+            (Some((_, last)), Some((center, spread))) => {
+                if spread == last || last < 1. {
+                    return None;
+                }
+                self.spread = Some((center, spread));
+                pinch(TouchPhase::Moved, center, spread / last - 1.)
+            }
+            (Some((center, _)), None) => {
+                self.spread = None;
+                pinch(TouchPhase::Ended, center, 0.)
+            }
+            (None, None) => None,
+        }
     }
 
     fn start(&mut self, contact: &Contact, events: &mut Vec<TouchEvent>) {
@@ -214,6 +262,40 @@ mod tests {
         assert_eq!(phases(&lift), [(0, TouchPhase::Ended)]);
         let up = touches.translate(Action::Up, &[], &[contact(1, 55., 50.)]);
         assert_eq!(phases(&up), [(1, TouchPhase::Ended)]);
+    }
+
+    #[test]
+    fn two_fingers_spreading_pinch_by_how_much_wider_they_are() {
+        let mut touches = Touches::default();
+        touches.translate(Action::Down, &[], &[contact(0, 0., 0.)]);
+        assert_eq!(touches.pinch(), None);
+        touches.translate(
+            Action::PointerDown(1),
+            &[],
+            &[contact(0, 0., 0.), contact(1, 100., 0.)],
+        );
+        let started = touches.pinch().unwrap();
+        assert_eq!(started.phase, TouchPhase::Started);
+        assert_eq!(started.center, point(px(50.), px(0.)));
+        touches.translate(
+            Action::Move,
+            &[],
+            &[contact(0, -50., 0.), contact(1, 150., 0.)],
+        );
+        let moved = touches.pinch().unwrap();
+        assert_eq!(moved.phase, TouchPhase::Moved);
+        assert!(
+            (moved.delta - 1.).abs() < 1e-4,
+            "twice as wide: {}",
+            moved.delta
+        );
+        touches.translate(
+            Action::PointerUp(0),
+            &[],
+            &[contact(0, -50., 0.), contact(1, 150., 0.)],
+        );
+        assert_eq!(touches.pinch().unwrap().phase, TouchPhase::Ended);
+        assert_eq!(touches.pinch(), None);
     }
 
     #[test]

@@ -70,40 +70,54 @@ fn write_record(writer: &mut impl Write, record: &Value) -> Result<()> {
     Ok(())
 }
 fn spawn_daemon(target: &SshTarget) -> Result<()> {
-    let mut command = ProcessCommand::new(std::env::current_exe()?);
-    command
-        .arg("daemon")
-        .arg(serde_json::to_string(target)?)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(private_file(
-            &root()?.join(format!("{}.log", target.key)),
-        )?));
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: setsid is async-signal-safe and touches no Rust state after fork.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    Err(std::io::Error::last_os_error())
-                } else {
-                    Ok(())
-                }
-            });
+    let command = |breakaway: bool| -> Result<ProcessCommand> {
+        let mut command = ProcessCommand::new(std::env::current_exe()?);
+        command
+            .arg("daemon")
+            .arg(serde_json::to_string(target)?)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(private_file(
+                &root()?.join(format!("{}.log", target.key)),
+            )?));
+        #[cfg(unix)]
+        {
+            let _ = breakaway;
+            use std::os::unix::process::CommandExt;
+            // SAFETY: setsid is async-signal-safe and touches no Rust state after fork.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                });
+            }
         }
-    }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            use windows_sys::Win32::System::Threading::{
+                CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
+            };
+            let mut flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+            if breakaway {
+                flags |= CREATE_BREAKAWAY_FROM_JOB;
+            }
+            command.creation_flags(flags);
+        }
+        Ok(command)
+    };
+    let spawned = command(true)?.spawn();
+    // A job that forbids breaking away (as CI runners and some SSH services
+    // use) refuses the first try; the daemon then lives in that job.
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        use windows_sys::Win32::System::Threading::{
-            CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
-        };
-        command.creation_flags(
-            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
-        );
-    }
-    let mut child = command.spawn().context("Could not detach remote daemon")?;
+    let spawned = match spawned {
+        Err(error) if error.raw_os_error() == Some(5) => command(false)?.spawn(),
+        spawned => spawned,
+    };
+    let mut child = spawned.context("Could not detach remote daemon")?;
     // Reap if it exits before the bridge. The child owns no inherited SSH pipes.
     thread::spawn(move || {
         let _ = child.wait();
@@ -212,6 +226,8 @@ enum Event {
     Attach {
         connection: u64,
         output: Sender<Value>,
+        /// Disconnects once everything sent to `output` is written.
+        written: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
     },
     Request {
         connection: u64,
@@ -224,6 +240,22 @@ enum Event {
 /// every event goes to all of them, and each response to the app that asked.
 struct Client {
     output: Sender<Value>,
+    written: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+/// Closes every connection once what was sent to it is written, so the last
+/// replies reach the desktop before the daemon exits.
+fn close_all(clients: impl IntoIterator<Item = Client>) {
+    let clients: Vec<Client> = clients.into_iter().collect();
+    for client in &clients {
+        client.output.close();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    for client in clients {
+        let Ok(written) = client.written.into_inner() else {
+            continue;
+        };
+        let _ = written.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
+    }
 }
 impl Client {
     fn send(&self, record: Value) -> bool {
@@ -278,7 +310,13 @@ fn serve(stream: TcpStream, token: String, target: SshTarget, events: Sender<Eve
     reader.get_ref().set_read_timeout(None)?;
     let connection = rand::random();
     let (output, records) = bounded::<Value>(256);
-    events.send_blocking(Event::Attach { connection, output })?;
+    let (done, written) = std::sync::mpsc::channel::<()>();
+    let written = std::sync::Mutex::new(written);
+    events.send_blocking(Event::Attach {
+        connection,
+        output,
+        written,
+    })?;
     thread::spawn(move || {
         while let Ok(record) = records.recv_blocking() {
             if write_record(&mut writer, &record).is_err() {
@@ -286,6 +324,7 @@ fn serve(stream: TcpStream, token: String, target: SshTarget, events: Sender<Eve
             }
         }
         let _ = writer.shutdown(Shutdown::Both);
+        drop(done);
     });
     let result = (|| -> Result<()> {
         while let Some(record) = read_record(&mut reader)? {
@@ -439,8 +478,12 @@ fn run(
     let mut summary = None;
     while let Ok(event) = incoming.recv_blocking() {
         match event {
-            Event::Attach { connection, output } => {
-                let attached = Client { output };
+            Event::Attach {
+                connection,
+                output,
+                written,
+            } => {
+                let attached = Client { output, written };
                 if bootstrap.is_empty() && !attached.send(snapshot(&model, target)?) {
                     attached.output.close();
                     continue;
@@ -514,9 +557,7 @@ fn run(
                                 ));
                             }
                         }
-                        for other in clients.values() {
-                            other.output.close();
-                        }
+                        close_all(clients.into_values());
                         return result;
                     }
                     #[cfg(not(unix))]
@@ -539,9 +580,7 @@ fn run(
                         ));
                     } else {
                         attached.send(reply(id, "remote_shutdown", json!({})));
-                        for (_, other) in clients.drain() {
-                            other.output.close();
-                        }
+                        close_all(clients.drain().map(|(_, client)| client));
                         break;
                     }
                     continue;

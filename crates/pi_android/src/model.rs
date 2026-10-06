@@ -244,6 +244,40 @@ impl Summary {
     }
 }
 
+/// One step of a turn's reply, in the order Pi made it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Flow {
+    /// Markdown Pi wrote, before, between or after its tools.
+    Text(String),
+    /// `Turn::images[n]`.
+    Image(usize),
+    /// `Turn::pages[n]`, where it last changed.
+    Page(usize),
+}
+
+impl Turn {
+    /// Whether pictures or pages sit between Pi's words, so the reply reads in order.
+    pub fn interleaved(&self) -> bool {
+        self.flow.iter().any(|step| !matches!(step, Flow::Text(_)))
+    }
+
+    /// Notes a page that was written or changed: shown once, where it last changed.
+    pub fn show_page(&mut self, page: crate::pages::Page) {
+        let n = match self.pages.iter().position(|shown| shown.path == page.path) {
+            Some(n) => {
+                self.pages[n] = page;
+                n
+            }
+            None => {
+                self.pages.push(page);
+                self.pages.len() - 1
+            }
+        };
+        self.flow.retain(|step| *step != Flow::Page(n));
+        self.flow.push(Flow::Page(n));
+    }
+}
+
 /// An image a tool returned. A durable session keeps the bytes on the
 /// computer and sends `key`, its id there; others send them inline.
 #[derive(Clone, Debug, PartialEq)]
@@ -269,6 +303,9 @@ pub struct Turn {
     pub pages: Vec<crate::pages::Page>,
     /// Pictures Pi looked at, such as a screenshot it took and read.
     pub images: Vec<ToolImage>,
+    /// What Pi said and showed, in order: words between tools, then a
+    /// picture it looked at, more words, a page, the closing words.
+    pub flow: Vec<Flow>,
     /// Working time spent in each stage, in `StageKind::ALL` order: the run line's stretches.
     pub times: [Duration; 4],
 }
@@ -283,6 +320,7 @@ impl Turn {
             summary: None,
             pages: Vec::new(),
             images: Vec::new(),
+            flow: Vec::new(),
             times: [Duration::ZERO; 4],
         }
     }
@@ -315,7 +353,6 @@ impl Turn {
             });
         &mut self.stages[index]
     }
-
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

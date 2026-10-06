@@ -62,14 +62,6 @@ impl Pages {
     }
 }
 
-/// Shows a page in a turn, once: a later change in the same turn replaces it.
-pub fn show(pages: &mut Vec<Page>, page: Page) {
-    match pages.iter_mut().find(|shown| shown.path == page.path) {
-        Some(shown) => *shown = page,
-        None => pages.push(page),
-    }
-}
-
 /// Pi's `edit`: replacements matched against the file as it was, each found
 /// exactly once. Pi also accepts loose matches; those give `None`.
 fn apply_edits(html: &str, args: &Value) -> Option<String> {
@@ -201,13 +193,23 @@ mod tests {
 
     #[test]
     fn a_page_shows_once_per_turn() {
-        let mut shown = Vec::new();
+        let mut turn = crate::model::Turn::new("", "");
         let page = |html: &str| Page {
             path: "a.html".into(),
             html: Some(html.into()),
         };
-        show(&mut shown, page("one"));
-        show(&mut shown, page("two"));
-        assert_eq!(shown, vec![page("two")]);
+        turn.show_page(page("one"));
+        turn.flow
+            .push(crate::model::Flow::Text("Changing it.".into()));
+        turn.show_page(page("two"));
+        assert_eq!(turn.pages, vec![page("two")]);
+        assert_eq!(
+            turn.flow,
+            [
+                crate::model::Flow::Text("Changing it.".into()),
+                crate::model::Flow::Page(0)
+            ],
+            "where it last changed"
+        );
     }
 }

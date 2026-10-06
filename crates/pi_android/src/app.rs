@@ -100,6 +100,13 @@ pub struct PhoneApp {
     pub(crate) sheet_motion: SwipeMotion,
     pub(crate) closing_sheet: Option<Sheet>,
     sheet_height: Rc<Cell<Pixels>>,
+    /// The new-session sheet as it is dragged down to close.
+    pub(crate) start_motion: SwipeMotion,
+    pub(crate) start_height: Rc<Cell<Pixels>>,
+    /// Zoom and pan of the image a sheet shows, and where it is on screen.
+    pub(crate) image_zoom: f32,
+    pub(crate) image_pan: gpui::Point<Pixels>,
+    pub(crate) image_box: Rc<Cell<gpui::Bounds<Pixels>>>,
     pub(crate) sheet_scroll: ScrollHandle,
     pub(crate) expanded_turns: HashMap<(SessionId, usize), bool>,
     /// Finished prompts shown in full instead of on one line.
@@ -314,6 +321,11 @@ impl PhoneApp {
             sheet_motion: SwipeMotion::at(1.),
             closing_sheet: None,
             sheet_height: Rc::new(Cell::new(px(0.))),
+            start_motion: SwipeMotion::at(0.),
+            start_height: Rc::new(Cell::new(px(0.))),
+            image_zoom: 1.,
+            image_pan: gpui::Point::default(),
+            image_box: Rc::default(),
             sheet_scroll: ScrollHandle::new(),
             expanded_turns: HashMap::new(),
             expanded_prompts: HashSet::new(),
@@ -421,10 +433,7 @@ impl PhoneApp {
 
     fn command_catalog_for_path(&self, path: &str, cx: &App) -> Option<Vec<SavedCommand>> {
         let store = self.store.as_ref()?;
-        let live = match &store.live {
-            Some(live) => live,
-            None => return None,
-        };
+        let live = store.live.as_ref()?;
         if let Some(commands) = live.commands_for_path(path) {
             return Some(commands.iter().map(SavedCommand::from).collect());
         }
@@ -453,10 +462,7 @@ impl PhoneApp {
         cx: &App,
     ) -> Option<Vec<SavedCommand>> {
         let store = self.store.as_ref()?;
-        let live = match &store.live {
-            Some(live) => live,
-            None => return None,
-        };
+        let live = store.live.as_ref()?;
         if let Some(commands) = live.commands(id) {
             return Some(commands.iter().map(SavedCommand::from).collect());
         }
@@ -544,6 +550,8 @@ impl PhoneApp {
                 .update(cx, |area, cx| area.set_text("", cx));
         }
         self.sheet = Some(sheet);
+        self.image_zoom = 1.;
+        self.image_pan = gpui::Point::default();
         if sheet == Sheet::Project {
             self.open_project_browser(false, cx);
         }
@@ -564,6 +572,7 @@ impl PhoneApp {
         let now = Instant::now();
         let reduced = cx.reduce_motion();
         self.sheet_motion.tick(now, reduced);
+        self.start_motion.tick(now, reduced);
         if self.sheet.is_none() && !self.sheet_motion.animating() {
             self.closing_sheet = None;
         }
@@ -574,6 +583,7 @@ impl PhoneApp {
             }
         }
         if self.sheet_motion.animating()
+            || self.start_motion.animating()
             || self
                 .swiping_session
                 .as_ref()
@@ -607,6 +617,8 @@ impl PhoneApp {
                         let extent = bounds.size.height.max(px(1.));
                         if event.touch_phase == gpui::TouchPhase::Started {
                             if !bounds.contains(&event.position)
+                                || (this.image_zoom > 1.01
+                                    && this.image_box.get().contains(&event.position))
                                 || along <= px(0.)
                                 || along.abs() < across.abs()
                                 || (this.sheet_scroll.max_offset().y > px(1.)
@@ -1360,7 +1372,9 @@ impl PhoneApp {
                 stage.diff.push(crate::model::DiffLine::new(
                     crate::model::LineKind::Added,
                     300 + step,
-                    &format!("  const line{step} = render(block, {step}); // written as it streams"),
+                    &format!(
+                        "  const line{step} = render(block, {step}); // written as it streams"
+                    ),
                 ));
                 stage.added += 1;
                 if stage.tools.is_empty() {
@@ -1374,7 +1388,9 @@ impl PhoneApp {
                     });
                 }
                 let tool = stage.tools.last_mut().unwrap();
-                tool.output.push_str(&format!("wrote line {step} of notes.md, a long line that wraps on a phone\n"));
+                tool.output.push_str(&format!(
+                    "wrote line {step} of notes.md, a long line that wraps on a phone\n"
+                ));
                 let text = turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
                 turn.summary = Some(crate::model::Summary {
                     headline: String::new(),
@@ -2163,6 +2179,32 @@ impl PhoneApp {
         }
     }
 
+    /// Whether long lines of code and output wrap, which the phone remembers.
+    pub(crate) fn wrap_lines(&self, cx: &App) -> bool {
+        self.prefs(cx).wrap_lines
+    }
+
+    /// The button that switches long lines between wrapping and scrolling sideways.
+    pub(crate) fn wrap_toggle(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let colors = theme(cx);
+        let wrap = self.wrap_lines(cx);
+        crate::ui::tap(id, "wrap", &colors)
+            .aria_label(if wrap {
+                "Scroll long lines sideways"
+            } else {
+                "Wrap long lines"
+            })
+            .when(wrap, |tap| tap.bg(colors.selected).rounded_full())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.update_prefs(cx, |prefs| prefs.wrap_lines = !prefs.wrap_lines);
+                cx.notify();
+            }))
+    }
+
     pub(crate) fn copy(&mut self, text: String, what: &str, cx: &mut Context<Self>) {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         self.close_sheet(cx);
@@ -2389,7 +2431,11 @@ impl Render for PhoneApp {
 impl PhoneApp {
     /// Laid over a block of content: a long press opens `text` to select
     /// and copy all of it or part, with the phone's buzz.
-    pub(crate) fn copyable(&self, text: impl Into<SharedString>, cx: &Context<Self>) -> impl IntoElement {
+    pub(crate) fn copyable(
+        &self,
+        text: impl Into<SharedString>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let text = text.into();
         let app = cx.entity().downgrade();
         gpui::canvas(

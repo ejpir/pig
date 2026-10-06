@@ -75,13 +75,24 @@ impl PhoneApp {
             .child(icon("chev_d", 14., colors.muted))
             .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Project, cx))),
         );
-        let starters = STARTERS.iter().enumerate().map(|(index, (text, command))| {
-            // Durable sessions have no commands: the words go instead.
-            let command = command.filter(|_| !live);
-            let draft = command.map_or_else(|| text.to_string(), |command| format!("{command} "));
-            ui::chip(("starter", index), None, command.unwrap_or(text).to_owned(), &colors)
-                .debug_selector(move || format!("starter-{index}").into())
-                .when(command.is_some(), |chip| chip.font_family(MONO).text_size(px(12.5)))
+        let starters = STARTERS
+            .iter()
+            .enumerate()
+            .map(|(index, (text, command))| {
+                // Durable sessions have no commands: the words go instead.
+                let command = command.filter(|_| !live);
+                let draft =
+                    command.map_or_else(|| text.to_string(), |command| format!("{command} "));
+                ui::chip(
+                    ("starter", index),
+                    None,
+                    command.unwrap_or(text).to_owned(),
+                    &colors,
+                )
+                .debug_selector(move || format!("starter-{index}"))
+                .when(command.is_some(), |chip| {
+                    chip.font_family(MONO).text_size(px(12.5))
+                })
                 .when(!can_use_starter, |chip| chip.opacity(0.55))
                 .when(can_use_starter, |chip| {
                     chip.on_click(cx.listener(move |this, _, window, cx| {
@@ -94,7 +105,9 @@ impl PhoneApp {
                         });
                     }))
                 })
-        }).collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
+        let drag = self.start_height.get() * self.start_motion.position();
         let sheet = div()
             .id("start-sheet")
             .child(crate::testing::probe("start-sheet"))
@@ -102,7 +115,7 @@ impl PhoneApp {
             .absolute()
             .left_0()
             .right_0()
-            .bottom_0()
+            .bottom(-drag)
             .max_h_full()
             .flex()
             .flex_col()
@@ -144,7 +157,8 @@ impl PhoneApp {
                             .overflow_x_scroll()
                             .children(starters),
                     ),
-            );
+            )
+            .child(self.start_drag_gesture(&scroll, cx));
         div()
             .relative()
             .flex_1()
@@ -159,10 +173,74 @@ impl PhoneApp {
                     .absolute()
                     .inset_0()
                     .bg(colors.scrim)
+                    .opacity(1. - self.start_motion.position())
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.back(window, cx);
                     })),
             )
             .child(sheet)
+    }
+
+    /// Dragging the sheet down closes it, as the bottom sheets do: from its
+    /// handle, or anywhere once its content is scrolled to the top.
+    fn start_drag_gesture(
+        &self,
+        scroll: &gpui::ScrollHandle,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let height = self.start_height.clone();
+        let scroll = scroll.clone();
+        gpui::canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                height.set(bounds.size.height);
+                let scroll = scroll.clone();
+                window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Capture {
+                        return;
+                    }
+                    let _ = view.update(cx, |this, cx| {
+                        if this.route() != Route::Start || this.sheet.is_some() {
+                            return;
+                        }
+                        let delta = event.delta.pixel_delta(px(20.));
+                        let motion = &mut this.start_motion;
+                        let extent = bounds.size.height.max(px(1.));
+                        if event.touch_phase == gpui::TouchPhase::Started {
+                            if !bounds.contains(&event.position)
+                                || delta.y <= px(0.)
+                                || delta.y.abs() < delta.x.abs()
+                                || (event.position.y > bounds.top() + px(36.)
+                                    && scroll.offset().y < px(-1.))
+                            {
+                                return;
+                            }
+                            motion.begin_drag();
+                        }
+                        if !motion.dragging() {
+                            return;
+                        }
+                        cx.stop_propagation();
+                        motion.drag_by(delta.y / extent);
+                        match event.touch_phase {
+                            gpui::TouchPhase::Cancelled => motion.settle(0.),
+                            gpui::TouchPhase::Ended => {
+                                if extent * motion.position() > px(85.).min(extent * 0.4) {
+                                    this.start_motion = crate::motion::SwipeMotion::at(0.);
+                                    this.back(window, cx);
+                                } else {
+                                    motion.settle(0.);
+                                }
+                            }
+                            _ => {}
+                        }
+                        cx.notify();
+                    });
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
     }
 }

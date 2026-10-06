@@ -178,9 +178,16 @@ impl PhoneApp {
                     self.project_browser.open.insert(format!("{pi}/{folder}"));
                 }
                 match name {
-                    "project-search" => self.folder.update(cx, |area, cx| area.set_text("prov", cx)),
+                    "project-search" => {
+                        self.folder.update(cx, |area, cx| area.set_text("prov", cx))
+                    }
                     "project-file" => {
-                        let node = self.project_browser.find("retry.ts").into_iter().next().unwrap();
+                        let node = self
+                            .project_browser
+                            .find("retry.ts")
+                            .into_iter()
+                            .next()
+                            .unwrap();
                         self.open_file(&node, window, cx);
                     }
                     _ => {}
@@ -210,28 +217,27 @@ impl PhoneApp {
             }
             "activity" | "tool-output" => {
                 finish(self);
-                if name == "tool-output" {
-                    if let Some(session) = self
+                if name == "tool-output"
+                    && let Some(session) = self
                         .store
                         .as_mut()
                         .and_then(|store| store.sessions.iter_mut().find(|s| s.id == QWEN))
-                    {
-                        let stage = &mut session.turns[0].stages[2];
-                        stage.tools.push(ToolActivity {
-                            id: "test-command".into(),
-                            name: "bash".into(),
-                            target: "cargo test --workspace --all-features".into(),
-                            output: format!(
-                                "{}\nFINAL: 120 tests passed",
-                                (1..=120)
-                                    .map(|i| format!("test {i}: passed — café 中文"))
-                                    .collect::<Vec<_>>()
-                                    .join("\n")
-                            ),
-                            finished: true,
-                            failed: false,
-                        });
-                    }
+                {
+                    let stage = &mut session.turns[0].stages[2];
+                    stage.tools.push(ToolActivity {
+                        id: "test-command".into(),
+                        name: "bash".into(),
+                        target: "cargo test --workspace --all-features".into(),
+                        output: format!(
+                            "{}\nFINAL: 120 tests passed",
+                            (1..=120)
+                                .map(|i| format!("test {i}: passed — café 中文"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        ),
+                        finished: true,
+                        failed: false,
+                    });
                 }
                 self.show_session(QWEN, window, cx);
                 self.open_sheet(
@@ -307,7 +313,10 @@ impl PhoneApp {
                     if name == "page" {
                         turn.pages = vec![crate::pages::Page {
                             path: "demo/aurora.html".into(),
-                            html: Some("<!doctype html><html><head><title>Aurora</title></head><body style=\"font-family:sans-serif;padding:2rem\"><h1>Aurora</h1><p>A page Pi made.</p><button style=\"min-height:48px;padding:0 16px\" onclick=\"document.getElementById('js-status').textContent='JavaScript executed'\">Run interaction</button><p id=\"js-status\">Waiting for interaction</p></body></html>".into()),
+                            html: Some(format!(
+                                "<!doctype html><html><head><title>Aurora</title></head><body style=\"font-family:sans-serif;padding:2rem\"><h1>Aurora</h1><p>A page Pi made.</p><button style=\"min-height:48px;padding:0 16px\" onclick=\"document.getElementById('js-status').textContent='JavaScript executed'\">Run interaction</button><p id=\"js-status\">Waiting for interaction</p>{}<p>End of the page</p></body></html>",
+                                "<p>A long page scrolls under the finger.</p>".repeat(60)
+                            )),
                         }];
                     }
                     if name == "streaming-reply" {
@@ -351,7 +360,9 @@ impl PhoneApp {
                     })
                 });
                 let mut png = std::io::Cursor::new(Vec::new());
-                image::DynamicImage::ImageRgb8(pixels).write_to(&mut png, image::ImageFormat::Png).unwrap();
+                image::DynamicImage::ImageRgb8(pixels)
+                    .write_to(&mut png, image::ImageFormat::Png)
+                    .unwrap();
                 use base64::Engine as _;
                 let data = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
                 if let Some(turn) = self
@@ -738,7 +749,9 @@ mod tests {
         cx.update(|window, cx| app.update(cx, |app, cx| app.preview("project", window, cx)));
         cx.run_until_parked();
         let click = |cx: &mut gpui::VisualTestContext, name: &'static str| {
-            let bounds = cx.debug_bounds(name).unwrap_or_else(|| panic!("{name} is shown"));
+            let bounds = cx
+                .debug_bounds(name)
+                .unwrap_or_else(|| panic!("{name} is shown"));
             cx.simulate_click(bounds.center(), gpui::Modifiers::none());
             cx.run_until_parked();
         };
@@ -751,7 +764,10 @@ mod tests {
         assert!(cx.debug_bounds("node:~/repos/pi/packages/ai").is_none());
         click(cx, "node:~/repos/minivm");
         app.read_with(cx, |app, _| {
-            assert_eq!(app.project_browser.picked.as_deref(), Some("/Users/nick/repos/minivm"));
+            assert_eq!(
+                app.project_browser.picked.as_deref(),
+                Some("/Users/nick/repos/minivm")
+            );
             assert_eq!(app.route(), Route::Start);
         });
         click(cx, "node:~/repos/pi/README.md");
@@ -798,7 +814,13 @@ mod tests {
                 assert_eq!(app.route(), Route::Sessions);
                 assert!(app.sheet.is_none());
                 assert!(app.swiping_session.is_none());
-                assert!(app.store.as_ref().unwrap().session(crate::model::SessionId(2)).is_some());
+                assert!(
+                    app.store
+                        .as_ref()
+                        .unwrap()
+                        .session(crate::model::SessionId(2))
+                        .is_some()
+                );
             });
         }
     }

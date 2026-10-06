@@ -12,11 +12,7 @@ use gpui::{
 };
 
 impl PhoneApp {
-    pub(crate) fn connect_screen(
-        &mut self,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(crate) fn connect_screen(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme(cx);
         let scroll = self.scroll(Route::Connect);
         let entered = !self.address.read(cx).text().trim().is_empty();
@@ -295,9 +291,13 @@ impl PhoneApp {
                 ),
             )
             .child(
-                pair_step(2, &colors)
-                    .border_t_1()
-                    .child(div().flex_1().min_w_0().pt(px(2.)).child("Scan the code it prints")),
+                pair_step(2, &colors).border_t_1().child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .pt(px(2.))
+                        .child("Scan the code it prints"),
+                ),
             )
             .child(
                 pair_step(3, &colors).border_t_1().child(

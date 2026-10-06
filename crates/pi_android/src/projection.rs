@@ -259,6 +259,10 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                     last_kind = first_tool;
                 }
                 turn.add_time(first_tool.unwrap_or(StageKind::HandOff), spent);
+                let text = text_of(message);
+                if !text.trim().is_empty() {
+                    turn.flow.push(crate::model::Flow::Text(text.clone()));
+                }
                 for block in message["content"].as_array().into_iter().flatten() {
                     if block["type"] != "toolCall" {
                         continue;
@@ -268,7 +272,10 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                     let observed = tool(pi, id);
                     if let Some(observed) = observed {
                         let path = observed.args["path"].as_str();
-                        turn.images.extend(tool_images(&observed.images, path));
+                        for image in tool_images(&observed.images, path) {
+                            turn.flow.push(crate::model::Flow::Image(turn.images.len()));
+                            turn.images.push(image);
+                        }
                     }
                     let args = observed.map_or(&block["arguments"], |tool| &tool.args);
                     add_tool(turn, id, name, args, observed, cwd);
@@ -276,10 +283,9 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                         && let Some(path) = args["path"].as_str()
                         && let Some(page) = pages.follow(name, args, &relative(path, cwd))
                     {
-                        crate::pages::show(&mut turn.pages, page);
+                        turn.show_page(page);
                     }
                 }
-                let text = text_of(message);
                 if !text.trim().is_empty() {
                     // Commentary before/between tools is visible progress too.
                     // Each message occurs once in Pi's authoritative history.
@@ -300,7 +306,7 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
 fn tool_images(images: &[Value], path: Option<&str>) -> Vec<crate::model::ToolImage> {
     let count = images.len();
     images
-        .into_iter()
+        .iter()
         .enumerate()
         .filter_map(|(index, image)| {
             let mime = image["mimeType"].as_str()?.to_owned();
@@ -1163,7 +1169,10 @@ mod tests {
         ]);
         let images = &project(&pi, facts(&[])).turns[0].images;
         assert_eq!(images.len(), 2);
-        assert_eq!((images[0].key.as_str(), images[0].name.as_str()), (id.as_str(), "page.png"));
+        assert_eq!(
+            (images[0].key.as_str(), images[0].name.as_str()),
+            (id.as_str(), "page.png")
+        );
         assert_eq!(images[0].inline, None);
         assert_eq!(images[1].name, "Image");
         assert_eq!(images[1].inline.as_deref(), Some("iVBORw0KGgo="));
@@ -1212,6 +1221,54 @@ mod tests {
             ]
         );
         assert_eq!(shown.turns[0].pages[0].title(), "Aurora");
+    }
+
+    #[test]
+    fn words_pictures_and_pages_read_in_the_order_pi_made_them() {
+        use crate::model::Flow;
+        let page = "<html><title>Aurora</title><body>blue</body></html>";
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":"Improve the page and check how it looks"},
+                {"role":"assistant","content":[
+                    {"type":"text","text":"Writing a first version."},
+                    {"type":"toolCall","id":"w","name":"write","arguments":{"path":"aurora.html","content":page}}
+                ],"stopReason":"toolUse"},
+                {"role":"toolResult","toolCallId":"w","toolName":"write","content":[],"isError":false},
+                {"role":"assistant","content":[
+                    {"type":"text","text":"Taking a look."},
+                    {"type":"toolCall","id":"r1","name":"read","arguments":{"path":"one.png"}}
+                ],"stopReason":"toolUse"},
+                {"role":"toolResult","toolCallId":"r1","toolName":"read","content":[
+                    {"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"}
+                ],"isError":false},
+                {"role":"assistant","content":[
+                    {"type":"text","text":"Too dark; brightening it."},
+                    {"type":"toolCall","id":"e","name":"edit","arguments":{"path":"aurora.html","edits":[{"oldText":"blue","newText":"green"}]}},
+                    {"type":"toolCall","id":"r2","name":"read","arguments":{"path":"two.png"}}
+                ],"stopReason":"toolUse"},
+                {"role":"toolResult","toolCallId":"e","toolName":"edit","content":[],"isError":false},
+                {"role":"toolResult","toolCallId":"r2","toolName":"read","content":[
+                    {"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"}
+                ],"isError":false},
+                {"role":"assistant","content":[{"type":"text","text":"Better now."}],"stopReason":"stop"}
+            ]}}),
+        ]);
+        let turn = &project(&pi, facts(&[])).turns[0];
+        assert!(turn.interleaved());
+        assert_eq!(
+            turn.flow,
+            [
+                Flow::Text("Writing a first version.".into()),
+                Flow::Text("Taking a look.".into()),
+                Flow::Image(0),
+                Flow::Text("Too dark; brightening it.".into()),
+                Flow::Page(0),
+                Flow::Image(1),
+                Flow::Text("Better now.".into()),
+            ]
+        );
+        assert_eq!(turn.images[1].name, "two.png");
     }
 
     #[test]

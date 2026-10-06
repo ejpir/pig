@@ -125,18 +125,23 @@ impl PhoneApp {
             }
             Some(JjHistoryState::Loaded(history)) => {
                 let empty = history.operations.is_empty();
-                let points = history.operations.into_iter().enumerate().map(|(index, operation)| {
-                    point(
-                        id,
-                        index,
-                        operation,
-                        running,
-                        self.restoring_history == Some((id, index)),
-                        &colors,
-                        cx,
-                    )
-                    .into_any_element()
-                });
+                let points =
+                    history
+                        .operations
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, operation)| {
+                            point(
+                                id,
+                                index,
+                                operation,
+                                running,
+                                self.restoring_history == Some((id, index)),
+                                &colors,
+                                cx,
+                            )
+                            .into_any_element()
+                        });
                 div()
                     .child(
                         div()
@@ -189,11 +194,14 @@ impl PhoneApp {
             )
             .when(running, |screen| {
                 screen.child(
-                    meta("Restore is off while Pi is working in this project.", &colors)
-                        .flex_none()
-                        .px(px(20.))
-                        .pt(px(8.))
-                        .pb(px(16.)),
+                    meta(
+                        "Restore is off while Pi is working in this project.",
+                        &colors,
+                    )
+                    .flex_none()
+                    .px(px(20.))
+                    .pt(px(8.))
+                    .pb(px(16.)),
                 )
             })
             .into_any_element()
@@ -285,7 +293,10 @@ fn point(
     let restore = div()
         .id(("restore-operation", index))
         .relative()
-        .child(crate::testing::probe(format!("{:?}", gpui::ElementId::from(("restore-operation", index)))))
+        .child(crate::testing::probe(format!(
+            "{:?}",
+            gpui::ElementId::from(("restore-operation", index))
+        )))
         .mt(px(-10.))
         .h(px(40.))
         .px(px(8.))
@@ -315,7 +326,10 @@ fn point(
                         .when(quiet, |title| title.text_color(colors.muted))
                         .child(title),
                 )
-                .child(meta(format!("{label}, {}", relative_time(operation.time)), colors)),
+                .child(meta(
+                    format!("{label}, {}", relative_time(operation.time)),
+                    colors,
+                )),
         )
         .child(restore)
 }

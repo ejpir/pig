@@ -332,7 +332,14 @@ impl Java {
         .unwrap_or(false)
     }
 
-    pub fn show_page(&self, title: &str, html: &str, dark: bool, source: bool, poster: &str) -> bool {
+    pub fn show_page(
+        &self,
+        title: &str,
+        html: &str,
+        dark: bool,
+        source: bool,
+        poster: &str,
+    ) -> bool {
         self.call("showPage", |env, activity| {
             let title = JString::from_str(env, title)?;
             let html = JString::from_str(env, html)?;

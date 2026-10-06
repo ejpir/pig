@@ -63,15 +63,22 @@ impl PhoneApp {
                 Some(to) => tap.on_click(cx.listener(move |this, _, _, cx| {
                     this.review_file = to;
                     this.review_lines.clear();
-                    this.review.update(cx, |review, cx| review.set_lines(None, cx));
+                    this.review
+                        .update(cx, |review, cx| review.set_lines(None, cx));
                     cx.notify();
                 })),
                 None => tap.opacity(0.45),
             }
         };
+        let wrap = self.wrap_lines(cx);
         let appbar = ui::appbar(back, name, Some(folder.into()), &colors)
+            .child(self.wrap_toggle("wrap-review", cx))
             .child(step("previous-file", "chev_l", shown.checked_sub(1)))
-            .child(step("next-file", "chev_r", (shown + 1 < count).then_some(shown + 1)));
+            .child(step(
+                "next-file",
+                "chev_r",
+                (shown + 1 < count).then_some(shown + 1),
+            ));
         let progress = div()
             .flex_none()
             .flex()
@@ -83,7 +90,11 @@ impl PhoneApp {
                     .flex_1()
                     .h(px(3.))
                     .rounded(px(2.))
-                    .bg(if index == shown { colors.accent } else { colors.raised })
+                    .bg(if index == shown {
+                        colors.accent
+                    } else {
+                        colors.raised
+                    })
             }));
         let summary = file.map(|file| {
             div()
@@ -97,7 +108,11 @@ impl PhoneApp {
                 .text_color(colors.muted)
                 .child(div().flex_1().child("Tap a line to ask Pi about it"))
                 .when(file.added > 0, |row| {
-                    row.child(div().text_color(colors.green).child(format!("+{}", file.added)))
+                    row.child(
+                        div()
+                            .text_color(colors.green)
+                            .child(format!("+{}", file.added)),
+                    )
                 })
                 .child(
                     div()
@@ -105,7 +120,9 @@ impl PhoneApp {
                         .flex()
                         .justify_end()
                         .text_color(colors.coral)
-                        .when(file.removed > 0, |removed| removed.child(format!("−{}", file.removed))),
+                        .when(file.removed > 0, |removed| {
+                            removed.child(format!("−{}", file.removed))
+                        }),
                 )
         });
         let diff = file.map(|file| {
@@ -148,19 +165,23 @@ impl PhoneApp {
                             .text_color(colors.faint)
                             .child(hunk_title(&hunk.header)),
                     )
-                    .child(div().py(px(4.)).children(hunk.lines.iter().enumerate().map(
-                        |(index, line)| {
-                            let selected = self.review_lines.contains(&(hunk_index, index));
-                            div()
-                                .id(("line", hunk_index * 10_000 + index))
-                                .relative()
-                                .child(ui::code_line(line, selected, 48., &colors))
-                                .child(self.copyable(line.text.clone(), cx))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_line(id, hunk_index, index, cx)
-                                }))
-                        },
-                    )))
+                    .child(
+                        div()
+                            .id(("hunk", hunk_index))
+                            .py(px(4.))
+                            .when(!wrap, |lines| lines.overflow_x_scroll())
+                            .children(hunk.lines.iter().enumerate().map(|(index, line)| {
+                                let selected = self.review_lines.contains(&(hunk_index, index));
+                                div()
+                                    .id(("line", hunk_index * 10_000 + index))
+                                    .relative()
+                                    .child(ui::code_line(line, selected, 48., wrap, &colors))
+                                    .child(self.copyable(line.text.clone(), cx))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_line(id, hunk_index, index, cx)
+                                    }))
+                            })),
+                    )
             }))
         });
         div()
@@ -172,21 +193,26 @@ impl PhoneApp {
             .when(count > 1, |screen| screen.child(progress))
             .when(count <= 1, |screen| screen.child(div().h(px(12.))))
             .children(summary)
+            .child(scroll_area(("review", id.0 as usize), &scroll).child(
+                div().pb(px(12.)).children(diff).when(count == 0, |list| {
+                    list.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .px(px(20.))
+                            .child(icon("info", 16., colors.muted))
+                            .child(ui::hint("Pi changed no files in this session.", &colors)),
+                    )
+                }),
+            ))
             .child(
-                scroll_area(("review", id.0 as usize), &scroll)
-                    .child(div().pb(px(12.)).children(diff).when(count == 0, |list| {
-                        list.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(12.))
-                                .px(px(20.))
-                                .child(icon("info", 16., colors.muted))
-                                .child(ui::hint("Pi changed no files in this session.", &colors)),
-                        )
-                    })),
+                div()
+                    .flex_none()
+                    .pt(px(8.))
+                    .pb(px(12.))
+                    .child(self.review.clone()),
             )
-            .child(div().flex_none().pt(px(8.)).pb(px(12.)).child(self.review.clone()))
             .into_any_element()
     }
 
@@ -223,20 +249,40 @@ fn hunk_title(header: &str) -> String {
     }
 }
 
-/// "line 211" or "lines 211–212", from the tapped lines' numbers.
+/// "line 211", "lines 211–212", or "lines 1–10, 15–20" when the tapped
+/// lines are apart, from their numbers.
 fn lines_label(file: &FileChange, lines: &BTreeSet<(usize, usize)>) -> Option<String> {
-    let numbers: Vec<u32> = lines
+    let numbers: BTreeSet<u32> = lines
         .iter()
         .filter_map(|(hunk, line)| file.hunks.get(*hunk)?.lines.get(*line))
         .map(|line| line.number)
         .collect();
-    let first = *numbers.iter().min()?;
-    let last = *numbers.iter().max()?;
-    Some(if first == last {
-        format!("line {first}")
-    } else {
-        format!("lines {first}–{last}")
-    })
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for number in numbers {
+        match runs.last_mut() {
+            Some((_, last)) if *last + 1 == number => *last = number,
+            _ => runs.push((number, number)),
+        }
+    }
+    let single = matches!(runs.as_slice(), [(first, last)] if first == last);
+    let runs = runs
+        .iter()
+        .map(|(first, last)| {
+            if first == last {
+                first.to_string()
+            } else {
+                format!("{first}–{last}")
+            }
+        })
+        .collect::<Vec<_>>();
+    if runs.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} {}",
+        if single { "line" } else { "lines" },
+        runs.join(", ")
+    ))
 }
 
 #[cfg(test)]
@@ -264,5 +310,33 @@ mod tests {
         lines.insert((0, 2));
         assert_eq!(lines_label(&file, &lines).as_deref(), Some("lines 211–212"));
         assert_eq!(lines_label(&file, &BTreeSet::new()), None);
+    }
+
+    #[test]
+    fn lines_apart_are_named_as_separate_ranges() {
+        let file = FileChange {
+            path: "a.ts".into(),
+            added: 0,
+            removed: 0,
+            hunks: vec![
+                Hunk {
+                    header: "@@ 1".into(),
+                    lines: (1..=3)
+                        .map(|n| DiffLine::new(LineKind::Context, n, ""))
+                        .collect(),
+                },
+                Hunk {
+                    header: "@@ 15".into(),
+                    lines: (15..=20)
+                        .map(|n| DiffLine::new(LineKind::Context, n, ""))
+                        .collect(),
+                },
+            ],
+        };
+        let lines = BTreeSet::from([(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 5)]);
+        assert_eq!(
+            lines_label(&file, &lines).as_deref(),
+            Some("lines 1–3, 15–16, 20")
+        );
     }
 }

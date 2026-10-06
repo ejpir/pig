@@ -1,4 +1,5 @@
 //! Headless SSH helper. The stdio bridge is disposable; the detached daemon owns Pi.
+#[cfg_attr(not(unix), allow(dead_code))]
 mod deletion;
 mod directories;
 mod durable;

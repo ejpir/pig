@@ -568,9 +568,7 @@ impl Render for Composer {
                                     .child(
                                         div()
                                             .id(("attachment", index))
-                                            .debug_selector(move || {
-                                                format!("attachment-{index}").into()
-                                            })
+                                            .debug_selector(move || format!("attachment-{index}"))
                                             .relative()
                                             .size(px(56.))
                                             .child(crate::testing::probe(format!(
@@ -591,7 +589,7 @@ impl Render for Composer {
                                     .child(
                                         ui::tap(("remove-attachment", index), "x", &colors)
                                             .debug_selector(move || {
-                                                format!("remove-attachment-{index}").into()
+                                                format!("remove-attachment-{index}")
                                             })
                                             .size(px(44.))
                                             .on_click(remove),
@@ -696,27 +694,32 @@ impl Render for Composer {
                     })
                     .child(send),
             );
-        div().flex().flex_col().children(strip).children(lines_strip).child(
-            div()
-                .id("composer")
-                .occlude()
-                .mx(px(12.))
-                .bg(colors.composer)
-                .border_1()
-                .border_color(if attached {
-                    colors.line
-                } else {
-                    colors.line_strong
-                })
-                .map(|composer| {
-                    if attached {
-                        composer.rounded_b(px(24.))
+        div()
+            .flex()
+            .flex_col()
+            .children(strip)
+            .children(lines_strip)
+            .child(
+                div()
+                    .id("composer")
+                    .occlude()
+                    .mx(px(12.))
+                    .bg(colors.composer)
+                    .border_1()
+                    .border_color(if attached {
+                        colors.line
                     } else {
-                        composer.rounded(px(24.))
-                    }
-                })
-                .child(body),
-        )
+                        colors.line_strong
+                    })
+                    .map(|composer| {
+                        if attached {
+                            composer.rounded_b(px(24.))
+                        } else {
+                            composer.rounded(px(24.))
+                        }
+                    })
+                    .child(body),
+            )
     }
 }
 

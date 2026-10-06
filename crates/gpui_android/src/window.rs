@@ -376,6 +376,15 @@ impl WindowState {
         self.settle_after_frame();
     }
 
+    pub fn pinch(&self, pinch: crate::touch::Pinch) {
+        self.dispatch(PlatformInput::Pinch(gpui::PinchEvent {
+            position: pinch.center,
+            delta: pinch.delta,
+            modifiers: Default::default(),
+            phase: pinch.phase,
+        }));
+    }
+
     pub fn touch(&self, events: Vec<TouchEvent>) {
         for event in events {
             self.last_touch.set(event.position);

@@ -50,6 +50,8 @@ pub struct Prefs {
     pub model_provider: Option<String>,
     pub model_id: Option<String>,
     pub thinking: String,
+    /// Long lines of code and output wrap; off, they scroll sideways.
+    pub wrap_lines: bool,
 }
 
 impl gpui::Global for Prefs {}
@@ -71,6 +73,7 @@ impl Default for Prefs {
             model_provider: None,
             model_id: None,
             thinking: "High".into(),
+            wrap_lines: true,
         }
     }
 }

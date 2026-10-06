@@ -196,46 +196,46 @@ impl PhoneApp {
     /// The search pill: finds what is listed, or goes to a typed path.
     fn folder_search(&self, colors: &Theme, cx: &Context<Self>) -> Div {
         let typed = !self.folder.read(cx).text().is_empty();
-        div()
-            .flex()
-            .child(
-                div()
-                    .id("project-search")
-                    .relative()
-                    .child(crate::testing::probe("project-search"))
-                    .flex_1()
-                    .min_w_0()
-                    .h(px(48.))
-                    .pl(px(16.))
-                    .pr(px(4.))
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .rounded(px(24.))
-                    .border_1()
-                    .map(|search| {
-                        if typed {
-                            search.bg(colors.composer).border_color(colors.line_strong)
-                        } else {
-                            search.bg(colors.panel).border_color(gpui::transparent_black())
-                        }
-                    })
-                    .child(icon("search", 20., colors.muted))
-                    .child(div().flex_1().min_w_0().child(self.folder.clone()))
-                    .when(typed, |search| {
-                        search.child(
-                            ui::tap("clear-project-search", "x", colors)
-                                .size(px(40.))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.folder.update(cx, |area, cx| area.set_text("", cx));
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        window.focus(&this.folder.read(cx).focus_handle(cx), cx)
-                    })),
-            )
+        div().flex().child(
+            div()
+                .id("project-search")
+                .relative()
+                .child(crate::testing::probe("project-search"))
+                .flex_1()
+                .min_w_0()
+                .h(px(48.))
+                .pl(px(16.))
+                .pr(px(4.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .rounded(px(24.))
+                .border_1()
+                .map(|search| {
+                    if typed {
+                        search.bg(colors.composer).border_color(colors.line_strong)
+                    } else {
+                        search
+                            .bg(colors.panel)
+                            .border_color(gpui::transparent_black())
+                    }
+                })
+                .child(icon("search", 20., colors.muted))
+                .child(div().flex_1().min_w_0().child(self.folder.clone()))
+                .when(typed, |search| {
+                    search.child(
+                        ui::tap("clear-project-search", "x", colors)
+                            .size(px(40.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.folder.update(cx, |area, cx| area.set_text("", cx));
+                                cx.notify();
+                            })),
+                    )
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    window.focus(&this.folder.read(cx).focus_handle(cx), cx)
+                })),
+        )
     }
 
     /// What is under the search: what it found, or recent projects and the tree.
@@ -274,7 +274,7 @@ impl PhoneApp {
                     "{:?}",
                     ElementId::from(("project", index))
                 )))
-                .debug_selector(move || format!("project-choice-{index}").into())
+                .debug_selector(move || format!("project-choice-{index}"))
                 .min_h(px(64.))
                 .py(px(12.))
                 .flex()
@@ -410,7 +410,9 @@ impl PhoneApp {
                     .items_center()
                     .gap(px(4.))
                     .min_w_0()
-                    .when(index > 0, |crumb| crumb.child(icon("chev_r", 14., colors.faint)))
+                    .when(index > 0, |crumb| {
+                        crumb.child(icon("chev_r", 14., colors.faint))
+                    })
                     .child(
                         div()
                             .id(("crumb", index))
@@ -427,7 +429,9 @@ impl PhoneApp {
                             .rounded(px(8.))
                             .whitespace_nowrap()
                             .when(here, |crumb| {
-                                crumb.text_color(colors.text).font_weight(FontWeight::SEMIBOLD)
+                                crumb
+                                    .text_color(colors.text)
+                                    .font_weight(FontWeight::SEMIBOLD)
                             })
                             .active(|style| style.bg(colors.selected))
                             .child(div().truncate().child(name))
@@ -644,7 +648,11 @@ impl PhoneApp {
                 .child(icon(
                     if node.folder { "folder" } else { "file" },
                     20.,
-                    if node.folder { colors.muted } else { colors.faint },
+                    if node.folder {
+                        colors.muted
+                    } else {
+                        colors.faint
+                    },
                 ))
                 .child(
                     div()
@@ -666,19 +674,30 @@ impl PhoneApp {
                                 .line_height(px(16.))
                                 .text_color(colors.muted)
                                 .truncate()
-                                .child(if folder.is_empty() { place.clone() } else { folder }),
+                                .child(if folder.is_empty() {
+                                    place.clone()
+                                } else {
+                                    folder
+                                }),
                         ),
                 )
                 .when(node.folder, |row| {
                     let path = path.clone();
                     row.child(
-                        ui::button(("use-found", index), Button::Quiet, None, "Use", true, colors)
-                            .px(px(8.))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.folder.update(cx, |area, cx| area.set_text("", cx));
-                                this.use_folder(&path, cx);
-                            })),
+                        ui::button(
+                            ("use-found", index),
+                            Button::Quiet,
+                            None,
+                            "Use",
+                            true,
+                            colors,
+                        )
+                        .px(px(8.))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.folder.update(cx, |area, cx| area.set_text("", cx));
+                            this.use_folder(&path, cx);
+                        })),
                     )
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {

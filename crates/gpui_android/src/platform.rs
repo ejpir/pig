@@ -462,6 +462,7 @@ impl AndroidPlatform {
             }
         }
         let events = window.touches().translate(action, &history, &current);
+        let pinch = window.touches().pinch();
         log::debug!(
             "motion {action:?}: {} pointers, {} batched samples -> {:?}",
             current.len(),
@@ -472,6 +473,9 @@ impl AndroidPlatform {
                 .collect::<Vec<_>>()
         );
         window.touch(events);
+        if let Some(pinch) = pinch {
+            window.pinch(pinch);
+        }
         InputStatus::Handled
     }
 }

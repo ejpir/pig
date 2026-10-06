@@ -63,11 +63,9 @@ impl PhoneApp {
                 )
         } else {
             let (name, status, status_hue) = match &self.store {
-                Some(store) if store.is_sample() => (
-                    store.computer.name.clone(),
-                    "Sample sessions",
-                    colors.green,
-                ),
+                Some(store) if store.is_sample() => {
+                    (store.computer.name.clone(), "Sample sessions", colors.green)
+                }
                 Some(store) if store.computer.connected => {
                     (store.computer.name.clone(), "Connected", colors.green)
                 }
@@ -93,10 +91,11 @@ impl PhoneApp {
                         .items_center()
                         .gap(px(12.))
                         .rounded(px(12.))
-                        .child(
-                            ui::tile_box(40., 12., colors.accent, &colors)
-                                .child(icon("pi", 16., colors.accent)),
-                        )
+                        .child(ui::tile_box(40., 12., colors.accent, &colors).child(icon(
+                            "pi",
+                            16.,
+                            colors.accent,
+                        )))
                         .child(
                             div()
                                 .flex_1()
@@ -344,7 +343,12 @@ impl PhoneApp {
     }
 
     /// Pi's question first on Home, with its command and Answer.
-    fn home_question(&self, session: &Session, colors: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn home_question(
+        &self,
+        session: &Session,
+        colors: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let id = session.id;
         let question = session.question.as_ref();
         let open = cx.listener(move |this, _, window, cx| this.show_session(id, window, cx));
@@ -362,7 +366,11 @@ impl PhoneApp {
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .child(ui::tile_box(32., 10., colors.wait, colors).child(icon("hand", 16., colors.wait)))
+                    .child(ui::tile_box(32., 10., colors.wait, colors).child(icon(
+                        "hand",
+                        16.,
+                        colors.wait,
+                    )))
                     .child(
                         div()
                             .flex_1()
@@ -383,12 +391,9 @@ impl PhoneApp {
                             ),
                     ),
             )
-            .child(
-                div()
-                    .mt(px(12.))
-                    .line_height(px(22.))
-                    .child(question.map_or_else(|| "Pi is waiting for you".to_owned(), |q| q.title.clone())),
-            )
+            .child(div().mt(px(12.)).line_height(px(22.)).child(
+                question.map_or_else(|| "Pi is waiting for you".to_owned(), |q| q.title.clone()),
+            ))
             .child(
                 div()
                     .mt(px(12.))
@@ -412,10 +417,23 @@ impl PhoneApp {
                                     .text_color(colors.secondary),
                             )
                     }))
-                    .when(question.is_none_or(|q| q.command.is_empty()), |row| row.child(div().flex_1()))
+                    .when(question.is_none_or(|q| q.command.is_empty()), |row| {
+                        row.child(div().flex_1())
+                    })
                     .child(
-                        ui::button(("answer", id.0 as usize), Button::Primary, None, "Answer", true, colors)
-                            .on_click(cx.listener(move |this, _, window, cx| this.show_session(id, window, cx))),
+                        ui::button(
+                            ("answer", id.0 as usize),
+                            Button::Primary,
+                            None,
+                            "Answer",
+                            true,
+                            colors,
+                        )
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.show_session(id, window, cx)
+                            }),
+                        ),
                     ),
             )
             .on_click(open)
@@ -476,10 +494,12 @@ impl PhoneApp {
         div()
             .id(("swipe-session", id.0 as usize))
             .child(crate::testing::probe(format!("session-row-{}", id.0)))
-            .debug_selector(move || format!("session-row-{}", id.0).into())
+            .debug_selector(move || format!("session-row-{}", id.0))
             .relative()
             .overflow_hidden()
-            .when(!working && !first, |row| row.border_t_1().border_color(colors.line))
+            .when(!working && !first, |row| {
+                row.border_t_1().border_color(colors.line)
+            })
             .when(swiping, |row| row.bg(colors.coral).rounded(px(12.)))
             .child(
                 div()
@@ -509,7 +529,14 @@ impl PhoneApp {
                     .gap(px(12.))
                     .bg(colors.canvas)
                     .active(|style| style.bg(colors.selected))
-                    .child(div().w(px(32.)).flex_none().flex().justify_center().child(leading))
+                    .child(
+                        div()
+                            .w(px(32.))
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .child(leading),
+                    )
                     .child(if working {
                         div()
                             .flex_1()

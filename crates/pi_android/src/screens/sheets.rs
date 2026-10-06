@@ -67,11 +67,18 @@ impl PhoneApp {
             Sheet::Logs => self.logs_sheet(&colors, cx),
             Sheet::SelectText => {
                 let lines = (f32::from(window.viewport_size().height) * 0.5 / 22.) as usize;
-                self.selectable.update(cx, |area, _| area.set_max_lines(lines.max(4)));
+                self.selectable
+                    .update(cx, |area, _| area.set_max_lines(lines.max(4)));
                 let text = self.selectable.read(cx).text().to_owned();
                 div()
                     .pb(px(8.))
-                    .child(ui::hint("Hold a word, then drag the handles to choose what to copy.", &colors).mt(px(4.)))
+                    .child(
+                        ui::hint(
+                            "Hold a word, then drag the handles to choose what to copy.",
+                            &colors,
+                        )
+                        .mt(px(4.)),
+                    )
                     .child(
                         div()
                             .mt(px(12.))
@@ -83,10 +90,19 @@ impl PhoneApp {
                             .child(self.selectable.clone()),
                     )
                     .child(
-                        ui::button("copy-all", Button::Plain, Some("copy"), "Copy all", false, &colors)
-                            .mt(px(12.))
-                            .w_full()
-                            .on_click(cx.listener(move |this, _, _, cx| this.copy(text.clone(), "all of it", cx))),
+                        ui::button(
+                            "copy-all",
+                            Button::Plain,
+                            Some("copy"),
+                            "Copy all",
+                            false,
+                            &colors,
+                        )
+                        .mt(px(12.))
+                        .w_full()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.copy(text.clone(), "all of it", cx)
+                        })),
                     )
             }
             Sheet::ToolImage(id, turn, n) => {
@@ -97,20 +113,19 @@ impl PhoneApp {
                     .cloned();
                 let shown = image.as_ref().map(|image| self.tool_image(id, image));
                 div().pb(px(8.)).child(match shown {
-                    Some(Ok(Some(shown))) => div()
-                        .w_full()
-                        .h(window.fully_visible_bounds().size.height * 0.65)
+                    Some(Ok(Some(shown))) => self
+                        .zoomable_image(
+                            shown.image,
+                            window.fully_visible_bounds().size.height * 0.65,
+                            cx,
+                        )
                         .rounded(px(12.))
-                        .overflow_hidden()
                         .bg(colors.panel)
-                        .child(
-                            gpui::img(shown.image)
-                                .size_full()
-                                .rounded(px(12.))
-                                .object_fit(gpui::ObjectFit::Contain),
-                        ),
-                    Some(Err(error)) => ui::hint(error, &colors),
-                    _ => ui::hint("Getting the image from the computer…", &colors),
+                        .into_any_element(),
+                    Some(Err(error)) => ui::hint(error, &colors).into_any_element(),
+                    _ => {
+                        ui::hint("Getting the image from the computer…", &colors).into_any_element()
+                    }
                 })
             }
             Sheet::Image(target, index) => {
@@ -239,12 +254,98 @@ impl PhoneApp {
             .into_any_element()
     }
 
+    /// An image to look closely at: pinch or double tap to zoom, drag to pan
+    /// while zoomed in.
+    fn zoomable_image(
+        &self,
+        image: impl Into<gpui::ImageSource>,
+        height: gpui::Pixels,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        const MAX_ZOOM: f32 = 6.;
+        let image_box = self.image_box.clone();
+        let (zoom, pan) = (self.image_zoom, self.image_pan);
+        // Zooms by `factor` around `at` in the window, keeping the image
+        // covering the box.
+        fn zoom_at(this: &mut PhoneApp, factor: f32, at: gpui::Point<gpui::Pixels>) {
+            let bounds = this.image_box.get();
+            let zoom = (this.image_zoom * factor).clamp(1., MAX_ZOOM);
+            let local = at - bounds.origin;
+            let scale = zoom / this.image_zoom;
+            this.image_zoom = zoom;
+            this.image_pan = local - (local - this.image_pan) * scale;
+            clamp_pan(this);
+        }
+        fn clamp_pan(this: &mut PhoneApp) {
+            let size = this.image_box.get().size;
+            let spare = |extent: gpui::Pixels| extent * (1. - this.image_zoom);
+            this.image_pan.x = this.image_pan.x.clamp(spare(size.width), px(0.));
+            this.image_pan.y = this.image_pan.y.clamp(spare(size.height), px(0.));
+        }
+        div()
+            .id("tool-image-view")
+            .relative()
+            .w_full()
+            .h(height)
+            .overflow_hidden()
+            .child(
+                gpui::canvas(move |bounds, _, _| image_box.set(bounds), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(pan.x)
+                    .top(pan.y)
+                    .w(relative(zoom))
+                    .h(relative(zoom))
+                    .child(
+                        gpui::img(image)
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Contain),
+                    ),
+            )
+            .on_pinch(cx.listener(|this, event: &gpui::PinchEvent, _, cx| {
+                if event.phase == gpui::TouchPhase::Moved {
+                    zoom_at(this, 1. + event.delta, event.position);
+                    cx.notify();
+                }
+                cx.stop_propagation();
+            }))
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                if this.image_zoom <= 1.01 {
+                    return;
+                }
+                this.image_pan += event.delta.pixel_delta(px(20.));
+                clamp_pan(this);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                if event.click_count() < 2 {
+                    return;
+                }
+                if this.image_zoom > 1.01 {
+                    this.image_zoom = 1.;
+                    this.image_pan = gpui::Point::default();
+                } else {
+                    zoom_at(this, 2.5, event.position());
+                }
+                cx.notify();
+            }))
+    }
+
     /// 13 Computers: each with its state or Connect, pairing another, the
     /// sample sessions and Settings.
     fn computers_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
         let live = self.live();
         let working = self.store.as_ref().map_or(0, |store| {
-            store.sessions.iter().filter(|s| s.state.is_running()).count()
+            store
+                .sessions
+                .iter()
+                .filter(|s| s.state.is_running())
+                .count()
         });
         let item = |id: ElementId| {
             div()
@@ -276,7 +377,11 @@ impl PhoneApp {
                 let address = computer.address.clone();
                 item(("computer", index).into())
                     .when(index > 0, |row| row.border_t_1())
-                    .child(icon(if current { "computer" } else { "server" }, 20., colors.muted))
+                    .child(icon(
+                        if current { "computer" } else { "server" },
+                        20.,
+                        colors.muted,
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -306,23 +411,32 @@ impl PhoneApp {
                                     }
                                     .into(),
                                 )
-                                .text_color(if computer.connected || !live {
-                                    colors.green
-                                } else {
-                                    colors.wait
-                                }),
+                                .text_color(
+                                    if computer.connected || !live {
+                                        colors.green
+                                    } else {
+                                        colors.wait
+                                    },
+                                ),
                             )
                             .into_any_element()
                     } else {
-                        ui::button(("connect-computer", index), Button::Plain, None, "Connect", true, colors)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.close_sheet(cx);
-                                this.address
-                                    .update(cx, |field, cx| field.set_text(address.clone(), cx));
-                                this.manual_setup = true;
-                                this.connect(window, cx);
-                            }))
-                            .into_any_element()
+                        ui::button(
+                            ("connect-computer", index),
+                            Button::Plain,
+                            None,
+                            "Connect",
+                            true,
+                            colors,
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.close_sheet(cx);
+                            this.address
+                                .update(cx, |field, cx| field.set_text(address.clone(), cx));
+                            this.manual_setup = true;
+                            this.connect(window, cx);
+                        }))
+                        .into_any_element()
                     })
             })
             .collect::<Vec<_>>();
@@ -336,22 +450,24 @@ impl PhoneApp {
         div()
             .pb(px(8.))
             .child(
-                div()
-                    .mt(px(8.))
-                    .children(computers)
-                    .child(
-                        item("pair-computer".into())
-                            .min_h(px(56.))
-                            .border_t_1()
-                            .text_color(colors.accent)
-                            .child(icon("plus", 20., colors.accent))
-                            .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("Pair another computer"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.close_sheet(cx);
-                                this.manual_setup = false;
-                                this.push(Route::Connect, window, cx);
-                            })),
-                    ),
+                div().mt(px(8.)).children(computers).child(
+                    item("pair-computer".into())
+                        .min_h(px(56.))
+                        .border_t_1()
+                        .text_color(colors.accent)
+                        .child(icon("plus", 20., colors.accent))
+                        .child(
+                            div()
+                                .flex_1()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Pair another computer"),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_sheet(cx);
+                            this.manual_setup = false;
+                            this.push(Route::Connect, window, cx);
+                        })),
+                ),
             )
             .child(div().mt(px(8.)).mx(px(-20.)).h(px(1.)).bg(colors.line))
             .child(
@@ -362,12 +478,14 @@ impl PhoneApp {
                     },
                 )),
             )
-            .child(link("open-settings", "settings", "Settings").border_t_1().on_click(
-                cx.listener(|this, _, window, cx| {
-                    this.close_sheet(cx);
-                    this.push(Route::Settings, window, cx);
-                }),
-            ))
+            .child(
+                link("open-settings", "settings", "Settings")
+                    .border_t_1()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close_sheet(cx);
+                        this.push(Route::Settings, window, cx);
+                    })),
+            )
     }
 
     fn session(&self, id: SessionId) -> Option<&Session> {
@@ -579,6 +697,7 @@ impl PhoneApp {
         else {
             return div();
         };
+        let wrap = self.wrap_lines(cx);
         div()
             .pb(px(12.))
             .min_w_0()
@@ -730,6 +849,7 @@ impl PhoneApp {
                                 .items_center()
                                 .gap(px(8.))
                                 .child(ui::label("Output", colors).flex_1())
+                                .child(self.wrap_toggle(("wrap-output", index), cx))
                                 .child(
                                     ui::tap(("copy-output", index), "copy", colors)
                                         .aria_label("Copy output")
@@ -741,7 +861,21 @@ impl PhoneApp {
                                         })),
                                 ),
                         )
-                        .child(ui::mono(tool.output.clone(), 12.).line_height(relative(1.5)))
+                        .child(if wrap {
+                            ui::mono(tool.output.clone(), 12.)
+                                .line_height(relative(1.5))
+                                .into_any_element()
+                        } else {
+                            div()
+                                .id(("output-lines", index))
+                                .overflow_x_scroll()
+                                .child(
+                                    ui::mono(tool.output.clone(), 12.)
+                                        .line_height(relative(1.5))
+                                        .whitespace_nowrap(),
+                                )
+                                .into_any_element()
+                        })
                     })
                     .when(tool.output.is_empty(), |card| {
                         card.child(ui::hint(
@@ -803,10 +937,13 @@ impl PhoneApp {
         let lines = gpui_android::recent_logs();
         let all = lines.join("\n");
         let count = lines.len();
+        let wrap = self.wrap_lines(cx);
         div()
             .pb(px(8.))
             .child(ui::hint(
-                format!("{count} lines since the app started, newest first. Hold one to select text."),
+                format!(
+                    "{count} lines since the app started, newest first. Hold one to select text."
+                ),
                 colors,
             ))
             .child(
@@ -815,41 +952,63 @@ impl PhoneApp {
                     .flex()
                     .gap(px(8.))
                     .child(
-                        ui::button("copy-logs", Button::Plain, Some("copy"), "Copy all", true, colors)
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                        ui::button(
+                            "copy-logs",
+                            Button::Plain,
+                            Some("copy"),
+                            "Copy all",
+                            true,
+                            colors,
+                        )
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
                                 this.copy(all.clone(), "the log", cx)
-                            })),
+                            }),
+                        ),
                     )
                     .child(
-                        ui::button("refresh-logs", Button::Plain, Some("refresh"), "Refresh", true, colors)
-                            .on_click(cx.listener(|_, _, _, cx| cx.notify())),
-                    ),
+                        ui::button(
+                            "refresh-logs",
+                            Button::Plain,
+                            Some("refresh"),
+                            "Refresh",
+                            true,
+                            colors,
+                        )
+                        .on_click(cx.listener(|_, _, _, cx| cx.notify())),
+                    )
+                    .child(div().flex_1())
+                    .child(self.wrap_toggle("wrap-logs", cx)),
             )
             .when(lines.is_empty(), |body| {
                 body.child(ui::hint("Nothing logged yet.", colors).mt(px(16.)))
             })
             .child(
                 div()
+                    .id("log-lines")
                     .mt(px(12.))
+                    .when(!wrap, |lines| lines.overflow_x_scroll().whitespace_nowrap())
                     .flex()
                     .flex_col()
                     .font_family(MONO)
                     .text_size(px(11.5))
                     .line_height(px(16.))
-                    .children(lines.into_iter().rev().take(SHOWN).enumerate().map(|(index, line)| {
-                        let level = line.split(' ').nth(1).unwrap_or("");
-                        div()
-                            .relative()
-                            .py(px(4.))
-                            .when(index > 0, |row| row.border_t_1().border_color(colors.line))
-                            .text_color(match level {
-                                "E" => colors.coral,
-                                "W" => colors.amber,
-                                _ => colors.secondary,
-                            })
-                            .child(line.clone())
-                            .child(self.copyable(line, cx))
-                    })),
+                    .children(lines.into_iter().rev().take(SHOWN).enumerate().map(
+                        |(index, line)| {
+                            let level = line.split(' ').nth(1).unwrap_or("");
+                            div()
+                                .relative()
+                                .py(px(4.))
+                                .when(index > 0, |row| row.border_t_1().border_color(colors.line))
+                                .text_color(match level {
+                                    "E" => colors.coral,
+                                    "W" => colors.amber,
+                                    _ => colors.secondary,
+                                })
+                                .child(line.clone())
+                                .child(self.copyable(line, cx))
+                        },
+                    )),
             )
     }
 
@@ -920,7 +1079,11 @@ impl PhoneApp {
                 .child(div().flex_1().child(title))
                 .child(meta(value))
                 .child(icon(
-                    if open == Some(true) { "chev_d" } else { "chev_r" },
+                    if open == Some(true) {
+                        "chev_d"
+                    } else {
+                        "chev_r"
+                    },
                     16.,
                     colors.faint,
                 ))
@@ -944,7 +1107,9 @@ impl PhoneApp {
                 div()
                     .id(("details-turn", index))
                     .mb(px(12.))
-                    .child(ui::label(format!("Turn {} · {}", index + 1, turn.at), colors).mb(px(8.)))
+                    .child(
+                        ui::label(format!("Turn {} · {}", index + 1, turn.at), colors).mb(px(8.)),
+                    )
                     .child(self.turn_activity(id, index, turn, false, colors, cx))
             }))
             .when(session.turns.is_empty(), |history| {
@@ -1005,7 +1170,14 @@ impl PhoneApp {
                     .border_t_1()
                     .border_b_1()
                     .border_color(colors.line)
-                    .child(stat("Cost", if details.cost.is_empty() { "—".into() } else { details.cost.clone() }))
+                    .child(stat(
+                        "Cost",
+                        if details.cost.is_empty() {
+                            "—".into()
+                        } else {
+                            details.cost.clone()
+                        },
+                    ))
                     .child(
                         stat("Turns", details.turns.to_string())
                             .pl(px(16.))
@@ -1033,7 +1205,12 @@ impl PhoneApp {
                         div()
                             .flex()
                             .items_center()
-                            .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("Context"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Context"),
+                            )
                             .child(meta(details.context_tokens.clone())),
                     )
                     .child(
@@ -1069,12 +1246,21 @@ impl PhoneApp {
                             .mt(px(8.))
                             .flex()
                             .child(meta(format!("{}% used", details.context_percent)).flex_1())
-                            .child(meta(format!("compacts at {}%", (COMPACTS_AT * 100.) as u32))),
+                            .child(meta(format!(
+                                "compacts at {}%",
+                                (COMPACTS_AT * 100.) as u32
+                            ))),
                     ),
             )
             .child(
-                row("details-model", "spark", "Model", format!("{model} · {thinking}"), None)
-                    .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Model, cx))),
+                row(
+                    "details-model",
+                    "spark",
+                    "Model",
+                    format!("{model} · {thinking}"),
+                    None,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Model, cx))),
             )
             .child(
                 row(
@@ -1193,7 +1379,7 @@ impl PhoneApp {
                     });
                 let provider = detail.clone();
                 ui::row(("model", index), index == 0, colors)
-                    .debug_selector(move || format!("model-choice-{index}").into())
+                    .debug_selector(move || format!("model-choice-{index}"))
                     .child(ui::row_text(
                         name.clone(),
                         Some(format!("{detail} · {model_id}").into()),
@@ -1304,7 +1490,7 @@ impl PhoneApp {
                     _ => "Deepest reasoning; takes longer",
                 };
                 ui::row(("thinking", index), index == 0, colors)
-                    .debug_selector(move || format!("thinking-choice-{index}").into())
+                    .debug_selector(move || format!("thinking-choice-{index}"))
                     .min_h(px(56.))
                     .child(ui::row_text(level.clone(), Some(detail.into()), colors))
                     .when(selected == level, |row| row.child(icon("check", 20., colors.accent)))
@@ -1315,7 +1501,6 @@ impl PhoneApp {
             })))
             .child(ui::hint("Higher effort can use more tokens and take longer. Available levels depend on the model.", colors).mt(px(12.)))
     }
-
 
     fn more_sheet(&self, id: SessionId, colors: &Theme, cx: &Context<Self>) -> Div {
         let Some(session) = self.session(id) else {

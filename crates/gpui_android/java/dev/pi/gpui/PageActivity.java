@@ -105,6 +105,16 @@ public final class PageActivity extends Activity {
         preview.getSettings().setGeolocationEnabled(false);
         preview.getSettings().setMediaPlaybackRequiresUserGesture(true);
         preview.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        // Pages made for a desktop browser are laid out wide and fit to the
+        // screen, and any page can be pinched to zoom and panned in both
+        // directions.
+        preview.getSettings().setUseWideViewPort(true);
+        preview.getSettings().setLoadWithOverviewMode(true);
+        preview.getSettings().setSupportZoom(true);
+        preview.getSettings().setBuiltInZoomControls(true);
+        preview.getSettings().setDisplayZoomControls(false);
+        preview.setVerticalScrollBarEnabled(true);
+        preview.setHorizontalScrollBarEnabled(true);
         preview.removeJavascriptInterface("searchBoxJavaBridge_");
         preview.removeJavascriptInterface("accessibility");
         preview.removeJavascriptInterface("accessibilityTraversal");

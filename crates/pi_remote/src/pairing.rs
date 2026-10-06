@@ -508,6 +508,7 @@ fn edit_authorized_keys_at(
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&lock_path)?;
     lock.lock_exclusive()?;
     let original = fs::read_to_string(&path).unwrap_or_default();

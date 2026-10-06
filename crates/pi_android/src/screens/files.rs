@@ -36,7 +36,11 @@ fn language(name: &str) -> Option<&'static str> {
 }
 
 impl PhoneApp {
-    pub(crate) fn file_screen(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn file_screen(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let colors = theme(cx);
         let scroll = self.scroll(Route::File);
         let Some(view) = &self.file_view else {
@@ -59,10 +63,10 @@ impl PhoneApp {
             if session.state.is_running() {
                 "Pi is editing it".to_owned()
             } else {
-                session
-                    .finished_at
-                    .as_ref()
-                    .map_or_else(|| "Edited by Pi".into(), |at| format!("Edited by Pi at {at}"))
+                session.finished_at.as_ref().map_or_else(
+                    || "Edited by Pi".into(),
+                    |at| format!("Edited by Pi at {at}"),
+                )
             }
         });
         let history = edited.or(in_project.first()).map(|session| session.id);
@@ -91,6 +95,7 @@ impl PhoneApp {
             format!("@{} ", view.path)
         };
         let root = view.root.clone();
+        let wrap = self.wrap_lines(cx);
         let body = match &view.text {
             Load::Loading => div()
                 .p(px(20.))
@@ -112,52 +117,76 @@ impl PhoneApp {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let code = shown.join("\n");
+                let language = language(view.name());
+                // Wrapped, each line keeps its number beside it.
+                let wrapped = wrap.then(|| {
+                    div()
+                        .relative()
+                        .font_family(MONO)
+                        .text_size(px(12.5))
+                        .line_height(px(22.))
+                        .text_color(colors.plain)
+                        .children(shown.iter().enumerate().map(|(index, line)| {
+                            div()
+                                .flex()
+                                .child(
+                                    div()
+                                        .w(px(gutter))
+                                        .flex_none()
+                                        .pr(px(12.))
+                                        .text_right()
+                                        .text_color(colors.faint)
+                                        .child((index + 1).to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .pr(px(20.))
+                                        .child(ui::code_text_language(line, language, &colors)),
+                                )
+                        }))
+                        .child(self.copyable(text.clone(), cx))
+                });
                 div()
                     .py(px(8.))
-                    .child(
-                        div()
-                            .relative()
-                            .flex()
-                            .font_family(MONO)
-                            .text_size(px(12.5))
-                            .line_height(px(22.))
-                            .text_color(colors.plain)
-                            .child(
-                                div()
-                                    .w(px(gutter))
-                                    .flex_none()
-                                    .pr(px(12.))
-                                    .text_right()
-                                    .text_color(colors.faint)
-                                    .child(numbers),
-                            )
-                            .child(
-                                div()
-                                    .id("file-code")
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_x_scroll()
-                                    .child(
-                                        div()
-                                            .pr(px(20.))
-                                            .whitespace_nowrap()
-                                            .child(ui::code_text_language(
-                                                &code,
-                                                language(view.name()),
-                                                &colors,
-                                            )),
-                                    ),
-                            )
-                            .child(self.copyable(text.clone(), cx)),
-                    )
+                    .children(wrapped)
+                    .when(!wrap, |body| {
+                        body.child(
+                            div()
+                                .relative()
+                                .flex()
+                                .font_family(MONO)
+                                .text_size(px(12.5))
+                                .line_height(px(22.))
+                                .text_color(colors.plain)
+                                .child(
+                                    div()
+                                        .w(px(gutter))
+                                        .flex_none()
+                                        .pr(px(12.))
+                                        .text_right()
+                                        .text_color(colors.faint)
+                                        .child(numbers),
+                                )
+                                .child(
+                                    div()
+                                        .id("file-code")
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_x_scroll()
+                                        .child(div().pr(px(20.)).whitespace_nowrap().child(
+                                            ui::code_text_language(&code, language, &colors),
+                                        )),
+                                )
+                                .child(self.copyable(text.clone(), cx)),
+                        )
+                    })
                     .when(more > 0, |body| {
                         body.child(
-                            ui::hint(
-                                format!("{more} more lines are on the computer."),
-                                &colors,
-                            )
-                            .px(px(20.))
-                            .pt(px(12.)),
+                            ui::hint(format!("{more} more lines are on the computer."), &colors)
+                                .px(px(20.))
+                                .pt(px(12.)),
                         )
                     })
             }
@@ -178,6 +207,7 @@ impl PhoneApp {
                     Some(subtitle.into()),
                     &colors,
                 )
+                .child(self.wrap_toggle("wrap-file", cx))
                 .children(text.clone().map(|text| {
                     ui::tap("copy-file", "copy", &colors)
                         .aria_label("Copy the file")
@@ -241,14 +271,16 @@ impl PhoneApp {
                             &colors,
                         )
                         .flex_1()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.use_folder(&root, cx);
-                            let mention = mention.clone();
-                            this.start.update(cx, |composer, cx| {
-                                composer.set_text(&mention, cx);
-                                composer.focus(window, cx);
-                            });
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.use_folder(&root, cx);
+                                let mention = mention.clone();
+                                this.start.update(cx, |composer, cx| {
+                                    composer.set_text(&mention, cx);
+                                    composer.focus(window, cx);
+                                });
+                            },
+                        )),
                     ),
             )
     }

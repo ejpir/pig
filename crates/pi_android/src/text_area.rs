@@ -115,6 +115,9 @@ pub struct TextArea {
     mouse_anchor: Option<usize>,
     /// Where the bar is in the window, while it shows.
     menu_bounds: Option<Bounds<Pixels>>,
+    /// What the field is clipped to, as a sheet's scroll area clips it: the
+    /// bar goes where it can be seen whole.
+    clip: Option<Bounds<Pixels>>,
     /// Text to read and copy from, not to edit: no keyboard, and the bar
     /// offers Copy and Select all.
     read_only: bool,
@@ -161,6 +164,7 @@ impl TextArea {
             dragging: None,
             mouse_anchor: None,
             menu_bounds: None,
+            clip: None,
             read_only: false,
         }
     }
@@ -709,8 +713,18 @@ impl TextArea {
         };
         // Past the box around the field too, as in the composer.
         let gap = px(24.);
-        let above = bounds.top() - gap - height >= window.fully_visible_bounds().top() + px(8.);
+        let visible = window.fully_visible_bounds();
+        let (clip_top, clip_bottom) = self.clip.map_or((visible.top(), visible.bottom()), |clip| {
+            (
+                clip.top().max(visible.top()),
+                clip.bottom().min(visible.bottom()),
+            )
+        });
+        let above = bounds.top() - gap - height >= clip_top + px(8.);
         let below = gap + px(HANDLE);
+        // Neither fits, as in a tall field in a sheet: over the field's top.
+        let inside = (!above && bounds.bottom() + below + height > clip_bottom - px(8.))
+            .then(|| (clip_top.max(bounds.top()) + px(8.)) - bounds.top());
         let viewport = window.viewport_size().width;
         let left = (bounds.left() + center - width / 2.)
             .min(viewport - width - px(8.))
@@ -718,6 +732,8 @@ impl TextArea {
             - bounds.left();
         let top = if above {
             bounds.top() - gap - height
+        } else if let Some(inside) = inside {
+            bounds.top() + inside
         } else {
             bounds.bottom() + below
         };
@@ -763,6 +779,8 @@ impl TextArea {
             .map(|edge| {
                 if above {
                     edge.bottom(relative(1.)).pb(gap)
+                } else if let Some(inside) = inside {
+                    edge.top(inside)
                 } else {
                     edge.top(relative(1.)).pt(below)
                 }
@@ -1453,6 +1471,7 @@ impl Element for TextBody {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let clip = window.content_mask().bounds;
         let focus = self.area.read(cx).focus.clone();
         if !self.area.read(cx).read_only {
             window.handle_input(
@@ -1535,6 +1554,7 @@ impl Element for TextBody {
         self.area.update(cx, |area, _| {
             area.layout = Some(layout);
             area.bounds = Some(bounds);
+            area.clip = Some(clip);
             area.scroll = scroll;
             area.scroll_x = prepaint.scroll_x;
             if prepaint.scrollbar_moved {
