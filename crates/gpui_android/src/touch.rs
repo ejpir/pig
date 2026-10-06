@@ -450,7 +450,7 @@ mod gesture_tests {
         });
         cx.run_until_parked();
         let mut touches = Touches::default();
-        let mut send = |events: Vec<TouchEvent>, cx: &mut TestAppContext| {
+        let send = |events: Vec<TouchEvent>, cx: &mut TestAppContext| {
             // Through the window, not the view: a tap's listener updates the view.
             for event in events {
                 cx.update_window(window.into(), |_, window, cx| {

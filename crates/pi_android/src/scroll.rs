@@ -50,6 +50,7 @@ thread_local! {
 
 /// Whether scrolling has visibly stopped, so a touch should tap rather than
 /// catch a fling that only GPUI still thinks is running.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn settled() -> bool {
     MOTION.with(|motion| motion.borrow().settled(Instant::now()))
 }

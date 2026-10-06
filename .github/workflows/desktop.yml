@@ -185,18 +185,13 @@ jobs:
       # The SSH helper carries the durable engine built above, so durable
       # sessions (and Pi for Android) work on a computer with just the helper.
       # Windows has no durable engine yet.
+      # Not bash: on Windows, Git's /usr/bin/link would shadow MSVC's link.exe.
       - name: Native release build
-        shell: bash
         env:
           PI_DESKTOP_BACKEND_ARCHIVE: ${{ runner.temp }}/pi/pi-${{ matrix.pi }}.tar.gz
           PI_DESKTOP_RELEASE_REPOSITORY: ${{ github.repository }}
-        run: |
-          features=pi-desktop/bundled-backend,pi_remote/bundled-backend
-          if [[ '${{ runner.os }}' != Windows ]]; then
-            features+=,pi_remote/bundled-durable
-            export PI_DESKTOP_DURABLE_BINARY="$PWD/artifacts/durable/pi-desktop-durable"
-          fi
-          cargo build --locked --release -p pi-desktop -p pi_remote --target ${{ matrix.target }} --features "$features"
+          PI_DESKTOP_DURABLE_BINARY: ${{ github.workspace }}/pi-desktop/artifacts/durable/pi-desktop-durable
+        run: cargo build --locked --release -p pi-desktop -p pi_remote --target ${{ matrix.target }} --features pi-desktop/bundled-backend,pi_remote/bundled-backend${{ runner.os != 'Windows' && ',pi_remote/bundled-durable' || '' }}
       - name: Package only distributable files
         run: python scripts/package_desktop.py --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.binary }} --notices ${{ runner.temp }}/pi/pi-notices.txt
       - name: Package standalone SSH helper
