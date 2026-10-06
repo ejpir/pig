@@ -56,7 +56,7 @@ fn extension_confirm_select_are_cancel_default_correlated_and_do_not_leak_shortc
     );
     cx.run_until_parked();
     assert!(cx.debug_bounds("confirmation-dialog").is_some());
-    cx.simulate_keystrokes("ctrl-n");
+    cx.simulate_keystrokes("secondary-n");
     cx.run_until_parked();
     assert_eq!(
         workspace(&desktop, &cx).read_with(&cx, |workspace, _| workspace.tabs.len()),
@@ -127,7 +127,7 @@ fn new_session_chooser_preserves_drafts_and_starts_only_on_create(cx: &mut TestA
     set_draft(&first, "Keep this text", &mut cx);
     open(&desktop, "/demo/repos/zed", None, &mut cx);
     select(&desktop, 0, &mut cx);
-    cx.simulate_keystrokes("ctrl-n");
+    cx.simulate_keystrokes("secondary-n");
     cx.run_until_parked();
     assert!(cx.debug_bounds("new-session-dialog").is_some());
     assert_eq!(
@@ -136,7 +136,7 @@ fn new_session_chooser_preserves_drafts_and_starts_only_on_create(cx: &mut TestA
     );
     click("cancel-new-session", &mut cx);
     assert_eq!(draft(&first, &cx), "Keep this text");
-    cx.simulate_keystrokes("ctrl-n");
+    cx.simulate_keystrokes("secondary-n");
     cx.run_until_parked();
     click("new-session-project-1", &mut cx);
     click("create-session", &mut cx);
@@ -292,7 +292,7 @@ fn new_session_study_geometry_keeps_footer_and_fields_visible(cx: &mut TestAppCo
     let (desktop, mut cx) = setup(cx);
     open(&desktop, "/demo/zed", None, &mut cx);
     open(&desktop, "/demo/minivm", None, &mut cx);
-    cx.simulate_keystrokes("ctrl-n");
+    cx.simulate_keystrokes("secondary-n");
     cx.run_until_parked();
     click("new-session-worktree", &mut cx);
     let dialog = cx.debug_bounds("new-session-dialog").unwrap();
@@ -311,7 +311,7 @@ fn new_session_study_geometry_keeps_footer_and_fields_visible(cx: &mut TestAppCo
             "{selector}: {bounds:?} outside {dialog:?}"
         );
     }
-    cx.simulate_keystrokes("enter ctrl-shift-d ctrl-n ctrl-b");
+    cx.simulate_keystrokes("enter ctrl-shift-d secondary-n secondary-b");
     cx.run_until_parked();
     assert!(cx.debug_bounds("new-session-dialog").is_some());
     assert_eq!(
@@ -349,7 +349,7 @@ fn initial_model_picker_floats_filters_and_handles_keyboard_without_changing_cur
             .as_ref()
             .map(|model| (model.provider.clone(), model.id.clone()))
     });
-    cx.simulate_keystrokes("ctrl-n");
+    cx.simulate_keystrokes("secondary-n");
     cx.run_until_parked();
     let dialog = cx.debug_bounds("new-session-dialog").unwrap();
     let footer = cx.debug_bounds("new-session-footer").unwrap();
@@ -508,7 +508,12 @@ fn worktree_creation_is_argv_based_no_overwrite_and_preserves_source_files() {
         "-m".as_ref(),
         "Synthetic fixture".as_ref(),
     ]);
-    let target = root.path().join("worktree with spaces");
+    // Resolved, as the created worktree is (macOS's /var is /private/var).
+    let target = root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("worktree with spaces");
     let actual =
         super::super::new_session::create_worktree(&project, "pi/fixture;literal", &target)
             .unwrap();

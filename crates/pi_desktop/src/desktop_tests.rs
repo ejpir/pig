@@ -1522,7 +1522,9 @@ fn a_command_that_changes_files_shows_them_and_restores_to_before(cx: &mut TestA
 fn a_second_session_in_a_busy_folder_can_work_in_its_own_workspace(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("pi");
+    // Resolved, as session folders are (macOS's /var is /private/var).
+    let base = dir.path().canonicalize().unwrap();
+    let root = base.join("pi");
     std::fs::create_dir(&root).unwrap();
     let env = pi_jj::Env::isolated("Test User", "test@example.com");
     // A recorded turn: workspaces start from the last one.
@@ -1567,7 +1569,7 @@ fn a_second_session_in_a_busy_folder_can_work_in_its_own_workspace(cx: &mut Test
     cx.simulate_click(start.center(), gpui::Modifiers::none());
     cx.run_until_parked();
 
-    let folder = dir.path().join("pi-ws/add-a-regression-test");
+    let folder = base.join("pi-ws/add-a-regression-test");
     assert_eq!(
         std::fs::read_to_string(folder.join("a.txt")).unwrap(),
         "one\n"
