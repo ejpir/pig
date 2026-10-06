@@ -252,9 +252,10 @@ jobs:
           if [[ -n "$ANDROID_KEYSTORE_BASE64" ]]; then
             printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
             export ANDROID_KEYSTORE="$RUNNER_TEMP/release.keystore"
+          elif [[ '${{ github.ref }}' == refs/tags/v* ]]; then
+            echo '::error::Set the ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD secrets to sign release APKs'
+            exit 1
           else
-            # Until the secrets exist. Moving to a release key later means
-            # reinstalling: Android refuses an update signed by another key.
             echo '::warning::No ANDROID_KEYSTORE_BASE64 secret; signing with a debug key'
           fi
           export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
