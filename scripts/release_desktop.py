@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a complete four-target release and emit a SHA-256 manifest."""
+"""Validate a complete four-target release, plus the Android app, and emit a SHA-256 manifest."""
 import argparse
 import hashlib
 import re
@@ -9,6 +9,8 @@ from pathlib import Path
 from package_desktop import ROOT, TARGETS, archive_name
 from package_remote import asset_name
 
+# Built by crates/pi_android/scripts/build_apk.py in CI's Android job.
+ANDROID_APK = "pi-android-arm64.apk"
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?")
 
 
@@ -27,7 +29,8 @@ def validate_release_version(tag: str, version: str) -> None:
 
 def manifest(directory: Path) -> Path:
     """Fail closed on missing/extra files rather than publishing a partial matrix."""
-    expected = {archive_name(target) for target in TARGETS} | {asset_name(target) for target in TARGETS}
+    expected = ({archive_name(target) for target in TARGETS} | {asset_name(target) for target in TARGETS}
+                | {ANDROID_APK})
     entries = {file.name for file in directory.iterdir()}
     if entries != expected:
         raise ValueError(f"Release matrix mismatch: missing={sorted(expected - entries)}, extra={sorted(entries - expected)}")

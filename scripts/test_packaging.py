@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import fetch_pi
 from package_desktop import TARGETS, archive_name, check_binary, package
-from release_desktop import manifest, validate_tag, validate_release_version
+from release_desktop import ANDROID_APK, manifest, validate_tag, validate_release_version
 from package_remote import asset_name, package as package_remote
 
 
@@ -183,7 +183,8 @@ class PackagingTests(unittest.TestCase):
     def test_release_manifest_requires_exact_complete_matrix_and_correct_digests(self):
         output = self.root / "release"
         output.mkdir()
-        names = sorted([archive_name(target) for target in TARGETS] + [asset_name(target) for target in TARGETS])
+        names = sorted([archive_name(target) for target in TARGETS] + [asset_name(target) for target in TARGETS]
+                       + [ANDROID_APK])
         for name in names[:-1]:
             (output / name).write_bytes(b"fixture")
         with self.assertRaises(ValueError):
@@ -202,6 +203,7 @@ class PackagingTests(unittest.TestCase):
         for target in TARGETS:
             (output / archive_name(target)).write_bytes(b"fixture")
             (output / asset_name(target)).write_bytes(b"fixture")
+        (output / ANDROID_APK).write_bytes(b"fixture")
         first = output / archive_name(next(iter(TARGETS)))
         first.write_bytes(b"")
         with self.assertRaises(ValueError):

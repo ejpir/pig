@@ -67,7 +67,7 @@ def main():
     assert "working in this project" not in text("stopped")
     assert "signatures" in text("compact")  # OCR sometimes reads the small Q as O.
     assert "62.4k" not in text("compact")  # inspector hidden at the compact breakpoint
-    assert "start with a prompt" in text("new")
+    assert "start with the task" in text("new")
     assert "create session" not in text("new")  # Chooser completed, not just opened.
     assert "newsession" in text("new").replace(" ", "")
     for name, expected in (("model-picker", ["anthropic", "openai", "sonnet"]),
@@ -80,7 +80,7 @@ def main():
     load("usage", (1344, 740))
     assert "not reported" in text("usage")  # Demo has no active-tool inventory.
     assert "cache hits (tokens)" in text("usage")  # Explicitly requested inspector.
-    assert "62.4k" in text("usage")
+    assert "62.4k" in text("usage").replace("62 4k", "62.4k")  # OCR may drop the dot.
     assert "throw" not in text("moonstone")  # Diff details start collapsed.
     load("edit-details", (1344, 740))
     load("bash-details", (1344, 740))

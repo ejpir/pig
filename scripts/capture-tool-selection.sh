@@ -46,7 +46,7 @@ PY
 # out of order by Xvfb under load. Polling also gives GPUI time to own CLIPBOARD.
 # The sentinel and one-line assertion prevent stale/full-document copy successes.
 select_line() {
-    local kind="$1" marker="$2" first="$3" last="$4" y copied x=260
+    local kind="$1" marker="$2" first="$3" last="$4" y copied x=300
     local output="artifacts/tool-$kind-copy.txt"
     [[ "$kind" != bash ]] || x=253
     for y in $(seq "$first" 4 "$last"); do
@@ -75,12 +75,18 @@ select_line() {
     echo "Could not select $marker" >&2
     return 1
 }
-edit_y="$(find_header Edit)"
-click 500 "$edit_y"
+# A run's edits are grouped under "Changed"; open the group, then the edit.
+click 500 "$(find_header Changed)"
+xdotool mousemove --window "$window" 1300 120
+sleep 0.4
+click 500 "$(find_header Edit)"
+# The diff opens below the fold.
+xdotool mousemove --window "$window" 850 300 click --repeat 3 --delay 100 5
+sleep 0.4
 import -window "$window" artifacts/tool-selection-expanded.png
-select_line edit MissingSignature "$((edit_y+30))" 550 > /dev/null
+# Below the rows: a drag that starts on one folds it.
+select_line edit MissingSignature "$(($(find_header Edit) + 20))" 500 > /dev/null
 import -window "$window" artifacts/thread-edit-selected.png
-click 500 "$edit_y"
 xdotool key ctrl+q
 for _ in $(seq 1 50); do
     if ! kill -0 "$app" 2>/dev/null; then wait "$app"; echo 'PASS: native edit drag selection and keyboard clipboard copy; clean exit.'; exit 0; fi

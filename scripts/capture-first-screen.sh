@@ -57,29 +57,34 @@ print(left + (int(row['left']) + int(row['width']) // 2) // 2,
       top + (int(row['top']) + int(row['height']) // 2) // 2)
 PY
 }
-# Tool details are intentionally collapsed by default. Capture each expanded view too.
-for tool in 'edit-details Edit'; do
-    read -r name word <<< "$tool"
-    read -r x y < <(locate_word "$word" '230,270,1000,555')
-    xdotool mousemove --window "$window" "$x" "$y" click 1
-    sleep 1
-    # Taller prose/file summaries can put the expanded output below the fold.
-    if [[ "$word" == Bash ]]; then
-        xdotool mousemove --window "$window" 850 430 click --repeat 2 --delay 100 5
-        sleep 0.4
-        read -r x y < <(locate_word "$word" '230,100,1000,510')
-    fi
-    import -window "$window" "artifacts/thread-$name.png"
-    xdotool mousemove --window "$window" "$x" "$y" click 1
-    if [[ "$word" == Bash ]]; then
-        xdotool mousemove --window "$window" 850 430 click --repeat 4 --delay 100 4
-    fi
-    sleep 0.2
-done
-xdotool mousemove --window "$window" 850 430 click --repeat 2 --delay 100 5
+# Tool details are intentionally collapsed by default, and a run's edits are
+# grouped under "Changed". Open the group, then the edit, and capture the diff.
+read -r gx gy < <(locate_word Changed '230,270,1000,470')
+xdotool mousemove --window "$window" "$gx" "$gy" click 1
+sleep 1
+# Away from the group's tooltip, which would cover the edit's name.
+xdotool mousemove --window "$window" 1300 120
+sleep 0.5
+read -r ex ey < <(locate_word Edit '230,270,1000,600')
+xdotool mousemove --window "$window" "$ex" "$ey" click 1
+sleep 1
+# The diff opens below the fold.
+xdotool mousemove --window "$window" 850 300 click --repeat 3 --delay 100 5
+sleep 0.4
+xdotool mousemove --window "$window" 1300 120
+sleep 0.3
+import -window "$window" artifacts/thread-edit-details.png
+xdotool mousemove --window "$window" 850 300 click --repeat 6 --delay 50 4
+sleep 0.4
+xdotool mousemove --window "$window" "$ex" "$ey" click 1
+sleep 0.3
+xdotool mousemove --window "$window" "$gx" "$gy" click 1
+sleep 0.3
+# The check's output is at the end of the thread.
+xdotool mousemove --window "$window" 850 430 click --repeat 10 --delay 50 5
 sleep 0.4
 import -window "$window" artifacts/thread-bash-details.png
-xdotool mousemove --window "$window" 850 430 click --repeat 4 --delay 100 4
+xdotool mousemove --window "$window" 850 430 click --repeat 12 --delay 50 4
 sleep 0.3
 for picker in 'model-picker claude-opus-5-5' 'thinking-picker High'; do
     read -r name word <<< "$picker"
@@ -93,7 +98,15 @@ done
 # Usage remains reachable, but details are deliberately closed on first launch.
 xdotool key ctrl+shift+i
 sleep 0.5
+# Token and cache counts are behind "Usage details".
+read -r x y < <(locate_word Usage '1030,280,1344,350')
+xdotool mousemove --window "$window" "$x" "$y" click 1
+sleep 0.5
+xdotool mousemove --window "$window" 1300 120
+sleep 0.3
 import -window "$window" artifacts/thread-usage.png
+xdotool mousemove --window "$window" "$x" "$y" click 1
+sleep 0.3
 xdotool key ctrl+shift+i
 sleep 0.3
 xdotool key ctrl+a

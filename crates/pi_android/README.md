@@ -16,8 +16,10 @@ Home).
 
 1. Turn on SSH: on a Mac, **System Settings → General → Sharing → Remote
    Login**.
-2. Install a helper built with durable sessions, from the repository root on
-   that computer (see [backend/durable](../../backend/durable/README.md)):
+2. Install a helper built with durable sessions. The macOS and Linux helpers
+   in the releases (`pi-desktop-remote-*`) have it built in; put one in
+   `~/.pi/desktop/bin/`. Or build it from the repository root on that computer
+   (see [backend/durable](../../backend/durable/README.md)):
 
    ```sh
    cd backend/durable && npm ci --ignore-scripts \
@@ -155,6 +157,8 @@ updates still carry the full text projection; image bytes are replaced with
 small content-hash references and can be retrieved with `get_image`.
 
 ## Build and install
+
+Each release has a signed `pi-android-arm64.apk` (Android 11 or newer, arm64): download it on the phone and open it. To build it yourself:
 
 ```sh
 rustup target add aarch64-linux-android

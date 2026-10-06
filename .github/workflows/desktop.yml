@@ -182,11 +182,21 @@ jobs:
             cargo check --locked -p pi_remote --features bundled-durable
       - name: Native headless helper tests (no model calls)
         run: cargo test --locked -p pi_remote
+      # The SSH helper carries the durable engine built above, so durable
+      # sessions (and Pi for Android) work on a computer with just the helper.
+      # Windows has no durable engine yet.
       - name: Native release build
+        shell: bash
         env:
           PI_DESKTOP_BACKEND_ARCHIVE: ${{ runner.temp }}/pi/pi-${{ matrix.pi }}.tar.gz
           PI_DESKTOP_RELEASE_REPOSITORY: ${{ github.repository }}
-        run: cargo build --locked --release -p pi-desktop -p pi_remote --target ${{ matrix.target }} --features pi-desktop/bundled-backend,pi_remote/bundled-backend
+        run: |
+          features=pi-desktop/bundled-backend,pi_remote/bundled-backend
+          if [[ '${{ runner.os }}' != Windows ]]; then
+            features+=,pi_remote/bundled-durable
+            export PI_DESKTOP_DURABLE_BINARY="$PWD/artifacts/durable/pi-desktop-durable"
+          fi
+          cargo build --locked --release -p pi-desktop -p pi_remote --target ${{ matrix.target }} --features "$features"
       - name: Package only distributable files
         run: python scripts/package_desktop.py --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.binary }} --notices ${{ runner.temp }}/pi/pi-notices.txt
       - name: Package standalone SSH helper
@@ -202,10 +212,70 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  android:
+    name: Package / android-arm64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: pi-desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pi-desktop
+      - uses: actions/checkout@v4
+        with:
+          repository: zed-industries/zed
+          ref: ${{ env.ZED_REVISION }}
+          path: zed
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: aarch64-linux-android
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pi-desktop
+          key: android
+      # The runner's Android SDK has the platform, build-tools and NDK the
+      # builder needs. Releases are signed with the repository's key, so a new
+      # version installs over the last; other builds use a throwaway debug key.
+      - name: Build the APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$ANDROID_KEYSTORE_BASE64" ]]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            export ANDROID_KEYSTORE="$RUNNER_TEMP/release.keystore"
+          elif [[ '${{ github.ref }}' == refs/tags/v* ]]; then
+            echo '::error::Set the ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD secrets to sign release APKs'
+            exit 1
+          else
+            echo '::warning::No ANDROID_KEYSTORE_BASE64 secret; signing with a debug key'
+          fi
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
+          python crates/pi_android/scripts/build_apk.py --out dist/pi-android-arm64.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-desktop-android-arm64
+          path: pi-desktop/dist/pi-android-arm64.apk
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: Publish / ${{ github.ref_name }}
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [checks, native]
+    needs: [checks, native, android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -219,7 +289,7 @@ jobs:
           pattern: pi-desktop-*
           path: ${{ runner.temp }}/release
           merge-multiple: true
-      - name: Verify all four packages and four helpers and checksum them
+      - name: Verify all four packages, four helpers and the APK, and checksum them
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python scripts/release_desktop.py --tag "$RELEASE_TAG" --directory "$RUNNER_TEMP/release"

@@ -5,7 +5,9 @@
 
 Builds the `touch` example for arm64 Android, compiles the Java activity
 (`java/`) to DEX, writes a binary AndroidManifest.xml, then zips and signs the
-APK with the Android debug key (~/.android/debug.keystore, created if missing).
+APK with the Android debug key (~/.android/debug.keystore, created if missing),
+or with ANDROID_KEYSTORE (and ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and
+ANDROID_KEY_PASSWORD) when set. The version is the workspace's.
 Other apps call `build` with their own `App` (see crates/pi_android/scripts).
 
 Needs Python 3.9+, a JDK (javac, keytool) and the Android SDK, found through
@@ -19,6 +21,7 @@ import argparse
 import dataclasses
 import os
 import platform
+import re
 import shutil
 import struct
 import subprocess
@@ -165,11 +168,20 @@ def attribute(name, kind, value, android=True):
     return name, kind, value, android
 
 
+def workspace_version():
+    """The workspace version, and a version code that grows with it (1.2.3 is 1002003)."""
+    text = (WORKSPACE / "Cargo.toml").read_text()
+    version = re.search(r'^\[workspace\.package\][^\[]*?^version = "([^"]+)"', text, re.M | re.S).group(1)
+    major, minor, patch = (int(part) for part in re.match(r"(\d+)\.(\d+)\.(\d+)", version).groups())
+    return version, major * 1_000_000 + minor * 1_000 + patch
+
+
 def manifest(app, debuggable):
+    version, code = workspace_version()
     return element("manifest", [
         attribute("package", STRING, app.package, android=False),
-        attribute("versionCode", INT_DEC, 1),
-        attribute("versionName", STRING, "0.1"),
+        attribute("versionCode", INT_DEC, code),
+        attribute("versionName", STRING, version),
     ], [
         element("uses-sdk", [
             attribute("minSdkVersion", INT_DEC, MIN_SDK),
@@ -379,6 +391,19 @@ def debug_keystore(keytool="keytool"):
     return keystore
 
 
+def signing_key(keytool):
+    """A release key from the environment, or the debug key."""
+    keystore = os.environ.get("ANDROID_KEYSTORE")
+    if not keystore:
+        return ["--ks", debug_keystore(keytool), "--ks-pass", "pass:android"]
+    key = ["--ks", keystore, "--ks-pass", "env:ANDROID_KEYSTORE_PASSWORD"]
+    if os.environ.get("ANDROID_KEY_ALIAS"):
+        key += ["--ks-key-alias", os.environ["ANDROID_KEY_ALIAS"]]
+    if os.environ.get("ANDROID_KEY_PASSWORD"):
+        key += ["--key-pass", "env:ANDROID_KEY_PASSWORD"]
+    return key
+
+
 def build(app, debug, out):
     sdk = sdk_root()
     android_jar = tool("ANDROID_JAR", lambda: sdk and find_android_jar(sdk), f"android.jar (API {MIN_SDK}+)")
@@ -419,8 +444,7 @@ def build(app, debug, out):
                     apk.write(Path(folder) / f"{name}.png", f"res/drawable/{name}.png", zipfile.ZIP_STORED)
                 apk.writestr("res/mipmap/ic_launcher.xml", encode_xml(adaptive_icon()))
         out.parent.mkdir(parents=True, exist_ok=True)
-        run([java, "-jar", apksigner, "sign", "--ks", debug_keystore(keytool), "--ks-pass", "pass:android",
-             "--min-sdk-version", MIN_SDK, "--out", out, unsigned])
+        run([java, "-jar", apksigner, "sign", *signing_key(keytool), "--min-sdk-version", MIN_SDK, "--out", out, unsigned])
     print(f"Built {out}\nInstall it with: adb install -r {out}")
 
 
