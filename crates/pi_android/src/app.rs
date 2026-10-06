@@ -1376,6 +1376,19 @@ impl PhoneApp {
             return;
         }
         #[cfg(feature = "ui-test")]
+        if url == "pi://test/notify" {
+            // A sample session's finished notification, to check how it looks in the tray.
+            if let Some(store) = self.store.as_ref().filter(|store| store.is_sample())
+                && let Some(session) = store.sessions.first()
+            {
+                let accent = theme(cx).accent_rgb();
+                let posted =
+                    activity::notify(&alerts::finished(session, &store.computer.name, accent));
+                log::info!("Test notification posted: {posted}");
+            }
+            return;
+        }
+        #[cfg(feature = "ui-test")]
         if url == "pi://test/grow" && self.paused {
             // A run writing a file while its reply streams: every step adds a
             // diff line, an output line and words, as a live session does.

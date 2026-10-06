@@ -31,7 +31,7 @@ CRATE = Path(__file__).resolve().parent.parent
 WORKSPACE = CRATE.parent.parent
 TARGET = "aarch64-linux-android"
 MIN_SDK = 30
-TARGET_SDK = 35
+TARGET_SDK = 37
 ACTIVITY = "dev.pi.gpui.GpuiActivity"
 
 
@@ -46,6 +46,10 @@ class App:
     debuggable: bool = False  # permits read-only run-as fixture telemetry, independent of Rust optimization
     qr_scanner: bool = False
     deep_links: tuple = ()  # (scheme, host), opened in the main activity
+    # The launcher icon: a folder with ic_launcher_foreground.png (432 px, the
+    # adaptive icon's 108 dp layer) and ic_notification.png (a white
+    # silhouette for the status bar), and the 0xAARRGGBB colour behind it.
+    launcher: tuple = ()  # (folder, background)
 
 
 TOUCH = App(
@@ -135,13 +139,14 @@ def run(command, **kwargs):
 
 ANDROID_NS = "http://schemas.android.com/apk/res/android"
 ATTRIBUTE_IDS = {  # android.R.attr
-    "theme": 0x01010000, "label": 0x01010001, "name": 0x01010003, "hasCode": 0x0101000C,
+    "theme": 0x01010000, "label": 0x01010001, "icon": 0x01010002, "name": 0x01010003, "hasCode": 0x0101000C,
     "debuggable": 0x0101000F, "exported": 0x01010010, "authorities": 0x01010018,
     "grantUriPermissions": 0x0101001B, "launchMode": 0x0101001D, "configChanges": 0x0101001F,
     "value": 0x01010024, "scheme": 0x01010027, "host": 0x01010028,
     "minSdkVersion": 0x0101020C, "versionCode": 0x0101021B,
     "versionName": 0x0101021C, "targetSdkVersion": 0x01010270,
-    "extractNativeLibs": 0x010104EA,
+    "drawable": 0x01010199, "extractNativeLibs": 0x010104EA, "roundIcon": 0x0101052C,
+    "enableOnBackInvokedCallback": 0x0101066C,
 }
 THEME_NO_ACTION_BAR = 0x01030129  # @android:style/Theme.DeviceDefault.NoActionBar
 # ActivityInfo.CONFIG_*: rotation, resizing, density, dark mode and keyboards
@@ -174,10 +179,15 @@ def manifest(app, debuggable):
           for permission in app.permissions),
         element("application", [
             attribute("label", STRING, app.label),
+            *([attribute("icon", REFERENCE, LAUNCHER_ICON),
+               attribute("roundIcon", REFERENCE, LAUNCHER_ICON)] if app.launcher else []),
             attribute("hasCode", BOOLEAN, True),
             attribute("debuggable", BOOLEAN, debuggable),
             attribute("extractNativeLibs", BOOLEAN, True),
             attribute("theme", REFERENCE, THEME_NO_ACTION_BAR),
+            # Back reaches the app as the "back" key, which Android 16+ sends
+            # only to apps that leave predictive back off.
+            attribute("enableOnBackInvokedCallback", BOOLEAN, False),
         ], [
             element("activity", [
                 attribute("name", STRING, ACTIVITY),
@@ -230,6 +240,80 @@ def manifest(app, debuggable):
     ])
 
 
+# The resources an app with a launcher icon has, in a table built here as the
+# manifest is: no aapt. Ids are 0x7f TT EEEE, by type then entry, as listed.
+RESOURCE_TYPES = (
+    ("color", ("ic_launcher_background",)),
+    ("drawable", ("ic_launcher_foreground", "ic_notification")),
+    ("mipmap", ("ic_launcher",)),
+)
+LAUNCHER_ICON = 0x7F030000
+TYPE_INT_COLOR_ARGB8 = 0x1C
+
+
+def adaptive_icon():
+    """res/mipmap/ic_launcher.xml: the colour behind the foreground."""
+    return element("adaptive-icon", [], [
+        element("background", [attribute("drawable", REFERENCE, 0x7F010000)]),
+        element("foreground", [attribute("drawable", REFERENCE, 0x7F020000)]),
+    ])
+
+
+def string_pool(strings):
+    def length(n):
+        return bytes([n]) if n < 0x80 else bytes([0x80 | (n >> 8), n & 0xFF])
+
+    data, offsets = b"", []
+    for text in strings:
+        encoded = text.encode("utf-8")
+        offsets.append(len(data))
+        data += length(len(text)) + length(len(encoded)) + encoded + b"\0"
+    data += b"\0" * (-len(data) % 4)
+    strings_start = 28 + 4 * len(strings)
+    header = struct.pack("<HHIIIIII", 0x0001, 28, strings_start + len(data), len(strings), 0, 0x100, strings_start, 0)
+    return header + b"".join(struct.pack("<I", offset) for offset in offsets) + data
+
+
+def resource_table(package, background):
+    """resources.arsc for RESOURCE_TYPES, in the default configuration; and
+    the files it names, as (path in the APK, source or bytes)."""
+    files = {
+        "ic_launcher_foreground": "res/drawable/ic_launcher_foreground.png",
+        "ic_notification": "res/drawable/ic_notification.png",
+        "ic_launcher": "res/mipmap/ic_launcher.xml",
+    }
+    paths = list(files.values())
+    keys = [name for _, names in RESOURCE_TYPES for name in names]
+    types = [name for name, _ in RESOURCE_TYPES]
+    type_pool, key_pool = string_pool(types), string_pool(keys)
+    chunks = b""
+    for type_id, (kind, names) in enumerate(RESOURCE_TYPES, 1):
+        chunks += struct.pack("<HHIBBHI", 0x0202, 16, 16 + 4 * len(names), type_id, 0, 0, len(names))
+        chunks += b"\0" * 4 * len(names)
+        entries = b""
+        offsets = []
+        for name in names:
+            offsets.append(len(entries))
+            if kind == "color":
+                value = struct.pack("<HBBI", 8, 0, TYPE_INT_COLOR_ARGB8, background)
+            else:
+                value = struct.pack("<HBBI", 8, 0, STRING, paths.index(files[name]))
+            entries += struct.pack("<HHI", 8, 0, keys.index(name)) + value
+        config = struct.pack("<I", 64) + b"\0" * 60
+        header_size = 20 + len(config)
+        entries_start = header_size + 4 * len(names)
+        chunks += struct.pack("<HHIBBHII", 0x0201, header_size, entries_start + len(entries),
+                              type_id, 0, 0, len(names), entries_start)
+        chunks += config + b"".join(struct.pack("<I", o) for o in offsets) + entries
+    name = package.encode("utf-16-le")[:254].ljust(256, b"\0")
+    header_size = 288
+    package_chunk = struct.pack("<HHII", 0x0200, header_size, header_size + len(type_pool) + len(key_pool) + len(chunks), 0x7F)
+    package_chunk += name + struct.pack("<IIIII", header_size, len(types), header_size + len(type_pool), len(keys), 0)
+    package_chunk += type_pool + key_pool + chunks
+    body = string_pool(paths) + package_chunk
+    return struct.pack("<HHII", 0x0002, 12, 12 + len(body), 1) + body
+
+
 def walk(node):
     yield node
     for child in node[2]:
@@ -257,18 +341,7 @@ def encode_xml(root):
             if kind == STRING:
                 index(value)
 
-    def length(n):
-        return bytes([n]) if n < 0x80 else bytes([0x80 | (n >> 8), n & 0xFF])
-
-    data, offsets = b"", []
-    for text in strings:
-        encoded = text.encode("utf-8")
-        offsets.append(len(data))
-        data += length(len(text)) + length(len(encoded)) + encoded + b"\0"
-    data += b"\0" * (-len(data) % 4)
-    strings_start = 28 + 4 * len(strings)
-    pool = struct.pack("<HHIIIIII", 0x0001, 28, strings_start + len(data), len(strings), 0, 0x100, strings_start, 0)
-    pool += b"".join(struct.pack("<I", offset) for offset in offsets) + data
+    pool = string_pool(strings)
     ids = [ATTRIBUTE_IDS[name] for name in android_names]
     resource_map = struct.pack("<HHI", 0x0180, 8, 8 + 4 * len(ids)) + b"".join(struct.pack("<I", i) for i in ids)
 
@@ -338,6 +411,13 @@ def build(app, debug, out):
             apk.write(scratch / "classes.dex", "classes.dex")
             apk.write(library, f"lib/arm64-v8a/lib{app.library}.so")
             apk.write(CRATE / "assets/fonts/OFL.txt", "assets/licenses/NotoEmoji-OFL.txt")
+            if app.launcher:
+                folder, background = app.launcher
+                # Stored, not compressed: Android maps resources.arsc directly.
+                apk.writestr(zipfile.ZipInfo("resources.arsc"), resource_table(app.package, background))
+                for name in ("ic_launcher_foreground", "ic_notification"):
+                    apk.write(Path(folder) / f"{name}.png", f"res/drawable/{name}.png", zipfile.ZIP_STORED)
+                apk.writestr("res/mipmap/ic_launcher.xml", encode_xml(adaptive_icon()))
         out.parent.mkdir(parents=True, exist_ok=True)
         run([java, "-jar", apksigner, "sign", "--ks", debug_keystore(keytool), "--ks-pass", "pass:android",
              "--min-sdk-version", MIN_SDK, "--out", out, unsigned])

@@ -66,7 +66,7 @@ final class Notifications {
                 new NotificationChannel(channel, channelName, importance));
         Notification.Builder builder =
                 new Notification.Builder(activity, channel)
-                        .setSmallIcon(icon())
+                        .setSmallIcon(icon(activity))
                         .setColor(color)
                         .setContentTitle(title)
                         .setContentText(text)
@@ -82,7 +82,7 @@ final class Notifications {
         for (int i = 0; i < actionLabels.length; i++) {
             builder.addAction(
                     new Notification.Action.Builder(
-                                    icon(), actionLabels[i], open(activity, actionUrls[i]))
+                                    icon(activity), actionLabels[i], open(activity, actionUrls[i]))
                             .build());
         }
         manager.notify(id, builder.build());
@@ -100,9 +100,19 @@ final class Notifications {
                 activity, 0, intent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
-    /** The status bar icon: a π drawn in white, since the app has no resources. */
-    private static synchronized Icon icon() {
+    /**
+     * The status bar icon: the app's white silhouette, or a π drawn in white for
+     * an app built without a launcher icon.
+     */
+    private static synchronized Icon icon(Activity activity) {
         if (icon == null) {
+            int id =
+                    activity.getResources()
+                            .getIdentifier("ic_notification", "drawable", activity.getPackageName());
+            if (id != 0) {
+                icon = Icon.createWithResource(activity, id);
+                return icon;
+            }
             int size = 96;
             Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);

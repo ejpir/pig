@@ -28,6 +28,7 @@ PI = build_apk.App(
     ),
     qr_scanner=True,
     deep_links=(("pi", "pair"),),
+    launcher=(Path(__file__).resolve().parents[1] / "assets" / "launcher", 0xFF161D27),
 )
 
 if __name__ == "__main__":

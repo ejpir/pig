@@ -101,9 +101,10 @@ Logs and panics go to logcat:
 adb logcat -s gpui-touch GpuiActivity
 ```
 
-The APK is signed with the Android debug key, targets Android 15 (API 35) and
-runs on Android 11 and later on arm64. Other apps build their APK through the
-same script with their own package, library and permissions; see
-`crates/pi_android/scripts/build_apk.py`.
+The APK is signed with the Android debug key, targets Android 17 (API 37) and
+runs on Android 11 and later on arm64; it compiles against the newest platform
+installed (`sdkmanager "platforms;android-37.2" "build-tools;37.0.0"`). Other
+apps build their APK through the same script with their own package, library,
+permissions and launcher icon; see `crates/pi_android/scripts/build_apk.py`.
 
 [`android-activity`]: https://github.com/rust-mobile/android-activity
