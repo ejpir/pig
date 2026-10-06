@@ -350,6 +350,11 @@ fn failure(id: &str, command: &str, error: &str) -> Value {
 pub fn daemon(target: SshTarget) -> Result<()> {
     target.validate()?;
     let root = root()?;
+    // Before the lock too: a deleted session's daemon may still hold it while exiting.
+    ensure!(
+        !root.join(format!("{}.deleted.json", target.key)).exists(),
+        "This session was permanently deleted"
+    );
     let lock_path = root.join(format!("{}.lock", target.key));
     let lock = OpenOptions::new()
         .read(true)
