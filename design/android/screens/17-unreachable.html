@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>17 · Can’t reach the computer</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  .host { height: 32px; display: inline-flex; align-items: center; gap: 8px; padding: 0 12px 0 10px; border-radius: 16px; background: var(--panel); font-size: 13px; color: var(--secondary); }
+  .dot.off { background: var(--coral); }
+  .error { margin-top: 20px; border-radius: 12px; padding: 12px 14px; background: color-mix(in srgb, var(--coral) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--coral) 35%, transparent); color: var(--coral); font-size: 13px; display: flex; gap: 10px; }
+  .tips .listrow { min-height: 52px; align-items: flex-start; padding-top: 14px; padding-bottom: 12px; }
+  .tips .t { font-size: 14px; font-weight: 400; color: var(--secondary); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="appbar">
+      <div class="title" style="padding-left:16px"><b style="font-size:22px">Sessions</b></div>
+      <span class="tap"><i data-i="settings"></i></span>
+    </div>
+    <div class="scroll col">
+      <span class="host" style="align-self:flex-start"><span class="dot off"></span>studio-mac<span class="faint">· not reachable</span></span>
+      <h1 class="heading" style="margin-top:28px">Can’t reach studio-mac</h1>
+      <p class="hint" style="font-size:15px;margin-top:10px;line-height:1.5">The phone still knows this computer, and its sessions are safe there. Trying again on its own in 30 s.</p>
+
+      <div class="error"><i data-i="alert" class="sm" style="margin-top:1px"></i><span class="mono" style="font-size:12px;line-height:18px">Connecting to nick@studio-mac.local:22 timed out after 15 s</span></div>
+
+      <div class="label" style="margin:22px 4px 8px">Things to check</div>
+      <div class="card tips">
+        <div class="listrow"><i data-i="computer" class="sm muted"></i><div class="grow t">The computer is awake and Remote Login is on</div></div>
+        <div class="listrow"><i data-i="wifi" class="sm muted"></i><div class="grow t">The phone is on the same network, or Tailscale is connected</div></div>
+      </div>
+    </div>
+    <div style="padding:12px 20px 14px" class="col gap8">
+      <span class="btn primary wide">Try again</span>
+      <span class="btn quiet wide">Use a different computer</span>
+    </div>
+  </main>
+</div>
+<script src="phone.js"></script>
+</body></html>

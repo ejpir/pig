@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>16 · Reconnecting</title>
+<link rel="stylesheet" href="phone.css">
+<style>
+  .host { height: 32px; display: inline-flex; align-items: center; gap: 8px; padding: 0 12px 0 10px; border-radius: 16px; background: var(--panel); font-size: 13px; color: var(--secondary); }
+  .dot.try { background: var(--h-run); box-shadow: 0 0 0 4px color-mix(in srgb, var(--h-run) 22%, transparent); }
+  .steps .listrow { min-height: 48px; }
+  .steps .s { font-size: 13px; color: var(--muted); }
+  .tick { width: 24px; height: 24px; border-radius: 12px; flex: none; display: flex; align-items: center; justify-content: center; }
+  .tick.done { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+  .tick.now { border: 1.5px solid color-mix(in srgb, var(--h-run) 60%, transparent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--h-run) 14%, transparent); }
+  .tick.later { border: 1.5px dashed var(--line-strong); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="appbar">
+      <div class="title" style="padding-left:16px"><b style="font-size:22px">Sessions</b></div>
+      <span class="tap"><i data-i="settings"></i></span>
+    </div>
+    <div class="scroll col">
+      <span class="host" style="align-self:flex-start"><span class="dot try"></span>studio-mac<span class="faint">· reconnecting</span></span>
+      <h1 class="heading" style="margin-top:28px">Reconnecting to studio-mac</h1>
+      <p class="hint" style="font-size:15px;margin-top:10px;line-height:1.5">Your sessions kept running on the computer while the app was closed. They’ll be here as soon as the phone reaches it.</p>
+
+      <div class="card steps" style="margin-top:24px">
+        <div class="listrow">
+          <span class="tick done"><i data-i="check" class="xs"></i></span>
+          <div class="grow"><div class="t">Computer</div><div class="s mono ell" style="font-size:12px">nick@studio-mac.local</div></div>
+        </div>
+        <div class="listrow">
+          <span class="tick now"><span class="dot try" style="box-shadow:none"></span></span>
+          <div class="grow"><div class="t">Reaching it over SSH</div><div class="s">Attempt 2 · this can take a moment after the phone wakes</div></div>
+        </div>
+        <div class="listrow">
+          <span class="tick later"></span>
+          <div class="grow"><div class="t" style="color:var(--faint);font-weight:400">Loading sessions</div></div>
+        </div>
+      </div>
+    </div>
+    <div style="padding:12px 20px 14px" class="col gap8">
+      <span class="btn primary wide" style="opacity:.55">Connecting…</span>
+      <span class="btn quiet wide">Use a different computer</span>
+    </div>
+  </main>
+</div>
+<script src="phone.js"></script>
+</body></html>

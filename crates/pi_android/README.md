@@ -99,6 +99,9 @@ shows an update message and leaves recent projects available.
   original admission ID and complete image payload. Obsolete connection
   updates are ignored. Rejected prompts stay available as **Edit and retry**;
   recovery never replaces a draft already being edited.
+  Opening the app connects to the last computer and says so; if it can't
+  reach it, the app shows why and tries again after 5, 10, 20, then every 30
+  seconds. **Use a different computer** goes to setup.
 - **Back, notifications, links, selecting text, settings:** as in the sample.
 - **Computers, sheets and the dock:** Home's title is the computer; tap it to
   switch computers, pair another, try the sample sessions or reach Settings.
@@ -181,7 +184,7 @@ cargo run -p pi_android --example preview -- waiting  # a named state
 ```
 
 The named states use the sample sessions and match the design's screens:
-`connect`, `sessions`, `search`, `start`, `working`, `waiting`, `done`,
+`connect`, `reconnecting`, `unreachable`, `sessions`, `search`, `start`, `working`, `waiting`, `done`,
 `review`, `typing`, `details`, `evening`, `settings`, and the sheets `model`,
 `attach`, `more`, `project`, `models` and `resources`. Stress states include
 `long-input`, `long-reply`, `streaming-reply`, `long-labels`, `empty-search`,

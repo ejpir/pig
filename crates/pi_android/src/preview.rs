@@ -3,7 +3,7 @@
 //! sessions stay still in a preview.
 
 use crate::{
-    app::{PhoneApp, Route, Sheet, Target},
+    app::{PhoneApp, Resume, Route, Sheet, Target},
     composer::Attachment,
     model::{
         Answer, LineKind, SessionId, StageKind, StageStatus, State, Summary, ToolActivity, Turn,
@@ -20,6 +20,8 @@ const QWEN: SessionId = SessionId(1);
 /// Every state `PhoneApp::preview` knows.
 pub const SCREENS: &[&str] = &[
     "connect",
+    "reconnecting",
+    "unreachable",
     "sessions",
     "computers",
     "search",
@@ -112,6 +114,22 @@ impl PhoneApp {
         if name == "connect" {
             self.address
                 .update(cx, |address, cx| address.set_text(ADDRESS, cx));
+            cx.notify();
+            return;
+        }
+        if let Some(failed) = match name {
+            "reconnecting" => Some(false),
+            "unreachable" => Some(true),
+            _ => None,
+        } {
+            self.resuming = Some(Resume {
+                address: ADDRESS.into(),
+                attempt: if failed { 3 } else { 2 },
+                retry_at: failed.then(|| std::time::Instant::now() + Duration::from_secs(30)),
+            });
+            self.connecting = !failed;
+            self.connect_error =
+                failed.then(|| format!("Connecting to {ADDRESS}:22 timed out after 15 s").into());
             cx.notify();
             return;
         }
@@ -625,6 +643,23 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_different_computer_leaves_reconnecting_for_setup(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("unreachable", window, cx)));
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let resume = app.resuming.as_ref().expect("reconnecting");
+            assert!(resume.retry_at.is_some() && app.connect_error.is_some());
+        });
+        cx.update(|_, cx| app.update(cx, |app, cx| app.leave_resume(cx)));
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(app.resuming.is_none() && app.connect_error.is_none());
+            assert_eq!(app.route(), Route::Connect);
+        });
+    }
+
+    #[gpui::test]
     fn every_screen_renders(cx: &mut TestAppContext) {
         for (width, height) in [(320., 640.), (384., 854.), (640., 360.)] {
             for name in SCREENS {
@@ -634,7 +669,7 @@ mod tests {
                 cx.run_until_parked();
                 app.read_with(cx, |app, _| {
                     let expected = match *name {
-                        "connect" => Route::Connect,
+                        "connect" | "reconnecting" | "unreachable" => Route::Connect,
                         "sessions" | "computers" | "search" | "empty-search" | "delete"
                         | "delete-running" => Route::Sessions,
                         "start" | "model" | "model-long-list" | "model-no-match" | "thinking"

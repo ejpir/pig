@@ -2,7 +2,7 @@
 
 use super::scroll_area;
 use crate::{
-    app::{PhoneApp, Route},
+    app::{PhoneApp, Resume, Route},
     theme::{MONO, SANS, Theme, theme},
     ui::{self, Button, icon},
 };
@@ -13,6 +13,9 @@ use gpui::{
 
 impl PhoneApp {
     pub(crate) fn connect_screen(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(resume) = self.resuming.clone() {
+            return self.resume_screen(resume, cx);
+        }
         let colors = theme(cx);
         let scroll = self.scroll(Route::Connect);
         let entered = !self.address.read(cx).text().trim().is_empty();
@@ -379,6 +382,278 @@ impl PhoneApp {
             )
             .into_any_element()
     }
+}
+
+impl PhoneApp {
+    /// Opening with a saved computer: getting back to it, or why it can't.
+    fn resume_screen(&mut self, resume: Resume, cx: &mut Context<Self>) -> AnyElement {
+        let colors = theme(cx);
+        let scroll = self.scroll(Route::Connect);
+        let name = crate::model::Computer::from_address(&resume.address).name;
+        let failed = self.connect_error.clone().filter(|_| !self.connecting);
+        let failing = failed.is_some();
+        let (status, hue) = if failing {
+            ("not reachable", colors.coral)
+        } else {
+            ("reconnecting", colors.accent)
+        };
+        let chip = div()
+            .h(px(32.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .pl(px(10.))
+            .pr(px(12.))
+            .rounded(px(16.))
+            .bg(colors.panel)
+            .text_size(px(13.))
+            .text_color(colors.secondary)
+            .child(div().size(px(8.)).rounded(px(4.)).bg(hue))
+            .child(name.clone())
+            .child(div().text_color(colors.faint).child(format!("· {status}")));
+        let lead = match (&failed, resume.retry_at) {
+            (None, _) => "Your sessions kept running on the computer while the app was closed. They’ll be here as soon as the phone reaches it.".to_owned(),
+            (Some(_), Some(at)) => {
+                let seconds = at.saturating_duration_since(std::time::Instant::now()).as_secs() + 1;
+                format!("The phone still knows this computer, and its sessions are safe there. Trying again in {seconds} s.")
+            }
+            (Some(_), None) => "The phone still knows this computer, and its sessions are safe there.".to_owned(),
+        };
+        let body = match failed {
+            None => ui::card(&colors)
+                .mt(px(24.))
+                .child(
+                    progress_row(Progress::Done, &colors).child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Computer"))
+                            .child(
+                                ui::mono(resume.address.clone(), 12.)
+                                    .text_color(colors.muted)
+                                    .truncate(),
+                            ),
+                    ),
+                )
+                .child(
+                    progress_row(Progress::Now, &colors).border_t_1().child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Reaching it over SSH"),
+                            )
+                            .child(ui::hint(
+                                if resume.attempt > 1 {
+                                    format!(
+                                        "Attempt {} · this can take a moment after the phone wakes",
+                                        resume.attempt
+                                    )
+                                } else {
+                                    "This can take a moment after the phone wakes".to_owned()
+                                },
+                                &colors,
+                            )),
+                    ),
+                )
+                .child(
+                    progress_row(Progress::Later, &colors)
+                        .border_t_1()
+                        .child(div().text_color(colors.faint).child("Loading sessions")),
+                ),
+            Some(error) => {
+                let check = |glyph: &'static str, text: &'static str| {
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(14.))
+                        .px(px(16.))
+                        .py(px(14.))
+                        .border_color(colors.line)
+                        .text_size(px(14.))
+                        .line_height(px(20.))
+                        .text_color(colors.secondary)
+                        .child(icon(glyph, 16., colors.muted).mt(px(2.)))
+                        .child(div().flex_1().min_w_0().child(text))
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .mt(px(20.))
+                            .flex()
+                            .items_start()
+                            .gap(px(10.))
+                            .px(px(14.))
+                            .py(px(12.))
+                            .rounded(px(12.))
+                            .bg(colors.tint(colors.coral))
+                            .border_1()
+                            .border_color(colors.coral.opacity(0.35))
+                            .child(icon("alert", 16., colors.coral).mt(px(1.)))
+                            .child(
+                                ui::mono(error, 12.)
+                                    .flex_1()
+                                    .min_w_0()
+                                    .line_height(px(18.))
+                                    .text_color(colors.coral),
+                            ),
+                    )
+                    .when(!self.key_refused, |body| {
+                        body.child(
+                            ui::label("Things to check", &colors)
+                                .mt(px(22.))
+                                .mb(px(8.))
+                                .mx(px(4.)),
+                        )
+                        .child(
+                            ui::card(&colors)
+                                .child(check(
+                                    "computer",
+                                    "The computer is awake and Remote Login is on",
+                                ))
+                                .child(
+                                    check(
+                                        "server",
+                                        "The phone is on the same network, or Tailscale is connected",
+                                    )
+                                    .border_t_1(),
+                                ),
+                        )
+                    })
+                    .when(self.key_refused, |body| {
+                        body.child(
+                            ui::hint(
+                                "The computer turned down this phone’s key. Use a different computer to pair it again.",
+                                &colors,
+                            )
+                            .mt(px(12.)),
+                        )
+                    })
+            }
+        };
+        let retry = if self.connecting {
+            ui::disabled(
+                ui::button(
+                    "retry",
+                    Button::Primary,
+                    None,
+                    "Connecting…",
+                    false,
+                    &colors,
+                ),
+                &colors,
+            )
+        } else {
+            ui::button("retry", Button::Primary, None, "Try again", false, &colors)
+                .on_click(cx.listener(|this, _, window, cx| this.retry_resume(window, cx)))
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                scroll_area("connect", &scroll).child(
+                    div()
+                        .px(px(20.))
+                        .pt(px(24.))
+                        .pb(px(12.))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .child(chip)
+                        .child(
+                            ui::serif(
+                                if failing {
+                                    format!("Can’t reach {name}")
+                                } else {
+                                    format!("Reconnecting to {name}")
+                                },
+                                31.,
+                            )
+                            .mt(px(28.))
+                            .line_height(px(36.)),
+                        )
+                        .child(
+                            div()
+                                .mt(px(12.))
+                                .text_size(px(15.))
+                                .line_height(px(22.))
+                                .text_color(colors.secondary)
+                                .child(lead),
+                        )
+                        .child(div().w_full().child(body)),
+                ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(20.))
+                    .pt(px(12.))
+                    .pb(px(16.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(retry.w_full())
+                    .child(
+                        ui::button(
+                            "different-computer",
+                            Button::Quiet,
+                            None,
+                            "Use a different computer",
+                            false,
+                            &colors,
+                        )
+                        .w_full()
+                        .on_click(cx.listener(|this, _, _, cx| this.leave_resume(cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Progress {
+    Done,
+    Now,
+    Later,
+}
+
+/// A step of getting back to the computer: its mark, then its text.
+fn progress_row(progress: Progress, colors: &Theme) -> Div {
+    let mark = div()
+        .size(px(24.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full();
+    let mark = match progress {
+        Progress::Done => {
+            mark.bg(colors.tint(colors.green))
+                .child(icon("check", 14., colors.green))
+        }
+        Progress::Now => mark.child(ui::working_indicator(colors)),
+        Progress::Later => mark
+            .border_1()
+            .border_dashed()
+            .border_color(colors.line_strong),
+    };
+    div()
+        .min_h(px(56.))
+        .flex()
+        .items_center()
+        .gap(px(14.))
+        .px(px(16.))
+        .py(px(10.))
+        .border_color(colors.line)
+        .text_size(px(15.))
+        .line_height(px(20.))
+        .child(mark)
 }
 
 /// What the computer runs to show its pairing code.

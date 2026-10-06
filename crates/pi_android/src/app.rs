@@ -49,6 +49,16 @@ pub enum Route {
     Settings,
 }
 
+/// Getting back to the saved computer when the app opens, in place of setup.
+#[derive(Clone, Debug)]
+pub(crate) struct Resume {
+    pub(crate) address: String,
+    /// Tries so far, counting the one under way.
+    pub(crate) attempt: u32,
+    /// When the next try starts on its own, after a failed one.
+    pub(crate) retry_at: Option<Instant>,
+}
+
 /// Which composer a sheet acts on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -139,6 +149,10 @@ pub struct PhoneApp {
     pub(crate) key_refused: bool,
     /// The connect screen shows manual SSH key setup instead of QR pairing.
     pub(crate) manual_setup: bool,
+    /// Set while the app gets back to the saved computer; the connect screen
+    /// then shows that instead of first-run setup.
+    pub(crate) resuming: Option<Resume>,
+    _retry: Option<Task<()>>,
     /// Where the key and settings live.
     pub(crate) data_dir: PathBuf,
     /// Finds a folder or file in the project browser, or goes to a path.
@@ -354,6 +368,8 @@ impl PhoneApp {
             phone_key,
             key_refused: false,
             manual_setup: false,
+            resuming: None,
+            _retry: None,
             data_dir,
             folder,
             reconnecting: false,
@@ -396,7 +412,7 @@ impl PhoneApp {
             if sample {
                 app.open_store(&address);
             } else {
-                app.connect(window, cx);
+                app.resume(address, window, cx);
             }
         }
         window.focus(&app.focus, cx);
@@ -815,6 +831,12 @@ impl PhoneApp {
         self.connection_generation = self.connection_generation.wrapping_add(1);
         self.connecting = false;
         self.pairing_status = None;
+        self.stop_resuming();
+    }
+
+    fn stop_resuming(&mut self) {
+        self.resuming = None;
+        self._retry = None;
     }
 
     pub(crate) fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -868,6 +890,15 @@ impl PhoneApp {
                         if this.route() != Route::Connect {
                             this.routes = vec![Route::Connect];
                         }
+                        // A refused key or a changed host key needs the person,
+                        // not another try.
+                        let lasting = matches!(
+                            error.downcast_ref(),
+                            Some(ssh::Failure::KeyRefused | ssh::Failure::HostKeyChanged { .. })
+                        );
+                        if !lasting {
+                            this.schedule_resume(window, cx);
+                        }
                         cx.notify();
                     }
                 }
@@ -875,6 +906,63 @@ impl PhoneApp {
             .ok();
         })
         .detach();
+    }
+
+    /// Connects to the saved computer, trying again until it answers.
+    fn resume(&mut self, address: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.resuming = Some(Resume {
+            address,
+            attempt: 0,
+            retry_at: None,
+        });
+        self.retry_resume(window, cx);
+    }
+
+    /// Tries the saved computer again now.
+    pub(crate) fn retry_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connecting {
+            return;
+        }
+        let Some(resume) = &mut self.resuming else {
+            return;
+        };
+        resume.attempt += 1;
+        resume.retry_at = None;
+        let address = resume.address.clone();
+        self._retry = None;
+        self.address
+            .update(cx, |field, cx| field.set_text(address, cx));
+        self.connect(window, cx);
+    }
+
+    /// After a failed try, the next one, sooner at first: the phone's network
+    /// or VPN is often still coming up when the app opens.
+    fn schedule_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(resume) = &mut self.resuming else {
+            return;
+        };
+        let delay = Duration::from_secs(match resume.attempt {
+            0 | 1 => 5,
+            2 => 10,
+            3 => 20,
+            _ => 30,
+        });
+        resume.retry_at = Some(Instant::now() + delay);
+        self._retry = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update_in(cx, |this, window, cx| this.retry_resume(window, cx))
+                .ok();
+        }));
+    }
+
+    /// Stops getting back to the saved computer and shows setup, to pair
+    /// another. The saved one stays until another connects.
+    pub(crate) fn leave_resume(&mut self, cx: &mut Context<Self>) {
+        self.cancel_connection_attempt();
+        self.connect_error = None;
+        self.key_refused = false;
+        self.manual_setup = false;
+        cx.notify();
     }
 
     /// Opens the dedicated camera scanner. Its result comes back through the
@@ -895,6 +983,8 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A scanned QR is for setting up, so it shows there, error and all.
+        self.cancel_connection_attempt();
         if let Err(error) = offer.check_time() {
             self.connect_error = Some(error.to_string().into());
             cx.notify();
@@ -961,6 +1051,7 @@ impl PhoneApp {
         cx: &mut Context<Self>,
     ) {
         self.pairing_status = None;
+        self.stop_resuming();
         let fingerprint = connection.fingerprint.clone();
         let prefs = self.prefs(cx);
         let wanted = prefs
@@ -1253,6 +1344,14 @@ impl PhoneApp {
         let paused = self.paused && !self.playing;
         if !paused {
             self.keep_latest_in_view();
+        }
+        if self
+            .resuming
+            .as_ref()
+            .is_some_and(|resume| resume.retry_at.is_some())
+        {
+            // The countdown to the next try.
+            cx.notify();
         }
         let Some(store) = self.store.as_mut().filter(|_| !paused) else {
             return;
