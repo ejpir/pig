@@ -8,10 +8,51 @@ use gpui::{
     StyleRefinement, TouchDragEvent, TouchPhase, Window, canvas, div, fill, point, prelude::*, px,
     size,
 };
-use std::time::{Duration, Instant};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 const THUMB_HOLD: Duration = Duration::from_millis(500);
 const THUMB_FADE: Duration = Duration::from_millis(260);
+/// Content that moved less than this lately looks still: a fling's slow
+/// tail, or one stopped at the end of its content.
+const SETTLED_WITHIN: Duration = Duration::from_millis(100);
+const SETTLED_DISTANCE: f32 = 15.;
+
+/// How far scroll content has moved lately, across every scroll area.
+#[derive(Default)]
+struct Motion(VecDeque<(Instant, f32)>);
+
+impl Motion {
+    fn moved(&mut self, distance: f32, now: Instant) {
+        self.0.push_back((now, distance));
+        while self.0.len() > 64 {
+            self.0.pop_front();
+        }
+    }
+
+    fn settled(&self, now: Instant) -> bool {
+        let recent: f32 = self
+            .0
+            .iter()
+            .filter(|(at, _)| now.saturating_duration_since(*at) <= SETTLED_WITHIN)
+            .map(|(_, distance)| distance)
+            .sum();
+        recent < SETTLED_DISTANCE
+    }
+}
+
+thread_local! {
+    static MOTION: RefCell<Motion> = RefCell::default();
+}
+
+/// Whether scrolling has visibly stopped, so a touch should tap rather than
+/// catch a fling that only GPUI still thinks is running.
+pub(crate) fn settled() -> bool {
+    MOTION.with(|motion| motion.borrow().settled(Instant::now()))
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Geometry {
@@ -56,12 +97,12 @@ struct ScrollbarState {
 
 impl ScrollbarState {
     fn observe(&mut self, offset: Pixels, now: Instant) {
-        if self
-            .last_offset
-            .replace(offset)
-            .is_some_and(|previous| previous != offset)
+        if let Some(previous) = self.last_offset.replace(offset)
+            && previous != offset
         {
             self.last_motion = Some(now);
+            let distance = f32::from((offset - previous).abs());
+            MOTION.with(|motion| motion.borrow_mut().moved(distance, now));
         }
     }
 
@@ -315,6 +356,23 @@ mod tests {
         assert_eq!(top.offset(top.track.bottom(), px(0.)), px(-4500.));
         let end = Geometry::new(bounds, px(4500.), px(-9999.)).unwrap();
         assert_eq!(end.thumb.bottom(), end.track.bottom());
+    }
+
+    #[test]
+    fn scrolling_settles_once_it_barely_moves() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut motion = Motion::default();
+        assert!(motion.settled(start), "nothing has moved");
+        for frame in 0..6 {
+            motion.moved(12., at(frame * 16));
+        }
+        assert!(!motion.settled(at(90)), "a fling still moving");
+        for frame in 6..20 {
+            motion.moved(0.5, at(frame * 16));
+        }
+        assert!(motion.settled(at(320)), "a slow tail looks still");
+        assert!(motion.settled(at(2_000)), "a fling stopped at the end");
     }
 
     #[test]

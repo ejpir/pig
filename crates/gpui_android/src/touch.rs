@@ -5,7 +5,24 @@
 //! contact and every sample in order, so the recognizers see the real path and
 //! velocity of a fling.
 
-use gpui::{Pixels, Point, TouchEvent, TouchId, TouchPhase};
+use gpui::{Pixels, Point, TouchEvent, TouchId, TouchPhase, point, px};
+use std::cell::RefCell;
+
+thread_local! {
+    static SETTLED: RefCell<Option<Box<dyn Fn() -> bool>>> = RefCell::new(None);
+}
+
+/// GPUI treats a touch during a fling as catching it, never as a tap, even
+/// when the fling only creeps by less than a pixel a frame or its content is
+/// already at its end. `settled` tells whether the app's scrolling has visibly
+/// stopped; a touch then lets go of any fling first, so it can still tap.
+pub fn release_settled_flings(settled: impl Fn() -> bool + 'static) {
+    SETTLED.with(|slot| *slot.borrow_mut() = Some(Box::new(settled)));
+}
+
+fn settled() -> bool {
+    SETTLED.with(|slot| slot.borrow().as_ref().is_some_and(|settled| settled()))
+}
 
 /// One pointer of a motion event, already in logical pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,6 +80,13 @@ impl Touches {
             Action::Down => {
                 // A new gesture: anything still down was lost without an up.
                 self.cancel_all(&mut events);
+                if settled() {
+                    // A touch off screen catches the fling, and its cancel
+                    // lets go; the real touch that follows can tap.
+                    let away = point(px(-10_000.), px(-10_000.));
+                    events.push(event(TouchId(u64::MAX), TouchPhase::Started, away, None));
+                    events.push(event(TouchId(u64::MAX), TouchPhase::Cancelled, away, None));
+                }
                 if let Some(contact) = current.first() {
                     self.start(contact, &mut events);
                 }
@@ -415,5 +439,52 @@ mod gesture_tests {
                 assert_eq!(list.taps, 0, "a drag is not a tap")
             })
             .unwrap();
+    }
+
+    /// Flings the list, then taps the button above it.
+    fn fling_then_tap(cx: &mut TestAppContext) -> usize {
+        let handle = ScrollHandle::new();
+        let window = cx.add_window({
+            let handle = handle.clone();
+            |_, _| List { handle, taps: 0 }
+        });
+        cx.run_until_parked();
+        let mut touches = Touches::default();
+        let mut send = |events: Vec<TouchEvent>, cx: &mut TestAppContext| {
+            // Through the window, not the view: a tap's listener updates the view.
+            for event in events {
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.dispatch_event(event.to_platform_input(), cx)
+                })
+                .unwrap();
+            }
+        };
+        send(
+            touches.translate(Action::Down, &[], &finger(100., 600.)),
+            cx,
+        );
+        for step in 1..=6 {
+            std::thread::sleep(std::time::Duration::from_millis(8));
+            let y = 600. - 40. * step as f32;
+            send(touches.translate(Action::Move, &[], &finger(100., y)), cx);
+        }
+        send(touches.translate(Action::Up, &[], &finger(100., 360.)), cx);
+        send(touches.translate(Action::Down, &[], &finger(100., 20.)), cx);
+        send(touches.translate(Action::Up, &[], &finger(100., 20.)), cx);
+        cx.run_until_parked();
+        window.update(cx, |list, _, _| list.taps).unwrap()
+    }
+
+    #[gpui::test]
+    fn a_touch_on_a_moving_fling_only_catches_it(cx: &mut TestAppContext) {
+        release_settled_flings(|| false);
+        assert_eq!(fling_then_tap(cx), 0);
+    }
+
+    #[gpui::test]
+    fn a_touch_once_scrolling_has_settled_taps(cx: &mut TestAppContext) {
+        release_settled_flings(|| true);
+        assert_eq!(fling_then_tap(cx), 1);
+        release_settled_flings(|| false);
     }
 }

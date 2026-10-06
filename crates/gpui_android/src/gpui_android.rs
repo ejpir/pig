@@ -40,6 +40,7 @@ mod window;
 pub use android_activity::AndroidApp;
 #[cfg(target_os = "android")]
 pub use platform::{AndroidPlatform, init_logging, recent_logs};
+pub use touch::release_settled_flings;
 
 /// Off Android nothing is kept: logs go wherever the host sends them.
 #[cfg(not(target_os = "android"))]
