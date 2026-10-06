@@ -222,12 +222,18 @@ impl PhoneApp {
                             return;
                         }
                         cx.stop_propagation();
+                        // A flick's last sample barely moves; judge its speed before it.
+                        let flung = motion.flung();
                         motion.drag_by(delta.y / extent);
                         match event.touch_phase {
                             gpui::TouchPhase::Cancelled => motion.settle(0.),
                             gpui::TouchPhase::Ended => {
-                                if extent * motion.position() > px(85.).min(extent * 0.4) {
+                                if flung
+                                    || motion.flung()
+                                    || extent * motion.position() > px(85.).min(extent * 0.4)
+                                {
                                     this.start_motion = crate::motion::SwipeMotion::at(0.);
+                                    Self::stop_fling(window);
                                     this.back(window, cx);
                                 } else {
                                     motion.settle(0.);

@@ -593,6 +593,24 @@ impl PhoneApp {
         }
     }
 
+    /// A flick that closes a panel leaves GPUI flinging; the next touch would
+    /// only catch the fling and never tap. A touch off screen catches it now.
+    pub(crate) fn stop_fling(window: &mut Window) {
+        window.on_next_frame(|window, cx| {
+            let touch = |phase| {
+                gpui::PlatformInput::Touch(gpui::TouchEvent {
+                    id: gpui::TouchId(u64::MAX),
+                    phase,
+                    position: gpui::point(px(-10_000.), px(-10_000.)),
+                    predicted_position: None,
+                    force: None,
+                })
+            };
+            window.dispatch_event(touch(gpui::TouchPhase::Started), cx);
+            window.dispatch_event(touch(gpui::TouchPhase::Cancelled), cx);
+        });
+    }
+
     /// Capture dismissal for the gesture's lifetime, not the moving panel's
     /// hitbox. Moving a panel away from the starting finger must not lose the
     /// remaining events. Sheet content gets normal scrolling until its top.
@@ -603,7 +621,7 @@ impl PhoneApp {
             |_, _, _| (),
             move |bounds, _, window, _| {
                 sheet_height.set(bounds.size.height);
-                window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, _, cx| {
+                window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
                     if phase != gpui::DispatchPhase::Capture {
                         return;
                     }
@@ -636,12 +654,17 @@ impl PhoneApp {
                             return;
                         }
                         cx.stop_propagation();
+                        // A flick's last sample barely moves; judge its speed before it.
+                        let flung = motion.flung();
                         motion.drag_by(along / extent);
                         if event.touch_phase == gpui::TouchPhase::Cancelled {
                             motion.settle(0.);
                         } else if event.touch_phase == gpui::TouchPhase::Ended {
-                            let close = extent * motion.position() > px(85.).min(extent * 0.4);
+                            let close = flung
+                                || motion.flung()
+                                || extent * motion.position() > px(85.).min(extent * 0.4);
                             if close {
+                                Self::stop_fling(window);
                                 this.close_sheet(cx);
                             } else {
                                 motion.settle(0.);

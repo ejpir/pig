@@ -59,6 +59,14 @@ impl SwipeMotion {
         self.sampled_at = now;
     }
 
+    /// Whether the finger is moving fast toward the far end, as a flick that
+    /// should finish what a short drag started.
+    pub(crate) fn flung(&self) -> bool {
+        self.dragging
+            && self.sampled_at.elapsed() < Duration::from_millis(80)
+            && self.state.velocity > 1.
+    }
+
     pub(crate) fn settle(&mut self, target: f32) {
         if self.dragging && self.sampled_at.elapsed() > Duration::from_millis(80) {
             self.state.velocity = 0.;
@@ -120,6 +128,20 @@ mod tests {
         motion.advance(Duration::from_secs(1));
         assert_eq!(motion.position(), 1.);
         assert!(!motion.animating());
+    }
+
+    #[test]
+    fn a_quick_flick_is_flung_and_a_slow_drag_is_not() {
+        let mut motion = SwipeMotion::at(0.);
+        motion.begin_drag();
+        motion.sampled_at -= Duration::from_millis(16);
+        motion.drag_by(0.1);
+        assert!(motion.flung(), "0.1 in 16 ms");
+        let mut slow = SwipeMotion::at(0.);
+        slow.begin_drag();
+        slow.sampled_at -= Duration::from_millis(500);
+        slow.drag_by(0.1);
+        assert!(!slow.flung(), "0.1 in half a second");
     }
 
     #[test]
