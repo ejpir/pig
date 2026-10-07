@@ -4969,7 +4969,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_android"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "android-activity",
  "android_logger",
@@ -9253,7 +9253,7 @@ dependencies = [
 
 [[package]]
 name = "pi-desktop"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -9298,7 +9298,7 @@ dependencies = [
 
 [[package]]
 name = "pi_android"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -9321,7 +9321,7 @@ dependencies = [
 
 [[package]]
 name = "pi_core"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -9339,7 +9339,7 @@ dependencies = [
 
 [[package]]
 name = "pi_editor"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "client",
@@ -9365,7 +9365,7 @@ dependencies = [
 
 [[package]]
 name = "pi_jj"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "bstr",
@@ -9381,7 +9381,7 @@ dependencies = [
 
 [[package]]
 name = "pi_lsp_bridge"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "fs",
@@ -9402,7 +9402,7 @@ dependencies = [
 
 [[package]]
 name = "pi_markdown"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "base64",
  "gpui",
@@ -9424,7 +9424,7 @@ dependencies = [
 
 [[package]]
 name = "pi_remote"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -9450,7 +9450,7 @@ dependencies = [
 
 [[package]]
 name = "pi_settings"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "dirs",
@@ -9460,7 +9460,7 @@ dependencies = [
 
 [[package]]
 name = "pi_terminal"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "gpui",
