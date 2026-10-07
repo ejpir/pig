@@ -65,7 +65,7 @@ const Children = defineDoc<{ started: boolean; children: Record<string, { id: nu
 
 const AGENT = "A listed agent, or a name for a new one you describe in instructions, such as \"architecture\"";
 const INSTRUCTIONS = "Who the agent is and how it works: its role, focus and output. Defines a new agent; added to a listed agent's own";
-const AGENT_TOOLS = "Tools it may use, from read, write, edit and bash; for example [\"read\", \"bash\"] for one that only looks. Default: a listed agent's, else all";
+const AGENT_TOOLS = "Tools it may use, from read, write, edit and bash. Give an agent that reviews, researches or plans [\"read\", \"bash\"] so it can't change files. Default: a listed agent's, else all";
 const Task = Type.Object({
   agent: Type.String({ description: AGENT }),
   task: Type.String({ description: "Task to delegate to the agent" }),
@@ -314,13 +314,18 @@ class Call {
       const message = entry.model?.[0];
       if (!marked || message?.role !== "toolResult") return [];
       const call = calls.get(message.toolCallId);
-      return [call ? describe(call.name, call.arguments, false) : message.toolName];
+      return [call ? describe(call.name, call.arguments, "named") : message.toolName];
     });
     if (!result.interrupted.length) delete result.interrupted;
     const running = live?.tools?.find((slot) => slot.status !== "done");
     if (live?.run) {
       const call = running && calls.get(running.callId);
-      result.now = call ? describe(call.name, call.arguments, true) : running ? running.name : live.generation ? "Thinking" : "Working";
+      // Tools are quick and the card hears once a second: between them, say the last step.
+      const previous = [...calls.values()].at(-1);
+      result.now = call ? describe(call.name, call.arguments, "now")
+        : running ? running.name
+        : previous ? describe(previous.name, previous.arguments, "done")
+        : live.generation ? "Thinking" : "Working";
       return;
     }
     const last = [...messages].reverse().find((message) => message.role === "assistant");
@@ -330,7 +335,7 @@ class Call {
     // A run that ended at its tools, with no answer after them, was stopped.
     const unanswered = messages.at(-1)?.role !== "assistant" || last.stopReason === "toolUse";
     result.status = last.stopReason === "error" ? "failed" : last.stopReason === "aborted" || unanswered ? "stopped" : "done";
-    result.now = result.status === "done" ? firstLine(output) : last.errorMessage ?? (result.status === "stopped" ? "Stopped" : "Failed");
+    result.now = result.status === "done" ? gist(output) : last.errorMessage ?? (result.status === "stopped" ? "Stopped" : "Failed");
   }
 
   /** Publishes progress, at most once a second unless `now`. */
@@ -369,16 +374,26 @@ export function transcript(view: ConversationView): Message[] {
   return streaming ? [...messages, streaming] : messages;
 }
 
-/** "Reading google-gemini.ts", "Running pnpm test". */
-function describe(name: string, args: Record<string, unknown>, live: boolean): string {
+/**
+ * A step: going on ("Reading retry.ts"), done ("Read retry.ts"), or just named
+ * ("read retry.ts", or a command as it was run).
+ */
+export function describe(name: string, args: Record<string, unknown>, tense: "now" | "done" | "named"): string {
   const path = typeof args.path === "string" ? args.path.split("/").at(-1)! : "";
   const command = typeof args.command === "string" ? firstLine(args.command) : "";
+  const say = { now: ["Reading", "Editing", "Running"], done: ["Read", "Edited", "Ran"], named: ["read", name, ""] }[tense];
   switch (name) {
-    case "read": return live ? `Reading ${path}` : `read ${path}`;
-    case "write": case "edit": return live ? `Editing ${path}` : `${name} ${path}`;
-    case "bash": return live ? `Running ${command}` : command;
+    case "read": return `${say[0]} ${path}`;
+    case "write": case "edit": return `${say[1]} ${path}`;
+    case "bash": return `${say[2]} ${command}`.trim();
     default: return name;
   }
+}
+
+/** What an answer says, in a line: its first heading, else its first line ("Perfect! Now I…" heads many). */
+export function gist(answer: string): string {
+  const heading = answer.split("\n").find((line) => /^#{1,6}\s+\S/.test(line));
+  return firstLine(heading ? heading.replace(/^#+\s+/, "").replace(/\*\*/g, "") : answer);
 }
 
 function firstLine(text: string): string {

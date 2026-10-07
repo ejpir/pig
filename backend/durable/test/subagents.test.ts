@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { definition } from "../src/subagents.ts";
+import { definition, describe as step, gist } from "../src/subagents.ts";
 import type { AgentDefinition } from "../src/commands.ts";
 
 const scout: AgentDefinition = {
@@ -24,5 +24,18 @@ describe("subagent definitions", () => {
 
   test("stock Pi's search tools are bash, and unknown ones are left out", () => {
     expect(definition({ agent: "x", task: "t", tools: ["grep", "find", "ls", "web"] }, []).tools).toEqual(["bash"]);
+  });
+
+  test("a step reads as going on, done or named", () => {
+    expect(step("read", { path: "/repo/src/retry.ts" }, "now")).toBe("Reading retry.ts");
+    expect(step("read", { path: "/repo/src/retry.ts" }, "done")).toBe("Read retry.ts");
+    expect(step("bash", { command: "pnpm test\n--watch" }, "done")).toBe("Ran pnpm test");
+    expect(step("bash", { command: "pnpm test" }, "named")).toBe("pnpm test");
+    expect(step("edit", { path: "a/b.ts" }, "named")).toBe("edit b.ts");
+  });
+
+  test("an answer's gist is its first heading, past a preamble", () => {
+    expect(gist("Perfect! Now I have a complete picture.\n\n## Architecture Review: **Runner**\n\nBody")).toBe("Architecture Review: Runner");
+    expect(gist("found alpha")).toBe("found alpha");
   });
 });
