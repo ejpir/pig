@@ -255,6 +255,9 @@ pub enum Flow {
     Page(usize),
     /// `Turn::handoffs[n]`: work Pi handed to subagents.
     Handoff(usize),
+    /// Pi's context was summarized here, to make room: the summary. What came
+    /// before stays in the thread.
+    Compacted(String),
 }
 
 impl Turn {

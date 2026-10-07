@@ -18,6 +18,7 @@ import { authProviders, publicModel } from "./catalog.ts";
 import { findImage, imageReferences, promptContent } from "./images.ts";
 import { expandPromptCommand, noResources, promptCommands, type Resources } from "./commands.ts";
 import { imageRead } from "./read.ts";
+import { History } from "./history.ts";
 import { Calls, subagentExtension, transcript } from "./subagents.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -173,8 +174,18 @@ export async function run(
     output = next;
     return next;
   };
-  const snapshot = (value: ConversationView) => send({ type: "durable_state", key,
-    data: imageReferences({ ...value, docs: { ...value.docs, "app.desktop": metadata.value, "app.subagent-calls": calls.value ?? { calls: {} } } }), backend: info });
+  // The whole transcript, past any compaction; one snapshot at a time, in order.
+  const history = new History(root, context);
+  let snapshots = Promise.resolve();
+  const snapshot = (value: ConversationView): Promise<void> => {
+    const next = snapshots.then(async () => {
+      const entries = await history.entries(value);
+      await send({ type: "durable_state", key,
+        data: imageReferences({ ...value, entries, docs: { ...value.docs, "app.desktop": metadata.value, "app.subagent-calls": calls.value ?? { calls: {} } } }), backend: info });
+    });
+    snapshots = next.catch(() => {});
+    return next;
+  };
   await snapshot(watch.value);
   watch.start(async (value) => { await snapshot(value); });
   const unsubscribe = calls.subscribe(() => { snapshot(watch.value).catch((error) => console.error("Durable report:", error)); });
@@ -203,19 +214,32 @@ export async function run(
       case "get_state": return {}; // Rust derives state from the committed view, never these read acknowledgements.
       case "get_messages": return { remoteSnapshot: true };
       case "get_image": {
-        const image = findImage(value, string(record, "imageId"));
-        if (!image) throw new Error("Image is not in this session");
-        return { image };
+        const imageId = string(record, "imageId");
+        if (record.conversationId === undefined) {
+          const image = findImage({ ...value, entries: await history.entries(value) }, imageId);
+          if (!image) throw new Error("Image is not in this session");
+          return { image };
+        }
+        // One a subagent's tool returned.
+        const { conversation, view } = await subagent(record);
+        try {
+          const image = findImage({ ...view.value, entries: await new History(conversation, context).entries(view.value) }, imageId);
+          if (!image) throw new Error("Image is not in this subagent's conversation");
+          return { image };
+        } finally {
+          view.dispose();
+        }
       }
       case "get_subagent": {
         // Its transcript only when asked for: the parent's snapshots carry a summary.
-        const { view } = await subagent(record);
+        const { conversation, view } = await subagent(record);
         try {
+          const entries = await new History(conversation, context).entries(view.value);
           const live = view.value.docs["pi.live"] as { run?: unknown; tools?: { callId: string; name: string; status: string; output?: string }[] } | undefined;
           return imageReferences({
             conversationId: string(record, "conversationId"),
             busy: !!live?.run,
-            messages: transcript(view.value),
+            messages: transcript({ ...view.value, entries }),
             tools: (live?.tools ?? []).filter((slot) => slot.status !== "done")
               .map((slot) => ({ callId: slot.callId, name: slot.name, output: slot.output ?? "" })),
           });

@@ -73,7 +73,16 @@ pub fn project(pi: &Pi, facts: Facts) -> Session {
         (Some(start), false, Some(end)) => end.saturating_sub(start),
         _ => Duration::ZERO,
     };
-    let mut queued: Vec<String> = pi.steering.iter().chain(&pi.follow_up).cloned().collect();
+    let mut queued: Vec<String> = pi
+        .steering
+        .iter()
+        .chain(&pi.follow_up)
+        // Subagents' answers wait for Pi like a follow-up, but nobody typed them.
+        .map(|text| match pi_core::subagent::report(text) {
+            Some(_) => "Subagents reported back".to_owned(),
+            None => text.clone(),
+        })
+        .collect();
     queued.extend(facts.outbox.iter().skip(usize::from(!pi.busy())).cloned());
     let project = facts
         .cwd
@@ -248,6 +257,16 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                     });
                 }
                 turns.push(turn);
+            }
+            Some("compactionSummary") => {
+                if turns.is_empty() {
+                    let mut turn = Turn::new("", "");
+                    turn.stages.clear();
+                    turns.push(turn);
+                }
+                let summary = message["summary"].as_str().unwrap_or("").to_owned();
+                let turn = turns.last_mut().expect("a turn");
+                turn.flow.push(crate::model::Flow::Compacted(summary));
             }
             // Time handed off isn't a stage of Pi's own.
             Some("toolResult") if message["toolName"] == pi_core::subagent::TOOL => {}

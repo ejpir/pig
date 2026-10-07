@@ -2464,6 +2464,7 @@ impl SessionController {
             if let Some(request) = self.command(
                 Command::GetImage {
                     image_id: image.clone(),
+                    conversation_id: None,
                 },
                 cx,
             ) {

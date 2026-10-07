@@ -27,6 +27,13 @@ pub enum Command {
     GetImage {
         #[serde(rename = "imageId")]
         image_id: String,
+        /// The subagent whose conversation holds it; else the session's own.
+        #[serde(
+            rename = "conversationId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        conversation_id: Option<String>,
     },
     /// A durable subagent's messages, from its conversation's ID in the
     /// `subagent` call's details.

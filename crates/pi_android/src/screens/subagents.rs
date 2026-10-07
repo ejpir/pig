@@ -3,10 +3,10 @@
 //! subagent's own screen, opened from its row. Only Pi talks to a subagent, so
 //! that screen is read-only, with Stop.
 
-use super::{scroll_area, thread::stage_row};
+use super::scroll_area;
 use crate::{
     app::{PhoneApp, Pick, Route},
-    model::{SessionId, StageStatus, Turn, duration_label},
+    model::{SessionId, Turn, duration_label},
     projection,
     theme::{Theme, theme},
     ui::{self, icon},
@@ -561,23 +561,17 @@ impl PhoneApp {
                     None => store.sample_subagents.get(conversation).cloned().map(Ok),
                 }
             });
-        // What Pi wrote to it in full; the call's summary keeps a shorter task.
-        let asked = match &fetched {
-            Some(Ok(pi)) => pi
-                .messages
-                .iter()
-                .find(|message| message["role"] == "user")
-                .map(|message| pi_core::session::content_text(&message["content"]))
-                .filter(|text| !text.trim().is_empty()),
-            _ => None,
-        }
-        .unwrap_or_else(|| subagent.task.clone());
-        let run = match &fetched {
+        // Drawn like a session of its own, under an ID of the phone's: the
+        // sheets that open from it find it there.
+        let own = match &fetched {
             Some(Ok(pi)) => {
+                let key = (id, subagent.conversation_id.clone().unwrap_or_default());
+                let next = SessionId(u32::MAX - self.subagent_ids.len() as u32);
+                let own = *self.subagent_ids.entry(key).or_insert(next);
                 let shown = projection::project(
                     pi,
                     projection::Facts {
-                        id,
+                        id: own,
                         cwd: &pi.cwd.to_string_lossy(),
                         folder: String::new(),
                         question: None,
@@ -585,33 +579,23 @@ impl PhoneApp {
                         key: "",
                     },
                 );
-                let turn = shown.turns.last().cloned();
-                turn.map(|turn| {
-                    let stages = turn
-                        .stages
-                        .iter()
-                        .filter(|stage| {
-                            !(subagent.status.finished() && stage.status == StageStatus::Planned)
-                        })
-                        .collect::<Vec<_>>();
-                    div()
+                self.subagent_sessions.insert(own, shown);
+                Some(own)
+            }
+            _ => None,
+        };
+        let run = match &fetched {
+            Some(Ok(_)) => {
+                let session = own.and_then(|own| self.subagent_sessions.get(&own));
+                match session.filter(|session| !session.turns.is_empty()) {
+                    Some(session) => div()
                         .flex()
                         .flex_col()
                         .gap(px(24.))
-                        .child(div().flex().flex_col().gap(px(24.)).children(
-                            stages.iter().enumerate().map(|(n, stage)| {
-                                stage_row(stage, &turn, pick.turn, n, n + 1 < stages.len(), &colors)
-                            }),
-                        ))
-                        .children(
-                            turn.summary
-                                .as_ref()
-                                .filter(|_| subagent.status.finished())
-                                .map(|summary| crate::message::render(&summary.text(), &colors)),
-                        )
-                        .into_any_element()
-                })
-                .unwrap_or_else(|| ui::hint("Not started yet.", &colors).into_any_element())
+                        .children(self.turns(session, true, &colors, cx))
+                        .into_any_element(),
+                    None => ui::hint("Not started yet.", &colors).into_any_element(),
+                }
             }
             Some(Err(error)) => ui::hint(error.clone(), &colors).into_any_element(),
             None if subagent.conversation_id.is_none() => {
@@ -627,6 +611,8 @@ impl PhoneApp {
                 .child("Loading what it did…")
                 .into_any_element(),
         };
+        // Until its own run shows, what Pi asked it.
+        let asked = subagent.task.clone();
         let brief = div()
             .pl(px(16.))
             .py(px(4.))
@@ -755,7 +741,7 @@ impl PhoneApp {
                         .flex()
                         .flex_col()
                         .gap(px(24.))
-                        .child(brief)
+                        .when(own.is_none(), |column| column.child(brief))
                         .children(interrupted_note(&subagent).map(|text| {
                             note("alert", colors.amber, text, &colors).mx(px(0.)).mb(px(0.))
                         }))

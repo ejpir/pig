@@ -1032,6 +1032,7 @@ impl Live {
                         .map_err(|error| error.to_string())
                 };
                 watch.subagents.insert(conversation, fetched);
+                Self::fetch_images(watch);
                 None
             }
             Request::Quiet => None,
@@ -1125,22 +1126,36 @@ impl Live {
         if watch.input.is_none() {
             return;
         }
-        let wanted: Vec<String> = watch
+        // The session's own, and those of the subagent whose screen is open.
+        let followed = watch.following.as_ref().and_then(|conversation| {
+            Some((conversation, watch.subagents.get(conversation)?.as_ref().ok()?))
+        });
+        let wanted: Vec<(String, Option<String>)> = watch
             .pi
             .tools
             .iter()
-            .flat_map(|tool| &tool.images)
-            .filter_map(|block| block["imageId"].as_str())
-            .filter(|id| !watch.images.contains_key(*id))
-            .map(str::to_owned)
+            .map(|tool| (tool, None))
+            .chain(followed.into_iter().flat_map(|(conversation, pi)| {
+                pi.tools.iter().map(move |tool| (tool, Some(conversation)))
+            }))
+            .flat_map(|(tool, conversation)| {
+                tool.images.iter().map(move |block| (block, conversation))
+            })
+            .filter_map(|(block, conversation)| {
+                Some((block["imageId"].as_str()?.to_owned(), conversation.cloned()))
+            })
+            .filter(|(id, _)| !watch.images.contains_key(id))
             .collect();
-        for id in wanted {
+        for (id, conversation) in wanted {
+            if watch.images.contains_key(&id) {
+                continue;
+            }
             watch.images.insert(id.clone(), None);
-            Self::send(
-                watch,
-                json!({"type": "get_image", "imageId": id}),
-                Request::Image(id),
-            );
+            let mut request = json!({"type": "get_image", "imageId": id});
+            if let Some(conversation) = conversation {
+                request["conversationId"] = conversation.into();
+            }
+            Self::send(watch, request, Request::Image(id));
         }
     }
 

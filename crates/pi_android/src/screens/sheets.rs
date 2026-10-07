@@ -488,8 +488,12 @@ impl PhoneApp {
             )
     }
 
+    /// A session of the computer's, or a subagent's whose screen is open.
     fn session(&self, id: SessionId) -> Option<&Session> {
-        self.store.as_ref()?.session(id)
+        self.store
+            .as_ref()
+            .and_then(|store| store.session(id))
+            .or_else(|| self.subagent_sessions.get(&id))
     }
 
     fn delete_sheet(&self, id: SessionId, colors: &Theme, cx: &Context<Self>) -> Div {

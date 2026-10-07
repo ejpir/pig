@@ -1509,6 +1509,11 @@ impl TranscriptView {
             Some("user") => {
                 content = content.mt(px(if index == 0 { 0. } else { 24. })).mb(px(8.));
                 let body = content_text(&message["content"]);
+                // Subagents' answers come back as input to Pi, but nobody typed them.
+                let body = match pi_core::subagent::report(&body) {
+                    Some(said) => format!("From subagents\n\n{said}"),
+                    None => body,
+                };
                 let images = self.user_images(index, &message["content"]);
                 match parse_skill_block(&body) {
                     Some(skill) => {

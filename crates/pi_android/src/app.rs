@@ -131,6 +131,12 @@ pub struct PhoneApp {
     pub(crate) expanded_turns: HashMap<(SessionId, usize), bool>,
     /// Finished prompts shown in full instead of on one line.
     pub(crate) expanded_prompts: HashSet<(SessionId, usize)>,
+    /// Compaction summaries opened in the thread: session, turn, step of its flow.
+    pub(crate) expanded_compactions: HashSet<(SessionId, usize, usize)>,
+    /// Subagents whose screen was opened, drawn like a session: an ID of the
+    /// phone's own for each (session, conversation), and how it is now.
+    pub(crate) subagent_ids: HashMap<(SessionId, String), SessionId>,
+    pub(crate) subagent_sessions: HashMap<SessionId, crate::model::Session>,
     /// Questions put off with Later: the composer shows instead of the card.
     pub(crate) questions_later: HashSet<SessionId>,
     /// Report cards showing every changed file, not just the first few.
@@ -365,6 +371,9 @@ impl PhoneApp {
             sheet_scroll: ScrollHandle::new(),
             expanded_turns: HashMap::new(),
             expanded_prompts: HashSet::new(),
+            expanded_compactions: HashSet::new(),
+            subagent_ids: HashMap::new(),
+            subagent_sessions: HashMap::new(),
             questions_later: HashSet::new(),
             all_files: HashSet::new(),
             folded_handoffs: HashSet::new(),

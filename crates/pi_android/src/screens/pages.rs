@@ -280,6 +280,12 @@ impl PhoneApp {
             Some(data) => pi_markdown::decode_base64(&image.mime, data),
             None => {
                 let live = self.store.as_ref().and_then(|store| store.live.as_ref());
+                // A subagent's images come through its session's connection.
+                let id = self
+                    .subagent_ids
+                    .iter()
+                    .find(|(_, own)| **own == id)
+                    .map_or(id, |((session, _), _)| *session);
                 match live.and_then(|live| live.image(id, &image.key)) {
                     None => return Ok(None),
                     Some(Err(error)) => return Err(error.clone()),
@@ -436,6 +442,17 @@ impl PhoneApp {
             crate::app::Route::Thread(id) => {
                 self.store.as_ref().and_then(|store| store.session(id))
             }
+            // A subagent's pages, from its screen.
+            crate::app::Route::Subagent(id, pick) => self
+                .store
+                .as_ref()
+                .and_then(|store| store.session(id))
+                .and_then(|session| session.turns.get(pick.turn))
+                .and_then(|turn| turn.handoffs.get(pick.handoff))
+                .and_then(|handoff| handoff.subagents.get(pick.index))
+                .and_then(|subagent| subagent.conversation_id.clone())
+                .and_then(|conversation| self.subagent_ids.get(&(id, conversation)))
+                .and_then(|own| self.subagent_sessions.get(own)),
             _ => None,
         };
         site(

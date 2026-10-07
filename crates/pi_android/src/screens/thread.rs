@@ -100,47 +100,7 @@ impl PhoneApp {
                 .child(ui::tap("more", "dots", &colors).on_click(
                     cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
                 ));
-        let last = session.turns.len().saturating_sub(1);
-        let many = session.turns.len() > 1;
-        let turns = session
-            .turns
-            .iter()
-            .enumerate()
-            .map(|(index, turn)| {
-                let live = index == last && running;
-                let ending = (index == last && !running).then(|| self.ending(session, cx));
-                div()
-                    .id(("turn", index))
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(24.))
-                    .when(index > 0, |turn| {
-                        turn.pt(px(24.)).border_t_1().border_color(colors.line)
-                    })
-                    .child(self.prompt(id, index, turn, live, many, &colors, cx))
-                    .child(if live {
-                        self.stations(session, index, turn, true, &colors, cx)
-                    } else {
-                        self.turn_activity(id, index, turn, false, &colors, cx)
-                    })
-                    .map(|column| {
-                        if turn.interleaved() {
-                            column.children(self.flow(id, index, turn, &colors, cx))
-                        } else {
-                            column
-                                .children(reply(turn, index == last, &colors).map(|reply| {
-                                    let text =
-                                        turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
-                                    reply.relative().child(self.copyable(text, cx))
-                                }))
-                                .children(self.image_cards(id, index, turn, &colors, cx))
-                                .children(self.page_cards(index, turn, &colors, cx))
-                        }
-                    })
-                    .children(ending)
-            })
-            .collect::<Vec<_>>();
+        let turns = self.turns(session, false, &colors, cx);
         let queued = (!session.queued.is_empty()).then(|| {
             div()
                 .child(ui::label("Queued for when this run ends", &colors).mb(px(8.)))
@@ -316,6 +276,62 @@ impl PhoneApp {
             .into_any_element()
     }
 
+    /// Each turn of a session: the prompt, the run, and what Pi said and
+    /// showed. `read_only` leaves out what changes the session.
+    pub(crate) fn turns(
+        &self,
+        session: &Session,
+        read_only: bool,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Vec<gpui::Stateful<Div>> {
+        let id = session.id;
+        let running = session.state.is_running();
+        let last = session.turns.len().saturating_sub(1);
+        let many = session.turns.len() > 1;
+        session
+            .turns
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                let live = index == last && running;
+                // Review and the report card belong to the session the user runs.
+                let ending =
+                    (index == last && !running && !read_only).then(|| self.ending(session, cx));
+                div()
+                    .id(("turn", index))
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(24.))
+                    .when(index > 0, |turn| {
+                        turn.pt(px(24.)).border_t_1().border_color(colors.line)
+                    })
+                    .child(self.prompt(id, index, turn, live, many, colors, cx))
+                    .child(if live {
+                        self.stations(session, index, turn, true, colors, cx)
+                    } else {
+                        self.turn_activity(id, index, turn, false, colors, cx)
+                    })
+                    .map(|column| {
+                        if turn.interleaved() {
+                            column.children(self.flow(id, index, turn, colors, cx))
+                        } else {
+                            column
+                                .children(reply(turn, index == last, colors).map(|reply| {
+                                    let text =
+                                        turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
+                                    reply.relative().child(self.copyable(text, cx))
+                                }))
+                                .children(self.image_cards(id, index, turn, colors, cx))
+                                .children(self.page_cards(index, turn, colors, cx))
+                        }
+                    })
+                    .children(ending)
+            })
+            .collect()
+    }
+
     /// A reply with pictures or pages between Pi's words, in the order Pi
     /// made them.
     fn flow(
@@ -328,7 +344,8 @@ impl PhoneApp {
     ) -> Vec<AnyElement> {
         turn.flow
             .iter()
-            .filter_map(|step| match step {
+            .enumerate()
+            .filter_map(|(n, step)| match step {
                 Flow::Text(text) => Some(
                     div()
                         .relative()
@@ -346,8 +363,66 @@ impl PhoneApp {
                 Flow::Handoff(n) => self
                     .handoff_card(id, index, turn, *n, colors, cx)
                     .map(IntoElement::into_any_element),
+                Flow::Compacted(summary) => Some(
+                    self.compacted(id, index, n, summary, colors, cx)
+                        .into_any_element(),
+                ),
             })
             .collect()
+    }
+
+    /// Where Pi's context was summarized: a line across the thread, and the
+    /// summary Pi works from after it, when tapped.
+    fn compacted(
+        &self,
+        id: SessionId,
+        index: usize,
+        step: usize,
+        summary: &str,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let open = self.expanded_compactions.contains(&(id, index, step));
+        let rule = || div().flex_1().h(px(1.)).bg(colors.line);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                div()
+                    .id(("compacted", step))
+                    .debug_selector(|| "compacted".into())
+                    .min_h(px(40.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(8.))
+                    .text_size(px(12.5))
+                    .text_color(colors.muted)
+                    .active(|style| style.bg(colors.selected))
+                    .child(rule())
+                    .child(icon("layers", 12., colors.muted))
+                    .child(if open {
+                        "Context summarized · hide"
+                    } else {
+                        "Context summarized · show summary"
+                    })
+                    .child(rule())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.expanded_compactions.remove(&(id, index, step)) {
+                            this.expanded_compactions.insert((id, index, step));
+                        }
+                        cx.notify();
+                    })),
+            )
+            .when(open, |column| {
+                column.child(
+                    ui::card(colors)
+                        .p(px(14.))
+                        .min_w_0()
+                        .child(crate::message::render(summary, colors)),
+                )
+            })
     }
 
     /// What was asked, on the right. A finished prompt rests on one line and
