@@ -473,6 +473,15 @@ impl PhoneApp {
                 }
                 _ => format!("{} · {}", session.project, session.activity),
             }
+        } else if let Some(handoff) = super::subagents::at_work(&session.turns)
+            && session.state == crate::model::State::Done
+        {
+            // Pi answered; its subagents carry on.
+            format!(
+                "{} · {}",
+                session.project,
+                crate::projection::at_work(handoff)
+            )
         } else {
             format!("{} · {}", session.project, session.status_line())
         }
@@ -563,7 +572,7 @@ impl PhoneApp {
                                     .mt(px(6.))
                                     .flex()
                                     .items_center()
-                                    .gap(px(8.))
+                                    .gap(px(12.))
                                     .children(
                                         super::subagents::at_work(&session.turns)
                                             .map(|handoff| super::subagents::crew(handoff, colors)),
@@ -592,7 +601,7 @@ impl PhoneApp {
                                             .mt(px(2.))
                                             .flex()
                                             .items_center()
-                                            .gap(px(8.))
+                                            .gap(px(12.))
                                             // Subagents carry on after Pi's turn ended.
                                             .children(
                                                 super::subagents::at_work(&session.turns).map(

@@ -74,6 +74,8 @@ pub struct Handoff {
     pub mode: Mode,
     /// The call carried on after the computer restarted.
     pub resumed: bool,
+    /// Its subagents work on after the call returns, and report through the session.
+    pub background: bool,
     pub subagents: Vec<Subagent>,
 }
 
@@ -81,8 +83,28 @@ impl Handoff {
     /// The call's handoff: from its details once it reports, else from what it was asked.
     pub fn of(tool: &Tool) -> Option<Self> {
         (tool.name == TOOL).then(|| {
-            Self::from_details(&tool.details).unwrap_or_else(|| Self::from_args(&tool.args))
+            let mut handoff =
+                Self::from_details(&tool.details).unwrap_or_else(|| Self::from_args(&tool.args));
+            // A call its subagents don't outlive: once it ended, none is at
+            // work, whatever it said last (a stopped call says "running").
+            if tool.finished && !handoff.background {
+                handoff.ended(tool.is_error);
+            }
+            handoff
         })
+    }
+
+    /// Its call ended without saying how each subagent did: none is still at work.
+    pub fn ended(&mut self, cut_short: bool) {
+        for subagent in &mut self.subagents {
+            if !subagent.status.finished() {
+                subagent.status = if cut_short {
+                    Status::Stopped
+                } else {
+                    Status::Done
+                };
+            }
+        }
     }
 
     /// From the arguments alone: every task waiting.
@@ -99,6 +121,7 @@ impl Handoff {
         Self {
             mode,
             resumed: false,
+            background: false,
             subagents,
         }
     }
@@ -118,6 +141,7 @@ impl Handoff {
         Some(Self {
             mode,
             resumed: details["resumed"] == true,
+            background: details["background"] == true,
             subagents,
         })
     }
@@ -302,6 +326,50 @@ mod tests {
         assert_eq!(
             (scout.status, scout.now.as_deref(), scout.cost),
             (Status::Done, Some("Found it."), Some(0.05))
+        );
+    }
+
+    #[test]
+    fn a_call_that_ended_without_progress_has_nobody_at_work() {
+        let mut tool = Tool {
+            id: "hand".into(),
+            name: TOOL.into(),
+            args: json!({"tasks":[{"agent":"scout","task":"a"},{"agent":"scout","task":"b"}]}),
+            output: String::new(),
+            diff: None,
+            finished: false,
+            is_error: false,
+            images: Vec::new(),
+            details: Value::Null,
+        };
+        assert_eq!(
+            Handoff::of(&tool).unwrap().subagents[0].status,
+            Status::Waiting
+        );
+        tool.finished = true;
+        assert!(
+            Handoff::of(&tool)
+                .unwrap()
+                .subagents
+                .iter()
+                .all(|s| s.status == Status::Done)
+        );
+        tool.is_error = true;
+        assert_eq!(
+            Handoff::of(&tool).unwrap().subagents[1].status,
+            Status::Stopped
+        );
+        // What a stopped call said last.
+        tool.details = json!({"version":1,"mode":"parallel","results":[{"index":0,"agent":"scout","task":"a","status":"running"}]});
+        assert_eq!(
+            Handoff::of(&tool).unwrap().subagents[0].status,
+            Status::Stopped
+        );
+        // Subagents that outlive their call say for themselves.
+        tool.details["background"] = json!(true);
+        assert_eq!(
+            Handoff::of(&tool).unwrap().subagents[0].status,
+            Status::Running
         );
     }
 

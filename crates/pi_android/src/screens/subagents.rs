@@ -206,49 +206,35 @@ fn interrupted_note(subagent: &Subagent) -> Option<String> {
     })
 }
 
-/// A working session's subagents on Home: small overlapping tiles, live ones
-/// ringed, and how many more there are past the first few.
+/// A working session's subagents on Home: the first few as small overlapping
+/// tiles, live ones ringed. The line beside them says how many are at work.
 pub(crate) fn crew(handoff: &Handoff, colors: &Theme) -> Div {
-    let more = handoff.subagents.len().saturating_sub(SHOWN);
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .children(
-            shown(handoff, false)
-                .into_iter()
-                .enumerate()
-                .map(|(n, index)| {
-                    let subagent = &handoff.subagents[index];
-                    let (glyph, hue) = agent_look(&subagent.agent, colors);
-                    div()
-                        .size(px(22.))
-                        .when(n > 0, |tile| tile.ml(px(-6.)))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(7.))
-                        .border_2()
-                        .border_color(colors.canvas)
-                        .bg(colors.canvas.blend(hue.opacity(0.22)))
-                        .when(subagent.status == Status::Running, |tile| {
-                            tile.shadow(ui::ring(hue, 1.5, 1.))
-                        })
-                        .when(subagent.status == Status::Waiting, |tile| {
-                            tile.opacity(0.45)
-                        })
-                        .child(icon(glyph, 12., hue))
-                }),
-        )
-        .when(more > 0, |tiles| {
-            tiles.child(
+    div().flex().flex_none().items_center().children(
+        shown(handoff, false)
+            .into_iter()
+            .enumerate()
+            .map(|(n, index)| {
+                let subagent = &handoff.subagents[index];
+                let (glyph, hue) = agent_look(&subagent.agent, colors);
                 div()
-                    .ml(px(4.))
-                    .text_size(px(12.))
-                    .text_color(colors.muted)
-                    .child(format!("+{more}")),
-            )
-        })
+                    .size(px(22.))
+                    .when(n > 0, |tile| tile.ml(px(-6.)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.))
+                    .border_2()
+                    .border_color(colors.canvas)
+                    .bg(colors.canvas.blend(hue.opacity(0.22)))
+                    .when(subagent.status == Status::Running, |tile| {
+                        tile.shadow(ui::ring(hue, 1.5, 1.))
+                    })
+                    .when(subagent.status == Status::Waiting, |tile| {
+                        tile.opacity(0.45)
+                    })
+                    .child(icon(glyph, 12., hue))
+            }),
+    )
 }
 
 /// The latest hand-off of a turn whose subagents are still at work.

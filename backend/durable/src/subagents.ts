@@ -60,6 +60,8 @@ export type SubagentDetails = {
   mode: "single" | "parallel" | "chain";
   /** The crew carried on after a restart. */
   resumed?: boolean;
+  /** The subagents work on after the call returned: this, not the call's end, says how each is doing. */
+  background: true;
   results: SubagentResult[];
 };
 
@@ -198,7 +200,7 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
         const toolless = items.find((item) => item.tools && !durableTools(item.tools).length);
         if (toolless) return failure(`The ${toolless.agent} agent needs at least one of: ${TOOLS.join(", ")}`);
         const mode: SubagentDetails["mode"] = args.chain?.length ? "chain" : args.tasks?.length ? "parallel" : "single";
-        const details: SubagentDetails = { version: 1, mode, results: items.map((item, index) => ({ index, agent: item.agent, task: item.task, status: "waiting" })) };
+        const details: SubagentDetails = { version: 1, mode, background: true, results: items.map((item, index) => ({ index, agent: item.agent, task: item.task, status: "waiting" })) };
         // One commit records the call and starts its crew, once.
         await api.commit(async (tx) => {
           const calls = (await tx.doc(Calls, api.conversationId)).calls;
@@ -427,7 +429,7 @@ class CrewRun {
     this.#reported = Date.now();
     const results = this.results.map((result) => result.output && result.output.length > MAX_SHOWN
       ? { ...result, output: `${result.output.slice(0, MAX_SHOWN)}…` } : result);
-    const details: SubagentDetails = { version: 1, mode: this.mode, ...(this.#resumed ? { resumed: true } : {}), results };
+    const details: SubagentDetails = { version: 1, mode: this.mode, background: true, ...(this.#resumed ? { resumed: true } : {}), results };
     await this.write(async (tx) => {
       (await tx.doc(Calls, this.runtime.conversationId)).calls[this.input.callId] = JSON.parse(JSON.stringify(details));
     });

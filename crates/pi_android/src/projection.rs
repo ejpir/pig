@@ -289,7 +289,15 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                         let handoff = observed
                             .and_then(pi_core::subagent::Handoff::of)
                             .unwrap_or_else(|| {
-                                pi_core::subagent::Handoff::from_args(&block["arguments"])
+                                let mut handoff =
+                                    pi_core::subagent::Handoff::from_args(&block["arguments"]);
+                                // Answered, though nothing said how: none is at work.
+                                if let Some(result) = pi.messages.iter().find(|message| {
+                                    message["role"] == "toolResult" && message["toolCallId"] == id
+                                }) {
+                                    handoff.ended(result["isError"] == true);
+                                }
+                                handoff
                             });
                         turn.flow
                             .push(crate::model::Flow::Handoff(turn.handoffs.len()));
@@ -544,12 +552,19 @@ pub fn waiting_on(handoff: &pi_core::subagent::Handoff) -> String {
     }
 }
 
-/// "1 scout at work", "8 subagents at work".
+/// "1 scout at work", "8 subagents at work": those running, else those to come.
 pub fn at_work(handoff: &pi_core::subagent::Handoff) -> String {
+    let running = handoff.running() > 0;
     let busy: Vec<&str> = handoff
         .subagents
         .iter()
-        .filter(|subagent| !subagent.status.finished())
+        .filter(|subagent| {
+            if running {
+                subagent.status == pi_core::subagent::Status::Running
+            } else {
+                !subagent.status.finished()
+            }
+        })
         .map(|subagent| subagent.agent.as_str())
         .collect();
     let same = busy.windows(2).all(|pair| pair[0] == pair[1]);

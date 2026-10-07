@@ -695,7 +695,7 @@ fn subagent_sample(crew: Crew) -> crate::model::Session {
         };
         (
             json!({"tasks": areas.iter().map(|area| json!({"agent":"scout","task":format!("Review the {area} module")})).collect::<Vec<_>>()}),
-            json!({"version":1,"mode":"parallel","results": areas.iter().enumerate().map(|(n, area)| {
+            json!({"version":1,"mode":"parallel","background":true,"results": areas.iter().enumerate().map(|(n, area)| {
                 let mut result = json!({"index":n,"agent":"scout","task":format!("Review the {area} module"),"status":status(n)});
                 if status(n) != "waiting" {
                     result["conversationId"] = json!(format!("{}", 100 + n));
@@ -715,7 +715,7 @@ fn subagent_sample(crew: Crew) -> crate::model::Session {
                 {"agent":"scout","task":"Anthropic and Bedrock"},
                 {"agent":"scout","task":"OpenAI and OpenCode"},
                 {"agent":"scout","task":"Google and Mistral"}]}),
-            json!({"version":1,"mode":"parallel","results":[
+            json!({"version":1,"mode":"parallel","background":true,"results":[
                 {"index":0,"agent":"scout","task":"Anthropic and Bedrock","status":"done","conversationId":"11","model":"anthropic/claude-haiku-4-5","now":"4 call sites, one backoff","output":"4 call sites, one backoff","startedAt":now - 62_000,"endedAt":now - 14_000,"cost":0.012},
                 {"index":1,"agent":"scout","task":"OpenAI and OpenCode","status":"running","conversationId":"12","model":"anthropic/claude-haiku-4-5","now":"Searching for retryAfter","startedAt":now - 62_000,"cost":0.009},
                 {"index":2,"agent":"scout","task":"Google and Mistral","status":"running","conversationId":"13","model":"anthropic/claude-haiku-4-5","now":"Reading google-gemini.ts","startedAt":now - 62_000,"cost":0.007}]}),
