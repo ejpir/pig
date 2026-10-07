@@ -61,6 +61,58 @@ fn shape(handoff: &Handoff) -> String {
     }
 }
 
+/// How many subagents a card shows before Show all.
+const SHOWN: usize = 5;
+
+/// The subagents a card shows: every one, or the first few with those at work
+/// first, so a hundred side by side still show what is happening. A chain
+/// keeps its steps in order.
+fn shown(handoff: &Handoff, all: bool) -> Vec<usize> {
+    let count = handoff.subagents.len();
+    if all || count <= SHOWN {
+        return (0..count).collect();
+    }
+    if handoff.mode == Mode::Chain {
+        let current = handoff
+            .subagents
+            .iter()
+            .position(|subagent| !subagent.status.finished())
+            .unwrap_or(count);
+        let start = current.saturating_sub(SHOWN - 1).min(count - SHOWN);
+        return (start..start + SHOWN).collect();
+    }
+    let mut picked: Vec<usize> = (0..count)
+        .filter(|&index| handoff.subagents[index].status == Status::Running)
+        .chain((0..count).filter(|&index| handoff.subagents[index].status != Status::Running))
+        .take(SHOWN)
+        .collect();
+    picked.sort_unstable();
+    picked
+}
+
+/// "8 running · 30 done · 62 waiting".
+fn tally(handoff: &Handoff) -> String {
+    let count = |wanted: &[Status]| {
+        handoff
+            .subagents
+            .iter()
+            .filter(|subagent| wanted.contains(&subagent.status))
+            .count()
+    };
+    [
+        (count(&[Status::Running]), "running"),
+        (count(&[Status::Done]), "done"),
+        (count(&[Status::Failed]), "failed"),
+        (count(&[Status::Stopped]), "stopped"),
+        (count(&[Status::Waiting]), "waiting"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, said)| format!("{count} {said}"))
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
 fn first_line(text: &str) -> String {
     text.lines()
         .find(|line| !line.trim().is_empty())
@@ -154,34 +206,52 @@ fn interrupted_note(subagent: &Subagent) -> Option<String> {
     })
 }
 
-/// A working session's subagents on Home: small overlapping tiles, live ones ringed.
+/// A working session's subagents on Home: small overlapping tiles, live ones
+/// ringed, and how many more there are past the first few.
 pub(crate) fn crew(handoff: &Handoff, colors: &Theme) -> Div {
+    let more = handoff.subagents.len().saturating_sub(SHOWN);
     div()
         .flex()
         .flex_none()
-        .children(handoff.subagents.iter().enumerate().map(|(n, subagent)| {
-            let (glyph, hue) = agent_look(&subagent.agent, colors);
-            div()
-                .size(px(22.))
-                .when(n > 0, |tile| tile.ml(px(-6.)))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(7.))
-                .border_2()
-                .border_color(colors.canvas)
-                .bg(colors.canvas.blend(hue.opacity(0.22)))
-                .when(subagent.status == Status::Running, |tile| {
-                    tile.shadow(ui::ring(hue, 1.5, 1.))
-                })
-                .when(subagent.status == Status::Waiting, |tile| {
-                    tile.opacity(0.45)
-                })
-                .child(icon(glyph, 12., hue))
-        }))
+        .items_center()
+        .children(
+            shown(handoff, false)
+                .into_iter()
+                .enumerate()
+                .map(|(n, index)| {
+                    let subagent = &handoff.subagents[index];
+                    let (glyph, hue) = agent_look(&subagent.agent, colors);
+                    div()
+                        .size(px(22.))
+                        .when(n > 0, |tile| tile.ml(px(-6.)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(7.))
+                        .border_2()
+                        .border_color(colors.canvas)
+                        .bg(colors.canvas.blend(hue.opacity(0.22)))
+                        .when(subagent.status == Status::Running, |tile| {
+                            tile.shadow(ui::ring(hue, 1.5, 1.))
+                        })
+                        .when(subagent.status == Status::Waiting, |tile| {
+                            tile.opacity(0.45)
+                        })
+                        .child(icon(glyph, 12., hue))
+                }),
+        )
+        .when(more > 0, |tiles| {
+            tiles.child(
+                div()
+                    .ml(px(4.))
+                    .text_size(px(12.))
+                    .text_color(colors.muted)
+                    .child(format!("+{more}")),
+            )
+        })
 }
 
-/// The hand-off a running turn is waiting on.
+/// The latest hand-off of a turn whose subagents are still at work.
 pub(crate) fn waiting_on(turn: &Turn) -> Option<&Handoff> {
     turn.handoffs.iter().rev().find(|handoff| {
         handoff
@@ -189,6 +259,11 @@ pub(crate) fn waiting_on(turn: &Turn) -> Option<&Handoff> {
             .iter()
             .any(|subagent| !subagent.status.finished())
     })
+}
+
+/// Subagents still at work anywhere in a session: they carry on after Pi's turn ends.
+pub(crate) fn at_work(turns: &[Turn]) -> Option<&Handoff> {
+    turns.iter().rev().find_map(waiting_on)
 }
 
 impl PhoneApp {
@@ -210,23 +285,47 @@ impl PhoneApp {
             .iter()
             .any(|s| Some(s.agent.as_str()) != first);
         let cost = handoff.cost();
+        let key = (id, turn_index, n);
+        let folded = self.folded_handoffs.contains(&key);
+        let all = self.all_subagents.contains(&key);
+        let probe = format!("handoff-{turn_index}-{n}");
         let header = div()
-            .min_h(px(48.))
+            .id(ElementId::Name(probe.clone().into()))
+            .debug_selector({
+                let probe = probe.clone();
+                move || probe
+            })
+            .relative()
+            .child(crate::testing::probe(probe))
+            .min_h(px(56.))
             .px(px(16.))
+            .py(px(8.))
             .flex()
             .items_center()
             .gap(px(8.))
-            .border_b_1()
-            .border_color(colors.line)
+            .when(!folded, |header| {
+                header.border_b_1().border_color(colors.line)
+            })
+            .active(|style| style.bg(colors.selected).rounded(px(15.)))
             .child(icon("fork", 16., colors.muted))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Handed off"),
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Handed off"),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .text_color(colors.muted)
+                            .child(tally(handoff)),
+                    ),
             )
             .when(handoff.resumed, |header| {
                 header.child(ui::badge("Resumed", colors.accent, colors.accent, colors))
@@ -241,13 +340,68 @@ impl PhoneApp {
                     } else {
                         String::new()
                     }),
-            );
+            )
+            .child(icon(
+                if folded { "chev_d" } else { "chev_u" },
+                16.,
+                colors.faint,
+            ))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.folded_handoffs.remove(&key) {
+                    this.folded_handoffs.insert(key);
+                }
+                cx.notify();
+            }));
+        let visible = if folded {
+            Vec::new()
+        } else {
+            shown(handoff, all)
+        };
+        let hidden = handoff.subagents.len() - shown(handoff, false).len();
+        let more = (!folded && hidden > 0).then(|| {
+            let probe = format!("handoff-all-{turn_index}-{n}");
+            div()
+                .id(ElementId::Name(probe.clone().into()))
+                .debug_selector({
+                    let probe = probe.clone();
+                    move || probe
+                })
+                .relative()
+                .child(crate::testing::probe(probe))
+                .min_h(px(48.))
+                .px(px(16.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .border_t_1()
+                .border_color(colors.line)
+                .text_size(px(14.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.accent)
+                .active(|style| style.bg(colors.selected).rounded(px(15.)))
+                .child(icon(
+                    if all { "chev_u" } else { "chev_d" },
+                    16.,
+                    colors.accent,
+                ))
+                .child(if all {
+                    "Show fewer".to_owned()
+                } else {
+                    format!("Show all {}", handoff.subagents.len())
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.all_subagents.remove(&key) {
+                        this.all_subagents.insert(key);
+                    }
+                    cx.notify();
+                }))
+        });
         let rows =
-            handoff
-                .subagents
-                .iter()
+            visible
+                .into_iter()
                 .enumerate()
-                .flat_map(|(index, subagent)| {
+                .flat_map(|(position, index)| {
+                    let subagent = &handoff.subagents[index];
                     let pick = Pick {
                         turn: turn_index,
                         handoff: n,
@@ -260,7 +414,7 @@ impl PhoneApp {
                         .map(|ms| duration_label(Duration::from_millis(ms)));
                     let row = ui::row(
                         ElementId::Name(format!("subagent-{turn_index}-{n}-{index}").into()),
-                        index == 0,
+                        position == 0,
                         colors,
                     )
                     .debug_selector(move || format!("subagent-{turn_index}-{n}-{index}"))
@@ -335,7 +489,7 @@ impl PhoneApp {
                 .flex_col()
                 .gap(px(8.))
                 .child(ui::label(shape(handoff), colors))
-                .child(ui::card(colors).child(header).children(rows)),
+                .child(ui::card(colors).child(header).children(rows).children(more)),
         )
     }
 
@@ -644,5 +798,56 @@ impl PhoneApp {
                     .child(strip),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn crew(statuses: &[Status], mode: Mode) -> Handoff {
+        let mut handoff = Handoff::from_args(&serde_json::json!({"tasks": statuses
+            .iter()
+            .map(|_| serde_json::json!({"agent":"scout","task":"look"}))
+            .collect::<Vec<_>>()}));
+        handoff.mode = mode;
+        for (subagent, status) in handoff.subagents.iter_mut().zip(statuses) {
+            subagent.status = *status;
+        }
+        handoff
+    }
+
+    #[test]
+    fn a_big_crew_shows_those_at_work_first() {
+        use Status::*;
+        let handoff = crew(
+            &[Done, Done, Done, Done, Done, Running, Waiting, Running],
+            Mode::Parallel,
+        );
+        assert_eq!(shown(&handoff, false), [0, 1, 2, 5, 7]);
+        assert_eq!(shown(&handoff, true).len(), 8);
+        assert_eq!(tally(&handoff), "2 running · 5 done · 1 waiting");
+        // Few enough: every one, in order.
+        assert_eq!(
+            shown(&crew(&[Done, Running], Mode::Parallel), false),
+            [0, 1]
+        );
+    }
+
+    #[test]
+    fn a_long_chain_shows_the_steps_up_to_the_current_one() {
+        use Status::*;
+        let chain = crew(
+            &[Done, Done, Done, Done, Done, Done, Running, Waiting],
+            Mode::Chain,
+        );
+        assert_eq!(shown(&chain, false), [2, 3, 4, 5, 6]);
+        let started = crew(
+            &[Running, Waiting, Waiting, Waiting, Waiting, Waiting],
+            Mode::Chain,
+        );
+        assert_eq!(shown(&started, false), [0, 1, 2, 3, 4]);
+        let finished = crew(&[Done; 7], Mode::Chain);
+        assert_eq!(shown(&finished, false), [2, 3, 4, 5, 6]);
     }
 }

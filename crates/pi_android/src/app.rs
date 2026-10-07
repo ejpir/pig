@@ -135,6 +135,10 @@ pub struct PhoneApp {
     pub(crate) questions_later: HashSet<SessionId>,
     /// Report cards showing every changed file, not just the first few.
     pub(crate) all_files: HashSet<SessionId>,
+    /// Hand-off cards, by session, turn and hand-off: folded to their header,
+    /// or showing every subagent instead of the first few.
+    pub(crate) folded_handoffs: HashSet<(SessionId, usize, usize)>,
+    pub(crate) all_subagents: HashSet<(SessionId, usize, usize)>,
     /// A sheet transition gives focus back to the app once, before its fields can focus.
     sheet_focus_pending: bool,
     /// The answer picked in the question sheet; sent only with Answer.
@@ -363,6 +367,8 @@ impl PhoneApp {
             expanded_prompts: HashSet::new(),
             questions_later: HashSet::new(),
             all_files: HashSet::new(),
+            folded_handoffs: HashSet::new(),
+            all_subagents: HashSet::new(),
             sheet_focus_pending: false,
             choice: None,
             expanded: HashSet::new(),

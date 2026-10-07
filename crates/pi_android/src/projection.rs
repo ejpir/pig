@@ -221,6 +221,7 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
         match message["role"].as_str() {
             Some("user") => {
                 let text = text_of(message);
+                let reported = pi_core::subagent::report(&text).map(str::to_owned);
                 // A `/skill:` prompt arrives expanded; it reads as it was typed.
                 let text = match pi_core::skill::parse_skill_block(&text) {
                     Some(block) => match block.user_message {
@@ -229,8 +230,13 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                     },
                     None => text,
                 };
+                let text = match &reported {
+                    Some(said) => format!("Subagents reported back\n\n{said}"),
+                    None => text,
+                };
                 let mut turn =
                     Turn::new(text, timestamp(message).map(clock_at).unwrap_or_default());
+                turn.reported = reported.is_some();
                 turn.stages.clear();
                 let images = message["content"].as_array().map_or(0, |blocks| {
                     blocks.iter().filter(|b| b["type"] == "image").count()
@@ -535,6 +541,23 @@ pub fn waiting_on(handoff: &pi_core::subagent::Handoff) -> String {
         ([agent], _) => format!("Waiting on the {agent}"),
         ([agent, ..], true) => format!("Waiting on {} {agent}s", busy.len()),
         (_, false) => format!("Waiting on {} subagents", busy.len()),
+    }
+}
+
+/// "1 scout at work", "8 subagents at work".
+pub fn at_work(handoff: &pi_core::subagent::Handoff) -> String {
+    let busy: Vec<&str> = handoff
+        .subagents
+        .iter()
+        .filter(|subagent| !subagent.status.finished())
+        .map(|subagent| subagent.agent.as_str())
+        .collect();
+    let same = busy.windows(2).all(|pair| pair[0] == pair[1]);
+    match (busy.as_slice(), same) {
+        ([], _) => "hearing back".into(),
+        ([agent], _) => format!("1 {agent} at work"),
+        ([agent, ..], true) => format!("{} {agent}s at work", busy.len()),
+        (_, false) => format!("{} subagents at work", busy.len()),
     }
 }
 
@@ -1359,5 +1382,22 @@ mod tests {
         let shown = project(&pi, facts(&[]));
         assert_eq!(shown.turns[0].prompt, "/skill:lint only src");
         assert_eq!(shown.turns[1].prompt, "/skill:lint");
+    }
+
+    #[test]
+    fn subagents_reporting_back_is_not_the_users_prompt() {
+        let report = "<subagent_report call=\"hand\">\nThe subagents you started have finished. This is their report, not a message from the user.\n\n## scout: find alpha\n\nfound alpha\n</subagent_report>";
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+            {"role":"user","content":"look around"},
+            {"role":"user","content":report}]}}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        assert!(!shown.turns[0].reported);
+        assert!(shown.turns[1].reported);
+        assert_eq!(
+            shown.turns[1].prompt,
+            "Subagents reported back\n\n## scout: find alpha\n\nfound alpha"
+        );
     }
 }

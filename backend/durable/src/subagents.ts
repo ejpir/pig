@@ -1,26 +1,32 @@
 /**
- * The `subagent` tool: Pi hands a task to another agent, which works in a
- * conversation of its own and answers back. The same parameters as stock Pi's
- * subagent extension (one task, `tasks` side by side, or a `chain` passing
- * `{previous}` along) and the same agent files, but each subagent is a durable
- * conversation owned by the call: stopping the call stops it, and after a
- * restart the call finds it again instead of starting it twice.
+ * The `subagent` tool: Pi hands tasks to other agents, which work in
+ * conversations of their own while Pi carries on. The same parameters as stock
+ * Pi's subagent extension (one task, `tasks` side by side, or a `chain` passing
+ * `{previous}` along) and the same agent files.
  *
- * Progress is the call's `details`: one short summary per subagent, never a
- * transcript, since every commit sends the parent's view.
+ * The call returns at once. A background crew task runs the subagents, each a
+ * durable conversation it owns, and posts their answers back to Pi as one
+ * message when the last finishes. Pi's own turns and Esc never reach the crew;
+ * stopping the whole session does. After a restart the crew finds its
+ * subagents again instead of starting them twice.
+ *
+ * Progress is a document of the session, one short summary per subagent and
+ * never a transcript, since every change is sent to the apps.
  */
 import type { Context } from "@earendil-works/chord";
 import { Type, type Message } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
 import {
-  configure, defineDoc, defineExtension, defineTool,
-  type ConversationId, type ConversationView, type Extension, type Harness, type ToolExecutionApi,
+  configure, defineDoc, defineExtension, defineTask, defineTool,
+  type ConversationId, type ConversationView, type Extension, type Harness, type TaskId, type TaskRuntime, type Tx,
 } from "@earendil-works/pi-durable";
 import type { AgentDefinition, Resources } from "./commands.ts";
 
-const MAX_PARALLEL = 8;
-const CONCURRENCY = 4;
+const MAX_TASKS = 200;
+const CONCURRENCY = 8;
 const MAX_OUTPUT = 4000;
+/** An answer as the apps see it: they show its first line, and the whole one is the subagent's own. */
+const MAX_SHOWN = 500;
 /** How often running subagents report, at most: each report is a commit. */
 const REPORT_MS = 1000;
 /** Tools a subagent may be given; agent files may name stock Pi's others, which durable doesn't have. */
@@ -52,16 +58,25 @@ export type SubagentResult = {
 export type SubagentDetails = {
   version: 1;
   mode: "single" | "parallel" | "chain";
-  /** This call carried on after a restart. */
+  /** The crew carried on after a restart. */
   resumed?: boolean;
   results: SubagentResult[];
 };
 
-/** Which conversation runs each task of a call, and when it ran: survives a restart of the call. */
+/** Which conversation runs each task of a crew, and when it ran: survives a restart. */
 const Children = defineDoc<{ started: boolean; children: Record<string, { id: number; startedAt: number; endedAt?: number }> }>({
   kind: "app.subagents", version: 1, scope: "task",
   initial: () => ({ started: false, children: {} }),
 });
+
+/** Every call's subagents as they are now, by call ID: what the apps show once a call has returned. */
+export const Calls = defineDoc<{ calls: Record<string, SubagentDetails> }>({
+  kind: "app.subagent-calls", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  initial: () => ({ calls: {} }),
+});
+
+/** The marker of the message that brings a crew's answers back to Pi. */
+export const REPORT = "subagent_report";
 
 const AGENT = "A listed agent, or a name for a new one you describe in instructions, such as \"architecture\"";
 const INSTRUCTIONS = "Who the agent is and how it works: its role, focus and output. Defines a new agent; added to a listed agent's own";
@@ -93,8 +108,11 @@ const Parameters = Type.Object({
 
 type Item = { agent: string; task: string; instructions?: string; tools?: string[]; cwd?: string };
 
+type CrewInput = { callId: string; mode: SubagentDetails["mode"]; items: (Item & { definition: Definition })[] };
+type CrewState = { phase: "run" } | { phase: "report"; text: string };
+
 /** What a subagent is: a listed agent, one the call defines, or both. */
-type Definition = Pick<AgentDefinition, "name" | "prompt" | "model" | "tools">;
+type Definition = { name: string; prompt: string; model?: string; tools?: string[] };
 
 /** Stock Pi's search tools are searches through bash in a durable session. */
 function durableTools(tools: string[]): string[] {
@@ -115,21 +133,57 @@ export function definition(item: Item, agents: readonly AgentDefinition[]): Defi
 }
 
 /**
- * `harness` is read when a call runs, after the Harness opened. `resources`
+ * `harness` is read when a crew runs, after the Harness opened. `resources`
  * gives the agents, read again for each call.
  */
 export function subagentExtension(models: Models, harness: () => Harness, resources: () => Resources): Extension {
+  // Owned by Pi's conversation, and background: Pi's turns, idle waits and Esc
+  // leave it alone; stopping the whole session reaches it.
+  const Crew = defineTask<CrewInput, CrewState, null>({
+    name: "app.subagent-crew",
+    version: 1,
+    initial: () => ({ phase: "run" }),
+    phases: {
+      run: async (crew, runtime, context) => {
+        const text = await new CrewRun(runtime, context, harness(), models, extension, crew.input).execute();
+        await runtime.commit(() => ({ status: "running", checkpoint: { phase: "report", text } }), context);
+      },
+      // Comes after Pi's current answer, or starts a turn when Pi is idle; the
+      // request ID keeps a restart from reporting twice.
+      report: async (crew, runtime, context) => {
+        const pi = (await runtime.conversation(runtime.conversationId, context))!;
+        await pi.submit({ type: "input", content: crew.state.checkpoint.text, whenBusy: "followUp", requestId: `subagent-report-${crew.id}` }, context);
+        await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
+      },
+    },
+    // Its subagents were stopped first; it says so and reports nothing.
+    abort: async (crew, runtime, context) => {
+      await runtime.commit(async (tx) => {
+        const details = (await tx.doc(Calls, runtime.conversationId)).calls[crew.input.callId];
+        for (const result of details?.results ?? []) {
+          if (result.status === "running" || result.status === "waiting") {
+            result.status = "stopped";
+            result.now = "Stopped";
+            result.endedAt ??= Date.now();
+          }
+        }
+        return { status: "terminal", outcome: { status: "aborted" } };
+      }, context);
+    },
+  });
   const extension: Extension = defineExtension({
     name: "subagents",
+    tasks: [Crew],
     tools: [defineTool({
       name: "subagent",
       description: [
-        "Delegate tasks to subagents, each working in a context of its own and answering back.",
+        "Delegate tasks to subagents, each working in a context of its own. They work in the background:",
+        "the call returns at once, and their answers come back to you in one message when the last one finishes.",
         "Modes: single (agent + task), parallel (tasks array), chain (sequential, with a {previous} placeholder for the prior step's output).",
         "Use a listed agent, or define one: give it a short name (\"architecture\", \"code-quality\"), instructions for its role and output, and tools.",
       ].join(" "),
       parameters: Parameters,
-      // A rerun after a restart finds the same children and their submissions.
+      // A rerun after a restart finds the crew it started.
       replay: "safe",
       execute: async (args, api, context) => {
         const agents = resources().agents.filter((agent) =>
@@ -138,14 +192,25 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
           : args.agent && args.task ? [{ agent: args.agent, task: args.task, instructions: args.instructions, tools: args.tools, cwd: args.cwd }] : [];
         const modes = Number(!!args.chain?.length) + Number(!!args.tasks?.length) + Number(!!(args.agent && args.task));
         if (modes !== 1) return failure("Provide exactly one mode: agent and task, tasks, or chain.");
-        if (items.length > MAX_PARALLEL) return failure(`At most ${MAX_PARALLEL} tasks at once`);
+        if (items.length > MAX_TASKS) return failure(`At most ${MAX_TASKS} tasks in one call`);
         const unnamed = items.find((item) => !/^[\w.-]{1,64}$/.test(item.agent));
         if (unnamed) return failure(`Name each agent in a word or two, such as "architecture": "${unnamed.agent}" isn't one.`);
         const toolless = items.find((item) => item.tools && !durableTools(item.tools).length);
         if (toolless) return failure(`The ${toolless.agent} agent needs at least one of: ${TOOLS.join(", ")}`);
         const mode: SubagentDetails["mode"] = args.chain?.length ? "chain" : args.tasks?.length ? "parallel" : "single";
-        const run = new Call(api, context, harness(), models, extension, mode, items, agents);
-        return run.execute();
+        const details: SubagentDetails = { version: 1, mode, results: items.map((item, index) => ({ index, agent: item.agent, task: item.task, status: "waiting" })) };
+        // One commit records the call and starts its crew, once.
+        await api.commit(async (tx) => {
+          const calls = (await tx.doc(Calls, api.conversationId)).calls;
+          if (Object.hasOwn(calls, api.callId)) return;
+          calls[api.callId] = JSON.parse(JSON.stringify(details));
+          const input: CrewInput = JSON.parse(JSON.stringify({ callId: api.callId, mode, items: items.map((item) => ({ ...item, definition: definition(item, agents) })) }));
+          await tx.createTask(Crew, input, { ownership: { kind: "conversation" }, background: true });
+        }, context);
+        const who = [...new Set(items.map((item) => item.agent))].join(", ");
+        const text = `Started ${items.length === 1 ? `the ${who} subagent` : `${items.length} subagents (${who})`} in the background. `
+          + "Their answers will come back to you in a message once they finish. Don't wait for them or check on them: carry on with what else there is, or end your turn.";
+        return { content: [{ type: "text" as const, text }], details };
       },
     })],
     sections: [{
@@ -167,28 +232,42 @@ function failure(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true };
 }
 
-/** One call of the tool: its subagents, their progress, and the answer. */
-class Call {
+/** One crew: its subagents, their progress, and what it reports. */
+class CrewRun {
   readonly results: SubagentResult[];
+  readonly mode: SubagentDetails["mode"];
+  readonly items: CrewInput["items"];
   #reported = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #resumed = false;
 
   constructor(
-    readonly api: ToolExecutionApi, readonly context: Context, readonly harness: Harness, readonly models: Models,
-    readonly extension: Extension, readonly mode: SubagentDetails["mode"], readonly items: Item[],
-    readonly agents: readonly AgentDefinition[],
+    readonly runtime: TaskRuntime<CrewInput, CrewState, null, object>, readonly context: Context, readonly harness: Harness,
+    readonly models: Models, readonly extension: Extension, readonly input: CrewInput,
   ) {
-    this.results = items.map((item, index) => ({ index, agent: item.agent, task: item.task, status: "waiting" }));
+    this.mode = input.mode;
+    this.items = input.items;
+    this.results = input.items.map((item, index) => ({ index, agent: item.agent, task: item.task, status: "waiting" }));
   }
 
-  async execute() {
-    this.#resumed = await this.api.commit(async (tx) => {
-      const doc = await tx.doc(Children, this.api.taskId);
+  get taskId(): TaskId {
+    return this.runtime.taskId;
+  }
+
+  /** A commit that changes no task state, returning what `change` does. */
+  async write<T>(change: (tx: Tx) => Promise<T>): Promise<T> {
+    let result: T;
+    await this.runtime.commit(async (tx) => { result = await change(tx); return undefined; }, this.context);
+    return result!;
+  }
+
+  async execute(): Promise<string> {
+    this.#resumed = await this.write(async (tx) => {
+      const doc = await tx.doc(Children, this.taskId);
       const resumed = doc.started;
       doc.started = true;
       return resumed;
-    }, this.context);
+    });
     await this.report(true);
     try {
       if (this.mode === "chain") {
@@ -216,10 +295,10 @@ class Call {
   }
 
   /** Runs one task to its end in its own conversation; found again after a restart. */
-  async run(index: number, item: Item): Promise<SubagentResult> {
+  async run(index: number, item: CrewInput["items"][number]): Promise<SubagentResult> {
     const result = this.results[index];
     result.task = item.task;
-    const { id: number, startedAt, endedAt } = await this.child(index, definition(item, this.agents), item);
+    const { id: number, startedAt, endedAt } = await this.child(index, item.definition, item);
     const id = number as unknown as ConversationId;
     result.conversationId = String(number);
     result.startedAt = startedAt;
@@ -231,15 +310,15 @@ class Call {
     try {
       follow();
       if (endedAt === undefined) {
-        const handle = (await this.api.conversation(id, this.context))!;
+        const handle = (await this.runtime.conversation(id, this.context))!;
         // The request ID makes a rerun find the same submission instead of sending the task twice.
         const submission = await handle.submit({ type: "input", content: item.task, requestId: `subagent-${index}` }, this.context);
         await submission.wait(this.context);
         await handle.waitForIdle(this.context);
-        await this.api.commit(async (tx) => {
-          const child = (await tx.doc(Children, this.api.taskId)).children[index];
+        await this.write(async (tx) => {
+          const child = (await tx.doc(Children, this.taskId)).children[index];
           child.endedAt ??= Date.now();
-        }, this.context);
+        });
       }
       this.observe(result, view.value);
       result.endedAt = endedAt ?? Date.now();
@@ -253,19 +332,19 @@ class Call {
 
   /** The conversation that runs task `index`: created once, configured from its definition. */
   async child(index: number, definition: Definition, item: Item) {
-    const parent = await this.api.agent(this.context);
+    const parent = await this.runtime.agent(this.context);
     const { model, note } = this.model(definition, parent.model);
     if (note) this.results[index].modelNote = note;
     this.results[index].model = model ? `${model.provider}/${model.modelId}` : undefined;
     const tools = definition.tools
       ? parent.tools.filter((tool) => definition.tools!.includes(tool.name) && TOOLS.includes(tool.name))
       : undefined;
-    return this.api.commit(async (tx) => {
-      const doc = await tx.doc(Children, this.api.taskId);
+    return this.write(async (tx) => {
+      const doc = await tx.doc(Children, this.taskId);
       const existing = doc.children[index];
       if (existing) return { ...existing };
       // A copy of this conversation's agent: cwd, thinking level, extensions.
-      const created = await tx.createConversation({ ownership: { kind: "task", taskId: this.api.taskId } });
+      const created = await tx.createConversation({ ownership: { kind: "task", taskId: this.taskId } });
       await configure(tx, created.id, {
         ...(model ? { model } : {}),
         ...(tools ? { tools } : {}),
@@ -280,7 +359,7 @@ class Call {
       const child: { id: number; startedAt: number; endedAt?: number } = { id: Number(created.id), startedAt: Date.now() };
       doc.children[index] = child;
       return child;
-    }, this.context);
+    });
   }
 
   /** The agent file's model when this computer has it, else the session's. */
@@ -346,12 +425,16 @@ class Call {
       return;
     }
     this.#reported = Date.now();
-    const details: SubagentDetails = { version: 1, mode: this.mode, ...(this.#resumed ? { resumed: true } : {}), results: this.results };
-    await this.api.details(JSON.parse(JSON.stringify(details)), this.context);
+    const results = this.results.map((result) => result.output && result.output.length > MAX_SHOWN
+      ? { ...result, output: `${result.output.slice(0, MAX_SHOWN)}…` } : result);
+    const details: SubagentDetails = { version: 1, mode: this.mode, ...(this.#resumed ? { resumed: true } : {}), results };
+    await this.write(async (tx) => {
+      (await tx.doc(Calls, this.runtime.conversationId)).calls[this.input.callId] = JSON.parse(JSON.stringify(details));
+    });
   }
 
-  answer() {
-    const done = this.results.filter((result) => result.status === "done");
+  /** What Pi hears back. */
+  answer(): string {
     const say = (result: SubagentResult) => result.status === "done" ? result.output || "(no answer)"
       : `(${result.status}${result.now ? `: ${result.now}` : ""})`;
     const text = this.mode === "parallel"
@@ -361,8 +444,9 @@ class Call {
           ? say(this.results.at(-1)!)
           : this.results.filter((result) => result.status !== "waiting").map((result, step) => `Step ${step + 1} (${result.agent}): ${say(result)}`).join("\n\n")
         : say(this.results[0]);
-    const failed = this.mode === "parallel" ? done.length === 0 : done.length !== this.results.length;
-    return { content: [{ type: "text" as const, text }], isError: failed };
+    const done = this.results.filter((result) => result.status === "done").length;
+    const how = done === this.results.length ? "finished" : `finished, ${done} of ${this.results.length} with an answer`;
+    return `<${REPORT} call="${this.input.callId}">\nThe subagents you started have ${how}. This is their report, not a message from the user.\n\n${text}\n</${REPORT}>`;
   }
 }
 

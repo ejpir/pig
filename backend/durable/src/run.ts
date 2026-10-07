@@ -18,7 +18,7 @@ import { authProviders, publicModel } from "./catalog.ts";
 import { findImage, imageReferences, promptContent } from "./images.ts";
 import { expandPromptCommand, noResources, promptCommands, type Resources } from "./commands.ts";
 import { imageRead } from "./read.ts";
-import { subagentExtension, transcript } from "./subagents.ts";
+import { Calls, subagentExtension, transcript } from "./subagents.ts";
 
 const context = BACKGROUND_CONTEXT;
 const MAX_RECORD = 16 * 1024 * 1024;
@@ -149,10 +149,17 @@ export async function run(
   const root = await harness.root(context, { agent: {
     cwd, ...(provider && modelId ? { model: { provider, modelId } } : {}),
   } });
-  await root.commit(async (tx) => { (await tx.doc(Metadata, root.id)).initialized = true; }, context);
+  await root.commit(async (tx) => {
+    (await tx.doc(Metadata, root.id)).initialized = true;
+    // Made here, so the apps can follow it before any subagent starts.
+    (await tx.doc(Calls, root.id)).calls ??= {};
+  }, context);
   const state = await root.viewState(context);
   const metadata = await harness.documentState(Metadata, root.id, context);
   if (!metadata?.value) throw new Error("Durable desktop metadata was not committed");
+  // Subagents working in the background, which the view's own documents don't carry.
+  const calls = await harness.documentState(Calls, root.id, context);
+  if (!calls) throw new Error("Durable subagent calls were not committed");
   autoCompaction = metadata.value.autoCompaction;
   const watch = await root.watch(context);
   // One output line at a time, with backpressure. The durable watch itself bounds pending frames.
@@ -167,9 +174,10 @@ export async function run(
     return next;
   };
   const snapshot = (value: ConversationView) => send({ type: "durable_state", key,
-    data: imageReferences({ ...value, docs: { ...value.docs, "app.desktop": metadata.value } }), backend: info });
+    data: imageReferences({ ...value, docs: { ...value.docs, "app.desktop": metadata.value, "app.subagent-calls": calls.value ?? { calls: {} } } }), backend: info });
   await snapshot(watch.value);
   watch.start(async (value) => { await snapshot(value); });
+  const unsubscribe = calls.subscribe(() => { snapshot(watch.value).catch((error) => console.error("Durable report:", error)); });
   // Missing definitions, corrupt/newer storage and startup errors must fail closed, not select stock Pi.
   harness.resume();
 
@@ -299,7 +307,8 @@ export async function run(
         await harness.abortSubmission(item.id, context, root.id);
         return {};
       }
-      case "abort": await root.abort(context); return {};
+      // Stopping the session stops the subagents working in the background too.
+      case "abort": await root.abort(context, { background: true }); return {};
       default: throw new Error(`${record.type} is not supported by the experimental durable backend`);
     }
   };
@@ -316,6 +325,8 @@ export async function run(
   } finally {
     // Owner-pipe EOF stops this process, NOT the durable run. close preserves pending checkpoints.
     await watch.stop();
+    unsubscribe();
+    calls.dispose();
     state.dispose();
     metadata.dispose();
     await harness.close(context);

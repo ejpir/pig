@@ -565,9 +565,7 @@ impl PhoneApp {
                                     .items_center()
                                     .gap(px(8.))
                                     .children(
-                                        session
-                                            .turn()
-                                            .and_then(super::subagents::waiting_on)
+                                        super::subagents::at_work(&session.turns)
                                             .map(|handoff| super::subagents::crew(handoff, colors)),
                                     )
                                     .child(meta(detail).flex_1().min_w_0()),
@@ -589,7 +587,22 @@ impl PhoneApp {
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child(session.title.clone()),
                                     )
-                                    .child(meta(detail).mt(px(2.))),
+                                    .child(
+                                        div()
+                                            .mt(px(2.))
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.))
+                                            // Subagents carry on after Pi's turn ended.
+                                            .children(
+                                                super::subagents::at_work(&session.turns).map(
+                                                    |handoff| {
+                                                        super::subagents::crew(handoff, colors)
+                                                    },
+                                                ),
+                                            )
+                                            .child(meta(detail).flex_1().min_w_0()),
+                                    ),
                             )
                             .child(meta(time.into()).flex_none())
                     })

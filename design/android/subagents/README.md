@@ -19,6 +19,8 @@
 ## How it behaves
 
 - **A subagent belongs to its session.** It appears under the stage that started it, on Home in its session's row, and in notifications as its session. Stopping the session stops its subagents.
+- **Pi isn't held up.** Subagents work in the background: Pi answers, and you can keep talking to it, while they work. Their answers come back to Pi as one message, shown as **From subagents**, not as yours.
+- **A crew of any size fits.** The card shows five subagents, those at work first, then **Show all**; its header folds the card to one line of counts.
 - **Only Pi talks to a subagent.** Its screen has no composer. You steer the session, and Pi decides what to pass on.
 - **Each agent keeps one colour and icon:** scout reads, planner plans, worker edits, reviewer checks. A chain reads at a glance in the card, on the run line and in the spend.
 - **Where the time and money went:** each subagent shows its time and cost, and the finished session splits the total by agent. Subagents can use other models, so the model is named wherever it differs from the session's.

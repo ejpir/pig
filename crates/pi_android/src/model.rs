@@ -297,6 +297,8 @@ pub struct Turn {
     pub images: Vec<ToolImage>,
     /// Each `subagent` call: who Pi handed work to, and how it went.
     pub handoffs: Vec<pi_core::subagent::Handoff>,
+    /// Its prompt is subagents reporting back, not something the user typed.
+    pub reported: bool,
     /// What Pi said and showed, in order: words between tools, then a
     /// picture it looked at, more words, a page, the closing words.
     pub flow: Vec<Flow>,
@@ -315,6 +317,7 @@ impl Turn {
             pages: Vec::new(),
             images: Vec::new(),
             handoffs: Vec::new(),
+            reported: false,
             flow: Vec::new(),
             times: [Duration::ZERO; 4],
         }

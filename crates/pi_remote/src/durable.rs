@@ -286,6 +286,14 @@ pub fn project(record: &Value, previous: &Session, target: &SshTarget) -> Result
             model.apply(&json!({"type":"tool_execution_update","toolCallId":id,"toolName":slot["name"],"partialResult":{"content":[{"type":"text","text":slot["output"].as_str().unwrap_or("")}],"details":slot["details"]}}))?;
         }
     }
+    // Subagents carry on after their call returned: how each is doing now.
+    if let Some(calls) = docs["app.subagent-calls"]["calls"].as_object() {
+        for tool in &mut model.tools {
+            if let Some(details) = calls.get(&tool.id).filter(|details| details.is_object()) {
+                tool.details = details.clone();
+            }
+        }
+    }
     if let Some(items) = docs["pi.inbox"]["items"].as_array() {
         for item in items {
             let content = pi_core::session::content_text(&item["content"]);

@@ -532,6 +532,18 @@ def subagents(phone):
     phone.wait(lambda s: shown(s, "subagent-0-0-0") and shown(s, "subagent-0-0-1"),
                "a finished chain lists each step")
     phone.capture("subagents-done")
+    # A big crew: the first few, those at work first, then all on request.
+    phone.fixture("subagents-many")
+    phone.wait(lambda s: all(shown(s, f"subagent-0-0-{n}") for n in range(9, 14)) and shown(s, "handoff-all-0-0"),
+               "twenty-four scouts show the five at work, and Show all")
+    phone.capture("subagents-many")
+    phone.tap("handoff-all-0-0")
+    phone.wait(lambda s: shown(s, "subagent-0-0-0") and shown(s, "subagent-0-0-14"),
+               "Show all lists the rest")
+    phone.capture("subagents-all")
+    phone.tap("handoff-0-0")
+    time.sleep(0.5)
+    phone.capture("subagents-folded")
 
 
 def shown(state, name):

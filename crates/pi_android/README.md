@@ -190,7 +190,7 @@ The named states use the sample sessions and match the design's screens:
 `long-input`, `long-reply`, `streaming-reply`, `long-labels`, `empty-search`,
 `failed`, `stopped`, `computers`, `many-files`, `activity`, `markdown`, `multi-turn` and
 `tool-output`, `follow-up-input`, `delete`, `delete-running`, `projects`,
-`project-empty`, `project-error`, `project-loading`, `project-long-path`, `project-tree`, `project-search`, `project-file`, `tool-image`, `media-sample` (the shared sample both apps' tests draw), `subagents`, `subagents-done`, `subagent` (work handed to subagents, and one subagent's own screen),
+`project-empty`, `project-error`, `project-loading`, `project-long-path`, `project-tree`, `project-search`, `project-file`, `tool-image`, `media-sample` (the shared sample both apps' tests draw), `subagents`, `subagents-many`, `subagents-done`, `subagent` (work handed to subagents, a crew of 24, and one subagent's own screen),
 `model-long-list`, `model-no-match`, `thinking`, `mentions`, `image-input`
 and `image-only`. The tests
 render every state at 320×640, 384×854 and 640×360.
@@ -223,7 +223,8 @@ edits, Stop, actual system-picker image import, image preview/send, scrollbars,
 sheet drags, confirmed swipe deletion, completed activity details, long
 tool/reply scrolling, project selection, prompt templates and skills in
 Resources and the `/` suggestions (`--case commands`), and subagents: the
-hand-off card, a subagent's screen with Stop, and back (`--case subagents`).
+hand-off card, a subagent's screen with Stop, and back, and a crew of 24 that
+shows five, all, or folds (`--case subagents`).
 It saves screenshots and a JSON report. Use `--case input`, `--case picker`,
 `--case models`, etc. to repeat a case. The picker case supports English AOSP
 DocumentsUI and Xiaomi's picker; it creates a uniquely named synthetic PNG and

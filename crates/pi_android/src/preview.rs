@@ -75,6 +75,7 @@ pub const SCREENS: &[&str] = &[
     "tool-image",
     "media-sample",
     "subagents",
+    "subagents-many",
     "subagents-done",
     "subagent",
     "logs",
@@ -383,12 +384,15 @@ impl PhoneApp {
                 }
                 self.show_session(QWEN, window, cx);
             }
-            "subagents" | "subagents-done" | "subagent" => {
+            "subagents" | "subagents-many" | "subagents-done" | "subagent" => {
                 finish(self);
-                let running = name != "subagents-done";
                 if let Some(store) = &mut self.store {
                     if let Some(shown) = store.sessions.iter_mut().find(|s| s.id == QWEN) {
-                        let mut sample = subagent_sample(running);
+                        let mut sample = subagent_sample(match name {
+                            "subagents-done" => Crew::Reported,
+                            "subagents-many" => Crew::Many,
+                            _ => Crew::Working,
+                        });
                         sample.title = "Provider retries".into();
                         *shown = sample;
                     }
@@ -662,14 +666,50 @@ fn media_sample() -> crate::model::Session {
     )
 }
 
-/// Three scouts side by side, one done; or, finished, a chain picked up after a restart.
-fn subagent_sample(running: bool) -> crate::model::Session {
+enum Crew {
+    /// Three scouts side by side, one done, while Pi waits for nothing.
+    Working,
+    /// Twenty-four side by side, most still to come.
+    Many,
+    /// A chain picked up after a restart, reported back and answered.
+    Reported,
+}
+
+fn subagent_sample(crew: Crew) -> crate::model::Session {
     use serde_json::json;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    let (args, details) = if running {
+    let running = !matches!(crew, Crew::Reported);
+    let (args, details) = if let Crew::Many = crew {
+        let areas = [
+            "auth", "billing", "cache", "cli", "config", "db", "events", "export", "files", "http",
+            "i18n", "import", "jobs", "logging", "mail", "metrics", "queue", "search", "settings",
+            "storage", "sync", "ui", "users", "webhooks",
+        ];
+        let status = |n: usize| match n {
+            0..=8 => "done",
+            9..=16 => "running",
+            _ => "waiting",
+        };
+        (
+            json!({"tasks": areas.iter().map(|area| json!({"agent":"scout","task":format!("Review the {area} module")})).collect::<Vec<_>>()}),
+            json!({"version":1,"mode":"parallel","results": areas.iter().enumerate().map(|(n, area)| {
+                let mut result = json!({"index":n,"agent":"scout","task":format!("Review the {area} module"),"status":status(n)});
+                if status(n) != "waiting" {
+                    result["conversationId"] = json!(format!("{}", 100 + n));
+                    result["startedAt"] = json!(now - 90_000);
+                    result["now"] = json!(if status(n) == "done" { format!("{area}: no blocking issues") } else { format!("Reading {area}.ts") });
+                    result["cost"] = json!(0.004);
+                }
+                if status(n) == "done" {
+                    result["endedAt"] = json!(now - 30_000 + n as u64 * 1000);
+                }
+                result
+            }).collect::<Vec<_>>()}),
+        )
+    } else if running {
         (
             json!({"tasks":[
                 {"agent":"scout","task":"Anthropic and Bedrock"},
@@ -690,22 +730,20 @@ fn subagent_sample(running: bool) -> crate::model::Session {
                 {"index":1,"agent":"reviewer","task":"Review the worker's changes","status":"done","conversationId":"22","model":"anthropic/claude-sonnet-5-5","modelNote":"claude-sonnet-4-5 isn't set up on this computer; using anthropic/claude-sonnet-5-5","now":"No blocking issues; one naming nit","output":"No blocking issues; one naming nit","startedAt":now - 88_000,"endedAt":now - 22_000,"cost":0.11}]}),
         )
     };
+    // The call returns at once; the subagents carry on, and report back when done.
     let mut messages = vec![
         json!({"role":"user","content":"Every provider retries differently. Use scouts to find how each one retries, then plan one shared helper.","timestamp":now - 80_000}),
         json!({"role":"assistant","content":[{"type":"toolCall","id":"hand","name":"subagent","arguments":args}],"timestamp":now - 76_000}),
+        json!({"role":"toolResult","toolCallId":"hand","toolName":"subagent","content":[{"type":"text","text":"Started the subagents in the background."}],"details":details,"isError":false,"timestamp":now - 75_000}),
+        json!({"role":"assistant","content":[{"type":"text","text":"The scouts are on it. I'll put their findings together when they report back; ask me anything meanwhile."}],"timestamp":now - 74_000}),
     ];
     if !running {
-        messages.push(json!({"role":"toolResult","toolCallId":"hand","toolName":"subagent","content":[{"type":"text","text":"No blocking issues; one naming nit"}],"details":details,"isError":false,"timestamp":now - 20_000}));
+        messages.push(json!({"role":"user","content":"<subagent_report call=\"hand\">\nThe subagents you started have finished. This is their report, not a message from the user.\n\nNo blocking issues; one naming nit\n</subagent_report>","timestamp":now - 20_000}));
         messages.push(json!({"role":"assistant","content":[{"type":"text","text":"The worker moved every provider onto one `withRetry`, and the reviewer found no blocking issues."}],"timestamp":now - 18_000}));
     }
     let mut pi = pi_core::session::Session::new("/repo".into());
     pi.apply(&json!({"type":"response","command":"get_messages","success":true,"data":{"messages":messages}}))
         .unwrap();
-    if running {
-        pi.apply(&json!({"type":"agent_start"})).unwrap();
-        pi.apply(&json!({"type":"tool_execution_start","toolCallId":"hand","toolName":"subagent","args":args})).unwrap();
-        pi.apply(&json!({"type":"tool_execution_update","toolCallId":"hand","toolName":"subagent","partialResult":{"content":[],"details":details}})).unwrap();
-    }
     crate::projection::project(
         &pi,
         crate::projection::Facts {
@@ -835,6 +873,32 @@ mod tests {
                 });
             }
         }
+    }
+
+    /// A big crew shows its first few, all on request, or just its header.
+    #[gpui::test]
+    fn a_crew_folds(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("subagents-many", window, cx)));
+        cx.run_until_parked();
+        let rows = |cx: &mut gpui::VisualTestContext| {
+            (0..24)
+                .filter(|n| {
+                    cx.debug_bounds(format!("subagent-0-0-{n}").leak())
+                        .is_some()
+                })
+                .count()
+        };
+        assert_eq!(rows(cx), 5);
+        let all = cx.debug_bounds("handoff-all-0-0").unwrap();
+        cx.simulate_click(all.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(rows(cx), 24);
+        let header = cx.debug_bounds("handoff-0-0").unwrap();
+        cx.simulate_click(header.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(rows(cx), 0);
     }
 
     /// Work handed to subagents shows as a card whose rows open each one.

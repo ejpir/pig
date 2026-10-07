@@ -76,11 +76,19 @@ impl PhoneApp {
             State::NeedsYou | State::Working => {
                 format!("{} · {}", session.project, store.computer.name)
             }
-            State::Done => format!(
-                "{} · done in {}",
-                session.project,
-                duration_label(session.elapsed)
-            ),
+            State::Done => match super::subagents::at_work(&session.turns) {
+                // Pi answered, and its subagents carry on.
+                Some(handoff) => format!(
+                    "{} · {}",
+                    session.project,
+                    crate::projection::at_work(handoff)
+                ),
+                None => format!(
+                    "{} · done in {}",
+                    session.project,
+                    duration_label(session.elapsed)
+                ),
+            },
             State::Stopped => format!("{} · stopped by you", session.project),
             State::Failed => format!("{} · {}", session.project, session.status_line()),
         };
@@ -355,7 +363,8 @@ impl PhoneApp {
         colors: &Theme,
         cx: &Context<Self>,
     ) -> Div {
-        let folded = !live && !self.expanded_prompts.contains(&(id, index));
+        // Subagents' answers can run long: they rest on one line even while Pi reads them.
+        let folded = (!live || turn.reported) && !self.expanded_prompts.contains(&(id, index));
         div().flex().justify_end().child(
             div()
                 .id(("prompt", index))
@@ -370,16 +379,33 @@ impl PhoneApp {
                 .relative()
                 .bg(colors.panel)
                 .line_height(px(22.))
-                .when(numbered || !turn.pages.is_empty(), |prompt| {
+                .when(turn.reported, |prompt| {
                     prompt.child(
                         div()
                             .mb(px(4.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
                             .text_size(px(12.5))
                             .line_height(px(16.))
                             .text_color(colors.muted)
-                            .child(format!("Turn {} · {}", index + 1, turn.at)),
+                            .child(icon("fork", 12., colors.muted))
+                            .child(format!("From subagents · {}", turn.at)),
                     )
                 })
+                .when(
+                    !turn.reported && (numbered || !turn.pages.is_empty()),
+                    |prompt| {
+                        prompt.child(
+                            div()
+                                .mb(px(4.))
+                                .text_size(px(12.5))
+                                .line_height(px(16.))
+                                .text_color(colors.muted)
+                                .child(format!("Turn {} · {}", index + 1, turn.at)),
+                        )
+                    },
+                )
                 .child(
                     div()
                         .min_w_0()
@@ -408,7 +434,7 @@ impl PhoneApp {
                     )
                 })
                 .child(self.copyable(turn.prompt.clone(), cx))
-                .when(!live, |prompt| {
+                .when(!live || turn.reported, |prompt| {
                     prompt.on_click(cx.listener(move |this, _, _, cx| {
                         if !this.expanded_prompts.remove(&(id, index)) {
                             this.expanded_prompts.insert((id, index));

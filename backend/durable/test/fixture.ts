@@ -52,6 +52,10 @@ faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
     return fauxAssistantMessage(`Delegated: ${said}`);
   }
   if (typeof text === "string" && text.startsWith("find ")) return fauxAssistantMessage(`found ${text.slice(5)}`);
+  // The subagents' answers, once they all finished.
+  if (typeof text === "string" && text.startsWith("<subagent_report")) {
+    return fauxAssistantMessage(`Heard back: ${text.split("\n").slice(3, -1).join(" ").trim()}`);
+  }
   if (text === "safe" || text === "unsafe") {
     if (!after.some((message) => message.role === "toolResult")) {
       return fauxAssistantMessage(fauxToolCall(`${text}_work`, {}, { id: `${text}-call` }), { stopReason: "toolUse" });

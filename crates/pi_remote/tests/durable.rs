@@ -559,6 +559,35 @@ fn durable_runner_keeps_writer_lock_if_its_rust_owner_is_killed() {
     }
 }
 
+/// Whether Pi has said something starting with `start`.
+fn said(snapshot: &Value, start: &str) -> bool {
+    snapshot["data"]["messages"]
+        .as_array()
+        .is_some_and(|messages| {
+            messages.iter().any(|m| {
+                m["role"] == "assistant"
+                    && m["content"][0]["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .starts_with(start)
+            })
+        })
+}
+
+/// What Pi said last.
+fn last_said(snapshot: &Value) -> String {
+    snapshot["data"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "assistant")
+        .unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
 /// The `subagent` call in the latest snapshot that has one.
 fn handoff(snapshot: &Value) -> Option<Value> {
     snapshot["data"]["tools"]
@@ -586,29 +615,12 @@ fn subagents_answer_side_by_side_and_show_their_own_messages() {
     bridge
         .send(json!({"type":"prompt","id":"delegate","message":"delegate","requestId":"delegate"}));
     assert_eq!(bridge.response("delegate")["success"], true);
+    // The call returns at once, and the answers come back to Pi when both finish.
     let settled = bridge.until(|r| {
-        r["type"] == "remote_snapshot"
-            && r["data"]["run"] == "Idle"
-            && r["data"]["messages"].as_array().is_some_and(|messages| {
-                messages.iter().any(|m| {
-                    m["role"] == "assistant"
-                        && m["content"][0]["text"]
-                            .as_str()
-                            .unwrap_or("")
-                            .starts_with("Delegated:")
-                })
-            })
+        r["type"] == "remote_snapshot" && r["data"]["run"] == "Idle" && said(r, "Heard back:")
     });
-    let answer = settled["data"]["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .rev()
-        .find(|m| m["role"] == "assistant")
-        .unwrap()["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    assert!(said(&settled, "Delegated: Started 2 subagents (scout)"));
+    let answer = last_said(&settled);
     assert!(
         answer.contains("found alpha") && answer.contains("found beta"),
         "{answer}"
@@ -677,9 +689,7 @@ fn a_subagent_carries_on_after_a_crash_without_repeating_an_unsafe_command() {
 
     let mut second = Bridge::new(directory.path(), &target);
     let settled = second.until(|r| {
-        r["type"] == "remote_snapshot"
-            && r["data"]["run"] == "Idle"
-            && handoff(r).is_some_and(|call| call["details"]["results"][0]["status"] == "done")
+        r["type"] == "remote_snapshot" && r["data"]["run"] == "Idle" && said(r, "Heard back:")
     });
     assert_eq!(
         executions(directory.path(), "unsafe"),
@@ -698,7 +708,7 @@ fn a_subagent_carries_on_after_a_crash_without_repeating_an_unsafe_command() {
 
 #[test]
 #[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
-fn stopping_one_subagent_lets_the_session_carry_on() {
+fn pi_carries_on_while_a_subagent_works_and_stopping_it_leaves_the_session_alone() {
     let directory = tempfile::tempdir().unwrap();
     let target = durable_target(directory.path());
     let _cleanup = Cleanup(directory.path().into(), target.key.clone());
@@ -720,26 +730,27 @@ fn stopping_one_subagent_lets_the_session_carry_on() {
         .as_str()
         .unwrap()
         .to_owned();
+    // Pi isn't held up by its subagent: it answered, and answers again.
+    bridge.until(|r| {
+        r["type"] == "remote_snapshot" && r["data"]["run"] == "Idle" && said(r, "Delegated:")
+    });
+    bridge.send(json!({"type":"prompt","id":"chat","message":"hello","requestId":"chat"}));
+    assert_eq!(bridge.response("chat")["success"], true);
+    let chatted = bridge.until(|r| {
+        r["type"] == "remote_snapshot" && r["data"]["run"] == "Idle" && said(r, "Finished: hello")
+    });
+    assert_eq!(
+        handoff(&chatted).unwrap()["details"]["results"][0]["status"],
+        "running"
+    );
     bridge.send(json!({"type":"stop_subagent","id":"stop","conversationId":child}));
     assert_eq!(bridge.response("stop")["success"], true);
+    // Pi heard back and answered: the session itself was not stopped.
     let settled = bridge.until(|r| {
-        r["type"] == "remote_snapshot"
-            && r["data"]["run"] == "Idle"
-            && handoff(r).is_some_and(|call| call["finished"] == true)
+        r["type"] == "remote_snapshot" && r["data"]["run"] == "Idle" && said(r, "Heard back:")
     });
     let call = handoff(&settled).unwrap();
     assert_eq!(call["details"]["results"][0]["status"], "stopped", "{call}");
-    assert_eq!(call["is_error"], true);
-    // Pi heard back and answered: the session itself was not stopped.
-    let messages = settled["data"]["messages"].as_array().unwrap();
-    assert!(
-        messages.iter().any(|m| m["role"] == "assistant"
-            && m["content"][0]["text"]
-                .as_str()
-                .unwrap_or("")
-                .starts_with("Delegated:")),
-        "{messages:?}"
-    );
     assert_eq!(executions(directory.path(), "unsafe"), 1);
     bridge.send(json!({"type":"remote_shutdown","id":"shutdown"}));
     assert_eq!(bridge.response("shutdown")["success"], true);
@@ -760,12 +771,9 @@ fn pi_can_define_the_agents_it_hands_work_to() {
     );
     assert_eq!(bridge.response("delegate")["success"], true);
     let settled = bridge.until(|r| {
-        r["type"] == "remote_snapshot"
-            && r["data"]["run"] == "Idle"
-            && handoff(r).is_some_and(|call| call["finished"] == true)
+        r["type"] == "remote_snapshot" && r["data"]["run"] == "Idle" && said(r, "Heard back:")
     });
     let call = handoff(&settled).unwrap();
-    assert_eq!(call["is_error"], false, "{call}");
     let results = call["details"]["results"].as_array().unwrap();
     assert_eq!(
         results

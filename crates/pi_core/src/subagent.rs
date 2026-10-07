@@ -213,6 +213,21 @@ impl Subagent {
     }
 }
 
+/// The message that brings a background crew's answers back to Pi: what they
+/// said, without the wrapper. Pi reads it as input, but nobody typed it.
+pub fn report(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("<subagent_report")?;
+    let body = rest.split_once('>')?.1;
+    let body = body.trim_end().strip_suffix("</subagent_report>")?;
+    // After the line that tells Pi what this is.
+    Some(
+        body.trim()
+            .split_once("\n\n")
+            .map_or("", |(_, said)| said)
+            .trim(),
+    )
+}
+
 /// A subagent's conversation from `get_subagent`, as a session the apps draw.
 pub fn session(data: &Value, cwd: std::path::PathBuf) -> Result<Session> {
     let mut session = Session::new(cwd);
@@ -288,6 +303,13 @@ mod tests {
             (scout.status, scout.now.as_deref(), scout.cost),
             (Status::Done, Some("Found it."), Some(0.05))
         );
+    }
+
+    #[test]
+    fn a_crew_report_reads_as_what_its_subagents_said() {
+        let text = "<subagent_report call=\"c1\">\nThe subagents you started have finished. This is their report, not a message from the user.\n\n## scout: find alpha\n\nfound alpha\n</subagent_report>";
+        assert_eq!(report(text), Some("## scout: find alpha\n\nfound alpha"));
+        assert_eq!(report("hello"), None);
     }
 
     #[test]
