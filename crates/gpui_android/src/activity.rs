@@ -149,16 +149,27 @@ pub fn scan_qr() -> bool {
 }
 
 /// Opens an HTML page full screen: a sandboxed web view, without access to the
-/// app or its files, and the page's source a tab away. Links leave for the
-/// browser. Returns false if it could not be opened.
-pub fn show_page(title: &str, html: &str, dark: bool, source: bool, poster: &str) -> bool {
+/// app or its files, and the page's source a tab away. `site` is JSON,
+/// `{"path": "demo/index.html", "pages": {"demo/about.html": "<html>…"}}`:
+/// the page's own path, and pages its links may open in the same view, by
+/// path. Other links leave for the browser. Returns false if it could not be
+/// opened.
+pub fn show_page(
+    title: &str,
+    html: &str,
+    dark: bool,
+    source: bool,
+    poster: &str,
+    site: &str,
+) -> bool {
     #[cfg(target_os = "android")]
     {
-        crate::java::current().is_some_and(|java| java.show_page(title, html, dark, source, poster))
+        crate::java::current()
+            .is_some_and(|java| java.show_page(title, html, dark, source, poster, site))
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (title, html, dark, source, poster);
+        let _ = (title, html, dark, source, poster, site);
         false
     }
 }

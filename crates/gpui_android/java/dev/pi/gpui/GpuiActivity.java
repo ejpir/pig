@@ -96,6 +96,10 @@ public class GpuiActivity extends NativeActivity {
     private int seq;
     private int batchDepth;
     private boolean edited;
+    /** The mirror as last reported, so an edit made some other way still gets reported. */
+    private String reportedText = "";
+    private int[] reportedSpans = {0, 0, -1, -1};
+    private boolean checkPosted;
     private int inputType = EditorInfo.TYPE_CLASS_TEXT;
     private int imeOptions = EditorInfo.IME_ACTION_NONE;
     private InputMethodManager inputMethods;
@@ -424,6 +428,8 @@ public class GpuiActivity extends NativeActivity {
     }
 
     private void report(int pushId) {
+        reportedText = mirror.toString();
+        reportedSpans = spans();
         seq++;
         if (!nativeReady) {
             return;
@@ -438,9 +444,28 @@ public class GpuiActivity extends NativeActivity {
                 BaseInputConnection.getComposingSpanEnd(mirror));
     }
 
-    /** Reports the mirror once the keyboard's current batch of edits is complete. */
+    private int[] spans() {
+        return new int[] {
+            Selection.getSelectionStart(mirror),
+            Selection.getSelectionEnd(mirror),
+            BaseInputConnection.getComposingSpanStart(mirror),
+            BaseInputConnection.getComposingSpanEnd(mirror)
+        };
+    }
+
+    /**
+     * Reports the mirror once the keyboard's current batch of edits is complete:
+     * after an edit, or when it changed since the last report. Keyboards also
+     * edit through calls not overridden here, such as Gboard's autocorrect
+     * replacing a word with {@code replaceText}; those are found by the change.
+     */
     private void flush() {
-        if (batchDepth > 0 || !edited) {
+        if (batchDepth > 0) {
+            return;
+        }
+        if (!edited
+                && reportedText.contentEquals(mirror)
+                && java.util.Arrays.equals(reportedSpans, spans())) {
             return;
         }
         edited = false;
@@ -597,9 +622,10 @@ public class GpuiActivity extends NativeActivity {
      * Opens {@link PageActivity} on an HTML page. The page goes through a file in the
      * cache, since an intent's extras are limited to about a megabyte.
      */
-    public boolean showPage(String title, String html, boolean dark, boolean source, String poster) {
+    public boolean showPage(String title, String html, boolean dark, boolean source, String poster, String site) {
         try {
             File file = PageActivity.save(this, html);
+            File pages = PageActivity.save(this, site);
             Log.i(TAG, "Opening a saved HTML page");
             runOnUiThread(
                     () -> {
@@ -610,7 +636,8 @@ public class GpuiActivity extends NativeActivity {
                                             .putExtra(PageActivity.PATH, file.getPath())
                                             .putExtra(PageActivity.DARK, dark)
                                             .putExtra(PageActivity.SOURCE, source)
-                                            .putExtra(PageActivity.POSTER, poster));
+                                            .putExtra(PageActivity.POSTER, poster)
+                                            .putExtra(PageActivity.SITE, pages.getPath()));
                         } catch (ActivityNotFoundException | SecurityException e) {
                             Log.w(TAG, "Could not open the page", e);
                         }
@@ -875,7 +902,18 @@ public class GpuiActivity extends NativeActivity {
 
         @Override
         public Editable getEditable() {
-            return active ? mirror : null;
+            if (!active) return null;
+            // Any edit goes through here. One made outside a batch, by a call
+            // not overridden below, is reported once that call returns.
+            if (!checkPosted) {
+                checkPosted = true;
+                editor.post(
+                        () -> {
+                            checkPosted = false;
+                            flush();
+                        });
+            }
+            return mirror;
         }
 
         @Override

@@ -339,21 +339,26 @@ impl Java {
         dark: bool,
         source: bool,
         poster: &str,
+        site: &str,
     ) -> bool {
         self.call("showPage", |env, activity| {
             let title = JString::from_str(env, title)?;
             let html = JString::from_str(env, html)?;
             let poster = JString::from_str(env, poster)?;
+            let site = JString::from_str(env, site)?;
             env.call_method(
                 activity,
                 jni_str!("showPage"),
-                jni_sig!("(Ljava/lang/String;Ljava/lang/String;ZZLjava/lang/String;)Z"),
+                jni_sig!(
+                    "(Ljava/lang/String;Ljava/lang/String;ZZLjava/lang/String;Ljava/lang/String;)Z"
+                ),
                 &[
                     JValue::Object(&title),
                     JValue::Object(&html),
                     JValue::Bool(dark),
                     JValue::Bool(source),
                     JValue::Object(&poster),
+                    JValue::Object(&site),
                 ],
             )?
             .z()

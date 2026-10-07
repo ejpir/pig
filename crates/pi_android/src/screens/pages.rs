@@ -10,6 +10,7 @@ use crate::{
 use gpui::{Context, Div, ElementId, FontWeight, ObjectFit, div, img, prelude::*, px, rgb, rgba};
 use pi_markdown::Page;
 use std::{
+    collections::BTreeMap,
     hash::{Hash, Hasher},
     path::PathBuf,
 };
@@ -336,18 +337,82 @@ impl PhoneApp {
     }
 
     fn open_page(&mut self, page: &Page, source: bool, cx: &mut Context<Self>) {
-        let Some(html) = &page.html else {
+        let Some(html) = page.html.clone() else {
             self.notify_user(
                 "Pi changed this page in a way the phone can't follow. Ask Pi to write it again.",
                 cx,
             );
             return;
         };
+        let pages = self.site(page);
+        let id = match self.route() {
+            crate::app::Route::Thread(id) => Some(id),
+            _ => None,
+        };
+        let live = self.store.as_ref().and_then(|store| {
+            let live = store.live.as_ref()?;
+            let cwd = live.session_cwd(id?)?;
+            Some((
+                live.connection.clone(),
+                live.helper.clone(),
+                store.computer.address.clone(),
+                cwd.trim_end_matches('/').to_owned(),
+            ))
+        });
+        let page = page.clone();
+        let Some((connection, helper, host, cwd)) = live else {
+            self.show_page(&page, &html, source, &pages, cx);
+            return;
+        };
+        // Pages it links to that Pi wrote some other way, as with a shell
+        // command, come from the computer.
+        let base = if page.path.starts_with('/') {
+            "/".to_owned()
+        } else {
+            format!("{cwd}/")
+        };
+        cx.spawn(async move |this, cx| {
+            let pages = linked_pages(pages, key(&page.path), |path| {
+                let full = format!("{base}{path}");
+                let (connection, helper, host) = (connection.clone(), helper.clone(), host.clone());
+                async move {
+                    let (folder, name) = full.rsplit_once('/')?;
+                    let folder = if folder.is_empty() { "/" } else { folder };
+                    crate::remote::read_file(&connection, &helper, &host, folder, name)
+                        .await
+                        .ok()
+                }
+            })
+            .await;
+            this.update(cx, |this, cx| {
+                this.show_page(&page, &html, source, &pages, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn show_page(
+        &mut self,
+        page: &Page,
+        html: &str,
+        source: bool,
+        pages: &BTreeMap<String, String>,
+        cx: &mut Context<Self>,
+    ) {
         let poster = self
             .poster_path(page)
             .map(|path| path.display().to_string())
             .unwrap_or_default();
-        if gpui_android::activity::show_page(&page.title(), html, theme(cx).dark, source, &poster) {
+        let site = serde_json::json!({"path": key(&page.path), "pages": pages}).to_string();
+        if gpui_android::activity::show_page(
+            &page.title(),
+            html,
+            theme(cx).dark,
+            source,
+            &poster,
+            &site,
+        ) {
             return;
         }
         if cfg!(target_os = "android") {
@@ -363,6 +428,123 @@ impl PhoneApp {
             Err(error) => self.notify_user(format!("The page could not be saved: {error}"), cx),
         }
     }
+
+    /// The page and every other page Pi wrote in the open session, as each
+    /// was last left, by [`key`].
+    fn site(&self, page: &Page) -> BTreeMap<String, String> {
+        let session = match self.route() {
+            crate::app::Route::Thread(id) => {
+                self.store.as_ref().and_then(|store| store.session(id))
+            }
+            _ => None,
+        };
+        site(
+            session
+                .into_iter()
+                .flat_map(|session| &session.turns)
+                .flat_map(|turn| &turn.pages)
+                .chain([page]),
+        )
+    }
+}
+
+/// How many pages a page's links may bring from the computer.
+const LINKED: usize = 24;
+
+/// A page's path as the viewer looks it up: without a leading slash.
+fn key(path: &str) -> String {
+    path.trim_start_matches('/').to_owned()
+}
+
+/// Pages by [`key`]; later ones replace earlier ones at a path.
+fn site<'a>(pages: impl IntoIterator<Item = &'a Page>) -> BTreeMap<String, String> {
+    pages
+        .into_iter()
+        .filter_map(|page| Some((key(&page.path), page.html.clone()?)))
+        .collect()
+}
+
+/// `pages`, with the pages their links reach from `start`, read with `read`
+/// by key; at most [`LINKED`] more.
+async fn linked_pages<F, R>(
+    mut pages: BTreeMap<String, String>,
+    start: String,
+    read: F,
+) -> BTreeMap<String, String>
+where
+    F: Fn(String) -> R,
+    R: std::future::Future<Output = Option<String>>,
+{
+    let mut seen = std::collections::HashSet::from([start.clone()]);
+    let mut queue = vec![start];
+    let mut read_count = 0;
+    while let Some(from) = queue.pop() {
+        let Some(html) = pages.get(&from).cloned() else {
+            continue;
+        };
+        for link in page_links(&html) {
+            let Some(path) = resolve(&from, &link) else {
+                continue;
+            };
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            if !pages.contains_key(&path) {
+                if read_count == LINKED {
+                    return pages;
+                }
+                read_count += 1;
+                let Some(text) = read(path.clone()).await else {
+                    continue;
+                };
+                pages.insert(path.clone(), text);
+            }
+            queue.push(path);
+        }
+    }
+    pages
+}
+
+/// Where a page's links lead to other pages beside it: `href`s with no
+/// scheme or host, ending in `.html`, without their query or fragment.
+fn page_links(html: &str) -> Vec<String> {
+    let mut links = Vec::new();
+    let mut rest = html;
+    while let Some(at) = rest.find("href=") {
+        rest = &rest[at + 5..];
+        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            continue;
+        };
+        let Some(end) = rest[1..].find(quote) else {
+            break;
+        };
+        let link = &rest[1..1 + end];
+        let link = link.split(['#', '?']).next().unwrap_or("");
+        let lower = link.to_ascii_lowercase();
+        if (lower.ends_with(".html") || lower.ends_with(".htm"))
+            && !link.contains(':')
+            && !link.starts_with('/')
+        {
+            links.push(link.to_owned());
+        }
+    }
+    links
+}
+
+/// `link` from the page at `from`, as a key; `None` above the top.
+fn resolve(from: &str, link: &str) -> Option<String> {
+    let mut parts: Vec<&str> = from.split('/').collect();
+    parts.pop();
+    for part in link.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
 }
 
 /// "2.1 KB", as a file's size reads.
@@ -376,3 +558,84 @@ fn size_label(bytes: usize) -> String {
 
 /// A decoded tool image and its width over its height.
 pub(crate) type ShownImage = pi_markdown::Decoded;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_page_opens_with_the_pages_its_links_reach() {
+        let page = |path: &str, html: &str| Page {
+            path: path.into(),
+            html: Some(html.into()),
+        };
+        let lost = Page {
+            path: "demo/lost.html".into(),
+            html: None,
+        };
+        let pages = site([
+            &page("demo/index.html", "old"),
+            &page("/home/me/orbit.html", "orbit"),
+            &lost,
+            &page("demo/index.html", "new"),
+        ]);
+        assert_eq!(
+            pages.into_iter().collect::<Vec<_>>(),
+            [
+                ("demo/index.html".to_owned(), "new".to_owned()),
+                ("home/me/orbit.html".to_owned(), "orbit".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn links_between_pages_resolve_beside_the_page() {
+        let html = r##"<a href="neon-orbit.html">a</a> <a href='games/drive.html#top'>b</a>
+            <a href="https://example.com/x.html">c</a> <a href="#top">d</a> <a href="/abs.html">e</a>
+            <a href="../up.htm?x=1">f</a> <link href="style.css">"##;
+        assert_eq!(
+            page_links(html),
+            ["neon-orbit.html", "games/drive.html", "../up.htm"]
+        );
+        assert_eq!(
+            resolve("demo/index.html", "a.html").as_deref(),
+            Some("demo/a.html")
+        );
+        assert_eq!(
+            resolve("demo/index.html", "../a.html").as_deref(),
+            Some("a.html")
+        );
+        assert_eq!(resolve("index.html", "../a.html"), None);
+    }
+
+    #[test]
+    fn linked_pages_come_from_the_computer_once() {
+        let pages = site([&Page {
+            path: "index.html".into(),
+            html: Some(
+                r#"<a href="a.html"></a><a href="b.html"></a><a href="gone.html"></a>"#.into(),
+            ),
+        }]);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let found = runtime.block_on(linked_pages(pages, "index.html".into(), |path| {
+            asked.borrow_mut().push(path.clone());
+            async move {
+                match path.as_str() {
+                    "a.html" => {
+                        Some(r#"<a href="index.html"></a><a href="b.html"></a>"#.to_owned())
+                    }
+                    "b.html" => Some(String::from("b")),
+                    _ => None,
+                }
+            }
+        }));
+        assert_eq!(
+            found.keys().collect::<Vec<_>>(),
+            ["a.html", "b.html", "index.html"]
+        );
+        assert_eq!(asked.into_inner(), ["a.html", "b.html", "gone.html"]);
+    }
+}

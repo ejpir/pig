@@ -46,6 +46,20 @@ public final class PageActivity extends Activity {
     public static final String SOURCE = "source";
     /** Where to save a picture of the page, for its card in the thread. */
     public static final String POSTER = "poster";
+    /** A saved JSON file: the page's path, and the pages its links may open, by path. */
+    public static final String SITE = "site";
+    /**
+     * Where the pages seem to be, so their relative links resolve to paths
+     * this viewer looks up. A reserved name: nothing is ever fetched from it.
+     */
+    private static final String ORIGIN = "https://pi-page.invalid/";
+
+    /** The pages links may open, by path, and the one showing. */
+    private final java.util.Map<String, String> pages = new java.util.HashMap<>();
+    private String current;
+    private String currentHtml;
+    private WebView preview;
+    private TextView source;
 
     public static File save(Context context, String html) throws IOException {
         File directory = new File(context.getCacheDir(), "pi-pages");
@@ -75,6 +89,8 @@ public final class PageActivity extends Activity {
         getWindow().setNavigationBarColor(canvas);
 
         String html = readAndDelete(getIntent().getStringExtra(PATH));
+        String start = readSite(readAndDelete(getIntent().getStringExtra(SITE)));
+        currentHtml = html;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(canvas);
@@ -89,7 +105,7 @@ public final class PageActivity extends Activity {
                 });
 
         FrameLayout content = new FrameLayout(this);
-        WebView preview = new WebView(this);
+        preview = new WebView(this);
         preview.setBackgroundColor(Color.WHITE);
         // Pages are interactive, but they get no Android bridge, local files,
         // content providers, persistent storage, or network. JavaScript can
@@ -127,24 +143,36 @@ public final class PageActivity extends Activity {
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                openExternal(request.getUrl());
+                follow(request.getUrl());
                 return true;
             }
 
             @Override
             @SuppressWarnings("deprecation")
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                openExternal(Uri.parse(url));
+                follow(Uri.parse(url));
                 return true;
             }
+
+            @Override
+            public void doUpdateVisitedHistory(WebView view, String url, boolean reload) {
+                // Back to a page shown before: its source too.
+                String path = pathOf(Uri.parse(url));
+                if (path != null && pages.containsKey(path) && !path.equals(current)) {
+                    current = path;
+                    currentHtml = pages.get(path);
+                    if (source != null) source.setText(currentHtml);
+                }
+            }
         });
-        preview.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
+        current = start;
+        load(start, html);
         content.addView(preview, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         ScrollView sourceScroll = new ScrollView(this);
         sourceScroll.setVisibility(View.GONE);
-        TextView source = label(html, 13, text);
+        source = label(html, 13, text);
         source.setTypeface(Typeface.MONOSPACE);
         source.setTextIsSelectable(true);
         source.setPadding(dp(16), dp(12), dp(16), dp(24));
@@ -181,7 +209,7 @@ public final class PageActivity extends Activity {
         TextView reload = label("↻", 22, secondary);
         reload.setGravity(Gravity.CENTER);
         reload.setContentDescription("Reload");
-        reload.setOnClickListener(view -> preview.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null));
+        reload.setOnClickListener(view -> preview.reload());
         bar.addView(reload, new LinearLayout.LayoutParams(dp(48), dp(48)));
         root.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)));
 
@@ -213,6 +241,73 @@ public final class PageActivity extends Activity {
         if (getIntent().getBooleanExtra(SOURCE, false)) {
             sourceTab.performClick();
         }
+    }
+
+    /** Shows a page at its path, so its relative links resolve beside it. */
+    private void load(String path, String html) {
+        String url = path == null ? null : ORIGIN + Uri.encode(path, "/");
+        preview.loadDataWithBaseURL(url, html, "text/html", "UTF-8", url);
+    }
+
+    /** A link to another page Pi wrote opens it here; anything else leaves for the browser. */
+    private void follow(Uri uri) {
+        String path = pathOf(uri);
+        if (path == null) {
+            openExternal(uri);
+            return;
+        }
+        String html = pages.get(path);
+        if (html == null) {
+            android.widget.Toast.makeText(
+                            this,
+                            "Pi didn't write " + Uri.parse(path).getLastPathSegment() + " in this session",
+                            android.widget.Toast.LENGTH_SHORT)
+                    .show();
+            return;
+        }
+        current = path;
+        currentHtml = html;
+        source.setText(html);
+        load(path, html);
+    }
+
+    /** The path of a link between pages, without its query or fragment; null for any other link. */
+    private static String pathOf(Uri uri) {
+        if (uri == null || !"https".equals(uri.getScheme()) || !"pi-page.invalid".equals(uri.getHost())) return null;
+        String path = uri.getPath();
+        if (path == null) return null;
+        while (path.startsWith("/")) path = path.substring(1);
+        return path;
+    }
+
+    /** Reads the pages links may open; returns the shown page's path. */
+    private String readSite(String json) {
+        try {
+            org.json.JSONObject site = new org.json.JSONObject(json);
+            org.json.JSONObject all = site.optJSONObject("pages");
+            if (all != null) {
+                java.util.Iterator<String> keys = all.keys();
+                while (keys.hasNext()) {
+                    String key = keys.next();
+                    pages.put(key, all.getString(key));
+                }
+            }
+            String path = site.optString("path", "");
+            return path.isEmpty() ? null : path;
+        } catch (org.json.JSONException error) {
+            return null;
+        }
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        // Back goes back through the pages a link opened, then closes.
+        if (preview != null && preview.getVisibility() == View.VISIBLE && preview.canGoBack()) {
+            preview.goBack();
+            return;
+        }
+        super.onBackPressed();
     }
 
     /** The page as it shows, at half size; its card shows the middle of it. */

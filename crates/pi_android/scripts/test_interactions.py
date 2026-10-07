@@ -282,6 +282,10 @@ def gboard_typing(phone):
     phone.wait(lambda s: s["draft_chars"] == 4, "Gboard deletion re-enters the previous word without duplicating it")
     touch("o")
     phone.wait(lambda s: s["draft_chars"] == 5, "Gboard resumes editing the composing word")
+    # Autocorrect replaces a word as space is pressed, not with the next key.
+    for letter in " wrld ":
+        touch(letter)
+    phone.wait(lambda s: s["draft_chars"] == 12, "Gboard's autocorrect (wrld to world) arrives with the space")
     phone.capture("gboard-hello")
     phone.key("KEYCODE_BACK")
     phone.wait_keyboard(False)
@@ -292,7 +296,7 @@ def gboard_typing(phone):
     phone.settled_state()
     for letter in "sonnet":
         touch(letter)
-    phone.wait(lambda s: s["model_search_chars"] == 6 and s["draft_chars"] == 5,
+    phone.wait(lambda s: s["model_search_chars"] == 6 and s["draft_chars"] == 12,
                "new search input cannot inherit the previous field's composing word")
     phone.capture("gboard-search")
     phone.fixture("start")
