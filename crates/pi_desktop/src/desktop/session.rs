@@ -156,6 +156,11 @@ pub struct SessionController {
     submissions: HashMap<String, String>,
     /// The images sent with a pending submission, by request id.
     submitted_images: HashMap<String, Vec<ImageContent>>,
+    /// Tool images a durable session keeps on its computer, by image id:
+    /// `None` while on the way.
+    fetched_images: HashMap<String, Option<Result<pi_markdown::Decoded, String>>>,
+    /// Image ids by the id of the `get_image` request asking for them.
+    image_requests: HashMap<String, String>,
     clear_request: Option<(String, bool)>,
     connected: bool,
     expected_resume_id: Option<String>,
@@ -416,6 +421,8 @@ impl SessionController {
             bootstrap_failed: false,
             submissions: HashMap::new(),
             submitted_images: HashMap::new(),
+            fetched_images: HashMap::new(),
+            image_requests: HashMap::new(),
             clear_request: None,
             expected_resume_id: saved.map(|s| s.id),
             initial_model: None,
@@ -1040,6 +1047,7 @@ impl SessionController {
                     | Command::GetAvailableThinkingLevels
                     | Command::GetCommands
                     | Command::GetBackendInfo
+                    | Command::GetImage { .. }
                     | Command::GetCustomEntries { .. }
                     | Command::GetAuthProviders
                     | Command::GetProjectTrust
@@ -1993,6 +2001,23 @@ impl SessionController {
                     self.bootstrap_failed = true;
                 }
                 let response = record["type"] == "response";
+                if response && let Some(image) = self.image_requests.remove(&id) {
+                    let fetched = if record["success"] == true {
+                        let image = &record["data"]["image"];
+                        pi_markdown::decode_base64(
+                            image["mimeType"].as_str().unwrap_or("image/png"),
+                            image["data"].as_str().unwrap_or(""),
+                        )
+                        .map_err(|_| "The computer sent an image that could not be read.".into())
+                    } else {
+                        Err(record["error"]
+                            .as_str()
+                            .unwrap_or("The computer could not send this image.")
+                            .to_owned())
+                    };
+                    self.fetched_images.insert(image, Some(fetched));
+                    changes |= Changes::METADATA;
+                }
                 if response {
                     self.diagnostics.push(
                         "response",
@@ -2400,9 +2425,54 @@ impl SessionController {
         }
         if let Some(content) = content {
             cx.emit(SessionEvent::Content(content));
+            self.fetch_images(cx);
         }
         self.publish(changes, cx);
         self.send_pending_prompt(cx);
+    }
+
+    /// A tool image the session left on its computer: `None` until asked
+    /// for, `Some(None)` while on the way.
+    pub fn fetched_image(&self, id: &str) -> Option<Option<&Result<pi_markdown::Decoded, String>>> {
+        self.fetched_images.get(id).map(Option::as_ref)
+    }
+
+    /// As if `request` had asked for image `image`; the demo has no computer to ask.
+    #[cfg(test)]
+    pub(super) fn awaiting_image(&mut self, request: &str, image: &str) {
+        self.fetched_images.insert(image.into(), None);
+        self.image_requests.insert(request.into(), image.into());
+    }
+
+    /// Asks once for each image a tool returned that the session left out.
+    fn fetch_images(&mut self, cx: &mut Context<Self>) {
+        if self.client.is_none() {
+            return;
+        }
+        let wanted: Vec<String> = self
+            .model
+            .tools
+            .iter()
+            .flat_map(|tool| &tool.images)
+            .filter(|image| image["data"].as_str().is_none_or(str::is_empty))
+            .filter_map(|image| image["imageId"].as_str())
+            .filter(|id| !self.fetched_images.contains_key(*id))
+            .map(str::to_owned)
+            .collect();
+        for image in wanted {
+            self.fetched_images.insert(image.clone(), None);
+            if let Some(request) = self.command(
+                Command::GetImage {
+                    image_id: image.clone(),
+                },
+                cx,
+            ) {
+                self.image_requests.insert(request, image);
+            } else {
+                self.fetched_images
+                    .insert(image, Some(Err("The image could not be asked for.".into())));
+            }
+        }
     }
 
     /// Attaches a jj project with a turn already begun, as `submit` would for a

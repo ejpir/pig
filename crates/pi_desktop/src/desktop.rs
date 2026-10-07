@@ -756,6 +756,7 @@ mod menus;
 mod new_session;
 mod panels;
 mod parallel;
+mod poster;
 mod prompts;
 mod session;
 mod session_view;

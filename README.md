@@ -14,7 +14,7 @@ A native desktop app for the [pi](https://github.com/earendil-works/pi) coding a
 </table>
 
 - **Sessions and projects** in a sidebar, with search, forks and worktrees.
-- **Thread** with readable Markdown, collapsible tools, and a composer with `/` commands, `@` mentions and attachments.
+- **Thread** with readable Markdown and Mermaid, the screenshots and HTML pages Pi made, collapsible tools, and a composer with `/` commands, `@` mentions and attachments.
 - **Changes** as split or unified diffs; each run that edits files can become a jj change you can undo.
 - **Files, terminal, language servers, models and settings** in the same window.
 - **Remote sessions over SSH** that keep running when you disconnect ([docs/remote.md](docs/remote.md)).

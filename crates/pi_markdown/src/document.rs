@@ -51,6 +51,8 @@ impl Block {
 /// toolkit. Embedded data images are decoded here; network-backed images stay
 /// as accessible alt text and never cause an implicit request from a reply.
 pub fn blocks(source: &str) -> Vec<Block> {
+    let source = crate::embed_svg(source);
+    let source = source.as_ref();
     let mut result = Vec::new();
     let mut block = Block::default();
     let mut style = Span::default();

@@ -1,0 +1,114 @@
+{
+ "type": "response",
+ "command": "get_messages",
+ "success": true,
+ "data": {
+  "messages": [
+   {
+    "role": "user",
+    "content": "Show me every kind of picture",
+    "timestamp": 1760000000000
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "toolCall",
+      "id": "shot",
+      "name": "read",
+      "arguments": {
+       "path": "/repo/sample/shot.png"
+      }
+     },
+     {
+      "type": "toolCall",
+      "id": "page",
+      "name": "write",
+      "arguments": {
+       "path": "/repo/sample/page.html",
+       "content": "<!doctype html><html><head><title>Sample page</title><style>body{margin:0;font-family:-apple-system,system-ui,sans-serif;background:#f4f1ec;color:#1d2430}header{padding:56px 64px;background:linear-gradient(120deg,#253d50,#6b4f9a);color:#fff}h1{margin:0;font-size:56px}main{display:flex;gap:24px;padding:40px 64px}section{flex:1;height:140px;border-radius:16px;background:#fff;box-shadow:0 2px 8px #0002}</style></head><body><header><h1>Sample page</h1><p>blue</p></header><main><section></section><section></section><section></section></main><script>document.querySelector(\"h1\").textContent += \" \u00b7 drawn\"</script></body></html>"
+      }
+     }
+    ],
+    "stopReason": "toolUse",
+    "timestamp": 1760000001000
+   },
+   {
+    "role": "toolResult",
+    "toolCallId": "shot",
+    "toolName": "read",
+    "content": [
+     {
+      "type": "text",
+      "text": "Read image file [image/png]"
+     },
+     {
+      "type": "image",
+      "data": "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",
+      "mimeType": "image/png"
+     }
+    ],
+    "isError": false,
+    "timestamp": 1760000002000
+   },
+   {
+    "role": "toolResult",
+    "toolCallId": "page",
+    "toolName": "write",
+    "content": [
+     {
+      "type": "text",
+      "text": "Wrote sample/page.html"
+     }
+    ],
+    "isError": false,
+    "timestamp": 1760000002000
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "toolCall",
+      "id": "tweak",
+      "name": "edit",
+      "arguments": {
+       "path": "/repo/sample/page.html",
+       "edits": [
+        {
+         "oldText": "blue",
+         "newText": "green"
+        }
+       ]
+      }
+     }
+    ],
+    "stopReason": "toolUse",
+    "timestamp": 1760000003000
+   },
+   {
+    "role": "toolResult",
+    "toolCallId": "tweak",
+    "toolName": "edit",
+    "content": [
+     {
+      "type": "text",
+      "text": "Edited sample/page.html"
+     }
+    ],
+    "isError": false,
+    "timestamp": 1760000004000
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "Here is everything Pi can show.\n\n![Inline SVG](data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjAiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCAxMjAgNDAiPjxyZWN0IHdpZHRoPSIxMjAiIGhlaWdodD0iNDAiIHJ4PSI4IiBmaWxsPSIjMjUzZDUwIi8+PGNpcmNsZSBjeD0iMjAiIGN5PSIyMCIgcj0iMTAiIGZpbGw9IiM4MGJmOTUiLz48L3N2Zz4=)\n\n![Inline PNG](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHAAAAAwCAIAAABG2mlwAAAAc0lEQVR42u3RwQkAIAwEwdRpTRZmQ4rP9CAhDxnYBm4u9rkqLBAABQpUQIECFVCgQEsac5UEFChQoECBAgUKFChQoECBAu0ZDBQoUKBAgQIFChToj6CdhwEFChQoUKBAgQIFChQoUKBAgQIFChQoUKBPoAlPrlqOblhBdgAAAABJRU5ErkJggg==)\n\n```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"40\" viewBox=\"0 0 120 40\"><rect width=\"120\" height=\"40\" rx=\"8\" fill=\"#5a8cc8\"/><path d=\"M16 28l14-14 12 10 18-16\" stroke=\"#fff\" stroke-width=\"3\" fill=\"none\"/></svg>\n```\n\n<svg width=\"120\" height=\"40\" viewBox=\"0 0 120 40\"><rect width=\"120\" height=\"40\" rx=\"20\" fill=\"#c87a3c\"/><circle cx=\"100\" cy=\"20\" r=\"10\" fill=\"#fff\"/></svg>\n\n```mermaid\ngraph LR\n  Prompt --> Work\n  Work --> Review\n```\n\nThe page is in `sample/page.html`."
+     }
+    ],
+    "stopReason": "stop",
+    "timestamp": 1760000005000
+   }
+  ]
+ }
+}

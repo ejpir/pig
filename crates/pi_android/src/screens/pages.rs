@@ -4,11 +4,11 @@
 use crate::{
     app::PhoneApp,
     model::{SessionId, ToolImage, Turn},
-    pages::Page,
     theme::{Theme, theme},
     ui::{self, Button, icon},
 };
 use gpui::{Context, Div, ElementId, FontWeight, ObjectFit, div, img, prelude::*, px, rgb, rgba};
+use pi_markdown::Page;
 use std::{
     hash::{Hash, Hasher},
     path::PathBuf,
@@ -55,6 +55,7 @@ impl PhoneApp {
                 let (opened, source) = (page.clone(), page.clone());
                 let picture = div()
                     .id(ElementId::Name(format!("page-poster-{index}-{n}").into()))
+                    .debug_selector(|| format!("page-poster-{index}-{n}"))
                     .relative()
                     .h(px(POSTER))
                     .overflow_hidden()
@@ -235,6 +236,7 @@ impl PhoneApp {
                     .id(ElementId::Name(format!("tool-image-{index}-{n}").into()))
                     .relative()
                     .child(crate::testing::probe(format!("tool-image-{index}-{n}")))
+                    .debug_selector(|| format!("tool-image-{index}-{n}"))
                     .child(picture)
                     .child(
                         div()
@@ -273,34 +275,23 @@ impl PhoneApp {
         if let Some(shown) = self.tool_images.borrow().get(&image.key) {
             return Ok(Some(shown.clone()));
         }
-        let (mime, bytes) = match &image.inline {
-            Some(data) => {
-                use base64::Engine as _;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .map_err(|_| "This image could not be read.".to_owned())?;
-                (image.mime.clone(), bytes)
-            }
+        let decoded = match &image.inline {
+            Some(data) => pi_markdown::decode_base64(&image.mime, data),
             None => {
                 let live = self.store.as_ref().and_then(|store| store.live.as_ref());
                 match live.and_then(|live| live.image(id, &image.key)) {
                     None => return Ok(None),
                     Some(Err(error)) => return Err(error.clone()),
-                    Some(Ok(fetched)) => (fetched.mime.clone(), fetched.bytes.to_vec()),
+                    Some(Ok(fetched)) => pi_markdown::decode(&fetched.mime, fetched.bytes.to_vec()),
                 }
             }
         };
-        let format = gpui::ImageFormat::from_mime_type(&mime)
-            .ok_or_else(|| format!("The phone can't show {mime} images."))?;
-        let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
-            .with_guessed_format()
-            .ok()
-            .and_then(|reader| reader.into_dimensions().ok())
-            .ok_or_else(|| "This image could not be read.".to_owned())?;
-        let shown = ShownImage {
-            image: std::sync::Arc::new(gpui::Image::from_bytes(format, bytes)),
-            ratio: width.max(1) as f32 / height.max(1) as f32,
-        };
+        let shown = decoded.map_err(|error| match error {
+            pi_markdown::DecodeError::Unsupported(mime) => {
+                format!("The phone can't show {mime} images.")
+            }
+            pi_markdown::DecodeError::Unreadable => "This image could not be read.".to_owned(),
+        })?;
         self.tool_images
             .borrow_mut()
             .insert(image.key.clone(), shown.clone());
@@ -384,8 +375,4 @@ fn size_label(bytes: usize) -> String {
 }
 
 /// A decoded tool image and its width over its height.
-#[derive(Clone)]
-pub(crate) struct ShownImage {
-    pub image: std::sync::Arc<gpui::Image>,
-    pub ratio: f32,
-}
+pub(crate) type ShownImage = pi_markdown::Decoded;

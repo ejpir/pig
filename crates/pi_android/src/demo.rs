@@ -860,7 +860,7 @@ fn aurora(id: SessionId) -> Session {
         stage(Verify, Skipped, "Nothing to check"),
         stage(HandOff, Done, "Summary and a page"),
     ];
-    turn.pages = vec![crate::pages::Page {
+    turn.pages = vec![pi_markdown::Page {
         path: "demo/aurora.html".into(),
         html: Some(include_str!("../assets/samples/aurora.html").into()),
     }];

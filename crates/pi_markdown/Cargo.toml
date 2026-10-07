@@ -3,16 +3,20 @@ name = "pi_markdown"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared Pi Desktop and Android Markdown rendering and syntax highlighting."
+description = "Shared Pi Desktop and Android Markdown, media and syntax highlighting."
 
 [dependencies]
 base64 = "0.22"
 gpui.workspace = true
 grammars.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 mermaid_render.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false }
+serde_json.workspace = true
 streaming-iterator.workspace = true
 tree-sitter.workspace = true
+# Zed's version: checks raw SVG in a reply the way gpui will draw it.
+usvg = { version = "0.46.0", default-features = false }
 # Embed Zed's grammar queries in debug builds as well as release/APK builds.
 util.workspace = true
 

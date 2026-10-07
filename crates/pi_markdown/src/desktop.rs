@@ -263,6 +263,11 @@ impl Documents {
             let (source, plain) = match source {
                 Source::Markdown(source) => {
                     self.code.remove(&key);
+                    // Zed's Markdown draws only base64 `data:` images.
+                    let source = match crate::embed_svg(&source) {
+                        Cow::Borrowed(_) => source,
+                        Cow::Owned(embedded) => Cow::Owned(embedded),
+                    };
                     (source, false)
                 }
                 Source::Text(source) => {

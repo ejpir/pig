@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 mod catalog_tests;
 #[path = "desktop/lifecycle_tests.rs"]
 mod lifecycle_tests;
+#[path = "desktop/media_tests.rs"]
+mod media_tests;
 #[path = "desktop/projects_shell_tests.rs"]
 mod projects_shell_tests;
 #[path = "desktop/readability_tests.rs"]

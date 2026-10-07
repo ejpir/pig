@@ -56,6 +56,8 @@ const ICONS: &[(&str, &[u8])] = icons![
     list_collapse,
     shield,
     send,
+    image,
+    open,
 ];
 
 impl AssetSource for Assets {

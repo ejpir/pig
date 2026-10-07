@@ -262,7 +262,7 @@ impl Turn {
     }
 
     /// Notes a page that was written or changed: shown once, where it last changed.
-    pub fn show_page(&mut self, page: crate::pages::Page) {
+    pub fn show_page(&mut self, page: pi_markdown::Page) {
         let n = match self.pages.iter().position(|shown| shown.path == page.path) {
             Some(n) => {
                 self.pages[n] = page;
@@ -278,17 +278,7 @@ impl Turn {
     }
 }
 
-/// An image a tool returned. A durable session keeps the bytes on the
-/// computer and sends `key`, its id there; others send them inline.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ToolImage {
-    pub key: String,
-    /// The file it came from, when the tool read one: "shot.png".
-    pub name: String,
-    pub mime: String,
-    /// Base64, when the session sent the bytes.
-    pub inline: Option<String>,
-}
+pub use pi_markdown::ToolImage;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Turn {
@@ -300,7 +290,7 @@ pub struct Turn {
     pub stages: Vec<Stage>,
     pub summary: Option<Summary>,
     /// HTML pages Pi wrote or changed, shown as cards that open them.
-    pub pages: Vec<crate::pages::Page>,
+    pub pages: Vec<pi_markdown::Page>,
     /// Pictures Pi looked at, such as a screenshot it took and read.
     pub images: Vec<ToolImage>,
     /// What Pi said and showed, in order: words between tools, then a
@@ -514,5 +504,23 @@ mod tests {
         assert_eq!(StageKind::Change.name(StageStatus::Live), "Changing");
         assert_eq!(StageKind::Understand.name(StageStatus::Done), "Understood");
         assert_eq!(StageKind::HandOff.name(StageStatus::Planned), "Hand off");
+    }
+
+    #[test]
+    fn a_page_shows_once_per_turn() {
+        let mut turn = Turn::new("", "");
+        let page = |html: &str| pi_markdown::Page {
+            path: "a.html".into(),
+            html: Some(html.into()),
+        };
+        turn.show_page(page("one"));
+        turn.flow.push(Flow::Text("Changing it.".into()));
+        turn.show_page(page("two"));
+        assert_eq!(turn.pages, vec![page("two")]);
+        assert_eq!(
+            turn.flow,
+            [Flow::Text("Changing it.".into()), Flow::Page(0)],
+            "where it last changed"
+        );
     }
 }

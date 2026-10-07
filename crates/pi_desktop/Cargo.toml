@@ -48,8 +48,12 @@ tar = { version = "0.4.46", default-features = false }
 # The Dock icon for unbundled runs; the same bindings gpui_macos uses.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSImage", "NSResponder"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSResponder", "NSView"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData", "NSGeometry", "NSString", "NSURL", "NSError", "NSDictionary", "NSValue", "block2"] }
+# Page previews: the page drawn by the system's WebKit, as Safari would.
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["WKWebView", "WKWebViewConfiguration", "WKSnapshotConfiguration", "WKNavigation", "block2", "objc2-app-kit", "objc2-core-foundation"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["CFCGTypes"] }
+block2 = "0.6.2"
 
 # The X11 window icon; gpui takes it as an `image::RgbaImage`.
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]

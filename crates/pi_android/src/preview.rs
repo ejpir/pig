@@ -330,7 +330,7 @@ impl PhoneApp {
                         body: long_text(),
                     });
                     if name == "page" {
-                        turn.pages = vec![crate::pages::Page {
+                        turn.pages = vec![pi_markdown::Page {
                             path: "demo/aurora.html".into(),
                             html: Some(format!(
                                 "<!doctype html><html><head><title>Aurora</title></head><body style=\"font-family:sans-serif;padding:2rem\"><h1>Aurora</h1><p>A page Pi made.</p><button style=\"min-height:48px;padding:0 16px\" onclick=\"document.getElementById('js-status').textContent='JavaScript executed'\">Run interaction</button><p id=\"js-status\">Waiting for interaction</p>{}<p>End of the page</p></body></html>",
@@ -689,6 +689,87 @@ mod tests {
                     assert_eq!(app.route(), expected, "{name}");
                 });
             }
+        }
+    }
+
+    /// The shared sample (`pi_markdown::sample`), as a session from the
+    /// computer: each kind of picture and page in it shows on the phone.
+    #[gpui::test]
+    fn the_shared_sample_shows_every_picture_and_page(cx: &mut TestAppContext) {
+        use pi_markdown::sample::{self, Item};
+        let mut pi = pi_core::session::Session::new(sample::CWD.into());
+        pi.apply(&sample::record()).unwrap();
+        let mut session = crate::projection::project(
+            &pi,
+            crate::projection::Facts {
+                id: QWEN,
+                cwd: sample::CWD,
+                folder: "~/repo".into(),
+                question: None,
+                outbox: &[],
+                key: "0123456789abcdef0123456789abcdef",
+            },
+        );
+        let turn = session.turns.last().unwrap();
+        assert_eq!(turn.images[0].name, sample::TOOL_IMAGE_NAME);
+        assert_eq!(turn.pages[0].path, sample::PAGE_PATH);
+        assert!(
+            turn.pages[0]
+                .html
+                .as_deref()
+                .unwrap()
+                .contains(sample::PAGE_BODY)
+        );
+        let reply = pi_markdown::blocks(turn.summary.as_ref().unwrap().source.as_deref().unwrap());
+        let image = |format| {
+            reply.iter().position(|block| {
+                matches!(&block.media, Some(pi_markdown::Media::Image(image)) if image.format == format)
+            })
+        };
+        let selectors = |item| match item {
+            Item::InlineSvg | Item::SvgBlock | Item::SvgMarkup => {
+                let svgs: Vec<usize> = reply
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, block)| {
+                        matches!(&block.media, Some(pi_markdown::Media::Image(image)) if image.format == gpui::ImageFormat::Svg)
+                    })
+                    .map(|(index, _)| index)
+                    .collect();
+                format!("markdown-image-{}", svgs[sample::svg_order(item).unwrap()])
+            }
+            Item::InlinePng => format!("markdown-image-{}", image(gpui::ImageFormat::Png).unwrap()),
+            Item::Mermaid => format!(
+                "markdown-mermaid-{}",
+                reply
+                    .iter()
+                    .position(|block| matches!(block.media, Some(pi_markdown::Media::Mermaid(_))))
+                    .unwrap()
+            ),
+            Item::ToolImage => "tool-image-0-0".into(),
+            Item::Page => "page-poster-0-0".into(),
+        };
+
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("done", window, cx)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let store = app.store.as_mut().unwrap();
+                let shown = store.sessions.iter_mut().find(|s| s.id == QWEN).unwrap();
+                session.title = shown.title.clone();
+                *shown = session;
+                app.show_session(QWEN, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        for item in sample::ITEMS {
+            // `debug_bounds` takes a static name.
+            let selector: &'static str = selectors(item).leak();
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "{item:?} ({selector}) is not shown"
+            );
         }
     }
 

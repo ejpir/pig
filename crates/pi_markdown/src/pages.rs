@@ -1,7 +1,7 @@
-//! Pages Pi made: an HTML file it wrote, shown as a card under the turn and
-//! opened full screen in a web view. The phone has the page from Pi's own tool
-//! calls, without asking the computer: a `write` carries the whole file, and an
-//! `edit` is applied to the last version the phone saw.
+//! Pages Pi made: an HTML file it wrote, shown as a card under the turn. The
+//! app has the page from Pi's own tool calls, without reading the file: a
+//! `write` carries the whole file, and an `edit` is applied to the last
+//! version the app saw. That works the same for a session on another computer.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -11,7 +11,7 @@ pub struct Page {
     /// From the project's root: `demo/aurora.html`.
     pub path: String,
     /// The page as the turn left it; `None` once Pi changed it in a way the
-    /// phone can't follow, such as an edit that matched loosely.
+    /// app can't follow, such as an edit that matched loosely.
     pub html: Option<String>,
 }
 
@@ -34,13 +34,13 @@ pub fn is_page(path: &str) -> bool {
     path.ends_with(".html") || path.ends_with(".htm")
 }
 
-/// What the phone knows of each page so far in a session.
+/// What the app knows of each page so far in a session.
 #[derive(Default)]
 pub struct Pages(HashMap<String, Option<String>>);
 
 impl Pages {
     /// Follows a tool call that finished without an error; returns the page it
-    /// touched. A page the phone never saw written stays unknown: an edit alone
+    /// touched. A page the app never saw written stays unknown: an edit alone
     /// doesn't carry the file.
     pub fn follow(&mut self, tool: &str, args: &Value, path: &str) -> Option<Page> {
         if !is_page(path) {
@@ -176,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn edits_the_phone_cant_follow_leave_the_page_unknown() {
+    fn edits_the_app_cant_follow_leave_the_page_unknown() {
         let mut pages = Pages::default();
         // An edit to a page that was never written here is not shown.
         let edit = json!({"oldText": "a", "newText": "b"});
@@ -189,27 +189,5 @@ mod tests {
         assert_eq!(pages.follow("edit", &next, "p.html").unwrap().html, None);
         let page = pages.follow("write", &json!({"content": "<p>c</p>"}), "p.html");
         assert_eq!(page.unwrap().html.as_deref(), Some("<p>c</p>"));
-    }
-
-    #[test]
-    fn a_page_shows_once_per_turn() {
-        let mut turn = crate::model::Turn::new("", "");
-        let page = |html: &str| Page {
-            path: "a.html".into(),
-            html: Some(html.into()),
-        };
-        turn.show_page(page("one"));
-        turn.flow
-            .push(crate::model::Flow::Text("Changing it.".into()));
-        turn.show_page(page("two"));
-        assert_eq!(turn.pages, vec![page("two")]);
-        assert_eq!(
-            turn.flow,
-            [
-                crate::model::Flow::Text("Changing it.".into()),
-                crate::model::Flow::Page(0)
-            ],
-            "where it last changed"
-        );
     }
 }

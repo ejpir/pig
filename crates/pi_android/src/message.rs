@@ -21,6 +21,7 @@ pub fn render(source: &str, colors: &Theme) -> Div {
                         .id(("markdown-image", index))
                         .relative()
                         .child(crate::testing::probe(format!("markdown-image-{index}")))
+                        .debug_selector(|| format!("markdown-image-{index}"))
                         .aria_label(if text.is_empty() {
                             "Embedded image".into()
                         } else {
@@ -66,6 +67,7 @@ pub fn render(source: &str, colors: &Theme) -> Div {
                         .id(("markdown-mermaid", index))
                         .relative()
                         .child(crate::testing::probe(format!("markdown-mermaid-{index}")))
+                        .debug_selector(|| format!("markdown-mermaid-{index}"))
                         .min_w_0()
                         .rounded(px(12.))
                         .bg(colors.panel)

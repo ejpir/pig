@@ -64,6 +64,15 @@ pub fn load(model: &mut Session, saved: Option<&SavedSession>, first: bool) {
                 model.apply(&record).expect("valid workspace fixture");
             }
         }
+        if first && std::env::var_os("PI_DESKTOP_DEMO_MEDIA").is_some() {
+            // The sample both apps' tests draw: pictures, a diagram and a page.
+            model
+                .apply(&pi_markdown::sample::record())
+                .expect("valid media sample");
+            model
+                .apply(&json!({"type":"agent_settled"}))
+                .expect("settled media sample");
+        }
         if first && std::env::var_os("PI_DESKTOP_DEMO_WORKBENCH").is_some() {
             model
                 .apply(&json!({"type":"queue_update","steering":[],"followUp":[]}))

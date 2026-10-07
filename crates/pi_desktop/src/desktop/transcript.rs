@@ -1,4 +1,5 @@
 mod activity;
+mod media;
 use activity::{Activity, Block, Group};
 pub(super) use activity::{call_kinds, stages_ahead};
 use serde_json::Value;
@@ -26,6 +27,12 @@ pub struct TranscriptView {
     document_subscriptions: HashMap<SharedString, Subscription>,
     /// Images of sent messages, decoded once: by message, block and data length.
     images: HashMap<(usize, usize, usize), std::sync::Arc<gpui::Image>>,
+    /// Images tools returned, decoded once: by `ToolImage::key`.
+    tool_images: HashMap<String, Result<pi_markdown::Decoded, String>>,
+    /// The HTML page each tool call left, with its row: see `media::follow_pages`.
+    pages: HashMap<String, (usize, pi_markdown::Page)>,
+    /// Page posters, by where each is kept: see `poster`.
+    posters: HashMap<std::path::PathBuf, media::Poster>,
     /// While follow mode is open, a call opens on its stage instead of inline.
     follow: Option<Entity<super::follow::FollowView>>,
     _follow_subscription: Option<Subscription>,
@@ -90,7 +97,7 @@ impl TranscriptView {
             }
             _ => {}
         });
-        Self {
+        let mut view = Self {
             controller: controller.clone(),
             documents: Default::default(),
             list,
@@ -101,6 +108,9 @@ impl TranscriptView {
             row_keys: HashMap::new(),
             document_subscriptions: HashMap::new(),
             images: HashMap::new(),
+            tool_images: HashMap::new(),
+            pages: media::follow_pages(controller.read(cx).model()),
+            posters: HashMap::new(),
             follow: None,
             _follow_subscription: None,
             _subscription: subscription,
@@ -110,7 +120,10 @@ impl TranscriptView {
             rows_rendered: 0,
             #[cfg(test)]
             rows_synced: 0,
-        }
+        };
+        // A session opened with its history already has pages to draw.
+        view.draw_posters(cx);
+        view
     }
     pub fn set_follow(
         &mut self,
@@ -200,6 +213,15 @@ impl TranscriptView {
         }
         self.activity_choices.retain(|key, _| new.contains_key(key));
         self.activity = next;
+        // A page's card moves to where it last changed.
+        let pages = media::follow_pages(self.controller.read(cx).model());
+        for (id, (row, _)) in self.pages.iter().chain(&pages) {
+            if self.pages.get(id) != pages.get(id) {
+                rows.insert(*row);
+            }
+        }
+        self.pages = pages;
+        self.draw_posters(cx);
         for row in rows {
             self.dirty.insert(row);
             self.list.remeasure_items(row..row + 1);
@@ -1683,6 +1705,8 @@ impl TranscriptView {
                             _ => {}
                         }
                     }
+                    let controller = self.controller.read(cx);
+                    content = content.children(self.tool_media(blocks, controller, theme));
                 }
                 content = content.children(ending);
             }

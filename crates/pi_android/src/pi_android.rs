@@ -16,7 +16,6 @@ mod live;
 mod message;
 mod model;
 mod motion;
-mod pages;
 mod pairing;
 mod prefs;
 mod preview;

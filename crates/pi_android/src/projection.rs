@@ -205,7 +205,7 @@ fn kind(tool: &str) -> StageKind {
 
 fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
-    let mut pages = crate::pages::Pages::default();
+    let mut pages = pi_markdown::Pages::default();
     // The run line's stretches: the time up to each message goes to what that
     // message did, and a tool's result to the tool's stage.
     let mut clock: Option<Duration> = None;
@@ -272,7 +272,7 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                     let observed = tool(pi, id);
                     if let Some(observed) = observed {
                         let path = observed.args["path"].as_str();
-                        for image in tool_images(&observed.images, path) {
+                        for image in pi_markdown::tool_images(&observed.images, path) {
                             turn.flow.push(crate::model::Flow::Image(turn.images.len()));
                             turn.images.push(image);
                         }
@@ -300,42 +300,6 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
         }
     }
     turns
-}
-
-/// The images in a tool's result, named by the file it read.
-fn tool_images(images: &[Value], path: Option<&str>) -> Vec<crate::model::ToolImage> {
-    let count = images.len();
-    images
-        .iter()
-        .enumerate()
-        .filter_map(|(index, image)| {
-            let mime = image["mimeType"].as_str()?.to_owned();
-            let data = image["data"].as_str().filter(|data| !data.is_empty());
-            let key = match (image["imageId"].as_str(), data) {
-                (Some(id), _) => id.to_owned(),
-                (None, Some(data)) => {
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    data.hash(&mut hasher);
-                    format!("inline-{:016x}", hasher.finish())
-                }
-                (None, None) => return None,
-            };
-            let file = path
-                .map(|path| path.rsplit('/').next().unwrap_or(path).to_owned())
-                .unwrap_or_else(|| "Image".into());
-            Some(crate::model::ToolImage {
-                key,
-                name: if count > 1 {
-                    format!("{file} ({})", index + 1)
-                } else {
-                    file
-                },
-                mime,
-                inline: data.map(str::to_owned),
-            })
-        })
-        .collect()
 }
 
 fn add_tool(
