@@ -63,26 +63,56 @@ const Children = defineDoc<{ started: boolean; children: Record<string, { id: nu
   initial: () => ({ started: false, children: {} }),
 });
 
+const AGENT = "A listed agent, or a name for a new one you describe in instructions, such as \"architecture\"";
+const INSTRUCTIONS = "Who the agent is and how it works: its role, focus and output. Defines a new agent; added to a listed agent's own";
+const AGENT_TOOLS = "Tools it may use, from read, write, edit and bash; for example [\"read\", \"bash\"] for one that only looks. Default: a listed agent's, else all";
 const Task = Type.Object({
-  agent: Type.String({ description: "Name of the agent to invoke" }),
+  agent: Type.String({ description: AGENT }),
   task: Type.String({ description: "Task to delegate to the agent" }),
+  instructions: Type.Optional(Type.String({ description: INSTRUCTIONS })),
+  tools: Type.Optional(Type.Array(Type.String(), { description: AGENT_TOOLS })),
   cwd: Type.Optional(Type.String({ description: "Working directory for the agent" })),
 });
 const ChainTask = Type.Object({
-  agent: Type.String({ description: "Name of the agent to invoke" }),
+  agent: Type.String({ description: AGENT }),
   task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
+  instructions: Type.Optional(Type.String({ description: INSTRUCTIONS })),
+  tools: Type.Optional(Type.Array(Type.String(), { description: AGENT_TOOLS })),
   cwd: Type.Optional(Type.String({ description: "Working directory for the agent" })),
 });
 const Parameters = Type.Object({
-  agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (for single mode)" })),
+  agent: Type.Optional(Type.String({ description: `${AGENT} (for single mode)` })),
   task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
+  instructions: Type.Optional(Type.String({ description: `${INSTRUCTIONS} (for single mode)` })),
+  tools: Type.Optional(Type.Array(Type.String(), { description: `${AGENT_TOOLS} (for single mode)` })),
   tasks: Type.Optional(Type.Array(Task, { description: "Array of {agent, task} for parallel execution" })),
   chain: Type.Optional(Type.Array(ChainTask, { description: "Array of {agent, task} for sequential execution" })),
   agentScope: Type.Optional(Type.String({ description: 'Which agents to use: "user", "project" or "both". Default "both"; a project\'s own agents only once Pi trusts the project.' })),
   cwd: Type.Optional(Type.String({ description: "Working directory for the agent (single mode)" })),
 });
 
-type Item = { agent: string; task: string; cwd?: string };
+type Item = { agent: string; task: string; instructions?: string; tools?: string[]; cwd?: string };
+
+/** What a subagent is: a listed agent, one the call defines, or both. */
+type Definition = Pick<AgentDefinition, "name" | "prompt" | "model" | "tools">;
+
+/** Stock Pi's search tools are searches through bash in a durable session. */
+function durableTools(tools: string[]): string[] {
+  const mapped = tools.map((tool) => ["grep", "find", "ls"].includes(tool) ? "bash" : tool);
+  return [...new Set(mapped.filter((tool) => TOOLS.includes(tool)))];
+}
+
+/** A listed agent named `item.agent`, with what the call adds; or the agent the call defines. */
+export function definition(item: Item, agents: readonly AgentDefinition[]): Definition {
+  const preset = agents.find((agent) => agent.name === item.agent);
+  const tools = item.tools ?? preset?.tools;
+  return {
+    name: item.agent,
+    prompt: [preset?.prompt.trim(), item.instructions?.trim()].filter(Boolean).join("\n\n"),
+    ...(preset?.model ? { model: preset.model } : {}),
+    ...(tools ? { tools: durableTools(tools) } : {}),
+  };
+}
 
 /**
  * `harness` is read when a call runs, after the Harness opened. `resources`
@@ -94,9 +124,9 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
     tools: [defineTool({
       name: "subagent",
       description: [
-        "Delegate tasks to specialized subagents, each with a context of its own.",
+        "Delegate tasks to subagents, each working in a context of its own and answering back.",
         "Modes: single (agent + task), parallel (tasks array), chain (sequential, with a {previous} placeholder for the prior step's output).",
-        "Available agents are listed in the system prompt.",
+        "Use a listed agent, or define one: give it a short name (\"architecture\", \"code-quality\"), instructions for its role and output, and tools.",
       ].join(" "),
       parameters: Parameters,
       // A rerun after a restart finds the same children and their submissions.
@@ -105,13 +135,14 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
         const agents = resources().agents.filter((agent) =>
           args.agentScope === "user" ? agent.scope === "user" : args.agentScope === "project" ? agent.scope === "project" : true);
         const items: Item[] = args.chain?.length ? args.chain : args.tasks?.length ? args.tasks
-          : args.agent && args.task ? [{ agent: args.agent, task: args.task, cwd: args.cwd }] : [];
+          : args.agent && args.task ? [{ agent: args.agent, task: args.task, instructions: args.instructions, tools: args.tools, cwd: args.cwd }] : [];
         const modes = Number(!!args.chain?.length) + Number(!!args.tasks?.length) + Number(!!(args.agent && args.task));
-        const available = agents.map((agent) => agent.name).join(", ") || "none";
-        if (modes !== 1) return failure(`Provide exactly one mode: agent and task, tasks, or chain. Available agents: ${available}`);
+        if (modes !== 1) return failure("Provide exactly one mode: agent and task, tasks, or chain.");
         if (items.length > MAX_PARALLEL) return failure(`At most ${MAX_PARALLEL} tasks at once`);
-        const unknown = items.find((item) => !agents.some((agent) => agent.name === item.agent));
-        if (unknown) return failure(`Unknown agent "${unknown.agent}". Available agents: ${available}`);
+        const unnamed = items.find((item) => !/^[\w.-]{1,64}$/.test(item.agent));
+        if (unnamed) return failure(`Name each agent in a word or two, such as "architecture": "${unnamed.agent}" isn't one.`);
+        const toolless = items.find((item) => item.tools && !durableTools(item.tools).length);
+        if (toolless) return failure(`The ${toolless.agent} agent needs at least one of: ${TOOLS.join(", ")}`);
         const mode: SubagentDetails["mode"] = args.chain?.length ? "chain" : args.tasks?.length ? "parallel" : "single";
         const run = new Call(api, context, harness(), models, extension, mode, items, agents);
         return run.execute();
@@ -125,7 +156,7 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
         if (!agents.length) return undefined;
         return ["<available_agents>", ...agents.map((agent) =>
           `- ${agent.name}: ${agent.description}${agent.model ? ` (model: ${agent.model})` : ""}`), "</available_agents>",
-        "Use the subagent tool to hand one of these agents a self-contained task."].join("\n");
+        "The subagent tool can hand one of these a self-contained task, or an agent you define in the call."].join("\n");
       },
     }],
   });
@@ -188,8 +219,7 @@ class Call {
   async run(index: number, item: Item): Promise<SubagentResult> {
     const result = this.results[index];
     result.task = item.task;
-    const definition = this.agents.find((agent) => agent.name === item.agent)!;
-    const { id: number, startedAt, endedAt } = await this.child(index, definition, item);
+    const { id: number, startedAt, endedAt } = await this.child(index, definition(item, this.agents), item);
     const id = number as unknown as ConversationId;
     result.conversationId = String(number);
     result.startedAt = startedAt;
@@ -221,8 +251,8 @@ class Call {
     }
   }
 
-  /** The conversation that runs task `index`: created once, configured from its agent file. */
-  async child(index: number, definition: AgentDefinition, item: Item) {
+  /** The conversation that runs task `index`: created once, configured from its definition. */
+  async child(index: number, definition: Definition, item: Item) {
     const parent = await this.api.agent(this.context);
     const { model, note } = this.model(definition, parent.model);
     if (note) this.results[index].modelNote = note;
@@ -254,7 +284,7 @@ class Call {
   }
 
   /** The agent file's model when this computer has it, else the session's. */
-  model(definition: AgentDefinition, fallback: { provider: string; modelId: string } | undefined) {
+  model(definition: Definition, fallback: { provider: string; modelId: string } | undefined) {
     if (!definition.model) return { model: fallback };
     const [provider, id] = definition.model.includes("/") ? definition.model.split("/", 2) : [undefined, definition.model];
     const found = provider

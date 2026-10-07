@@ -745,3 +745,42 @@ fn stopping_one_subagent_lets_the_session_carry_on() {
     assert_eq!(bridge.response("shutdown")["success"], true);
     bridge.detach();
 }
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn pi_can_define_the_agents_it_hands_work_to() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = durable_target(directory.path());
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+    // No agent file names these: the call defines them.
+    bridge.send(
+        json!({"type":"prompt","id":"delegate","message":"delegate custom","requestId":"delegate"}),
+    );
+    assert_eq!(bridge.response("delegate")["success"], true);
+    let settled = bridge.until(|r| {
+        r["type"] == "remote_snapshot"
+            && r["data"]["run"] == "Idle"
+            && handoff(r).is_some_and(|call| call["finished"] == true)
+    });
+    let call = handoff(&settled).unwrap();
+    assert_eq!(call["is_error"], false, "{call}");
+    let results = call["details"]["results"].as_array().unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| (
+                result["agent"].as_str().unwrap(),
+                result["output"].as_str().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("architecture", "found layers"),
+            ("code-quality", "found smells")
+        ]
+    );
+    bridge.send(json!({"type":"remote_shutdown","id":"shutdown"}));
+    assert_eq!(bridge.response("shutdown")["success"], true);
+    bridge.detach();
+}

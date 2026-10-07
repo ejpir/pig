@@ -35,13 +35,18 @@ faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
   }
   const after = transcript.messages.slice(lastUser + 1);
   // Hands work to scouts: two tasks side by side, or one that runs the crash-test tool.
-  if (text === "delegate" || text === "delegate unsafe") {
+  if (text === "delegate" || text === "delegate unsafe" || text === "delegate custom") {
     const result = after.find((message) => message.role === "toolResult");
     if (!result) {
+      // "delegate custom" names agents no file defines, as a model splitting work up would.
       const args: Record<string, JsonValue> = text === "delegate"
         ? { tasks: [{ agent: "scout", task: "find alpha" }, { agent: "scout", task: "find beta" }] }
-        : { agent: "scout", task: "unsafe" };
-      return fauxAssistantMessage(fauxToolCall("subagent", args, { id: text === "delegate" ? "delegate-call" : "delegate-unsafe-call" }), { stopReason: "toolUse" });
+        : text === "delegate custom"
+          ? { tasks: [
+            { agent: "architecture", task: "find layers", instructions: "Review module boundaries.", tools: ["read", "grep"] },
+            { agent: "code-quality", task: "find smells", instructions: "Review code quality." }] }
+          : { agent: "scout", task: "unsafe" };
+      return fauxAssistantMessage(fauxToolCall("subagent", args, { id: `${text.replace(" ", "-")}-call` }), { stopReason: "toolUse" });
     }
     const said = result.role === "toolResult" ? result.content.map((block) => block.type === "text" ? block.text : "").join("") : "";
     return fauxAssistantMessage(`Delegated: ${said}`);
