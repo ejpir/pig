@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Subagents</title>
+<style>
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+  :root { --bg:#ece7e1; --card:#faf9f7; --text:#252f3d; --muted:#665f59; --line:#ddd7d0; --accent:#4b607c; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0d1116; --card:#161d27; --text:#ebe7e4; --muted:#9ca2aa; --line:#363d46; --accent:#8caecb; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Plex", "IBM Plex Sans", system-ui, sans-serif; }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 48px 24px 80px; }
+  h1 { font: italic 400 44px/1.1 Georgia, "DejaVu Serif", serif; margin: 0 0 12px; letter-spacing: -.01em; }
+  .lede { font-size: 17px; color: var(--muted); max-width: 760px; margin: 0 0 8px; }
+  .links a { color: var(--accent); margin-right: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 28px 20px; margin-top: 36px; }
+  figure { margin: 0; }
+  figure a { display: block; }
+  figure img { width: 100%; display: block; border-radius: 22px; border: 1px solid var(--line); background: var(--card); }
+  figcaption { margin-top: 10px; font-size: 14px; color: var(--muted); }
+  figcaption b { display: block; color: var(--text); font-size: 15px; }
+</style></head>
+<body>
+<div class="wrap">
+  <h1>Subagents</h1>
+  <p class="lede">Work Pi hands off to other agents: who is doing what, inside the session that started it, and what survives a restart.</p>
+  <p class="links"><a href="README.md">Notes</a><a href="overview.png">Overview PNG</a></p>
+  <div class="grid" id="grid"></div>
+</div>
+<script>
+  const screens = [
+    ["01-working", "Handed off", "Three scouts side by side under the stage that started them."],
+    ["02-subagent", "A subagent", "What Pi asked, and the subagent's own run. Read-only."],
+    ["03-done", "Done, with a chain", "Each step of the chain, and who spent what."],
+    ["04-resumed", "Picked up after a restart", "The chain carries on; a cut-off command is said plainly."],
+    ["05-home", "Home", "A session's subagents in one line, never listed on their own."],
+    ["06-agents", "Agents on the computer", "The agents Pi can hand work to, and a project's held back."],
+    ["07-evening", "Evening", "Handed off, in the dark theme."],
+  ];
+  document.getElementById("grid").innerHTML = screens.map(([file, title, note]) =>
+    `<figure><a href="screens/${file}.html"><img src="screens/${file}.png" alt="${title}" loading="lazy"></a><figcaption><b>${title}</b>${note}</figcaption></figure>`).join("");
+</script>
+</body></html>

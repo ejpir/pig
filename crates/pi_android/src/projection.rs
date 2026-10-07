@@ -236,6 +236,8 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                 }
                 turns.push(turn);
             }
+            // Time handed off isn't a stage of Pi's own.
+            Some("toolResult") if message["toolName"] == pi_core::subagent::TOOL => {}
             Some("toolResult") => {
                 let tool = message["toolName"].as_str().map_or(last_kind, kind);
                 if let Some(turn) = turns.last_mut() {
@@ -270,6 +272,17 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                     let id = block["id"].as_str().unwrap_or("");
                     let name = block["name"].as_str().unwrap_or("");
                     let observed = tool(pi, id);
+                    if name == pi_core::subagent::TOOL {
+                        let handoff = observed
+                            .and_then(pi_core::subagent::Handoff::of)
+                            .unwrap_or_else(|| {
+                                pi_core::subagent::Handoff::from_args(&block["arguments"])
+                            });
+                        turn.flow
+                            .push(crate::model::Flow::Handoff(turn.handoffs.len()));
+                        turn.handoffs.push(handoff);
+                        continue;
+                    }
                     if let Some(observed) = observed {
                         let path = observed.args["path"].as_str();
                         for image in pi_markdown::tool_images(&observed.images, path) {
@@ -411,7 +424,23 @@ fn one_line(text: &str, limit: usize) -> String {
 
 /// Marks the last turn's stages for how the session stands now.
 fn settle(turn: &mut Turn, state: State, pi: &Pi, cwd: &str) {
-    if state.is_running() {
+    if state.is_running()
+        && let Some(tool) = pi
+            .tools
+            .iter()
+            .rev()
+            .find(|tool| !tool.finished && tool.name == pi_core::subagent::TOOL)
+    {
+        // Handed off: the stage Pi was in waits on its subagents.
+        let stage = turn.stage_mut(
+            turn.stages
+                .last()
+                .map_or(StageKind::Understand, |stage| stage.kind),
+        );
+        stage.status = StageStatus::Live;
+        stage.what = doing(tool);
+        turn.stage_mut(StageKind::HandOff).status = StageStatus::Planned;
+    } else if state.is_running() {
         let running = pi.tools.iter().rev().find(|tool| !tool.finished);
         let live = running.map(|tool| kind(&tool.name)).or_else(|| {
             // Between tools, Pi is reading its results or writing.
@@ -463,8 +492,11 @@ fn settle(turn: &mut Turn, state: State, pi: &Pi, cwd: &str) {
         .sort_by_key(|stage| StageKind::ALL.iter().position(|kind| *kind == stage.kind));
 }
 
-/// What a running tool is doing: "Editing app.rs".
+/// What a running tool is doing: "Editing app.rs", "Waiting on 2 scouts".
 fn doing(tool: &Tool) -> String {
+    if let Some(handoff) = pi_core::subagent::Handoff::of(tool) {
+        return waiting_on(&handoff);
+    }
     let path = tool.args["path"].as_str().map(name);
     match (tool.name.as_str(), path) {
         ("read", Some(path)) => format!("Reading {path}"),
@@ -479,6 +511,23 @@ fn doing(tool: &Tool) -> String {
         ),
         ("ls", Some(path)) => format!("Looking in {path}"),
         (name, _) => format!("Using {name}"),
+    }
+}
+
+/// "Waiting on 2 scouts", "Waiting on the planner", "Waiting on 3 subagents".
+pub fn waiting_on(handoff: &pi_core::subagent::Handoff) -> String {
+    let busy: Vec<&str> = handoff
+        .subagents
+        .iter()
+        .filter(|subagent| !subagent.status.finished())
+        .map(|subagent| subagent.agent.as_str())
+        .collect();
+    let same = busy.windows(2).all(|pair| pair[0] == pair[1]);
+    match (busy.as_slice(), same) {
+        ([], _) => "Hearing back".into(),
+        ([agent], _) => format!("Waiting on the {agent}"),
+        ([agent, ..], true) => format!("Waiting on {} {agent}s", busy.len()),
+        (_, false) => format!("Waiting on {} subagents", busy.len()),
     }
 }
 
@@ -984,6 +1033,7 @@ mod tests {
             finished: false,
             is_error: false,
             images: Vec::new(),
+            details: Value::Null,
         };
         assert_eq!(
             tool_lines(&tool)
@@ -1241,5 +1291,53 @@ mod tests {
         assert!(is_check("npm run lint"));
         assert!(!is_check("ls -la src"));
         assert!(!is_check("grep -rn testing ."));
+    }
+
+    #[test]
+    fn work_handed_to_subagents_shows_as_a_handoff_not_a_stage() {
+        let args = json!({"tasks":[{"agent":"scout","task":"find alpha"},{"agent":"scout","task":"find beta"}]});
+        let details = json!({"version":1,"mode":"parallel","results":[
+            {"index":0,"agent":"scout","task":"find alpha","status":"done","conversationId":"3","output":"found alpha"},
+            {"index":1,"agent":"scout","task":"find beta","status":"running","conversationId":"4","now":"Reading beta.ts"}]});
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":"look around"},
+                {"role":"assistant","content":[{"type":"toolCall","id":"hand","name":"subagent","arguments":args}]}]}}),
+            json!({"type":"agent_start"}),
+            json!({"type":"tool_execution_start","toolCallId":"hand","toolName":"subagent","args":args}),
+            json!({"type":"tool_execution_update","toolCallId":"hand","toolName":"subagent","partialResult":{"content":[],"details":details}}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        let turn = &shown.turns[0];
+        assert_eq!(turn.flow, [Flow::Handoff(0)]);
+        let handoff = &turn.handoffs[0];
+        assert_eq!(handoff.subagents.len(), 2);
+        assert_eq!(handoff.subagents[1].now.as_deref(), Some("Reading beta.ts"));
+        // The call itself isn't a tool Pi ran in a stage; the stage waits on it.
+        assert!(turn.stages.iter().all(|stage| stage.tools.is_empty()));
+        assert_eq!(turn.stages[0].status, StageStatus::Live);
+        assert_eq!(turn.stages[0].what, "Waiting on the scout");
+        assert_eq!(shown.activity, "Waiting on the scout");
+    }
+
+    #[test]
+    fn a_call_without_its_details_yet_lists_what_it_was_asked() {
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+            {"role":"user","content":"plan it"},
+            {"role":"assistant","content":[{"type":"toolCall","id":"hand","name":"subagent","arguments":{"chain":[
+                {"agent":"scout","task":"look"},{"agent":"planner","task":"plan {previous}"}]}}]}]}}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        let handoff = &shown.turns[0].handoffs[0];
+        assert_eq!(handoff.mode, pi_core::subagent::Mode::Chain);
+        assert_eq!(
+            handoff
+                .subagents
+                .iter()
+                .map(|s| s.agent.as_str())
+                .collect::<Vec<_>>(),
+            ["scout", "planner"]
+        );
     }
 }

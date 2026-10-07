@@ -563,7 +563,7 @@ pub fn diff_line(line: &DiffLine, selected: bool, colors: &Theme) -> Div {
 }
 
 /// A soft ring around a live mark, in its hue.
-fn ring(hue: Hsla, spread: f32, opacity: f32) -> Vec<gpui::BoxShadow> {
+pub fn ring(hue: Hsla, spread: f32, opacity: f32) -> Vec<gpui::BoxShadow> {
     vec![gpui::BoxShadow {
         color: hue.opacity(opacity),
         offset: gpui::point(px(0.), px(0.)),

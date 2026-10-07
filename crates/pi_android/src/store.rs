@@ -53,6 +53,8 @@ pub struct Store {
     pub(crate) live: Option<Live>,
     /// When each live session last moved, for the list's order.
     recency: HashMap<SessionId, u64>,
+    /// The sample's subagents, by conversation: a live computer sends its own.
+    pub(crate) sample_subagents: HashMap<String, pi_core::session::Session>,
 }
 
 impl Store {
@@ -73,6 +75,7 @@ impl Store {
             next_id: 8,
             live: None,
             recency: HashMap::new(),
+            sample_subagents: HashMap::new(),
         }
     }
 
@@ -86,6 +89,7 @@ impl Store {
             next_id: 1,
             live: Some(live),
             recency: HashMap::new(),
+            sample_subagents: HashMap::new(),
         };
         store.refresh_projects();
         store

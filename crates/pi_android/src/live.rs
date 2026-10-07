@@ -45,6 +45,8 @@ enum Request {
     Stop,
     /// A tool's image, by its id in the durable session.
     Image(String),
+    /// A subagent's messages, by its conversation's id.
+    Subagent(String),
     /// Its failure doesn't matter: a model without thinking levels refuses one.
     Quiet,
     Other,
@@ -70,6 +72,11 @@ struct Watch {
     /// Tool images fetched from the computer, by id: absent until asked for,
     /// `None` while on the way.
     images: HashMap<String, Option<Result<ToolImageBytes, String>>>,
+    /// The subagent on screen, by its conversation's id: fetched again as
+    /// its parent reports progress, one request at a time.
+    following: Option<String>,
+    /// Subagents fetched from the computer: absent until asked for.
+    subagents: HashMap<String, Result<pi_core::session::Session, String>>,
     ended: Option<String>,
     /// When the phone began watching, in seconds since 1970.
     since: u64,
@@ -109,6 +116,8 @@ impl Watch {
             sent: HashMap::new(),
             dialogs: Vec::new(),
             images: HashMap::new(),
+            following: None,
+            subagents: HashMap::new(),
             ended: None,
             since: seconds_now(),
         }
@@ -821,6 +830,9 @@ impl Live {
             log::warn!("Skipping a record Pi's session model refused: {error:#}");
         }
         Self::fetch_images(watch);
+        if kind == "remote_snapshot" {
+            Self::fetch_subagent(watch);
+        }
         if kind == "remote_snapshot" && !watch.current {
             watch.current = true;
             if watch.pi.state.model.is_none() && watch.target.backend == RemoteBackend::Durable {
@@ -1012,6 +1024,16 @@ impl Live {
                 watch.images.insert(id, Some(fetched));
                 None
             }
+            Request::Subagent(conversation) => {
+                let fetched = if failed {
+                    Err(error)
+                } else {
+                    pi_core::subagent::session(&record["data"], watch.target.cwd.clone().into())
+                        .map_err(|error| error.to_string())
+                };
+                watch.subagents.insert(conversation, fetched);
+                None
+            }
             Request::Quiet => None,
             Request::Other => failed.then_some(error),
         }
@@ -1038,6 +1060,64 @@ impl Live {
     /// A tool image fetched from the computer: `None` while on the way.
     pub fn image(&self, id: SessionId, key: &str) -> Option<&Result<ToolImageBytes, String>> {
         self.watches.get(&id)?.images.get(key)?.as_ref()
+    }
+
+    /// A subagent's own session, once fetched: see [`Self::follow_subagent`].
+    pub fn subagent(
+        &self,
+        id: SessionId,
+        conversation: &str,
+    ) -> Option<&Result<pi_core::session::Session, String>> {
+        self.watches.get(&id)?.subagents.get(conversation)
+    }
+
+    /// Keeps a subagent's messages fresh while its screen is open; `None` stops.
+    pub fn follow_subagent(&mut self, id: SessionId, conversation: Option<String>) {
+        let Some(watch) = self.watches.get_mut(&id) else {
+            return;
+        };
+        if watch.following == conversation {
+            return;
+        }
+        watch.following = conversation;
+        Self::fetch_subagent(watch);
+    }
+
+    /// Asks for the followed subagent, unless a request is on the way.
+    fn fetch_subagent(watch: &mut Watch) {
+        let Some(conversation) = watch.following.clone() else {
+            return;
+        };
+        if watch.input.is_none()
+            || watch
+                .sent
+                .values()
+                .any(|request| matches!(request, Request::Subagent(_)))
+        {
+            return;
+        }
+        Self::send(
+            watch,
+            json!({"type": "get_subagent", "conversationId": conversation}),
+            Request::Subagent(conversation),
+        );
+    }
+
+    /// Stops one subagent; the session carries on, and Pi is told.
+    pub fn stop_subagent(&mut self, id: SessionId, conversation: &str) -> Result<(), String> {
+        let watch = self
+            .watches
+            .get_mut(&id)
+            .filter(|watch| {
+                watch.current && watch.input.as_ref().is_some_and(|input| !input.is_closed())
+            })
+            .ok_or("Reconnect to the computer before stopping this subagent.")?;
+        Self::send(
+            watch,
+            json!({"type": "stop_subagent", "conversationId": conversation}),
+            Request::Other,
+        );
+        Ok(())
     }
 
     /// Asks once for each image a tool returned that the stream left out.

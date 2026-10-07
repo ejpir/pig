@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>06 Agents on the computer</title>
+<link rel="stylesheet" href="../../next4/next4.css"><link rel="stylesheet" href="../subagents.css"></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="bar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="title"><b>Resources</b><span>on studio-mac</span></div>
+    </div>
+    <div class="row g8" style="padding:4px var(--g) 12px">
+      <span class="chip">Prompts <span class="faint">4</span></span>
+      <span class="chip">Skills <span class="faint">3</span></span>
+      <span class="chip on">Agents <span class="faint">4</span></span>
+    </div>
+    <div class="scroll col">
+      <div class="list">
+        <div class="item" style="align-items:flex-start">
+          <span class="tile scout"><i data-i="search"></i></span>
+          <div class="grow">
+            <div class="row"><span class="t grow">scout</span><span class="meta">Haiku 4.5</span></div>
+            <div class="prose t1" style="margin-top:2px;line-height:18px">Fast recon. Hands back only what matters.</div>
+            <div class="row g4 wrap" style="margin-top:8px"><span class="chip sm">read</span><span class="chip sm">bash</span></div>
+          </div>
+        </div>
+        <div class="item" style="align-items:flex-start">
+          <span class="tile planner"><i data-i="plan"></i></span>
+          <div class="grow">
+            <div class="row"><span class="t grow">planner</span><span class="meta">Sonnet 5.5</span></div>
+            <div class="prose t1" style="margin-top:2px;line-height:18px">Turns what the scouts found into a step-by-step plan.</div>
+            <div class="row g4 wrap" style="margin-top:8px"><span class="chip sm">read</span></div>
+          </div>
+        </div>
+        <div class="item" style="align-items:flex-start">
+          <span class="tile reviewer"><i data-i="eye"></i></span>
+          <div class="grow">
+            <div class="row"><span class="t grow">reviewer</span><span class="meta">Sonnet 5.5</span></div>
+            <div class="prose t1" style="margin-top:2px;line-height:18px">Reviews changes for bugs and risks. Doesn't edit.</div>
+            <div class="row g4 wrap" style="margin-top:8px"><span class="chip sm">read</span><span class="chip sm">bash</span></div>
+          </div>
+        </div>
+        <div class="item" style="align-items:flex-start">
+          <span class="tile worker"><i data-i="pencil"></i></span>
+          <div class="grow">
+            <div class="row"><span class="t grow">worker</span><span class="meta">Session's model</span></div>
+            <div class="prose t1" style="margin-top:2px;line-height:18px">General purpose, with every tool, in a context of its own.</div>
+            <div class="row g4 wrap" style="margin-top:8px"><span class="chip sm">all tools</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="note" style="--hue:var(--h-wait);margin-top:16px"><i data-i="shield" class="sm"></i>
+        <span class="t1" style="line-height:18px"><b class="strong">pi</b> has 1 agent of its own in <code>.pi/agents</code>. It isn't used until Pi on studio-mac trusts the project.</span></div>
+      <p class="meta" style="margin-top:16px;line-height:18px">Agents are Markdown files in <code>~/.pi/agent/agents</code> on studio-mac, the same ones Pi's subagent extension uses. Pi picks one when you ask it to hand work off; you can also name one.</p>
+    </div>
+  </main>
+</div>
+<script src="../../next4/next4.js"></script><script src="../icons.js"></script>
+</body></html>

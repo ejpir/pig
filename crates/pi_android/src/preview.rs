@@ -74,6 +74,9 @@ pub const SCREENS: &[&str] = &[
     "project-file",
     "tool-image",
     "media-sample",
+    "subagents",
+    "subagents-done",
+    "subagent",
     "logs",
 ];
 
@@ -380,6 +383,31 @@ impl PhoneApp {
                 }
                 self.show_session(QWEN, window, cx);
             }
+            "subagents" | "subagents-done" | "subagent" => {
+                finish(self);
+                let running = name != "subagents-done";
+                if let Some(store) = &mut self.store {
+                    if let Some(shown) = store.sessions.iter_mut().find(|s| s.id == QWEN) {
+                        let mut sample = subagent_sample(running);
+                        sample.title = "Provider retries".into();
+                        *shown = sample;
+                    }
+                    store.sample_subagents.insert("12".into(), scout_sample());
+                }
+                self.show_session(QWEN, window, cx);
+                if name == "subagent" {
+                    self.open_subagent(
+                        QWEN,
+                        crate::app::Pick {
+                            turn: 0,
+                            handoff: 0,
+                            index: 1,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            }
             "tool-image" => {
                 finish(self);
                 // A page screenshot: a header, a hero and three cards.
@@ -634,6 +662,82 @@ fn media_sample() -> crate::model::Session {
     )
 }
 
+/// Three scouts side by side, one done; or, finished, a chain picked up after a restart.
+fn subagent_sample(running: bool) -> crate::model::Session {
+    use serde_json::json;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let (args, details) = if running {
+        (
+            json!({"tasks":[
+                {"agent":"scout","task":"Anthropic and Bedrock"},
+                {"agent":"scout","task":"OpenAI and OpenCode"},
+                {"agent":"scout","task":"Google and Mistral"}]}),
+            json!({"version":1,"mode":"parallel","results":[
+                {"index":0,"agent":"scout","task":"Anthropic and Bedrock","status":"done","conversationId":"11","model":"anthropic/claude-haiku-4-5","now":"4 call sites, one backoff","output":"4 call sites, one backoff","startedAt":now - 62_000,"endedAt":now - 14_000,"cost":0.012},
+                {"index":1,"agent":"scout","task":"OpenAI and OpenCode","status":"running","conversationId":"12","model":"anthropic/claude-haiku-4-5","now":"Searching for retryAfter","startedAt":now - 62_000,"cost":0.009},
+                {"index":2,"agent":"scout","task":"Google and Mistral","status":"running","conversationId":"13","model":"anthropic/claude-haiku-4-5","now":"Reading google-gemini.ts","startedAt":now - 62_000,"cost":0.007}]}),
+        )
+    } else {
+        (
+            json!({"chain":[
+                {"agent":"worker","task":"Build the plan: one withRetry in retry.ts"},
+                {"agent":"reviewer","task":"Review the worker's changes: {previous}"}]}),
+            json!({"version":1,"mode":"chain","resumed":true,"results":[
+                {"index":0,"agent":"worker","task":"Build the plan: one withRetry in retry.ts","status":"done","conversationId":"21","model":"anthropic/claude-opus-5-5","now":"Moved the backoff into retry.ts; 5 providers call it","output":"Moved the backoff into retry.ts; 5 providers call it","startedAt":now - 400_000,"endedAt":now - 88_000,"cost":0.42,"interrupted":["pnpm test"]},
+                {"index":1,"agent":"reviewer","task":"Review the worker's changes","status":"done","conversationId":"22","model":"anthropic/claude-sonnet-5-5","modelNote":"claude-sonnet-4-5 isn't set up on this computer; using anthropic/claude-sonnet-5-5","now":"No blocking issues; one naming nit","output":"No blocking issues; one naming nit","startedAt":now - 88_000,"endedAt":now - 22_000,"cost":0.11}]}),
+        )
+    };
+    let mut messages = vec![
+        json!({"role":"user","content":"Every provider retries differently. Use scouts to find how each one retries, then plan one shared helper.","timestamp":now - 80_000}),
+        json!({"role":"assistant","content":[{"type":"toolCall","id":"hand","name":"subagent","arguments":args}],"timestamp":now - 76_000}),
+    ];
+    if !running {
+        messages.push(json!({"role":"toolResult","toolCallId":"hand","toolName":"subagent","content":[{"type":"text","text":"No blocking issues; one naming nit"}],"details":details,"isError":false,"timestamp":now - 20_000}));
+        messages.push(json!({"role":"assistant","content":[{"type":"text","text":"The worker moved every provider onto one `withRetry`, and the reviewer found no blocking issues."}],"timestamp":now - 18_000}));
+    }
+    let mut pi = pi_core::session::Session::new("/repo".into());
+    pi.apply(&json!({"type":"response","command":"get_messages","success":true,"data":{"messages":messages}}))
+        .unwrap();
+    if running {
+        pi.apply(&json!({"type":"agent_start"})).unwrap();
+        pi.apply(&json!({"type":"tool_execution_start","toolCallId":"hand","toolName":"subagent","args":args})).unwrap();
+        pi.apply(&json!({"type":"tool_execution_update","toolCallId":"hand","toolName":"subagent","partialResult":{"content":[],"details":details}})).unwrap();
+    }
+    crate::projection::project(
+        &pi,
+        crate::projection::Facts {
+            id: QWEN,
+            cwd: "/repo",
+            folder: "~/repo".into(),
+            question: None,
+            outbox: &[],
+            key: "0123456789abcdef0123456789abcdef",
+        },
+    )
+}
+
+/// The second scout's own run, as `get_subagent` sends it.
+fn scout_sample() -> pi_core::session::Session {
+    pi_core::subagent::session(
+        &serde_json::json!({"busy":true,"messages":[
+            {"role":"user","content":"Find every place the OpenAI and OpenCode providers retry a request. For each, note what triggers it, the delay, the limit, and whether it honours Retry-After. Don't change files."},
+            {"role":"assistant","content":[
+                {"type":"toolCall","id":"r1","name":"read","arguments":{"path":"/repo/src/openai-completions.ts"}},
+                {"type":"toolCall","id":"r2","name":"read","arguments":{"path":"/repo/src/openai-responses.ts"}},
+                {"type":"toolCall","id":"r3","name":"read","arguments":{"path":"/repo/src/opencode.ts"}}]},
+            {"role":"toolResult","toolCallId":"r1","toolName":"read","content":[{"type":"text","text":"…"}],"isError":false},
+            {"role":"toolResult","toolCallId":"r2","toolName":"read","content":[{"type":"text","text":"…"}],"isError":false},
+            {"role":"toolResult","toolCallId":"r3","toolName":"read","content":[{"type":"text","text":"…"}],"isError":false},
+            {"role":"assistant","content":[{"type":"toolCall","id":"b1","name":"bash","arguments":{"command":"rg -n \"retryAfter|retry-after\" src"}}]}
+        ],"tools":[{"callId":"b1","name":"bash","output":"src/openai-completions.ts:88: retryAfter\nsrc/opencode.ts:41: retry-after\n"}]}),
+        "/repo".into(),
+    )
+    .unwrap()
+}
+
 fn long_text() -> String {
     let paragraphs = (1..=40).map(|number| format!(
         "Paragraph {number:02}: Check a long reply with short words, a long path /projects/a-very-long-project-name/src/deeply/nested/module/file.rs, Unicode café 中文 日本語 👩🏽‍💻, and punctuation. Every paragraph must remain readable and editable."
@@ -714,6 +818,14 @@ mod tests {
                         "review" => Route::Review(QWEN),
                         "html-page" => Route::Thread(crate::model::SessionId(7)),
                         "history" => Route::History(QWEN),
+                        "subagent" => Route::Subagent(
+                            QWEN,
+                            crate::app::Pick {
+                                turn: 0,
+                                handoff: 0,
+                                index: 1,
+                            },
+                        ),
                         "projects" | "project-empty" | "project-error" | "project-loading"
                         | "project-long-path" => Route::Projects,
                         "settings" | "models" | "resources" | "logs" => Route::Settings,
@@ -723,6 +835,38 @@ mod tests {
                 });
             }
         }
+    }
+
+    /// Work handed to subagents shows as a card whose rows open each one.
+    #[gpui::test]
+    fn a_subagent_opens_from_its_row(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("subagents", window, cx)));
+        cx.run_until_parked();
+        for row in ["subagent-0-0-0", "subagent-0-0-1", "subagent-0-0-2"] {
+            assert!(cx.debug_bounds(row).is_some(), "{row} is not shown");
+        }
+        let row = cx.debug_bounds("subagent-0-0-1").unwrap();
+        cx.simulate_click(row.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(
+                app.route(),
+                Route::Subagent(
+                    QWEN,
+                    crate::app::Pick {
+                        turn: 0,
+                        handoff: 0,
+                        index: 1
+                    }
+                )
+            )
+        });
+        assert!(
+            cx.debug_bounds("stop-subagent").is_some(),
+            "a running subagent can be stopped"
+        );
     }
 
     /// The shared sample (`pi_markdown::sample`), as a session from the

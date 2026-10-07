@@ -5,7 +5,9 @@ import { Type } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
+import type { JsonValue } from "@earendil-works/chord";
 import { run } from "../src/run.ts";
+import { noResources } from "../src/commands.ts";
 
 const faux = fauxProvider({ tokensPerSecond: 120 });
 const models = createModels();
@@ -32,6 +34,19 @@ faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
     return fauxAssistantMessage(`Received ${images.length} image(s): ${images.map((part) => `${part.mimeType}:${Buffer.from(part.data, "base64").length}`).join(", ")}`);
   }
   const after = transcript.messages.slice(lastUser + 1);
+  // Hands work to scouts: two tasks side by side, or one that runs the crash-test tool.
+  if (text === "delegate" || text === "delegate unsafe") {
+    const result = after.find((message) => message.role === "toolResult");
+    if (!result) {
+      const args: Record<string, JsonValue> = text === "delegate"
+        ? { tasks: [{ agent: "scout", task: "find alpha" }, { agent: "scout", task: "find beta" }] }
+        : { agent: "scout", task: "unsafe" };
+      return fauxAssistantMessage(fauxToolCall("subagent", args, { id: text === "delegate" ? "delegate-call" : "delegate-unsafe-call" }), { stopReason: "toolUse" });
+    }
+    const said = result.role === "toolResult" ? result.content.map((block) => block.type === "text" ? block.text : "").join("") : "";
+    return fauxAssistantMessage(`Delegated: ${said}`);
+  }
+  if (typeof text === "string" && text.startsWith("find ")) return fauxAssistantMessage(`found ${text.slice(5)}`);
   if (text === "safe" || text === "unsafe") {
     if (!after.some((message) => message.role === "toolResult")) {
       return fauxAssistantMessage(fauxToolCall(`${text}_work`, {}, { id: `${text}-call` }), { stopReason: "toolUse" });
@@ -40,4 +55,6 @@ faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
   }
   return fauxAssistantMessage(`Finished: ${text}`);
 }));
-await run(models, [defineExtension({ name: "fixture", tools: [work("safe_work", "safe"), work("unsafe_work", "unsafe")] })]);
+const scout = { name: "scout", description: "Finds things", prompt: "Answer in two words.", scope: "user" as const, filePath: "/agents/scout.md" };
+await run(models, [defineExtension({ name: "fixture", tools: [work("safe_work", "safe"), work("unsafe_work", "unsafe")] })],
+  () => ({ ...noResources, agents: [scout] }));

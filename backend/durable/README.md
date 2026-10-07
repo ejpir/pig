@@ -102,6 +102,25 @@ PI_DESKTOP_TEST_DURABLE_AUTH_PROBE="$PWD/artifacts/durable/pi-desktop-durable-au
 
 If stock Pi works but an older durable build reports `OAuth auth derivation failed` with a missing OAuth module, rebuild **both** the production runner and bundled helper, install the new hash-specific helper, and use a new session or explicitly shut down an idle old daemon before reconnecting. Reconnect does not upgrade a live owner. Do not delete credentials/session storage or re-login merely to repair a missing bundled module.
 
+## Prompt templates and skills
+
+The runner reads the same folders stock Pi reads by default, on the SSH host:
+
+- Prompt templates: `~/.pi/agent/prompts/*.md`, and the project's `.pi/prompts/*.md`.
+- Skills: `~/.pi/agent/skills`, `~/.agents/skills`, and the project's `.pi/skills` and `.agents/skills` (in the project folder and its parents, up to the repository root).
+
+A project's own folders are read only when stock Pi trusts it: its remembered answer for the folder, or `defaultProjectTrust: "always"`. The runner can't ask, so an undecided project gets the user's resources only; run stock Pi there once to answer. A name in the project wins over the same name in the user's folders. Pi packages and extra `skills`/`prompts` paths in `settings.json` are not read: resolving packages can install them, which a background runner shouldn't do.
+
+`get_commands` lists the templates, then the built-in `/review`, `/explain` and `/fix-tests` that no template replaces, then each skill as `skill:<name>`. `/template args` expands with stock Pi's placeholders (`$1`, `$@`, `${1:-default}`, `${@:2}`), and `/skill:name args` becomes stock Pi's `<skill>` block, which both apps show as a skill. Skills not marked `disable-model-invocation` are also listed for the model in the system prompt, as stock Pi does. The expansion is committed with the prompt, so recovery never reads these files again; they are read again for each prompt and command list, so a new file needs no restart. A retried prompt is matched by what was typed, so editing a template between a send and its retry doesn't make the retry a different prompt.
+
+## Subagents
+
+The runner gives Pi a `subagent` tool, with the same parameters as stock Pi's subagent extension: one `agent` and `task`, `tasks` side by side (at most 8, 4 at a time), or a `chain` whose tasks take the previous answer as `{previous}`. Agents are the same Markdown files: `~/.pi/agent/agents/*.md`, and the project's `.pi/agents/*.md` once stock Pi trusts the project, each with `name`, `description`, and optional `model` and `tools`. The system prompt lists them.
+
+Each subagent is a conversation owned by the call. It starts as a copy of the session's agent, with the agent file as its instructions, the model the file names when this computer has it (else the session's, with a note), the file's tools among `read`, `write`, `edit` and `bash`, and no subagents of its own. Stopping the session stops its subagents. The call may rerun after a restart: it finds the same conversations and the same submissions instead of starting them again, and a command a restart cut off is reported, never repeated by itself.
+
+Progress is the call's `details`: per subagent its task, state, latest step, time, cost, model and answer, at most once a second. A transcript never rides along with the session's snapshots: `get_subagent` returns one subagent's messages, and `stop_subagent` stops one while the call carries on. Both accept only the session's own subagents.
+
 ## Headless use from a phone
 
 The standalone `pi-desktop-durable` is an internal JSONL worker, **not a network or browser server**. It needs `--state`, `--cwd`, `--key` and the Rust owner's inherited writer lock. Do not bypass that lock by setting internal ownership variables yourself.
@@ -112,13 +131,13 @@ Enable SSH, add the phone's public key to the account's `~/.ssh/authorized_keys`
 
 ## Scope and recovery semantics
 
-- Text prompts, coding tools, streaming committed-state snapshots, steering/follow-ups, stop/clear queue, naming, model/thinking controls and reconnection.
+- Text prompts, coding tools, subagents, streaming committed-state snapshots, steering/follow-ups, stop/clear queue, naming, model/thinking controls and reconnection.
 - SQLite WAL uses `synchronous=FULL`; snapshots are not recovery checkpoints. Storage is `~/.pi/desktop/durable/<key>/`, not the binary cache. `PI_DESKTOP_REMOTE_STATE_DIR` redirects test endpoints/storage.
 - A detached daemon owns a Rust storage owner, which holds an OS writer lock inherited by the runner. A surviving orphan cannot silently admit a second writer. Owner-pipe EOF closes the harness without withdrawing its pending work. Old process descendants share the daemon-owned process group.
 - After worker/daemon/host failure, **explicit reconnect** opens the same storage and calls `resume()`. No unattended boot service or automatic daemon-restart loop yet.
 - Unsafe interrupted tools return an interrupted error, not an automatic replay. The model may choose subsequent actions; no task-success or exactly-once external-side-effect guarantee.
 - Prompt `requestId` is separate from transport correlation IDs. Admission is acknowledged after commit. `get_submission` resolves an uncertain admission; explicit same-key/same-payload retry deduplicates, a payload collision fails. There is no automatic retry or persistent desktop outbox yet. Receipt retention is bounded at 10,000 prompts without silent key eviction.
-- Stock host-side API-key/OAuth credentials, built-in providers and global model configuration are integrated. No interactive durable login, stock extension/skill/template host, images, manual compaction, session-tree/fork migration or Windows durable ownership yet. Unsupported commands fail instead of starting stock Pi or local services.
+- Stock host-side API-key/OAuth credentials, built-in providers, global model configuration, prompt templates and skills are integrated (see below). No interactive durable login, stock extension host, Pi packages, manual compaction, session-tree/fork migration or Windows durable ownership yet. Unsupported commands fail instead of starting stock Pi or local services.
 - Files work through the existing independent SSH channel. Remote terminals and LSP remain separate milestones.
 
 Before making this the default: validate native runtimes/live SSH and real provider/OAuth flows, add resource/extension compatibility, explicit capabilities/UI gating, a persisted desktop outbox and supported migration/version policy. Existing stock sessions retain their original backend.

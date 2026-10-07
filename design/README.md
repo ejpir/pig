@@ -4,6 +4,10 @@
 
 **[Browse the twelve phone screens](android/index.html)**: Pi keeps running on your computer or server, and the phone follows sessions, answers questions, reviews changes and starts work. Connect, Sessions, Starting, Working, Waiting, Done, Review, Typing, Details, Notifications, Evening and Settings, in the Moonstone and Evening themes. See the [notes and phone contract](android/README.md) and the [overview](android/overview.png).
 
+## Android: subagents
+
+**[Browse the seven subagent screens](android/subagents/index.html)**: work Pi hands off to scouts, planners, workers and reviewers, shown inside the session that started it, including a chain picked up after the computer restarts. See the [notes](android/subagents/README.md) and the [overview](android/subagents/overview.png).
+
 ## Visual workflow directions
 
 **[Compare eight directions](visual-workflow/index.html)**: Run rail, Stage flow, Studio, Session map, Follow mode, Mission control, Signal and Timeline tracks. Each is limited to GPUI-paintable effects, with a capability table and a recommended path. See the [notes](visual-workflow/README.md).

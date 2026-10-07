@@ -12,6 +12,7 @@ mod sessions;
 mod settings;
 mod sheets;
 mod start;
+mod subagents;
 mod thread;
 
 use crate::{theme::Theme, ui};

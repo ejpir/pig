@@ -558,7 +558,20 @@ impl PhoneApp {
                             .children(session.turn().map(|turn| {
                                 ui::track(&turn.times, turn.live_stage(), span, colors).mt(px(8.))
                             }))
-                            .child(meta(detail).mt(px(6.)))
+                            .child(
+                                div()
+                                    .mt(px(6.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .children(
+                                        session
+                                            .turn()
+                                            .and_then(super::subagents::waiting_on)
+                                            .map(|handoff| super::subagents::crew(handoff, colors)),
+                                    )
+                                    .child(meta(detail).flex_1().min_w_0()),
+                            )
                     } else {
                         div()
                             .flex_1()

@@ -28,6 +28,17 @@ pub enum Command {
         #[serde(rename = "imageId")]
         image_id: String,
     },
+    /// A durable subagent's messages, from its conversation's ID in the
+    /// `subagent` call's details.
+    GetSubagent {
+        #[serde(rename = "conversationId")]
+        conversation_id: String,
+    },
+    /// Stops one durable subagent; the call that started it carries on.
+    StopSubagent {
+        #[serde(rename = "conversationId")]
+        conversation_id: String,
+    },
     /// Cancels exactly one queued durable submission, retaining other payloads.
     CancelSubmission {
         #[serde(rename = "submissionId")]
@@ -218,6 +229,8 @@ impl Command {
             Self::GetState
             | Self::GetMessages
             | Self::GetImage { .. }
+            | Self::GetSubagent { .. }
+            | Self::StopSubagent { .. }
             | Self::CancelSubmission { .. }
             | Self::GetEntries
             | Self::Fork { cwd: None, .. }
@@ -266,6 +279,8 @@ impl Command {
             Self::GetActiveTools => "get_active_tools",
             Self::GetMessages => "get_messages",
             Self::GetImage { .. } => "get_image",
+            Self::GetSubagent { .. } => "get_subagent",
+            Self::StopSubagent { .. } => "stop_subagent",
             Self::CancelSubmission { .. } => "cancel_submission",
             Self::GetEntries => "get_entries",
             Self::GetSettings => "get_settings",

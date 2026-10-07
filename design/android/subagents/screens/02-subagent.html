@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>02 A subagent</title>
+<link rel="stylesheet" href="../../next4/next4.css"><link rel="stylesheet" href="../subagents.css"></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="bar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="title"><b>OpenAI and OpenCode</b><span>scout for Provider retries · Haiku 4.5</span></div>
+      <span class="tap"><i data-i="info"></i></span>
+    </div>
+    <div class="scroll col g24" style="padding-top:8px">
+      <div class="brief" style="--hue:var(--accent)">
+        <div class="row g8 label"><i data-i="pi" class="sm" style="color:var(--accent)"></i>Pi asked</div>
+        <p class="prose">Find every place the OpenAI and OpenCode providers retry a request. For each, note what triggers it, the delay, the limit, and whether it honours Retry-After. Don't change files.</p>
+      </div>
+      <div class="col g24">
+        <div class="st" style="--hue:var(--h-read)">
+          <span class="stn"><i data-i="eye"></i></span><span class="to"></span>
+          <div class="body">
+            <div class="row"><span class="strong grow">Read</span><span class="meta">0:38</span></div>
+            <div class="meta" style="margin-top:2px">3 files</div>
+            <div class="row g8 wrap" style="margin-top:12px">
+              <span class="chip sm"><i data-i="file"></i>openai-completions.ts</span>
+              <span class="chip sm"><i data-i="file"></i>openai-responses.ts</span>
+              <span class="chip sm"><i data-i="file"></i>opencode.ts</span>
+            </div>
+          </div>
+        </div>
+        <div class="st" style="--hue:var(--h-read)">
+          <span class="stn live"><i data-i="search"></i></span><span class="to ahead"></span>
+          <div class="body">
+            <div class="row"><span class="strong grow">Searching</span><span class="meta">0:24</span></div>
+            <div class="card code" style="margin-top:12px;padding:8px 0;border-radius:12px;overflow:hidden">
+              <div class="l"><span class="n">$</span><span>rg -n "retryAfter|retry-after" src</span></div>
+              <div class="l"><span class="n"></span><span style="color:var(--muted)">openai-completions.ts:88: retryAfter</span></div>
+              <div class="l"><span class="n"></span><span style="color:var(--muted)">opencode.ts:41: retry-after</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="st ahead">
+          <span class="stn ahead"><i data-i="send"></i></span>
+          <div class="body row g8"><span class="faint">Report back</span><span class="meta faint">to Provider retries</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="dock g8">
+      <div class="meta" style="padding:0 8px;line-height:18px">Only Pi talks to a subagent. Its answer goes back to <b class="secondary">Provider retries</b> when it finishes.</div>
+      <div class="strip" style="border-radius:24px;margin:0;border-bottom-color:var(--line-strong)">
+        <span class="dot ring" style="--hue:var(--h-read)"></span>
+        <span class="strong" style="font-size:14px">Working</span><span class="meta grow">1:02 · $0.01</span>
+        <span class="btn sm quiet" style="color:var(--coral);padding:0 12px"><i data-i="stop" class="sm"></i>Stop this scout</span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../../next4/next4.js"></script><script src="../icons.js"></script>
+</body></html>

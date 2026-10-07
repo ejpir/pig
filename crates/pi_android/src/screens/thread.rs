@@ -335,6 +335,9 @@ impl PhoneApp {
                 Flow::Page(n) => self
                     .page_card(index, turn, *n, colors, cx)
                     .map(IntoElement::into_any_element),
+                Flow::Handoff(n) => self
+                    .handoff_card(id, index, turn, *n, colors, cx)
+                    .map(IntoElement::into_any_element),
             })
             .collect()
     }
@@ -962,7 +965,7 @@ fn counts(stage: &Stage, colors: &Theme) -> Div {
         })
 }
 
-fn stage_row(
+pub(crate) fn stage_row(
     stage: &Stage,
     turn: &Turn,
     turn_index: usize,

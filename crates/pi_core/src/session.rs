@@ -42,6 +42,10 @@ pub struct Tool {
     /// Snapshots from helpers older than this field leave it out.
     #[serde(default)]
     pub images: Vec<Value>,
+    /// A `subagent` call's progress and results ([`crate::subagent`]). Other
+    /// tools' details stay out: they can be large, and nothing reads them.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub details: Value,
 }
 
 impl Tool {
@@ -521,6 +525,7 @@ impl Session {
                 finished: false,
                 is_error: false,
                 images: Vec::new(),
+                details: Value::Null,
             });
         }
     }
@@ -536,6 +541,9 @@ impl Session {
                 .cloned()
                 .collect();
             tool.diff = result["details"]["diff"].as_str().map(str::to_owned);
+            if tool.name == crate::subagent::TOOL && !result["details"].is_null() {
+                tool.details = result["details"].clone();
+            }
             tool.finished = finished;
             tool.is_error = is_error;
         }

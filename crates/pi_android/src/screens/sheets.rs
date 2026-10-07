@@ -1604,7 +1604,7 @@ impl PhoneApp {
             )
     }
 
-    fn resources_sheet(&self, colors: &Theme, _: &Context<Self>) -> Div {
+    fn resources_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
         let resources = [
             ("file", "AGENTS.md", "Context · ~/repos/pi"),
             ("slash", "/fix-tests", "Prompt"),
@@ -1613,14 +1613,42 @@ impl PhoneApp {
             ("layers", "web-search", "Extension"),
         ];
         if self.live() {
+            let commands = self
+                .command_catalog_for_project(self.project, cx)
+                .unwrap_or_default();
+            let computer = self.computer_name();
             return div()
                 .pb(px(8.))
+                .when(!commands.is_empty(), |sheet| {
+                    sheet.child(ui::card(colors).mt(px(8.)).children(
+                        commands.into_iter().enumerate().map(|(index, command)| {
+                            let kind = if command.name.starts_with("skill:") {
+                                "Skill"
+                            } else {
+                                "Prompt"
+                            };
+                            let detail = match command.description {
+                                Some(description) if !description.is_empty() => {
+                                    format!("{kind} · {description}")
+                                }
+                                _ => kind.to_owned(),
+                            };
+                            ui::row(("resource", index), index == 0, colors)
+                                .child(icon("slash", 20., colors.muted))
+                                .child(ui::row_text(
+                                    format!("/{}", command.name),
+                                    Some(detail.into()),
+                                    colors,
+                                ))
+                        }),
+                    ))
+                })
                 .child(
                     ui::hint(
-                        "Durable sessions don't load Pi's extensions, skills or prompt templates yet, so there is nothing to list.",
+                        format!("Prompt templates and skills from ~/.pi/agent on {computer}, and from a project Pi trusts. Durable sessions don't load Pi's extensions yet."),
                         colors,
                     )
-                    .mt(px(8.))
+                    .mt(px(14.))
                     .mx(px(4.)),
                 );
         }

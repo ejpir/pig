@@ -558,3 +558,190 @@ fn durable_runner_keeps_writer_lock_if_its_rust_owner_is_killed() {
         }
     }
 }
+
+/// The `subagent` call in the latest snapshot that has one.
+fn handoff(snapshot: &Value) -> Option<Value> {
+    snapshot["data"]["tools"]
+        .as_array()?
+        .iter()
+        .find(|tool| tool["name"] == "subagent" && tool["details"].is_object())
+        .cloned()
+}
+
+fn durable_target(directory: &Path) -> SshTarget {
+    let mut target =
+        SshTarget::new("test".into(), directory.to_string_lossy().into_owned()).unwrap();
+    target.backend = RemoteBackend::Durable;
+    target
+}
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn subagents_answer_side_by_side_and_show_their_own_messages() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = durable_target(directory.path());
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+    bridge
+        .send(json!({"type":"prompt","id":"delegate","message":"delegate","requestId":"delegate"}));
+    assert_eq!(bridge.response("delegate")["success"], true);
+    let settled = bridge.until(|r| {
+        r["type"] == "remote_snapshot"
+            && r["data"]["run"] == "Idle"
+            && r["data"]["messages"].as_array().is_some_and(|messages| {
+                messages.iter().any(|m| {
+                    m["role"] == "assistant"
+                        && m["content"][0]["text"]
+                            .as_str()
+                            .unwrap_or("")
+                            .starts_with("Delegated:")
+                })
+            })
+    });
+    let answer = settled["data"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "assistant")
+        .unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        answer.contains("found alpha") && answer.contains("found beta"),
+        "{answer}"
+    );
+    let call = handoff(&settled).expect("the call keeps its subagents' summary");
+    let results = call["details"]["results"].as_array().unwrap();
+    assert_eq!(call["details"]["mode"], "parallel");
+    assert!(
+        results.iter().all(|result| result["status"] == "done"),
+        "{call}"
+    );
+    assert_eq!(results[0]["output"], "found alpha");
+    assert_eq!(results[1]["agent"], "scout");
+    assert!(call["details"]["resumed"].is_null());
+
+    // A subagent's own messages, on request.
+    let child = results[0]["conversationId"].as_str().unwrap();
+    bridge.send(json!({"type":"get_subagent","id":"child","conversationId":child}));
+    let reply = bridge.response("child");
+    assert_eq!(reply["success"], true, "{reply}");
+    let messages = reply["data"]["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["content"], "find alpha");
+    assert_eq!(
+        messages.last().unwrap()["content"][0]["text"],
+        "found alpha"
+    );
+    assert_eq!(reply["data"]["busy"], false);
+    // Only this session's subagents: not its own conversation, nor a made-up one.
+    for other in ["0", "999"] {
+        bridge.send(json!({"type":"get_subagent","id":other,"conversationId":other}));
+        assert_eq!(bridge.response(other)["success"], false);
+    }
+    bridge.send(json!({"type":"remote_shutdown","id":"shutdown"}));
+    assert_eq!(bridge.response("shutdown")["success"], true);
+    bridge.detach();
+}
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn a_subagent_carries_on_after_a_crash_without_repeating_an_unsafe_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = durable_target(directory.path());
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut first = Bridge::new(directory.path(), &target);
+    first.snapshot();
+    first.send(
+        json!({"type":"prompt","id":"delegate","message":"delegate unsafe","requestId":"delegate"}),
+    );
+    assert_eq!(first.response("delegate")["success"], true);
+    // The subagent's crash-test tool is running and waiting for release.
+    let running = first.until(|r| {
+        r["type"] == "remote_snapshot"
+            && handoff(r).is_some_and(|call| {
+                call["details"]["results"][0]["now"]
+                    .as_str()
+                    .is_some_and(|now| now.contains("unsafe_work"))
+            })
+    });
+    assert_eq!(executions(directory.path(), "unsafe"), 1);
+    kill(&running["data"]["backend"]["Found"]["workerPid"]);
+    first.closed();
+    let mut first = first;
+    first.input.take();
+    let _ = first.process.wait().unwrap();
+    std::fs::write(directory.path().join("release"), "continue").unwrap();
+
+    let mut second = Bridge::new(directory.path(), &target);
+    let settled = second.until(|r| {
+        r["type"] == "remote_snapshot"
+            && r["data"]["run"] == "Idle"
+            && handoff(r).is_some_and(|call| call["details"]["results"][0]["status"] == "done")
+    });
+    assert_eq!(
+        executions(directory.path(), "unsafe"),
+        1,
+        "An interrupted unsafe command must not run again by itself"
+    );
+    let call = handoff(&settled).unwrap();
+    let scout = &call["details"]["results"][0];
+    assert_eq!(call["details"]["resumed"], true, "{call}");
+    assert_eq!(scout["interrupted"], json!(["unsafe_work"]), "{call}");
+    assert_eq!(scout["output"], "Finished unsafe after recovery.");
+    second.send(json!({"type":"remote_shutdown","id":"shutdown"}));
+    assert_eq!(second.response("shutdown")["success"], true);
+    second.detach();
+}
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn stopping_one_subagent_lets_the_session_carry_on() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = durable_target(directory.path());
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+    bridge.send(
+        json!({"type":"prompt","id":"delegate","message":"delegate unsafe","requestId":"delegate"}),
+    );
+    assert_eq!(bridge.response("delegate")["success"], true);
+    let running = bridge.until(|r| {
+        r["type"] == "remote_snapshot"
+            && handoff(r).is_some_and(|call| {
+                call["details"]["results"][0]["now"]
+                    .as_str()
+                    .is_some_and(|now| now.contains("unsafe_work"))
+            })
+    });
+    let child = handoff(&running).unwrap()["details"]["results"][0]["conversationId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    bridge.send(json!({"type":"stop_subagent","id":"stop","conversationId":child}));
+    assert_eq!(bridge.response("stop")["success"], true);
+    let settled = bridge.until(|r| {
+        r["type"] == "remote_snapshot"
+            && r["data"]["run"] == "Idle"
+            && handoff(r).is_some_and(|call| call["finished"] == true)
+    });
+    let call = handoff(&settled).unwrap();
+    assert_eq!(call["details"]["results"][0]["status"], "stopped", "{call}");
+    assert_eq!(call["is_error"], true);
+    // Pi heard back and answered: the session itself was not stopped.
+    let messages = settled["data"]["messages"].as_array().unwrap();
+    assert!(
+        messages.iter().any(|m| m["role"] == "assistant"
+            && m["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("Delegated:")),
+        "{messages:?}"
+    );
+    assert_eq!(executions(directory.path(), "unsafe"), 1);
+    bridge.send(json!({"type":"remote_shutdown","id":"shutdown"}));
+    assert_eq!(bridge.response("shutdown")["success"], true);
+    bridge.detach();
+}

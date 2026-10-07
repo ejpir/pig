@@ -1,0 +1,41 @@
+/* Subagents: the same tokens and proportions as ../next4/next4.css, plus a
+ * card for the work Pi handed off, one row per subagent. */
+
+/* Who each subagent is: a tile in its agent's hue, so a chain reads at a glance. */
+.scout { --hue: var(--h-read); } .planner { --hue: var(--accent); }
+.worker { --hue: var(--h-edit); } .reviewer { --hue: var(--h-check); }
+
+/* The hand-off card: a header, then one 64-tall row per subagent that opens it. */
+.team { padding: 0 16px; }
+.team .head { min-height: 48px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
+.team .head .grow { font-weight: 600; }
+.sub { min-height: 64px; display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+.sub + .sub, .note + .sub { border-top: 1px solid var(--line); }
+.sub .who { font-weight: 600; }
+.sub .task { color: var(--secondary); }
+.sub .now { margin-top: 2px; }
+.sub .end { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: none; }
+.sub > i[data-i="chev-r"] { width: 16px; height: 16px; color: var(--faint); margin-right: -4px; }
+.sub.waiting .who, .sub.waiting .task { color: var(--faint); }
+.sub.waiting .tile { background: transparent; border: 1.5px dashed var(--line-strong); color: var(--faint); }
+
+/* Steps of a chain: a number in the gutter, joined by the line. */
+.step { width: 20px; flex: none; text-align: center; font-size: var(--t1); font-weight: 600; color: var(--muted); }
+
+/* A subagent's progress in one line: its own run, stage by stage. */
+.mini { display: flex; gap: 2px; width: 48px; }
+.mini span { flex: 1; height: 3px; border-radius: 2px; background: var(--raised); }
+.mini .r { background: var(--h-read); } .mini .e { background: var(--h-edit); } .mini .c { background: var(--h-check); } .mini .h { background: var(--accent); }
+
+/* The task Pi wrote for a subagent: Pi's words, not the user's. */
+.brief { border-left: 3px solid var(--hue); padding: 4px 0 4px 16px; }
+.brief .prose { margin-top: 4px; }
+
+/* A note across the thread, such as a resume after a restart. */
+.note { display: flex; gap: 12px; align-items: flex-start; padding: 12px 16px; border-radius: var(--r2);
+  background: color-mix(in srgb, var(--hue) 10%, var(--canvas)); color: var(--secondary); line-height: 20px; }
+.note i[data-i] { color: var(--hue); margin-top: 0; }
+
+/* Spend, split by who spent it. */
+.spend { display: flex; height: 6px; border-radius: 3px; overflow: hidden; gap: 2px; }
+.spend b { height: 6px; }

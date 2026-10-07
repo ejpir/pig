@@ -792,7 +792,7 @@ impl Render for NewSessionForm {
                             segment(("new-ssh-engine", durable as usize), title, self.remote_durable == durable, theme)
                                 .on_click(cx.listener(move |this, _, _, cx| { this.remote_durable = durable; this.remote_key = None; cx.notify(); }))
                         }), theme)))
-                        .when(self.remote_durable, |form| form.child(div().mt(px(6.)).text_size(px(11.)).text_color(theme.muted).child("Prototype: crash recovery on reconnect. Requires a durable-enabled helper. Uses the SSH host's Pi credentials (including OAuth) and built-in providers; no stock extensions, skills, images or session migration.")))
+                        .when(self.remote_durable, |form| form.child(div().mt(px(6.)).text_size(px(11.)).text_color(theme.muted).child("Prototype: crash recovery on reconnect. Requires a durable-enabled helper. Uses the SSH host's Pi credentials (including OAuth), built-in providers, prompt templates and skills; no stock extensions or session migration.")))
                         .child(div().mt(px(8.)).text_size(px(11.)).text_color(theme.muted).child("Uses SSH keys/agent and verified hosts. Installs a per-user helper; no sudo. Remote work continues after disconnecting."))
                         .child(button("new-ssh-session", "Start a new remote session", theme).mt(px(8.))
                             .on_click(cx.listener(|this, _, _, cx| { this.remote_key = None; cx.notify(); })))

@@ -46,7 +46,17 @@ pub enum Route {
     Thread(SessionId),
     Review(SessionId),
     History(SessionId),
+    /// One subagent of a session, read-only.
+    Subagent(SessionId, Pick),
     Settings,
+}
+
+/// A subagent by where it shows: the turn, the hand-off in it, and its place there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Pick {
+    pub turn: usize,
+    pub handoff: usize,
+    pub index: usize,
 }
 
 /// Getting back to the saved computer when the app opens, in place of setup.
@@ -557,7 +567,9 @@ impl PhoneApp {
         self.searching = false;
         window.dismiss_virtual_keyboard();
         window.focus(&self.focus, cx);
-        if let Route::Thread(id) | Route::Review(id) | Route::History(id) = self.route() {
+        if let Route::Thread(id) | Route::Review(id) | Route::History(id) | Route::Subagent(id, _) =
+            self.route()
+        {
             activity::cancel_notification(alerts::question_id(id));
             activity::cancel_notification(alerts::finished_id(id));
             // A question waiting in the session takes the composer's place.
@@ -732,6 +744,9 @@ impl PhoneApp {
         }
         if self.routes.len() > 1 {
             let left = self.routes.pop();
+            if let Some(Route::Subagent(id, _)) = left {
+                self.follow_subagent(id, None);
+            }
             if left == Some(Route::File)
                 && self.file_view.as_ref().is_some_and(|view| view.from_sheet)
             {
@@ -1222,7 +1237,9 @@ impl PhoneApp {
 
     pub(crate) fn model_session(&self) -> Option<SessionId> {
         match self.route() {
-            Route::Thread(id) | Route::Review(id) | Route::History(id) => Some(id),
+            Route::Thread(id) | Route::Review(id) | Route::History(id) | Route::Subagent(id, _) => {
+                Some(id)
+            }
             _ => None,
         }
     }
@@ -1390,7 +1407,7 @@ impl PhoneApp {
 
     fn viewing(&self, id: SessionId) -> bool {
         self.visible
-            && matches!(self.route(), Route::Thread(shown) | Route::Review(shown) | Route::History(shown) if shown == id)
+            && matches!(self.route(), Route::Thread(shown) | Route::Review(shown) | Route::History(shown) | Route::Subagent(shown, _) if shown == id)
     }
 
     fn alert(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -1459,7 +1476,10 @@ impl PhoneApp {
     fn set_visible(&mut self, visibility: WindowVisibility, cx: &mut Context<Self>) {
         self.visible = visibility.is_visible();
         if self.visible
-            && let Route::Thread(id) | Route::Review(id) | Route::History(id) = self.route()
+            && let Route::Thread(id)
+            | Route::Review(id)
+            | Route::History(id)
+            | Route::Subagent(id, _) = self.route()
         {
             activity::cancel_notification(alerts::question_id(id));
             activity::cancel_notification(alerts::finished_id(id));
@@ -1559,9 +1579,10 @@ impl PhoneApp {
             // Only fixture mode exposes diagnostics, and only lengths/state:
             // never prompt contents, clipboard data, addresses or credentials.
             let session = match self.route() {
-                Route::Thread(id) | Route::Review(id) | Route::History(id) => {
-                    self.store.as_ref().and_then(|s| s.session(id))
-                }
+                Route::Thread(id)
+                | Route::Review(id)
+                | Route::History(id)
+                | Route::Subagent(id, _) => self.store.as_ref().and_then(|s| s.session(id)),
                 _ => None,
             };
             log::info!(
@@ -1754,7 +1775,7 @@ impl PhoneApp {
         self.scrolls.remove(&Route::Thread(id));
         self.scrolls.remove(&Route::Review(id));
         self.scrolls.remove(&Route::History(id));
-        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) | Route::History(session) if *session == id));
+        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) | Route::History(session) | Route::Subagent(session, _) if *session == id));
         if self.sheet == Some(Sheet::Delete(id)) {
             self.close_sheet(cx);
         }
@@ -2452,6 +2473,7 @@ impl Render for PhoneApp {
             Route::Thread(id) => self.thread_screen(id, window, cx),
             Route::Review(id) => self.review_screen(id, window, cx),
             Route::History(id) => self.history_screen(id, window, cx),
+            Route::Subagent(id, pick) => self.subagent_screen(id, pick, window, cx),
             Route::Settings => self.settings_screen(window, cx).into_any_element(),
         };
         let sheet = self.sheet.or(self.closing_sheet).map(|sheet| {

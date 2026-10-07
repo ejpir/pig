@@ -8,7 +8,7 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
 import {
   Harness, createRegistry, defineDoc, defineExtension, section,
-  type Extension, type ConversationView, type SubmissionId,
+  type Extension, type ConversationId, type ConversationView, type SubmissionId,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -16,8 +16,9 @@ import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { authProviders, publicModel } from "./catalog.ts";
 import { findImage, imageReferences, promptContent } from "./images.ts";
-import { expandPromptCommand, promptCommands } from "./commands.ts";
+import { expandPromptCommand, noResources, promptCommands, type Resources } from "./commands.ts";
 import { imageRead } from "./read.ts";
+import { subagentExtension, transcript } from "./subagents.ts";
 
 const context = BACKGROUND_CONTEXT;
 const MAX_RECORD = 16 * 1024 * 1024;
@@ -37,13 +38,14 @@ const commands = [
   "set_model", "set_thinking_level", "set_session_name", "set_auto_compaction",
   "get_image",
   "cancel_submission",
+  "get_subagent", "stop_subagent",
 ];
 const info = {
   backend: "pi-durable", version: "1", piVersion: "1.0.2", protocolVersion: 1,
   bunVersion: Bun.version, workerPid: process.pid, commands,
-  features: ["durable_execution", "committed_snapshots", "request_deduplication", "remote_pi_credentials", "builtin_providers", "image_prompts", "image_references"],
+  features: ["durable_execution", "committed_snapshots", "request_deduplication", "remote_pi_credentials", "builtin_providers", "image_prompts", "image_references", "prompt_templates", "skills", "subagents"],
   experimental: true,
-  limitations: ["Login on the SSH host; no interactive durable login flow yet", "No stock Pi extensions, skills or session-tree migration"],
+  limitations: ["Login on the SSH host; no interactive durable login flow yet", "No stock Pi extensions, Pi packages or session-tree migration"],
 };
 
 /** Strict LF framing; Unicode line separators inside JSON strings are ordinary data. */
@@ -72,10 +74,18 @@ function string(record: Record<string, unknown>, key: string): string {
   return record[key] as string;
 }
 
-export async function run(models: Models, extensions: readonly Extension[] = []): Promise<void> {
+/**
+ * `resources` finds the host's templates and skills: the project's too when
+ * given its folder. Read again for each prompt and command list, so a new file
+ * needs no restart.
+ */
+export async function run(
+  models: Models, extensions: readonly Extension[] = [], resources: (cwd?: string) => Resources = () => noResources,
+): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length === 1 && args[0] === "--list-commands") {
-    console.log(JSON.stringify({ version: 1, commands: promptCommands }));
+    // Before a session has a folder: the user's own commands and the built-ins.
+    console.log(JSON.stringify({ version: 1, commands: promptCommands(resources()) }));
     return;
   }
   if (args.length === 1 && args[0] === "--list-models") {
@@ -115,15 +125,21 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
   } finally {
     process.umask(mask);
   }
+  let found = resources(cwd);
   const registry = createRegistry();
   registry.install(CodingTools);
   registry.install(defineExtension({ name: "desktop-coding", wraps: [imageRead], sections: [
     section("preamble", () => "You are a coding assistant. Inspect the project with your tools. Do not repeat an interrupted unsafe operation without checking its effects first.", { tag: false }),
     section("cwd", (input) => input.env?.cwd),
+    // Unchanged between requests unless a skill changes, so the provider's cache holds.
+    section("skills", () => found.skillsPrompt || undefined, { tag: false }),
   ] }));
+  // The tool runs only once the Harness below is open.
+  let opened: Harness | undefined;
+  registry.install(subagentExtension(models, () => opened!, () => found));
   for (const extension of extensions) registry.install(extension);
   let autoCompaction = true;
-  const harness = await Harness.open(storage, {
+  const harness = opened = await Harness.open(storage, {
     models, registry, settings: { get compaction() { return { enabled: autoCompaction }; } },
     env: ({ cwd: selected = cwd }) => new NodeExecutionEnv({ cwd: selected }),
     onReport: (error) => console.error("Durable report:", error),
@@ -161,6 +177,17 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
     const selected = state.value.docs["pi.agent"].model as { provider: string; modelId: string } | undefined;
     return selected ? models.getModel(selected.provider, selected.modelId) : undefined;
   };
+  /** One of this session's subagents: a conversation a call of its own created. */
+  const subagent = async (record: Record<string, unknown>) => {
+    const id = Number(string(record, "conversationId"));
+    const conversation = Number.isSafeInteger(id) ? await harness.conversation(id as unknown as ConversationId, context) : undefined;
+    const view = conversation && await conversation.viewState(context);
+    if (!conversation || !view || view.value.conversation.owner?.conversationId !== root.id) {
+      view?.dispose();
+      throw new Error("This subagent is not part of this session");
+    }
+    return { conversation, view };
+  };
   const respond = async (record: Record<string, unknown>): Promise<unknown> => {
     const value = state.value;
     switch (record.type) {
@@ -172,8 +199,31 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
         if (!image) throw new Error("Image is not in this session");
         return { image };
       }
+      case "get_subagent": {
+        // Its transcript only when asked for: the parent's snapshots carry a summary.
+        const { view } = await subagent(record);
+        try {
+          const live = view.value.docs["pi.live"] as { run?: unknown; tools?: { callId: string; name: string; status: string; output?: string }[] } | undefined;
+          return imageReferences({
+            conversationId: string(record, "conversationId"),
+            busy: !!live?.run,
+            messages: transcript(view.value),
+            tools: (live?.tools ?? []).filter((slot) => slot.status !== "done")
+              .map((slot) => ({ callId: slot.callId, name: slot.name, output: slot.output ?? "" })),
+          });
+        } finally {
+          view.dispose();
+        }
+      }
+      case "stop_subagent": {
+        // The call that started it carries on, and tells the model it was stopped.
+        const { conversation, view } = await subagent(record);
+        view.dispose();
+        await conversation.abort(context);
+        return {};
+      }
       case "get_session_stats": return {};
-      case "get_commands": return { commands: promptCommands };
+      case "get_commands": return { commands: promptCommands(found = resources(cwd)) };
       case "get_settings": return { effective: { compaction: { enabled: autoCompaction } }, durable: true };
       case "get_active_tools": return { activeTools: (await root.agent(context)).tools.map((tool) => ({ name: tool.name, description: tool.description })) };
       case "get_available_models": {
@@ -211,13 +261,16 @@ export async function run(models: Models, extensions: readonly Extension[] = [])
         return {};
       }
       case "prompt": {
-        const message = expandPromptCommand(string(record, "message")), requestId = string(record, "requestId");
+        const typed = string(record, "message"), requestId = string(record, "requestId");
         if (!/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) throw new Error("Invalid persistent requestId");
         if (!chosenModel()) throw new Error("Choose a configured model before submitting a durable prompt");
-        const content = promptContent(message, record.images, chosenModel()!.input.includes("image"));
+        const acceptsImages = chosenModel()!.input.includes("image");
         const mode = record.streamingBehavior;
         if (mode !== undefined && mode !== "steer" && mode !== "followUp") throw new Error("Invalid streamingBehavior");
-        const hash = createHash("sha256").update(JSON.stringify([content, mode ?? "reject"])).digest("hex");
+        // A retry is recognised by what was typed: an edited template or skill
+        // doesn't make it a different prompt.
+        const hash = createHash("sha256").update(JSON.stringify([promptContent(typed, record.images, acceptsImages), mode ?? "reject"])).digest("hex");
+        const content = promptContent(expandPromptCommand(typed, found = resources(cwd)), record.images, acceptsImages);
         const duplicate = await root.commit(async (tx) => {
           const existing = await tx.submissionByRequest(root.id, requestId);
           const hashes = (await tx.doc(Receipts, root.id)).hashes;
