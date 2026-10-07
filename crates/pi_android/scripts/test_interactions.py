@@ -492,6 +492,48 @@ def tool_images(phone):
     phone.wait(lambda s: s["sheet"] is None, "back closes the image")
 
 
+def commands(phone):
+    phone.fixture("resources")
+    phone.wait(lambda s: all(shown(s, f"command-{name}") for name in ("review", "fix-tests", "skill:lint")),
+               "Resources lists prompt templates and skills")
+    phone.capture("resources-commands")
+    phone.key("KEYCODE_BACK")
+    phone.fixture("start")
+    phone.tap("draft")
+    phone.wait_keyboard(True)
+    phone.text("/")
+    phone.wait(lambda s: shown(s, "suggestion-/review") and shown(s, "suggestion-/skill:lint"),
+               "typing / offers prompt templates and skills")
+    phone.capture("command-suggestions")
+    # Typing narrows the strip to what matches, as it would for a person.
+    phone.text("sk")
+    # Bounds outlive what left the screen; the skill moving first shows the strip narrowed.
+    phone.wait(lambda s: s["bounds"]["suggestion-/skill:lint"][0] == s["bounds"]['NamedInteger("suggestion", 0)'][0],
+               "typing narrows the commands to the skill")
+    phone.tap("suggestion-/skill:lint")
+    phone.wait(lambda s: s["draft_chars"] == len("/skill:lint "), "choosing a skill puts its command in the draft")
+    phone.key("KEYCODE_BACK")
+    phone.wait_keyboard(False)
+
+
+def subagents(phone):
+    phone.fixture("subagents")
+    phone.wait(lambda s: all(shown(s, f"subagent-0-0-{n}") for n in range(3)),
+               "work handed to three scouts shows a row for each")
+    phone.capture("subagents")
+    phone.tap("subagent-0-0-1")
+    phone.wait(lambda s: s["route"].startswith("Subagent(") and shown(s, "stop-subagent"),
+               "a scout's row opens its own screen, with Stop while it works")
+    phone.capture("subagent")
+    phone.key("KEYCODE_BACK")
+    phone.wait(lambda s: s["route"].startswith("Thread(") and shown(s, "subagent-0-0-1"),
+               "back returns to the session's hand-off")
+    phone.fixture("subagents-done")
+    phone.wait(lambda s: shown(s, "subagent-0-0-0") and shown(s, "subagent-0-0-1"),
+               "a finished chain lists each step")
+    phone.capture("subagents-done")
+
+
 def shown(state, name):
     return any(key == name or f'"{name}"' in key for key in state["bounds"])
 
@@ -646,7 +688,8 @@ CASES = {"pairing": pairing_scanner, "input": input_and_selectors, "long-input":
          "models": model_scroll, "images": images, "delete": deletion,
          "picker": native_image_picker, "gestures": gestures, "ime": gboard_typing,
          "conversation": conversation, "rich-content": rich_content, "history": history,
-         "projects": projects, "tool-images": tool_images}
+         "projects": projects, "tool-images": tool_images, "commands": commands,
+         "subagents": subagents}
 
 
 def main():

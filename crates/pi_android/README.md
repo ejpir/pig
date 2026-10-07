@@ -221,7 +221,9 @@ inspection: the script checks process survival and crash logs, not appearance.
 and native camera scanner, typing, model search, thinking selection, long Unicode
 edits, Stop, actual system-picker image import, image preview/send, scrollbars,
 sheet drags, confirmed swipe deletion, completed activity details, long
-tool/reply scrolling and project selection.
+tool/reply scrolling, project selection, prompt templates and skills in
+Resources and the `/` suggestions (`--case commands`), and subagents: the
+hand-off card, a subagent's screen with Stop, and back (`--case subagents`).
 It saves screenshots and a JSON report. Use `--case input`, `--case picker`,
 `--case models`, etc. to repeat a case. The picker case supports English AOSP
 DocumentsUI and Xiaomi's picker; it creates a uniquely named synthetic PNG and

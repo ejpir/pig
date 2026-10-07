@@ -573,6 +573,8 @@ impl PhoneApp {
                     div()
                         .id("stop-subagent")
                         .debug_selector(|| "stop-subagent".into())
+                        .relative()
+                        .child(crate::testing::probe("stop-subagent"))
                         .h(px(40.))
                         .px(px(12.))
                         .flex()

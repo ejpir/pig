@@ -220,10 +220,17 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
         }
         match message["role"].as_str() {
             Some("user") => {
-                let mut turn = Turn::new(
-                    text_of(message),
-                    timestamp(message).map(clock_at).unwrap_or_default(),
-                );
+                let text = text_of(message);
+                // A `/skill:` prompt arrives expanded; it reads as it was typed.
+                let text = match pi_core::skill::parse_skill_block(&text) {
+                    Some(block) => match block.user_message {
+                        Some(said) => format!("/skill:{} {said}", block.name),
+                        None => format!("/skill:{}", block.name),
+                    },
+                    None => text,
+                };
+                let mut turn =
+                    Turn::new(text, timestamp(message).map(clock_at).unwrap_or_default());
                 turn.stages.clear();
                 let images = message["content"].as_array().map_or(0, |blocks| {
                     blocks.iter().filter(|b| b["type"] == "image").count()
@@ -1339,5 +1346,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["scout", "planner"]
         );
+    }
+
+    #[test]
+    fn a_skill_prompt_reads_as_it_was_typed() {
+        let block = "<skill name=\"lint\" location=\"/home/me/.pi/agent/skills/lint/SKILL.md\">\nReferences are relative to /home/me/.pi/agent/skills/lint.\n\nRun the linter.\n</skill>";
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+            {"role":"user","content":format!("{block}\n\nonly src")},
+            {"role":"user","content":block}]}}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        assert_eq!(shown.turns[0].prompt, "/skill:lint only src");
+        assert_eq!(shown.turns[1].prompt, "/skill:lint");
     }
 }

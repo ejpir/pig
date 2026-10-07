@@ -65,13 +65,25 @@ const FILES: &[&str] = &[
     "retry.ts",
 ];
 
-/// Commands the `/` suggestions offer.
+/// Commands the sample's `/` suggestions offer: its prompt templates and a skill.
 const COMMANDS: &[(&str, &str)] = &[
     ("fix-tests", "Fix the failing tests"),
     ("review", "Review the local changes"),
     ("explain", "Explain this project"),
     ("compact", "Summarize to free context"),
+    ("skill:lint", "Lint the code with the project's rules"),
 ];
+
+/// The sample's command catalog, as a computer sends one.
+pub fn sample_commands() -> Vec<SavedCommand> {
+    COMMANDS
+        .iter()
+        .map(|(name, description)| SavedCommand {
+            name: (*name).into(),
+            description: Some((*description).into()),
+        })
+        .collect()
+}
 
 /// A chip in the suggestion strip: its text, what it puts in the draft, its icon.
 type Suggestion = (String, String, &'static str);
@@ -635,7 +647,9 @@ impl Render for Composer {
                         .overflow_x_scroll()
                         .children(items.into_iter().enumerate().map(
                             |(index, (text, replacement, glyph))| {
+                                let probe = crate::testing::probe(format!("suggestion-{text}"));
                                 ui::chip(("suggestion", index), Some(glyph), text, &colors)
+                                    .child(probe)
                                     .when(index == 0, |chip| {
                                         chip.border_color(colors.accent).text_color(colors.text)
                                     })

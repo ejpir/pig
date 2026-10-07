@@ -1605,69 +1605,48 @@ impl PhoneApp {
     }
 
     fn resources_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
-        let resources = [
-            ("file", "AGENTS.md", "Context · ~/repos/pi"),
-            ("slash", "/fix-tests", "Prompt"),
-            ("slash", "/review", "Prompt"),
-            ("slash", "/explain", "Prompt"),
-            ("layers", "web-search", "Extension"),
-        ];
-        if self.live() {
-            let commands = self
-                .command_catalog_for_project(self.project, cx)
-                .unwrap_or_default();
-            let computer = self.computer_name();
-            return div()
-                .pb(px(8.))
-                .when(!commands.is_empty(), |sheet| {
-                    sheet.child(ui::card(colors).mt(px(8.)).children(
-                        commands.into_iter().enumerate().map(|(index, command)| {
-                            let kind = if command.name.starts_with("skill:") {
-                                "Skill"
-                            } else {
-                                "Prompt"
-                            };
-                            let detail = match command.description {
-                                Some(description) if !description.is_empty() => {
-                                    format!("{kind} · {description}")
-                                }
-                                _ => kind.to_owned(),
-                            };
-                            ui::row(("resource", index), index == 0, colors)
-                                .child(icon("slash", 20., colors.muted))
-                                .child(ui::row_text(
-                                    format!("/{}", command.name),
-                                    Some(detail.into()),
-                                    colors,
-                                ))
-                        }),
-                    ))
-                })
-                .child(
-                    ui::hint(
-                        format!("Prompt templates and skills from ~/.pi/agent on {computer}, and from a project Pi trusts. Durable sessions don't load Pi's extensions yet."),
-                        colors,
-                    )
-                    .mt(px(14.))
-                    .mx(px(4.)),
-                );
-        }
+        let live = self.live();
+        let commands = if live {
+            self.command_catalog_for_project(self.project, cx)
+                .unwrap_or_default()
+        } else {
+            crate::composer::sample_commands()
+        };
+        let computer = self.computer_name();
         div()
             .pb(px(8.))
-            .child(
-                ui::card(colors)
-                    .mt(px(8.))
-                    .children(resources.iter().enumerate().map(
-                        |(index, (glyph, name, detail))| {
-                            ui::row(("resource", index), index == 0, colors)
-                                .child(icon(glyph, 20., colors.muted))
-                                .child(ui::row_text(*name, Some((*detail).into()), colors))
-                        },
-                    )),
-            )
+            .when(!commands.is_empty(), |sheet| {
+                sheet.child(ui::card(colors).mt(px(8.)).children(
+                    commands.into_iter().enumerate().map(|(index, command)| {
+                        let kind = if command.name.starts_with("skill:") {
+                            "Skill"
+                        } else {
+                            "Prompt"
+                        };
+                        let detail = match command.description {
+                            Some(description) if !description.is_empty() => {
+                                format!("{kind} · {description}")
+                            }
+                            _ => kind.to_owned(),
+                        };
+                        ui::row(("resource", index), index == 0, colors)
+                            .child(crate::testing::probe(format!("command-{}", command.name)))
+                            .child(icon("slash", 20., colors.muted))
+                            .child(ui::row_text(
+                                format!("/{}", command.name),
+                                Some(detail.into()),
+                                colors,
+                            ))
+                    }),
+                ))
+            })
             .child(
                 ui::hint(
-                    "A sample list. The real one comes from Pi on the computer.",
+                    if live {
+                        format!("Prompt templates and skills from ~/.pi/agent on {computer}, and from a project Pi trusts. Durable sessions don't load Pi's extensions yet.")
+                    } else {
+                        "A sample list. The real one comes from Pi on the computer.".to_owned()
+                    },
                     colors,
                 )
                 .mt(px(14.))
