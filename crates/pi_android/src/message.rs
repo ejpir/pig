@@ -29,14 +29,13 @@ pub fn render(source: &str, colors: &Theme) -> Div {
                         })
                         .min_w_0()
                         .w_full()
-                        .max_h(px(360.))
-                        .rounded(px(12.))
-                        .overflow_hidden()
-                        .bg(colors.panel)
+                        // No larger than it is, and never wider than the reply.
                         .child(
-                            img(image.clone())
-                                .w_full()
+                            img(image.image.clone())
+                                .w(px(image.width as f32))
+                                .max_w_full()
                                 .max_h(px(360.))
+                                .aspect_ratio(image.ratio)
                                 .rounded(px(12.))
                                 .object_fit(ObjectFit::Contain),
                         )

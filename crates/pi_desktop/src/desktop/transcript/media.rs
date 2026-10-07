@@ -206,6 +206,7 @@ impl TranscriptView {
 
 /// A page's poster, by where it is kept.
 pub(super) enum Poster {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Drawing,
     Shown(Decoded),
     /// It couldn't be drawn, or nothing here draws posters.

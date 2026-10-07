@@ -164,7 +164,7 @@ mod tests {
         blocks(source)
             .iter()
             .filter(|block| {
-                matches!(&block.media, Some(Media::Image(image)) if image.format == gpui::ImageFormat::Svg)
+                matches!(&block.media, Some(Media::Image(image)) if image.image.format == gpui::ImageFormat::Svg)
             })
             .count()
     }

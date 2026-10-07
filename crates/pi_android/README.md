@@ -190,7 +190,7 @@ The named states use the sample sessions and match the design's screens:
 `long-input`, `long-reply`, `streaming-reply`, `long-labels`, `empty-search`,
 `failed`, `stopped`, `computers`, `many-files`, `activity`, `markdown`, `multi-turn` and
 `tool-output`, `follow-up-input`, `delete`, `delete-running`, `projects`,
-`project-empty`, `project-error`, `project-loading`, `project-long-path`, `project-tree`, `project-search`, `project-file`, `tool-image`,
+`project-empty`, `project-error`, `project-loading`, `project-long-path`, `project-tree`, `project-search`, `project-file`, `tool-image`, `media-sample` (the shared sample both apps' tests draw),
 `model-long-list`, `model-no-match`, `thinking`, `mentions`, `image-input`
 and `image-only`. The tests
 render every state at 320×640, 384×854 and 640×360.

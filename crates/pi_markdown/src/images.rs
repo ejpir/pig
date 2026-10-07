@@ -81,11 +81,24 @@ pub fn decode_base64(mime: &str, data: &str) -> Result<Decoded, DecodeError> {
 pub fn decode(mime: &str, bytes: Vec<u8>) -> Result<Decoded, DecodeError> {
     let format = ImageFormat::from_mime_type(mime)
         .ok_or_else(|| DecodeError::Unsupported(mime.to_owned()))?;
-    let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
-        .with_guessed_format()
-        .ok()
-        .and_then(|reader| reader.into_dimensions().ok())
-        .ok_or(DecodeError::Unreadable)?;
+    decode_as(format, bytes)
+}
+
+/// Bytes known to be `format`, with their size: an SVG's from its own
+/// `width`, `height` or `viewBox`, as gpui will draw it.
+pub(crate) fn decode_as(format: ImageFormat, bytes: Vec<u8>) -> Result<Decoded, DecodeError> {
+    let (width, height) = if format == ImageFormat::Svg {
+        let tree = usvg::Tree::from_data(&bytes, &usvg::Options::default())
+            .map_err(|_| DecodeError::Unreadable)?;
+        let size = tree.size();
+        (size.width().ceil() as u32, size.height().ceil() as u32)
+    } else {
+        image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|reader| reader.into_dimensions().ok())
+            .ok_or(DecodeError::Unreadable)?
+    };
     Ok(Decoded {
         image: Arc::new(Image::from_bytes(format, bytes)),
         width,
@@ -137,6 +150,12 @@ mod tests {
         assert_eq!(
             decode_base64("image/png", "bm90IGFuIGltYWdl").err(),
             Some(DecodeError::Unreadable)
+        );
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 40"/>"#.to_vec();
+        let decoded = decode("image/svg+xml", svg).unwrap();
+        assert_eq!(
+            (decoded.width, decoded.height, decoded.ratio),
+            (120, 40, 3.)
         );
     }
 }

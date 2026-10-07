@@ -73,6 +73,7 @@ pub const SCREENS: &[&str] = &[
     "project-search",
     "project-file",
     "tool-image",
+    "media-sample",
     "logs",
 ];
 
@@ -366,6 +367,19 @@ impl PhoneApp {
                 self.choice = Some(Answer::AllowOnce);
             }
             "html-page" => self.show_session(crate::model::SessionId(7), window, cx),
+            "media-sample" => {
+                finish(self);
+                if let Some(shown) = self
+                    .store
+                    .as_mut()
+                    .and_then(|store| store.sessions.iter_mut().find(|s| s.id == QWEN))
+                {
+                    let mut sample = media_sample();
+                    sample.title = shown.title.clone();
+                    *shown = sample;
+                }
+                self.show_session(QWEN, window, cx);
+            }
             "tool-image" => {
                 finish(self);
                 // A page screenshot: a header, a hero and three cards.
@@ -601,6 +615,25 @@ impl PhoneApp {
     }
 }
 
+/// The sample both apps' tests draw (`pi_markdown::sample`), as a session
+/// from the computer: pictures, raw SVG, a diagram and a page.
+fn media_sample() -> crate::model::Session {
+    use pi_markdown::sample;
+    let mut pi = pi_core::session::Session::new(sample::CWD.into());
+    pi.apply(&sample::record()).expect("valid media sample");
+    crate::projection::project(
+        &pi,
+        crate::projection::Facts {
+            id: QWEN,
+            cwd: sample::CWD,
+            folder: "~/repo".into(),
+            question: None,
+            outbox: &[],
+            key: "0123456789abcdef0123456789abcdef",
+        },
+    )
+}
+
 fn long_text() -> String {
     let paragraphs = (1..=40).map(|number| format!(
         "Paragraph {number:02}: Check a long reply with short words, a long path /projects/a-very-long-project-name/src/deeply/nested/module/file.rs, Unicode café 中文 日本語 👩🏽‍💻, and punctuation. Every paragraph must remain readable and editable."
@@ -697,19 +730,7 @@ mod tests {
     #[gpui::test]
     fn the_shared_sample_shows_every_picture_and_page(cx: &mut TestAppContext) {
         use pi_markdown::sample::{self, Item};
-        let mut pi = pi_core::session::Session::new(sample::CWD.into());
-        pi.apply(&sample::record()).unwrap();
-        let mut session = crate::projection::project(
-            &pi,
-            crate::projection::Facts {
-                id: QWEN,
-                cwd: sample::CWD,
-                folder: "~/repo".into(),
-                question: None,
-                outbox: &[],
-                key: "0123456789abcdef0123456789abcdef",
-            },
-        );
+        let session = media_sample();
         let turn = session.turns.last().unwrap();
         assert_eq!(turn.images[0].name, sample::TOOL_IMAGE_NAME);
         assert_eq!(turn.pages[0].path, sample::PAGE_PATH);
@@ -723,7 +744,7 @@ mod tests {
         let reply = pi_markdown::blocks(turn.summary.as_ref().unwrap().source.as_deref().unwrap());
         let image = |format| {
             reply.iter().position(|block| {
-                matches!(&block.media, Some(pi_markdown::Media::Image(image)) if image.format == format)
+                matches!(&block.media, Some(pi_markdown::Media::Image(image)) if image.image.format == format)
             })
         };
         let selectors = |item| match item {
@@ -732,7 +753,7 @@ mod tests {
                     .iter()
                     .enumerate()
                     .filter(|(_, block)| {
-                        matches!(&block.media, Some(pi_markdown::Media::Image(image)) if image.format == gpui::ImageFormat::Svg)
+                        matches!(&block.media, Some(pi_markdown::Media::Image(image)) if image.image.format == gpui::ImageFormat::Svg)
                     })
                     .map(|(index, _)| index)
                     .collect();
@@ -752,16 +773,7 @@ mod tests {
 
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
-        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("done", window, cx)));
-        cx.update(|window, cx| {
-            app.update(cx, |app, cx| {
-                let store = app.store.as_mut().unwrap();
-                let shown = store.sessions.iter_mut().find(|s| s.id == QWEN).unwrap();
-                session.title = shown.title.clone();
-                *shown = session;
-                app.show_session(QWEN, window, cx);
-            })
-        });
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("media-sample", window, cx)));
         cx.run_until_parked();
         for item in sample::ITEMS {
             // `debug_bounds` takes a static name.

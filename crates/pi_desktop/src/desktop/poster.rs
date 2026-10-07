@@ -3,10 +3,14 @@
 //! page's scripts as Safari would, and it is kept as a PNG by the page's
 //! contents. Elsewhere a page card has no poster.
 
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// The page's viewport, in points; the poster is its top.
+#[cfg(target_os = "macos")]
 pub const WIDTH: f64 = 1280.;
+#[cfg(target_os = "macos")]
 pub const HEIGHT: f64 = 560.;
 
 /// Where the poster of a page with this content is kept.
@@ -104,11 +108,12 @@ impl Drawing {
 }
 
 /// Whether WebKit would misread the page: not plain ASCII, and no `charset`.
+#[cfg(target_os = "macos")]
 pub fn utf8_unlabelled(html: &str) -> bool {
     !html.is_ascii() && !html.to_ascii_lowercase().contains("charset")
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     #[test]
     fn only_unlabelled_pages_outside_ascii_are_given_as_text() {

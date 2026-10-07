@@ -92,13 +92,13 @@ mod tests {
         let svgs = reply
             .iter()
             .filter(|block| {
-                matches!(&block.media, Some(Media::Image(image)) if image.format == gpui::ImageFormat::Svg)
+                matches!(&block.media, Some(Media::Image(image)) if image.image.format == gpui::ImageFormat::Svg)
             })
             .count();
         let images: Vec<_> = reply
             .iter()
             .filter_map(|block| match &block.media {
-                Some(Media::Image(image)) => Some(image.format),
+                Some(Media::Image(image)) => Some(image.image.format),
                 _ => None,
             })
             .collect();

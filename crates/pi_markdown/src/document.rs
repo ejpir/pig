@@ -26,7 +26,8 @@ pub struct Span {
 
 #[derive(Clone)]
 pub enum Media {
-    Image(Arc<Image>),
+    /// With its size, to draw it no larger than it is.
+    Image(crate::Decoded),
     Mermaid(String),
 }
 
@@ -191,7 +192,7 @@ pub fn blocks(source: &str) -> Vec<Block> {
     result
 }
 
-fn embedded_image(url: &str) -> Option<Arc<Image>> {
+fn embedded_image(url: &str) -> Option<crate::Decoded> {
     let data = url.strip_prefix("data:")?;
     let (metadata, encoded) = data.split_once(',')?;
     let mut fields = metadata.split(';');
@@ -213,7 +214,7 @@ fn embedded_image(url: &str) -> Option<Arc<Image>> {
             return None;
         }
     }
-    Some(Arc::new(Image::from_bytes(format, bytes)))
+    crate::images::decode_as(format, bytes).ok()
 }
 
 #[derive(Clone, Copy)]
