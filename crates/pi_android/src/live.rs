@@ -102,6 +102,25 @@ fn seconds_now() -> u64 {
 }
 
 impl Watch {
+    /// Nothing to follow: Pi and its subagents rest, and nothing waits on
+    /// the phone or the computer.
+    fn idle(&self) -> bool {
+        self.current
+            && !self.pi.busy()
+            && self.outbox.is_empty()
+            && self.failed.is_empty()
+            && self.sent.is_empty()
+            && self.dialogs.is_empty()
+            && !self.pi.tools.iter().any(|tool| {
+                pi_core::subagent::Handoff::of(tool).is_some_and(|handoff| {
+                    handoff
+                        .subagents
+                        .iter()
+                        .any(|subagent| !subagent.status.finished())
+                })
+            })
+    }
+
     fn new(target: SshTarget) -> Self {
         let pi = Pi::new(target.cwd.clone().into());
         Self {
@@ -160,6 +179,8 @@ pub struct Live {
     sender: async_channel::Sender<(Option<SessionId>, Update)>,
     pub updates: async_channel::Receiver<(Option<SessionId>, Update)>,
     watches: HashMap<SessionId, Watch>,
+    /// The session on screen, whose watch stays while it is shown.
+    shown: Option<SessionId>,
     listed: HashMap<SessionId, Listed>,
     keys: HashMap<String, SessionId>,
     deleted: HashSet<String>,
@@ -193,6 +214,7 @@ impl Live {
             sender,
             updates,
             watches: HashMap::new(),
+            shown: None,
             listed: HashMap::new(),
             keys: HashMap::new(),
             deleted: HashSet::new(),
@@ -287,14 +309,20 @@ impl Live {
                     return;
                 }
             };
+            // The watch holds the only sender: dropping it ends the channel.
+            let crate::ssh::Pipe {
+                records,
+                input,
+                ended,
+            } = pipe;
             if sender
-                .send((Some(id), Update::Opened(generation, pipe.input.clone())))
+                .send((Some(id), Update::Opened(generation, input)))
                 .await
                 .is_err()
             {
                 return;
             }
-            while let Ok(record) = pipe.records.recv().await {
+            while let Ok(record) = records.recv().await {
                 if sender
                     .send((Some(id), Update::Record(generation, record)))
                     .await
@@ -303,7 +331,7 @@ impl Live {
                     return;
                 }
             }
-            let reason = pipe.ended.recv().await.unwrap_or_default();
+            let reason = ended.recv().await.unwrap_or_default();
             let _ = sender
                 .send((Some(id), Update::Ended(generation, reason)))
                 .await;
@@ -1048,14 +1076,48 @@ impl Live {
                 continue;
             }
             let id = self.id_for(&session.key);
-            let running = session.running;
+            // A helper daemon outlives its run; only a run at work is followed.
+            let working = session.running && session.busy;
             self.listed.insert(id, session);
-            if running && !self.is_watched(id) {
+            if working && !self.is_watched(id) {
                 self.watch(id);
             }
             ids.push(id);
         }
+        self.release_idle();
         ids
+    }
+
+    /// The session on screen now, if any: others that are idle let go of
+    /// their channel.
+    pub fn show(&mut self, id: Option<SessionId>) {
+        if self.shown == id {
+            return;
+        }
+        self.shown = id;
+        if self.release_idle() {
+            // What the list shows of them comes from the listing again.
+            self.refresh();
+        }
+    }
+
+    /// Stops watching sessions with nothing going on that aren't on screen.
+    /// Each watch holds an SSH channel, and the computer allows a few per
+    /// connection (OpenSSH's MaxSessions, 10 by default). Returns whether
+    /// any went.
+    fn release_idle(&mut self) -> bool {
+        let idle: Vec<SessionId> = self
+            .watches
+            .iter()
+            .filter(|(id, watch)| Some(**id) != self.shown && watch.idle())
+            // The list shows it from the listing once it lets go.
+            .filter(|(id, _)| self.listed.contains_key(id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &idle {
+            self.watches.remove(id);
+        }
+        !idle.is_empty()
     }
 
     /// A tool image fetched from the computer: `None` while on the way.

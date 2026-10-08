@@ -713,13 +713,9 @@ impl TextArea {
         };
         // Past the box around the field too, as in the composer.
         let gap = px(24.);
+        // Drawn over everything, past the field's clip: only the window bounds it.
         let visible = window.fully_visible_bounds();
-        let (clip_top, clip_bottom) = self.clip.map_or((visible.top(), visible.bottom()), |clip| {
-            (
-                clip.top().max(visible.top()),
-                clip.bottom().min(visible.bottom()),
-            )
-        });
+        let (clip_top, clip_bottom) = (visible.top(), visible.bottom());
         let above = bounds.top() - gap - height >= clip_top + px(8.);
         let below = gap + px(HANDLE);
         // Neither fits, as in a tall field in a sheet: over the field's top.
@@ -1094,7 +1090,8 @@ impl Render for TextArea {
             }))
             .w_full()
             .child(TextBody { area: cx.entity() })
-            .children(menu)
+            // Over the buttons around the field, which then don't take its taps.
+            .children(menu.map(|bar| gpui::deferred(bar).with_priority(1)))
     }
 }
 

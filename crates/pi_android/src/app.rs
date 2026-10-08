@@ -576,7 +576,22 @@ impl PhoneApp {
         self.entered(window, cx);
     }
 
+    /// Tells the connection which session is on screen: idle ones elsewhere
+    /// let go of their channel.
+    fn show_live(&mut self) {
+        let shown = match self.route() {
+            Route::Thread(id) | Route::Review(id) | Route::History(id) | Route::Subagent(id, _) => {
+                Some(id)
+            }
+            _ => None,
+        };
+        if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
+            live.show(shown);
+        }
+    }
+
     fn entered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_live();
         self.swiping_session = None;
         self.close_sheet(cx);
         self.searching = false;
@@ -762,6 +777,7 @@ impl PhoneApp {
             if let Some(Route::Subagent(id, _)) = left {
                 self.follow_subagent(id, None);
             }
+            self.show_live();
             if left == Some(Route::File)
                 && self.file_view.as_ref().is_some_and(|view| view.from_sheet)
             {

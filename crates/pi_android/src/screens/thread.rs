@@ -481,16 +481,22 @@ impl PhoneApp {
                         )
                     },
                 )
-                .child(
-                    div()
+                .child(match turn.prompt.split_once("\n\n") {
+                    // Opened, subagents' answers read as the markdown they wrote.
+                    Some((_, said)) if turn.reported && !folded => div()
+                        .min_w_0()
+                        .child(crate::message::render(said, colors))
+                        .into_any_element(),
+                    _ => div()
                         .min_w_0()
                         .when(folded, |text| text.truncate())
                         .child(if folded {
                             turn.prompt.lines().next().unwrap_or("").to_owned()
                         } else {
                             turn.prompt.clone()
-                        }),
-                )
+                        })
+                        .into_any_element(),
+                })
                 .when(!turn.attachments.is_empty(), |prompt| {
                     prompt.child(
                         div().mt(px(8.)).flex().flex_wrap().gap(px(8.)).children(
