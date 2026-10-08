@@ -181,6 +181,7 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
       description: [
         "Delegate tasks to subagents, each working in a context of its own. They work in the background:",
         "the call returns at once, and their answers come back to you in one message when the last one finishes.",
+        "Don't do a task you handed off yourself, or check on it: that fills your context with what their answers will say.",
         "Modes: single (agent + task), parallel (tasks array), chain (sequential, with a {previous} placeholder for the prior step's output).",
         "Use a listed agent, or define one: give it a short name (\"architecture\", \"code-quality\"), instructions for its role and output, and tools.",
       ].join(" "),
@@ -211,7 +212,8 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
         }, context);
         const who = [...new Set(items.map((item) => item.agent))].join(", ");
         const text = `Started ${items.length === 1 ? `the ${who} subagent` : `${items.length} subagents (${who})`} in the background. `
-          + "Their answers will come back to you in a message once they finish. Don't wait for them or check on them: carry on with what else there is, or end your turn.";
+          + "They are doing this work now, and their answers come back to you in one message when the last one finishes. "
+          + "Don't do it yourself, check on them or prepare for their answers: end your turn now, unless the user asked for something they aren't doing.";
         return { content: [{ type: "text" as const, text }], details };
       },
     })],
