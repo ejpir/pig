@@ -62,7 +62,7 @@ def main():
             color(image, position, expected)
     for name in ("evening", "moonstone"):
         content = text(name)
-        for expected in ("qwen signatures", "$0.41", "follow-up", "offline", "working", "steer now"):
+        for expected in ("qwen signatures", "$0.41", "queue follow-up", "offline", "working"):
             assert expected in content, (name, expected, content)
     assert "working in this project" not in text("stopped")
     assert "signatures" in text("compact")  # OCR sometimes reads the small Q as O.
