@@ -20,7 +20,8 @@ done
 "$binary" --demo --project "$tmp/project" >artifacts/xvfb-app.log 2>&1 &
 app=$!
 window=""
-for _ in $(seq 1 100); do
+# Cold CI starts can spend more than ten seconds initializing the software Vulkan renderer.
+for _ in $(seq 1 300); do
     if ! kill -0 "$app" 2>/dev/null; then
         printf 'App exited before rendering; see artifacts/xvfb-app.log\n' >&2
         exit 1
