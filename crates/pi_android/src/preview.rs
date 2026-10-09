@@ -1708,6 +1708,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn thread_attachment_stays_above_the_text_areas_actual_paint_bounds(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(520.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("image-only", window, cx);
+                let image = app.start.read(cx).attachments()[0].clone();
+                app.preview("done", window, cx);
+                app.thread_composer(QWEN, window, cx)
+                    .update(cx, |composer, cx| composer.attach(image, cx));
+            })
+        });
+        cx.run_until_parked();
+        let attachment = cx.debug_bounds("attachment-0").unwrap();
+        let text = app.read_with(cx, |app, cx| {
+            app.threads[&QWEN]
+                .read(cx)
+                .area
+                .read(cx)
+                .paint_bounds()
+                .unwrap()
+        });
+        assert!(
+            attachment.bottom() <= text.top(),
+            "attachment paint {attachment:?} overlaps text paint {text:?}"
+        );
+    }
+
+    #[gpui::test]
     fn wrapped_attachments_keep_the_draft_and_send_clear_when_height_is_tight(
         cx: &mut TestAppContext,
     ) {
@@ -1734,6 +1764,55 @@ mod tests {
             send.bottom() <= gpui::px(520.),
             "send moved offscreen: {send:?}"
         );
+    }
+
+    #[gpui::test]
+    fn tool_images_keep_the_same_height_when_remote_bytes_arrive(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(640.)));
+        let inline = cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("tool-image", window, cx);
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == QWEN)
+                    .unwrap()
+                    .turns
+                    .last_mut()
+                    .unwrap()
+                    .images[0]
+                    .inline
+                    .take()
+                    .unwrap()
+            })
+        });
+        cx.run_until_parked();
+        let loading = cx.debug_bounds("tool-image-picture-0-0").unwrap();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == QWEN)
+                    .unwrap()
+                    .turns
+                    .last_mut()
+                    .unwrap()
+                    .images[0]
+                    .inline = Some(inline);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let loaded = cx.debug_bounds("tool-image-picture-0-0").unwrap();
+        assert_eq!(loading.size.height, gpui::px(220.));
+        assert_eq!(loaded.size.height, loading.size.height);
     }
 
     #[gpui::test]

@@ -141,6 +141,11 @@ impl Focusable for TextArea {
 
 impl TextArea {
     /// A field of prose that wraps and grows up to `max_lines`.
+    #[cfg(test)]
+    pub(crate) fn paint_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.bounds
+    }
+
     pub fn multiline(
         placeholder: impl Into<SharedString>,
         max_lines: usize,

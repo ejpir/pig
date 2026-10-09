@@ -203,36 +203,41 @@ impl PhoneApp {
         let image = turn.images.get(n)?;
         Some({
             {
-                let picture = match self.tool_image(id, image) {
-                    Ok(Some(shown)) => div()
-                        .w_full()
-                        .max_h(px(420.))
-                        .aspect_ratio(shown.ratio)
-                        .rounded_t(px(15.))
-                        .overflow_hidden()
-                        .bg(colors.panel)
-                        .child(
-                            img(shown.image)
-                                .size_full()
-                                .rounded_t(px(15.))
-                                .object_fit(ObjectFit::Contain),
-                        ),
-                    Ok(None) => div()
-                        .h(px(160.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(8.))
-                        .bg(colors.panel)
-                        .rounded_t(px(15.))
-                        .child(ui::working_indicator(colors))
-                        .child(ui::hint("Getting the image from the computer…", colors)),
-                    Err(error) => div()
-                        .p(px(16.))
-                        .bg(colors.panel)
-                        .rounded_t(px(15.))
-                        .child(ui::hint(error, colors).text_color(colors.coral)),
-                };
+                // Reserve one stable media slot before remote bytes arrive. A
+                // historical image resolving above the viewport must not move
+                // the conversation underneath the reader's finger.
+                let picture = div()
+                    .id(ElementId::Name(
+                        format!("tool-image-picture-{index}-{n}").into(),
+                    ))
+                    .debug_selector(move || format!("tool-image-picture-{index}-{n}"))
+                    .w_full()
+                    .h(px(220.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .bg(colors.panel)
+                    .rounded_t(px(15.))
+                    .child(match self.tool_image(id, image) {
+                        Ok(Some(shown)) => img(shown.image)
+                            .size_full()
+                            .rounded_t(px(15.))
+                            .object_fit(ObjectFit::Contain)
+                            .into_any_element(),
+                        Ok(None) => div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(8.))
+                            .child(ui::working_indicator(colors))
+                            .child(ui::hint("Getting the image from the computer…", colors))
+                            .into_any_element(),
+                        Err(error) => div()
+                            .p(px(16.))
+                            .child(ui::hint(error, colors).text_color(colors.coral))
+                            .into_any_element(),
+                    });
                 ui::card(colors)
                     .id(ElementId::Name(format!("tool-image-{index}-{n}").into()))
                     .relative()
