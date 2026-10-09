@@ -606,6 +606,60 @@ fn durable_target(directory: &Path) -> SshTarget {
 
 #[test]
 #[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn manual_compaction_is_an_action_and_never_a_slash_prompt() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = durable_target(directory.path());
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+    bridge.send(json!({"type":"set_auto_compaction","id":"auto","enabled":false}));
+    assert_eq!(bridge.response("auto")["success"], true);
+
+    let large = format!("large fixture turn:{}", " context".repeat(50_000));
+    bridge.send(json!({"type":"prompt","id":"large","message":large,"requestId":"large"}));
+    assert_eq!(bridge.response("large")["success"], true);
+    bridge.until(|r| {
+        r["type"] == "remote_snapshot"
+            && r["data"]["run"] == "Idle"
+            && said(r, "Finished the large")
+    });
+    let recent = format!(
+        "large fixture turn: recent marker{}",
+        " tail".repeat(20_000)
+    );
+    bridge.send(json!({"type":"prompt","id":"tail","message":recent,"requestId":"tail"}));
+    assert_eq!(bridge.response("tail")["success"], true);
+    bridge.until(|r| {
+        r["type"] == "remote_snapshot"
+            && r["data"]["run"] == "Idle"
+            && r["data"]["messages"].to_string().contains("recent marker")
+            && said(r, "Finished the large")
+    });
+
+    bridge.send(json!({"type":"compact","id":"compact","customInstructions":"keep API names"}));
+    let response = bridge.response("compact");
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["command"], "compact");
+    assert_eq!(
+        response["data"]["summary"],
+        "Compacted fixture history with API names."
+    );
+    assert!(response["data"]["tokensBefore"].as_u64().unwrap() > 20_000);
+    let compacted = bridge.until(|r| {
+        r["type"] == "remote_snapshot"
+            && r["data"]["messages"]
+                .to_string()
+                .contains("Compacted fixture history with API names.")
+    });
+    assert!(
+        !compacted["data"]["messages"]
+            .to_string()
+            .contains("/compact")
+    );
+}
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
 fn subagents_answer_side_by_side_and_show_their_own_messages() {
     let directory = tempfile::tempdir().unwrap();
     let target = durable_target(directory.path());

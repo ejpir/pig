@@ -43,6 +43,7 @@ enum Request {
     SetThinking(String),
     InitialThinkingLevels(String),
     Stop,
+    Compact,
     /// A tool's image, by its id in the durable session.
     Image(String),
     /// A subagent's messages, by its conversation's id.
@@ -50,6 +51,65 @@ enum Request {
     /// Its failure doesn't matter: a model without thinking levels refuses one.
     Quiet,
     Other,
+}
+
+struct SentRequest {
+    command: String,
+    request: Request,
+}
+
+#[derive(Clone, Copy)]
+struct Admission {
+    /// Omitted for an idle admission that must reject rather than silently queue
+    /// if another client made the session busy before it arrived.
+    streaming_behavior: Option<&'static str>,
+}
+
+struct PendingPrompt {
+    /// The sole owned payload while delivery is pending. Once `admission` is
+    /// present, neither text nor images are rebuilt or replaced.
+    prompt: Prompt,
+    admission: Option<Admission>,
+}
+
+impl PendingPrompt {
+    fn new(prompt: Prompt) -> Self {
+        Self {
+            prompt,
+            admission: None,
+        }
+    }
+
+    fn record(&self, admission: Admission) -> Value {
+        let mut record = json!({
+            "type": "prompt",
+            "message": self.prompt.message,
+            "images": self.prompt.images,
+            "requestId": self.prompt.request_id,
+        });
+        if let Some(behavior) = admission.streaming_behavior {
+            record["streamingBehavior"] = json!(behavior);
+        }
+        record
+    }
+}
+
+impl From<Prompt> for PendingPrompt {
+    fn from(prompt: Prompt) -> Self {
+        Self::new(prompt)
+    }
+}
+
+impl From<String> for PendingPrompt {
+    fn from(message: String) -> Self {
+        Self::new(message.into())
+    }
+}
+
+impl From<&str> for PendingPrompt {
+    fn from(message: &str) -> Self {
+        Self::new(message.into())
+    }
 }
 
 struct Watch {
@@ -61,12 +121,13 @@ struct Watch {
     current: bool,
     /// Whether commands may go: the state arrived and a model is chosen.
     ready: bool,
-    /// Prompts typed on the phone that Pi hasn't taken yet.
-    outbox: Vec<Prompt>,
+    /// Prompts typed on the phone that Pi hasn't taken yet. Each item owns its
+    /// immutable admission mode after the first transport accepts it.
+    outbox: Vec<PendingPrompt>,
     /// Rejected payloads remain recoverable, including images. They never retry
     /// automatically or make the session look as though it is still running.
     failed: Vec<FailedPrompt>,
-    sent: HashMap<String, Request>,
+    sent: HashMap<String, SentRequest>,
     /// Pi's open questions, oldest first.
     dialogs: Vec<Value>,
     /// Tool images fetched from the computer, by id: absent until asked for,
@@ -148,6 +209,9 @@ impl Watch {
         self.current = false;
         self.ready = false;
         self.ended = None;
+        // Session-local commands can change while disconnected. Keep their
+        // display cache, but do not use it for action shadowing until refreshed.
+        self.pi.commands_loaded = false;
         // Requests on the old pipe cannot be acknowledged by the new pipe.
         // Prompts remain in the outbox with their stable admission identities.
         self.sent.clear();
@@ -200,10 +264,6 @@ pub struct Live {
     pub commands_error: Option<String>,
 }
 
-fn request_id() -> String {
-    format!("phone-{:016x}", rand::random::<u64>())
-}
-
 impl Live {
     pub fn new(connection: Connection, helper: Helper, host: String, model: String) -> Self {
         let (sender, updates) = async_channel::unbounded();
@@ -242,6 +302,9 @@ impl Live {
 
     /// Asks the computer for its sessions; the answer arrives as an update.
     pub fn refresh(&self) {
+        if !self.helper.can_list_sessions() {
+            return;
+        }
         let (connection, helper, sender) = (
             self.connection.clone(),
             self.helper.clone(),
@@ -340,6 +403,9 @@ impl Live {
 
     /// Starts watching a listed session; nothing happens if already watched.
     pub fn watch(&mut self, id: SessionId) {
+        if !self.helper.can_attach() {
+            return;
+        }
         if self
             .watches
             .get(&id)
@@ -388,20 +454,42 @@ impl Live {
     }
 
     /// Picks the connection back up after it dropped: watched sessions attach again.
-    pub fn resume(&mut self, connection: Connection) {
+    pub fn resume(&mut self, connection: Connection, helper: Helper) {
         self.connection = connection;
+        self.helper = helper;
+        self.models_loading = false;
+        self.commands_loading = false;
         let watched: Vec<SessionId> = self.watches.keys().copied().collect();
+        if !self.helper.can_attach() {
+            let reason = self
+                .helper
+                .require_attach("opening sessions")
+                .unwrap_err()
+                .to_string();
+            for watch in self.watches.values_mut() {
+                watch.reset_transport();
+                watch.ended = Some(reason.clone());
+            }
+            return;
+        }
         for id in watched {
             if let Some(watch) = self.watches.get_mut(&id) {
                 watch.ended = Some("Reconnecting".into());
             }
             self.watch(id);
         }
-        self.refresh();
+        if self.helper.can_list_sessions() {
+            self.refresh();
+        }
+        self.refresh_models();
+        self.refresh_commands();
     }
 
     /// A new durable session in `folder`, starting with `prompt`.
     pub fn start(&mut self, folder: &str, prompt: Prompt) -> Result<SessionId, String> {
+        self.helper
+            .require_attach("starting a session")
+            .map_err(|error| error.to_string())?;
         if !prompt.images.is_empty() && !self.helper.images {
             return Err(
                 "Update the computer's helper to send images. Your draft has been kept.".into(),
@@ -417,71 +505,147 @@ impl Live {
             remote::new_target(&self.host, folder).map_err(|error| format!("{error:#}"))?;
         let id = self.id_for(&target.key.clone());
         let mut watch = Watch::new(target.clone());
-        watch.outbox.push(prompt);
+        watch.outbox.push(prompt.into());
         let generation = watch.generation;
         self.watches.insert(id, watch);
         self.attach(id, target, generation);
         Ok(id)
     }
 
-    fn send(watch: &mut Watch, mut record: Value, request: Request) {
-        let id = request_id();
+    /// Sends one transport request. Prompt admission fields are already frozen
+    /// in `record`; this adds only the per-connection correlation identity.
+    fn send(watch: &mut Watch, mut record: Value, request: Request) -> bool {
+        let Some(command) = record["type"].as_str().map(str::to_owned) else {
+            return false;
+        };
+        let id = crate::prompt::request_id();
         record["id"] = json!(id);
-        if let Request::Prompt(request_id) = &request {
-            // Durable sessions admit each prompt once, by this id.
-            record["requestId"] = json!(request_id);
-        }
         if let Some(input) = &watch.input
             && input.try_send(record).is_ok()
         {
-            watch.sent.insert(id, request);
+            watch.sent.insert(id, SentRequest { command, request });
+            true
+        } else {
+            false
         }
     }
 
     fn flush(watch: &mut Watch) {
         if !watch.ready
             || watch.input.is_none()
-            || watch.sent.values().any(|request| {
+            || watch.sent.values().any(|sent| {
                 matches!(
-                    request,
+                    &sent.request,
                     Request::SetModel
                         | Request::SetThinking(_)
                         | Request::InitialThinkingLevels(_)
                         | Request::Stop
+                        | Request::Compact
                 )
             })
         {
             return;
         }
-        let pending: Vec<Prompt> = watch
+        let pending: Vec<usize> = watch
             .outbox
             .iter()
-            .filter(|prompt| {
-                !watch
-                    .sent
-                    .values()
-                    .any(|request| matches!(request, Request::Prompt(sent) if *sent == prompt.request_id))
+            .enumerate()
+            .filter(|(_, pending)| {
+                !watch.sent.values().any(|sent| {
+                    matches!(&sent.request, Request::Prompt(request_id) if *request_id == pending.prompt.request_id)
+                })
             })
-            .cloned()
+            .map(|(index, _)| index)
             .collect();
-        for prompt in pending {
-            let mut record =
-                json!({"type": "prompt", "message": prompt.message, "images":prompt.images});
-            if watch.pi.busy()
-                || watch
-                    .sent
-                    .values()
-                    .any(|request| matches!(request, Request::Prompt(_)))
-            {
-                record["streamingBehavior"] = json!("steer");
+        for index in pending {
+            let admission = watch.outbox[index].admission.unwrap_or_else(|| Admission {
+                streaming_behavior: (watch.pi.busy()
+                    || watch
+                        .sent
+                        .values()
+                        .any(|sent| matches!(&sent.request, Request::Prompt(_))))
+                .then_some("steer"),
+            });
+            let request_id = watch.outbox[index].prompt.request_id.clone();
+            let record = watch.outbox[index].record(admission);
+            if Self::send(watch, record, Request::Prompt(request_id)) {
+                // Freeze only once the channel accepted the record. Before that,
+                // no admission was attempted and current session state may still
+                // choose its behavior.
+                watch.outbox[index].admission.get_or_insert(admission);
             }
-            Self::send(watch, record, Request::Prompt(prompt.request_id));
         }
+    }
+
+    fn compact_watch(watch: &mut Watch, custom_instructions: Option<String>) -> Result<(), String> {
+        if !watch.current || !watch.ready {
+            return Err("Wait for the session to finish connecting before compacting.".into());
+        }
+        if watch
+            .sent
+            .values()
+            .any(|sent| matches!(&sent.request, Request::Compact))
+        {
+            return Err("This session is already compacting.".into());
+        }
+        if watch.pi.busy()
+            || !watch.outbox.is_empty()
+            || watch
+                .sent
+                .values()
+                .any(|sent| matches!(&sent.request, Request::Prompt(_)))
+        {
+            return Err("Stop the session and clear queued prompts before compacting.".into());
+        }
+        let mut record = json!({"type":"compact"});
+        if let Some(instructions) = custom_instructions {
+            record["customInstructions"] = json!(instructions);
+        }
+        if Self::send(watch, record, Request::Compact) {
+            Ok(())
+        } else {
+            Err("The session disconnected before compaction could start.".into())
+        }
+    }
+
+    /// Manually compacts a session. Unlike a prompt this action is never queued
+    /// or retried as text; the computer owns its long-running operation.
+    pub fn compact(
+        &mut self,
+        id: SessionId,
+        custom_instructions: Option<String>,
+    ) -> Result<(), String> {
+        self.helper
+            .require_attach("compacting a session")
+            .map_err(|error| error.to_string())?;
+        self.watch(id);
+        if self.commands(id).is_none() {
+            return Err("Wait for this session's commands to finish loading.".into());
+        }
+        if !self.supports_compact(id) {
+            return Err("Update the computer's helper before using manual compaction.".into());
+        }
+        let watch = self
+            .watches
+            .get_mut(&id)
+            .ok_or("This session is no longer available.")?;
+        Self::compact_watch(watch, custom_instructions)
     }
 
     /// A prompt for a session: it runs now, or steers the current run.
     pub fn prompt(&mut self, id: SessionId, prompt: Prompt) -> Result<(), String> {
+        self.helper
+            .require_attach("sending a prompt")
+            .map_err(|error| error.to_string())?;
         self.watch(id);
+        if self.watches.get(&id).is_some_and(|watch| {
+            watch
+                .sent
+                .values()
+                .any(|sent| matches!(&sent.request, Request::Compact))
+        }) {
+            return Err("Wait for compaction to finish before sending another prompt.".into());
+        }
         if !prompt.images.is_empty() {
             if let Some(watch) = self.watches.get(&id)
                 && watch.target.backend == RemoteBackend::Durable
@@ -507,7 +671,7 @@ impl Live {
             }
         }
         if let Some(watch) = self.watches.get_mut(&id) {
-            watch.outbox.push(prompt);
+            watch.outbox.push(prompt.into());
             Self::flush(watch);
             Ok(())
         } else {
@@ -571,6 +735,26 @@ impl Live {
             .then_some(watch.pi.commands.as_slice())
     }
 
+    pub fn supports_compact(&self, id: SessionId) -> bool {
+        let Some(watch) = self.watches.get(&id) else {
+            return false;
+        };
+        if watch.target.backend == RemoteBackend::Pi {
+            return true;
+        }
+        let pi_core::session::BackendInfo::Found(info) = &watch.pi.backend else {
+            return false;
+        };
+        info["commands"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().any(|command| command == "compact"))
+            || info["features"].as_array().is_some_and(|features| {
+                features
+                    .iter()
+                    .any(|feature| feature == "manual_compaction")
+            })
+    }
+
     pub fn commands_for_path(&self, path: &str) -> Option<&[pi_core::protocol::SlashCommand]> {
         self.watches
             .values()
@@ -584,7 +768,7 @@ impl Live {
             watch
                 .sent
                 .values()
-                .any(|request| matches!(request, Request::Stop))
+                .any(|sent| matches!(&sent.request, Request::Stop))
         })
     }
 
@@ -595,27 +779,33 @@ impl Live {
     }
 
     pub fn recover_prompt(&mut self, id: SessionId, request_id: &str) -> Option<Prompt> {
-        let watch = self.watches.get_mut(&id)?;
+        Self::recover_failed(self.watches.get_mut(&id)?, request_id)
+    }
+
+    fn recover_failed(watch: &mut Watch, request_id: &str) -> Option<Prompt> {
         let index = watch
             .failed
             .iter()
             .position(|failed| failed.prompt.request_id == request_id)?;
-        Some(watch.failed.remove(index).prompt)
+        let prompt = watch.failed.remove(index).prompt;
+        // Recovery restores editable content. If it is sent again, it is a new
+        // admission even when the person makes no edit.
+        Some(Prompt::new(prompt.message, prompt.images))
     }
 
     fn hold_failed(watch: &mut Watch, error: &str) {
-        for prompt in std::mem::take(&mut watch.outbox) {
-            if watch
-                .sent
-                .values()
-                .any(|request| matches!(request, Request::Prompt(id) if *id == prompt.request_id))
+        for pending in std::mem::take(&mut watch.outbox) {
+            if pending.admission.is_some()
+                || watch.sent.values().any(|sent| {
+                    matches!(&sent.request, Request::Prompt(id) if *id == pending.prompt.request_id)
+                })
             {
                 // This payload may already be admitted. Wait for its receipt;
                 // never offer a second admission after a configuration error.
-                watch.outbox.push(prompt);
+                watch.outbox.push(pending);
             } else {
                 watch.failed.push(FailedPrompt {
-                    prompt,
+                    prompt: pending.prompt,
                     error: error.to_owned(),
                 });
             }
@@ -681,7 +871,7 @@ impl Live {
         if watch
             .sent
             .values()
-            .any(|request| matches!(request, Request::Stop))
+            .any(|sent| matches!(&sent.request, Request::Stop))
         {
             return Ok(());
         }
@@ -716,7 +906,9 @@ impl Live {
                 .saturating_sub(usize::from(!watch.pi.busy()));
             if local < unsent {
                 let at = watch.outbox.len() - unsent + local;
-                if watch.sent.values().any(|request| matches!(request, Request::Prompt(request_id) if *request_id == watch.outbox[at].request_id)) {
+                if watch.outbox[at].admission.is_some()
+                    || watch.sent.values().any(|sent| matches!(&sent.request, Request::Prompt(request_id) if *request_id == watch.outbox[at].prompt.request_id))
+                {
                     return Err("This prompt is being delivered. Wait for its queue confirmation, then remove it.".into());
                 }
                 watch.outbox.remove(at);
@@ -732,16 +924,20 @@ impl Live {
     }
 
     pub fn answer(&mut self, id: SessionId, answer: Answer) {
+        if !self.helper.can_attach() {
+            return;
+        }
         let Some(watch) = self.watches.get_mut(&id) else {
+            return;
+        };
+        let Some(input) = watch.input.as_ref().filter(|input| !input.is_closed()) else {
             return;
         };
         if watch.dialogs.is_empty() {
             return;
         }
         let request = watch.dialogs.remove(0);
-        if let Some(input) = &watch.input {
-            let _ = input.try_send(projection::answer(&request, answer));
-        }
+        let _ = input.try_send(projection::answer(&request, answer));
     }
 
     /// Applies an update; returns the session it changed and any problem.
@@ -854,6 +1050,24 @@ impl Live {
         if kind == "extension_ui_cancel" {
             watch.dialogs.retain(|dialog| dialog["id"] != record["id"]);
         }
+        // A response belongs to one active request only when both its transport
+        // identity and command match. A late duplicate is ignored, while a
+        // mismatched response cannot consume the legitimate request behind it.
+        let response = if kind == "response" {
+            let id = record["id"].as_str()?;
+            let command = record["command"].as_str()?;
+            let sent = watch.sent.get(id)?;
+            if sent.command != command {
+                log::warn!(
+                    "Ignoring response {id} for {command}; expected {}",
+                    sent.command
+                );
+                return None;
+            }
+            Some(watch.sent.remove(id)?.request)
+        } else {
+            None
+        };
         if let Err(error) = watch.pi.apply(record) {
             log::warn!("Skipping a record Pi's session model refused: {error:#}");
         }
@@ -889,34 +1103,39 @@ impl Live {
             // attachment while retaining the last catalog in the snapshot.
             Self::send(watch, json!({"type":"get_commands"}), Request::Commands);
         }
-        if kind != "response" {
-            return None;
-        }
-        let request = record["id"].as_str().and_then(|id| watch.sent.remove(id))?;
+        let request = response?;
         let failed = record["success"] != true;
         let error = record["error"]
             .as_str()
             .unwrap_or("Pi refused it")
             .to_owned();
         match request {
-            Request::Prompt(prompt) => {
-                if let Some(index) = watch
+            Request::Prompt(request_id) => {
+                let Some(index) = watch
                     .outbox
                     .iter()
-                    .position(|queued| queued.request_id == prompt)
-                {
-                    let prompt = watch.outbox.remove(index);
-                    if failed {
-                        watch.failed.push(FailedPrompt {
-                            prompt,
-                            error: error.clone(),
-                        });
+                    .position(|queued| queued.prompt.request_id == request_id)
+                else {
+                    // A prompt response is terminal. Duplicate or late responses
+                    // must not turn an already accepted prompt into a failure.
+                    return None;
+                };
+                let prompt = watch.outbox.remove(index).prompt;
+                watch.sent.retain(
+                    |_, sent| !matches!(&sent.request, Request::Prompt(id) if *id == request_id),
+                );
+                if failed {
+                    watch.failed.push(FailedPrompt {
+                        prompt,
+                        error: error.clone(),
+                    });
+                    if watch.pi.messages.is_empty() {
+                        watch.pi.error = Some(error.clone());
                     }
+                    Some(error)
+                } else {
+                    None
                 }
-                if failed && watch.pi.messages.is_empty() {
-                    watch.pi.error = Some(error.clone());
-                }
-                failed.then_some(error)
             }
             Request::Models | Request::AvailableModels => {
                 let initial = matches!(request, Request::Models);
@@ -964,7 +1183,7 @@ impl Live {
                     if !watch
                         .sent
                         .values()
-                        .any(|request| matches!(request, Request::InitialThinkingLevels(_)))
+                        .any(|sent| matches!(&sent.request, Request::InitialThinkingLevels(_)))
                     {
                         Self::send(
                             watch,
@@ -1032,6 +1251,7 @@ impl Live {
                 }
                 failed.then_some(error)
             }
+            Request::Compact => failed.then_some(error),
             Request::Image(id) => {
                 use base64::Engine as _;
                 let image = &record["data"]["image"];
@@ -1155,7 +1375,7 @@ impl Live {
             || watch
                 .sent
                 .values()
-                .any(|request| matches!(request, Request::Subagent(_)))
+                .any(|sent| matches!(&sent.request, Request::Subagent(_)))
         {
             return;
         }
@@ -1236,7 +1456,11 @@ impl Live {
                     cwd: &watch.target.cwd,
                     folder: self.helper.short(&watch.target.cwd),
                     question: watch.dialogs.first().and_then(projection::question),
-                    outbox: &watch.outbox.iter().map(Prompt::label).collect::<Vec<_>>(),
+                    outbox: &watch
+                        .outbox
+                        .iter()
+                        .map(|pending| pending.prompt.label())
+                        .collect::<Vec<_>>(),
                     key: &watch.target.key,
                 },
             ));
@@ -1349,11 +1573,18 @@ mod tests {
         }
     }
 
+    fn admission(mut record: Value) -> Value {
+        record.as_object_mut().unwrap().remove("id");
+        record
+    }
+
     #[test]
     fn obsolete_pipes_cannot_overwrite_new_state_or_close_the_replacement_connection() {
         let (mut watch, _) = watch();
         let old = watch.generation;
+        watch.pi.commands_loaded = true;
         watch.reset_transport();
+        assert!(!watch.pi.commands_loaded);
         assert!(!watch.accepts(&Update::Record(
             old,
             json!({"type":"remote_session_deleted"})
@@ -1366,7 +1597,7 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_retries_the_entire_unacknowledged_payload_once_with_its_original_identity() {
+    fn reconnect_retries_the_exact_idle_admission_and_ignores_late_collision_errors() {
         let (mut watch, first_pipe) = watch();
         watch.ready = true;
         let prompt = Prompt::new(
@@ -1376,46 +1607,146 @@ mod tests {
                 "image/png",
             )],
         );
-        watch.outbox.push(prompt.clone());
+        watch.outbox.push(prompt.into());
+        let old_generation = watch.generation;
         Live::flush(&mut watch);
         let first = first_pipe.try_recv().unwrap();
+        assert!(first.get("streamingBehavior").is_none());
+        assert!(watch.outbox[0].admission.is_some());
         Live::flush(&mut watch);
         assert!(
             first_pipe.try_recv().is_err(),
             "no duplicate request on one pipe"
         );
+
         watch.reset_transport();
+        watch.pi.run = pi_core::session::RunState::Running;
         let (input, next_pipe) = async_channel::unbounded();
         watch.input = Some(input);
         watch.ready = true;
         Live::flush(&mut watch);
         let retry = next_pipe.try_recv().unwrap();
-        assert_eq!(first["requestId"], retry["requestId"]);
         assert_ne!(first["id"], retry["id"]);
-        assert_eq!(retry["images"], first["images"]);
-        assert_eq!(retry["message"], first["message"]);
-        let error = json!({"type":"response","id":retry["id"],"command":"prompt","success":false,"error":"Unsupported model"});
-        Live::record(&mut watch, &error, "", "", &mut Vec::new());
+        assert_eq!(admission(first.clone()), admission(retry.clone()));
+        assert!(
+            retry.get("streamingBehavior").is_none(),
+            "an idle reject admission must not become steer after reconnect"
+        );
+
+        let delivered =
+            json!({"type":"response","id":retry["id"],"command":"prompt","success":true});
+        assert!(Live::record(&mut watch, &delivered, "", "", &mut Vec::new()).is_none());
+        let duplicate = json!({"type":"response","id":retry["id"],"command":"prompt","success":false,"error":"requestId already belongs to a different prompt"});
+        assert!(Live::record(&mut watch, &duplicate, "", "", &mut Vec::new()).is_none());
+        let obsolete = Update::Record(
+            old_generation,
+            json!({"type":"response","id":first["id"],"command":"prompt","success":false,"error":"requestId already belongs to a different prompt"}),
+        );
+        assert!(!watch.accepts(&obsolete));
         assert!(watch.outbox.is_empty());
-        assert_eq!(watch.failed[0].prompt, prompt);
-        Live::flush(&mut watch);
+        assert!(watch.failed.is_empty(), "no failed card after acceptance");
+        assert!(
+            watch.pi.error.is_none(),
+            "no stale session error after acceptance"
+        );
         assert!(
             next_pipe.try_recv().is_err(),
-            "a rejection requires user action"
+            "no duplicate prompt submitted"
         );
     }
 
     #[test]
-    fn prompts_steer_a_running_session_by_default() {
+    fn a_genuine_collision_rejection_remains_recoverable_with_images_and_a_new_identity() {
+        let (mut watch, sent) = watch();
+        watch.ready = true;
+        let prompt = Prompt::new(
+            "try this".into(),
+            vec![pi_core::protocol::ImageContent::new(
+                "aW1hZ2U=".into(),
+                "image/png",
+            )],
+        );
+        let original_id = prompt.request_id.clone();
+        watch.outbox.push(prompt.clone().into());
+        Live::flush(&mut watch);
+        let request = sent.try_recv().unwrap();
+        let error = json!({"type":"response","id":request["id"],"command":"prompt","success":false,"error":"requestId already belongs to a different prompt"});
+        assert_eq!(
+            Live::record(&mut watch, &error, "", "", &mut Vec::new()).as_deref(),
+            Some("requestId already belongs to a different prompt")
+        );
+        assert!(watch.outbox.is_empty());
+        assert_eq!(watch.failed[0].prompt, prompt);
+        let recovered = Live::recover_failed(&mut watch, &original_id).unwrap();
+        assert_ne!(recovered.request_id, original_id);
+        assert_eq!(recovered.message, prompt.message);
+        assert_eq!(recovered.images, prompt.images);
+        assert!(watch.failed.is_empty());
+    }
+
+    #[test]
+    fn a_mismatched_response_cannot_consume_or_fail_the_prompt_request() {
+        let (mut watch, sent) = watch();
+        watch.ready = true;
+        watch.outbox.push("keep waiting".into());
+        Live::flush(&mut watch);
+        let request = sent.try_recv().unwrap();
+
+        let wrong = json!({"type":"response","id":request["id"],"command":"set_model","success":false,"error":"wrong response"});
+        assert!(Live::record(&mut watch, &wrong, "", "", &mut Vec::new()).is_none());
+        assert_eq!(watch.outbox.len(), 1);
+        assert!(watch.failed.is_empty());
+        assert!(watch.pi.error.is_none());
+        assert!(watch.sent.contains_key(request["id"].as_str().unwrap()));
+
+        let refusal = json!({"type":"response","id":request["id"],"command":"prompt","success":false,"error":"real refusal"});
+        assert_eq!(
+            Live::record(&mut watch, &refusal, "", "", &mut Vec::new()).as_deref(),
+            Some("real refusal")
+        );
+        assert!(watch.outbox.is_empty());
+        assert_eq!(watch.failed.len(), 1);
+    }
+
+    #[test]
+    fn the_first_terminal_prompt_response_wins_in_either_order() {
+        let (mut watch, sent) = watch();
+        watch.ready = true;
+        watch.outbox.push("reject me".into());
+        Live::flush(&mut watch);
+        let request = sent.try_recv().unwrap();
+        let failed = json!({"type":"response","id":request["id"],"command":"prompt","success":false,"error":"provider refused"});
+        assert!(Live::record(&mut watch, &failed, "", "", &mut Vec::new()).is_some());
+        let accepted =
+            json!({"type":"response","id":request["id"],"command":"prompt","success":true});
+        assert!(Live::record(&mut watch, &accepted, "", "", &mut Vec::new()).is_none());
+        assert_eq!(
+            watch.failed.len(),
+            1,
+            "late success cannot erase a real failure"
+        );
+        assert_eq!(watch.failed[0].error, "provider refused");
+    }
+
+    #[test]
+    fn steering_mode_remains_stable_when_the_session_becomes_idle() {
         let (mut watch, sent) = watch();
         watch.current = true;
         watch.ready = true;
         watch.pi.run = pi_core::session::RunState::Running;
         watch.outbox.push("Change direction now".into());
         Live::flush(&mut watch);
-        let prompt = sent.try_recv().unwrap();
-        assert_eq!(prompt["type"], "prompt");
-        assert_eq!(prompt["streamingBehavior"], "steer");
+        let first = sent.try_recv().unwrap();
+        assert_eq!(first["streamingBehavior"], "steer");
+
+        watch.reset_transport();
+        watch.pi.run = pi_core::session::RunState::Idle;
+        let (input, retried) = async_channel::unbounded();
+        watch.input = Some(input);
+        watch.ready = true;
+        Live::flush(&mut watch);
+        let retry = retried.try_recv().unwrap();
+        assert_eq!(admission(first), admission(retry));
     }
 
     #[test]
@@ -1440,6 +1771,65 @@ mod tests {
                 .contains("being delivered")
         );
         assert_eq!(watch.outbox.len(), 1);
+    }
+
+    #[test]
+    fn compact_sends_an_action_without_admitting_prompt_text() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        let messages = watch.pi.messages.len();
+
+        Live::compact_watch(&mut watch, Some("keep API names".into())).unwrap();
+        let request = sent.try_recv().unwrap();
+        assert_eq!(
+            admission(request.clone()),
+            json!({"type":"compact","customInstructions":"keep API names"})
+        );
+        assert!(watch.outbox.is_empty());
+        assert_eq!(watch.pi.messages.len(), messages);
+        assert!(sent.try_recv().is_err());
+        assert_eq!(
+            Live::compact_watch(&mut watch, None).unwrap_err(),
+            "This session is already compacting."
+        );
+
+        let response = json!({"type":"response","id":request["id"],"command":"compact","success":true,"data":{}});
+        assert!(Live::record(&mut watch, &response, "", "", &mut Vec::new()).is_none());
+        Live::compact_watch(&mut watch, None).unwrap();
+        assert_eq!(
+            admission(sent.try_recv().unwrap()),
+            json!({"type":"compact"})
+        );
+    }
+
+    #[test]
+    fn compact_waits_for_a_current_ready_session_and_reports_backend_failure() {
+        let (mut watch, sent) = watch();
+        assert!(
+            Live::compact_watch(&mut watch, None)
+                .unwrap_err()
+                .contains("finish connecting")
+        );
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.run = pi_core::session::RunState::Running;
+        assert!(
+            Live::compact_watch(&mut watch, None)
+                .unwrap_err()
+                .contains("Stop the session")
+        );
+        assert!(sent.try_recv().is_err());
+        watch.pi.run = pi_core::session::RunState::Idle;
+        Live::compact_watch(&mut watch, None).unwrap();
+        let request = sent.try_recv().unwrap();
+        let failed = json!({"type":"response","id":request["id"],"command":"compact","success":false,"error":"Nothing to compact (session too small)"});
+        assert_eq!(
+            Live::record(&mut watch, &failed, "", "", &mut Vec::new()).as_deref(),
+            Some("Nothing to compact (session too small)")
+        );
+        assert!(watch.outbox.is_empty());
+        assert!(watch.failed.is_empty());
     }
 
     #[test]
@@ -1600,8 +1990,12 @@ mod tests {
         )
         .unwrap();
         let set = sent.try_recv().unwrap();
-        // Explicit user recovery resubmits the full payload, never a label.
-        watch.outbox.push(watch.failed.remove(0).prompt);
+        // Explicit user recovery resubmits the full payload under a new key,
+        // never a label or the rejected admission identity.
+        let rejected_id = watch.failed[0].prompt.request_id.clone();
+        let recovered = Live::recover_failed(&mut watch, &rejected_id).unwrap();
+        assert_ne!(recovered.request_id, rejected_id);
+        watch.outbox.push(recovered.into());
         Live::record(
             &mut watch,
             &json!({"type":"response","id":set["id"],"command":"set_model","success":true,"data":{"provider":"host","id":"next"}}),
@@ -1615,6 +2009,70 @@ mod tests {
         );
         assert_eq!(sent.try_recv().unwrap()["type"], "prompt");
         assert_eq!(watch.pi.state.model.as_ref().unwrap().id, "next");
+    }
+
+    #[test]
+    fn model_confirmation_cannot_mutate_or_fail_an_attempted_admission() {
+        let (mut watch, first_pipe) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.outbox.push("Keep the original admission".into());
+        Live::flush(&mut watch);
+        let first = first_pipe.try_recv().unwrap();
+        assert!(first.get("streamingBehavior").is_none());
+
+        watch.reset_transport();
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.run = pi_core::session::RunState::Running;
+        let (input, next_pipe) = async_channel::unbounded();
+        watch.input = Some(input);
+        Live::configure(
+            &mut watch,
+            json!({"type":"set_model","provider":"host","modelId":"next"}),
+            Request::SetModel,
+        )
+        .unwrap();
+        let set = next_pipe.try_recv().unwrap();
+        Live::flush(&mut watch);
+        assert!(
+            next_pipe.try_recv().is_err(),
+            "model confirmation blocks retry"
+        );
+
+        let mut models = Vec::new();
+        assert!(Live::record(
+            &mut watch,
+            &json!({"type":"response","id":set["id"],"command":"set_model","success":false,"error":"Unavailable"}),
+            "",
+            "",
+            &mut models,
+        )
+        .is_some());
+        assert_eq!(watch.outbox.len(), 1, "attempted prompt stays pending");
+        assert!(watch.failed.is_empty(), "no recoverable failure card yet");
+        assert!(watch.outbox[0].admission.is_some());
+
+        Live::configure(
+            &mut watch,
+            json!({"type":"set_model","provider":"host","modelId":"next"}),
+            Request::SetModel,
+        )
+        .unwrap();
+        let set = next_pipe.try_recv().unwrap();
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":set["id"],"command":"set_model","success":true,"data":{"provider":"host","id":"next"}}),
+            "",
+            "",
+            &mut models,
+        );
+        assert_eq!(
+            next_pipe.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
+        let retry = next_pipe.try_recv().unwrap();
+        assert_eq!(admission(first), admission(retry));
     }
 
     /// Runs against the disposable SSH endpoint owned by scripts/test_ssh.py.

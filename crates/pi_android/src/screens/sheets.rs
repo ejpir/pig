@@ -1083,8 +1083,13 @@ impl PhoneApp {
                    title: &'static str,
                    value: String,
                    open: Option<bool>| {
+            let value_selector = format!("{key}-value");
+            let value_probe = value_selector.clone();
+            let chevron_selector = format!("{key}-chevron");
+            let chevron_probe = chevron_selector.clone();
             div()
                 .id(key)
+                .debug_selector(move || key.to_owned())
                 .relative()
                 .child(crate::testing::probe(key))
                 .min_h(px(56.))
@@ -1095,17 +1100,31 @@ impl PhoneApp {
                 .border_color(colors.line)
                 .active(|style| style.bg(colors.selected))
                 .child(icon(glyph, 20., colors.muted))
-                .child(div().flex_1().child(title))
-                .child(meta(value))
-                .child(icon(
-                    if open == Some(true) {
-                        "chev_d"
-                    } else {
-                        "chev_r"
-                    },
-                    16.,
-                    colors.faint,
-                ))
+                .child(div().flex_1().min_w_0().truncate().child(title))
+                .child(
+                    meta(value)
+                        .debug_selector(move || value_selector.clone())
+                        .relative()
+                        .child(crate::testing::probe(value_probe))
+                        .min_w_0()
+                        .truncate(),
+                )
+                .child(
+                    div()
+                        .debug_selector(move || chevron_selector.clone())
+                        .relative()
+                        .flex_none()
+                        .child(crate::testing::probe(chevron_probe))
+                        .child(icon(
+                            if open == Some(true) {
+                                "chev_d"
+                            } else {
+                                "chev_r"
+                            },
+                            16.,
+                            colors.faint,
+                        )),
+                )
         };
         let disclosure = |key: &'static str| {
             cx.listener(move |this, _, _, cx| {
@@ -1120,6 +1139,7 @@ impl PhoneApp {
         let snapshots = details.snapshots;
         let runs_open = self.expanded.contains("details-run");
         let tools_open = self.expanded.contains("details-tools");
+        let subagents = crate::model::subagent_details_summary(&session.turns);
         let history = div()
             .pb(px(16.))
             .children(session.turns.iter().enumerate().map(|(index, turn)| {
@@ -1216,6 +1236,14 @@ impl PhoneApp {
                         .border_color(colors.line),
                     ),
             )
+            .children(subagents.map(|summary| {
+                row("details-subagents", "fork", "Subagents", summary, None).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        this.close_sheet(cx);
+                        this.push(Route::Subagents(id), window, cx);
+                    },
+                ))
+            }))
             .child(
                 div()
                     .pt(px(20.))

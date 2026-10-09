@@ -58,11 +58,14 @@ PI_DESKTOP_DURABLE_BINARY=$PWD/artifacts/durable/pi-desktop-durable \
   cargo build --release --locked -p pi_remote --features bundled-durable
 ```
 
-To pair a phone with the computer, install the helper as `~/.pi/desktop/bin/pi-desktop-remote` (turn on SSH first; on a Mac, **System Settings → General → Sharing → Remote Login**) and run:
+To pair a phone with the computer, activate the helper first (turn on SSH first; on a Mac, **System Settings → General → Sharing → Remote Login**), then run the stable command:
 
 ```sh
+target/release/pi-desktop-remote activate
 ~/.pi/desktop/bin/pi-desktop-remote pair
 ```
+
+Activation keeps the executable under `~/.pi/desktop/bin/<sha256>/` and atomically selects it with the stable `~/.pi/desktop/bin/pi-desktop-remote` symlink.
 
 In the Android app, tap **Scan computer QR** and scan the code in the terminal. Check that both devices show the same six-digit code, then press Enter on the computer. Pairing goes through the computer's own SSH server and installs a phone key that can run only the helper. If the phone can't reach the address it found, add `--host <address>`; a Tailscale name or an IP works. The QR expires after two minutes (`--expires <seconds>` changes that). See [Pi for Android](crates/pi_android/README.md#connect) for manual SSH-key setup.
 

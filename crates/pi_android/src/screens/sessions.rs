@@ -6,6 +6,7 @@ use crate::{
     app::{PhoneApp, Route, Sheet},
     model::{Session, State, duration_label},
     motion::SwipeMotion,
+    remote::HelperUpdateState,
     theme::{Theme, theme},
     ui::{self, Button, icon},
 };
@@ -66,9 +67,22 @@ impl PhoneApp {
                 Some(store) if store.is_sample() => {
                     (store.computer.name.clone(), "Sample sessions", colors.green)
                 }
-                Some(store) if store.computer.connected => {
-                    (store.computer.name.clone(), "Connected", colors.green)
-                }
+                Some(store) if store.computer.connected => match store
+                    .live
+                    .as_ref()
+                    .and_then(|live| live.helper.update.as_ref())
+                    .map(|update| update.state)
+                {
+                    Some(HelperUpdateState::UpdateRequired) => {
+                        (store.computer.name.clone(), "Update required", colors.coral)
+                    }
+                    Some(HelperUpdateState::UpdateRecommended) => (
+                        store.computer.name.clone(),
+                        "Update recommended",
+                        colors.amber,
+                    ),
+                    None => (store.computer.name.clone(), "Connected", colors.green),
+                },
                 Some(store) => (store.computer.name.clone(), "Reconnecting…", colors.wait),
                 None => ("Pi".into(), "Not connected", colors.muted),
             };
@@ -172,6 +186,50 @@ impl PhoneApp {
                 .text_color(colors.muted)
                 .child(text)
         };
+        let helper_update = store
+            .live
+            .as_ref()
+            .and_then(|live| live.helper.update.as_ref())
+            .map(|update| {
+                let required = update.state == HelperUpdateState::UpdateRequired;
+                let hue = if required { colors.coral } else { colors.amber };
+                div()
+                    .id(if required {
+                        "helper-update-required"
+                    } else {
+                        "helper-update-recommended"
+                    })
+                    .relative()
+                    .child(crate::testing::probe(if required {
+                        "helper-update-required"
+                    } else {
+                        "helper-update-recommended"
+                    }))
+                    .mb(px(16.))
+                    .p(px(16.))
+                    .rounded(px(16.))
+                    .bg(colors.tint(hue))
+                    .border_1()
+                    .border_color(hue.opacity(0.55))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .text_color(hue)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(icon(if required { "alert" } else { "info" }, 18., hue))
+                            .child(update.title(&store.computer.name)),
+                    )
+                    .child(
+                        div()
+                            .mt(px(10.))
+                            .text_size(px(13.))
+                            .line_height(px(19.))
+                            .text_color(colors.secondary)
+                            .child(update.details(&store.computer.name)),
+                    )
+            });
         let earlier = (store.earlier > 0 && !self.searching).then(|| {
             div()
                 .min_h(px(56.))
@@ -210,6 +268,7 @@ impl PhoneApp {
             .pb(px(24.))
             .flex()
             .flex_col()
+            .children(helper_update)
             .children(needs.iter().enumerate().map(|(index, session)| {
                 self.home_question(session, &colors, cx)
                     .when(index > 0, |card| card.mt(px(12.)))

@@ -313,6 +313,21 @@ impl Store {
         Ok(())
     }
 
+    /// Manually compacts an existing live session without inserting slash text
+    /// into its transcript.
+    pub fn compact(
+        &mut self,
+        id: SessionId,
+        custom_instructions: Option<String>,
+    ) -> Result<(), String> {
+        let Some(live) = &mut self.live else {
+            return Err("Compaction is available after connecting to a computer.".into());
+        };
+        live.compact(id, custom_instructions)?;
+        self.reproject(id);
+        Ok(())
+    }
+
     /// A prompt for an existing session. Live runs steer; samples queue it.
     pub fn send(
         &mut self,

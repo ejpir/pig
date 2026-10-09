@@ -7,7 +7,7 @@
 
 use crate::{
     alerts::{self, Link},
-    composer::{Attachment, Composer, ComposerEvent},
+    composer::{Attachment, Composer, ComposerEvent, compact_instructions},
     live::{Live, Update},
     model::{Answer, Computer, SessionId, StageKind, State},
     motion::SwipeMotion,
@@ -46,6 +46,8 @@ pub enum Route {
     Thread(SessionId),
     Review(SessionId),
     History(SessionId),
+    /// Every subagent across all of a session's turns and hand-offs.
+    Subagents(SessionId),
     /// One subagent of a session, read-only.
     Subagent(SessionId, Pick),
     Settings,
@@ -201,6 +203,8 @@ pub struct PhoneApp {
     /// Invalidates project-tree replies when the selected folder changes.
     pub(crate) project_files_generation: u64,
     pub(crate) threads: HashMap<SessionId, Entity<Composer>>,
+    /// Cleared compact commands, retained until the backend accepts or rejects them.
+    pending_compacts: HashMap<SessionId, (Target, String)>,
     /// Sample sessions have their own model selection, just like live sessions.
     sample_models: HashMap<SessionId, (String, String)>,
     pub(crate) review: Entity<Composer>,
@@ -415,6 +419,7 @@ impl PhoneApp {
             file_generation: 0,
             project_files_generation: 0,
             threads: HashMap::new(),
+            pending_compacts: HashMap::new(),
             sample_models: HashMap::new(),
             review,
             review_file: 0,
@@ -520,6 +525,27 @@ impl PhoneApp {
         self.command_catalog_for_path(&path, cx)
     }
 
+    fn compact_available_for_session(&self, id: SessionId) -> bool {
+        self.store
+            .as_ref()
+            .and_then(|store| store.live.as_ref())
+            .is_some_and(|live| live.commands(id).is_some() && live.supports_compact(id))
+    }
+
+    fn compact_for_session(&self, id: SessionId, draft: &str) -> Option<Option<String>> {
+        let live = self.store.as_ref()?.live.as_ref()?;
+        let parsed = compact_instructions(draft, false)?;
+        let Some(commands) = live.commands(id) else {
+            // Do not turn an action into model text while its possible session
+            // shadow is still unknown. Live keeps the draft and asks to wait.
+            return Some(parsed);
+        };
+        let shadowed = commands
+            .iter()
+            .any(|command| command.name.trim_start_matches('/') == "compact");
+        (!shadowed).then_some(parsed)
+    }
+
     pub(crate) fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let appearance = self.prefs(cx).appearance;
         let system_dark = matches!(
@@ -580,9 +606,11 @@ impl PhoneApp {
     /// let go of their channel.
     fn show_live(&mut self) {
         let shown = match self.route() {
-            Route::Thread(id) | Route::Review(id) | Route::History(id) | Route::Subagent(id, _) => {
-                Some(id)
-            }
+            Route::Thread(id)
+            | Route::Review(id)
+            | Route::History(id)
+            | Route::Subagents(id)
+            | Route::Subagent(id, _) => Some(id),
             _ => None,
         };
         if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
@@ -597,8 +625,11 @@ impl PhoneApp {
         self.searching = false;
         window.dismiss_virtual_keyboard();
         window.focus(&self.focus, cx);
-        if let Route::Thread(id) | Route::Review(id) | Route::History(id) | Route::Subagent(id, _) =
-            self.route()
+        if let Route::Thread(id)
+        | Route::Review(id)
+        | Route::History(id)
+        | Route::Subagents(id)
+        | Route::Subagent(id, _) = self.route()
         {
             activity::cancel_notification(alerts::question_id(id));
             activity::cancel_notification(alerts::finished_id(id));
@@ -828,6 +859,7 @@ impl PhoneApp {
         self.store = Some(Store::sample(Computer::from_address(address)));
         self.routes = vec![Route::Sessions];
         self.threads.clear();
+        self.pending_compacts.clear();
         self.sample_models.clear();
         self.jj_histories.clear();
         self.restoring_history = None;
@@ -840,6 +872,7 @@ impl PhoneApp {
 
     pub(crate) fn open_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_connection_attempt();
+        activity::cancel_notification(alerts::HELPER_UPDATE_ID);
         self.paused = false;
         let typed = self.address.read(cx).text().trim().to_owned();
         let address = if typed.is_empty() {
@@ -916,7 +949,11 @@ impl PhoneApp {
             let reached = async {
                 let connection = Connection::open(address.clone(), identity, known).await?;
                 let helper = remote::find(&connection).await?;
-                let listed = remote::sessions(&connection, &helper).await?;
+                let listed = if helper.can_list_sessions() {
+                    remote::sessions(&connection, &helper).await?
+                } else {
+                    Vec::new()
+                };
                 anyhow::Ok((connection, helper, listed))
             }
             .await;
@@ -1106,12 +1143,18 @@ impl PhoneApp {
             .zip(prefs.model_id.as_ref())
             .map(|(provider, id)| format!("{provider}/{id}"))
             .unwrap_or_else(|| prefs.model.clone());
+        let helper_release = helper
+            .release
+            .as_ref()
+            .map(|release| format!("Helper {release}"));
         let mut live = Live::new(connection, helper, address.to_string(), wanted);
         live.thinking = prefs.thinking.clone();
-        live.refresh_models();
-        live.refresh_commands();
+        if live.helper.can_attach() {
+            live.refresh_models();
+            live.refresh_commands();
+        }
         let mut computer = Computer::from_address(&address.to_string());
-        computer.pi_version = None;
+        computer.pi_version = helper_release;
         let mut store = Store::live(computer, live);
         store.apply(vec![(None, Update::Listed(Ok(listed)))]);
         self.project = prefs
@@ -1123,6 +1166,7 @@ impl PhoneApp {
         self.store = Some(store);
         self.routes = vec![Route::Sessions, Route::Projects];
         self.threads.clear();
+        self.pending_compacts.clear();
         self.jj_histories.clear();
         self.restoring_history = None;
         self.enabling_jj = None;
@@ -1140,6 +1184,7 @@ impl PhoneApp {
         self.load_project_files(self.project, cx);
         self.start_pump(cx);
         activity::request_notification_permission();
+        self.update_helper_notification(cx);
         self.entered(window, cx);
         self.open_project_browser(true, cx);
     }
@@ -1179,9 +1224,27 @@ impl PhoneApp {
             .iter()
             .filter_map(|(id, update)| {
                 (*id).filter(|_| {
-                    matches!(update, Update::Record(_, record) if record["type"] == "response" && record["command"] == "get_commands" && record["success"] == true)
+                    matches!(update, Update::Record(_, record) if record["type"] == "response" && record["command"] == "get_commands")
                 })
             })
+            .collect();
+        let compact_responses: Vec<(SessionId, bool)> = batch
+            .iter()
+            .filter_map(|(id, update)| {
+                let id = (*id)?;
+                match update {
+                    Update::Record(_, record)
+                        if record["type"] == "response" && record["command"] == "compact" =>
+                    {
+                        Some((id, record["success"] == true))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        let ended_sessions: HashSet<SessionId> = batch
+            .iter()
+            .filter_map(|(id, update)| matches!(update, Update::Ended(_, _)).then_some((*id)?))
             .collect();
         let Some(store) = &mut self.store else {
             return;
@@ -1220,6 +1283,34 @@ impl PhoneApp {
                     .extend(catalogs);
             });
         }
+        let refresh_commands: HashSet<SessionId> = if global_commands {
+            self.threads.keys().copied().collect()
+        } else {
+            command_sessions
+        };
+        for id in refresh_commands {
+            let commands = self.command_catalog_for_session(id, cx);
+            let compact = self.compact_available_for_session(id);
+            if let Some(composer) = self.threads.get(&id) {
+                composer.update(cx, |composer, _| {
+                    composer.use_commands(commands);
+                    composer.set_session_commands(compact);
+                });
+            }
+        }
+        for (id, success) in compact_responses {
+            let Some((target, draft)) = self.pending_compacts.remove(&id) else {
+                continue;
+            };
+            if !success {
+                self.restore_compact_draft(target, &draft, cx);
+            }
+        }
+        for id in ended_sessions {
+            if let Some((target, draft)) = self.pending_compacts.remove(&id) {
+                self.restore_compact_draft(target, &draft, cx);
+            }
+        }
         self.update_working_notification(cx);
         cx.notify();
     }
@@ -1240,24 +1331,46 @@ impl PhoneApp {
         self.reconnecting = true;
         self.last_reconnect = Instant::now();
         cx.spawn(async move |this, cx| {
-            let connection = Connection::open(address, identity, known).await;
+            let reached = async {
+                let connection = Connection::open(address, identity, known).await?;
+                let helper = remote::find(&connection).await?;
+                anyhow::Ok((connection, helper))
+            }
+            .await;
             this.update(cx, |this, cx| {
                 this.reconnecting = false;
                 let Some(store) = &mut this.store else {
                     return;
                 };
-                match connection {
-                    Ok(connection) => {
-                        if let Some(live) = &mut store.live {
-                            live.resume(connection);
-                        }
+                let mut helper_changed = false;
+                match reached {
+                    Ok((connection, helper)) => {
+                        let helper_release = helper
+                            .release
+                            .as_ref()
+                            .map(|release| format!("Helper {release}"));
+                        store.computer.pi_version = helper_release.clone();
                         store.computer.connected = true;
+                        if let Some(computer) = store.computers.first_mut() {
+                            computer.pi_version = helper_release;
+                            computer.connected = true;
+                        }
+                        if let Some(live) = &mut store.live {
+                            live.resume(connection, helper);
+                        }
                         this.last_listed = Instant::now();
+                        helper_changed = true;
                     }
                     Err(error) => {
                         log::info!("Reconnecting failed: {error:#}");
                         store.computer.connected = false;
+                        if let Some(computer) = store.computers.first_mut() {
+                            computer.connected = false;
+                        }
                     }
+                }
+                if helper_changed {
+                    this.update_helper_notification(cx);
                 }
                 cx.notify();
             })
@@ -1268,9 +1381,11 @@ impl PhoneApp {
 
     pub(crate) fn model_session(&self) -> Option<SessionId> {
         match self.route() {
-            Route::Thread(id) | Route::Review(id) | Route::History(id) | Route::Subagent(id, _) => {
-                Some(id)
-            }
+            Route::Thread(id)
+            | Route::Review(id)
+            | Route::History(id)
+            | Route::Subagents(id)
+            | Route::Subagent(id, _) => Some(id),
             _ => None,
         }
     }
@@ -1349,6 +1464,7 @@ impl PhoneApp {
         self.project_browser.clear();
         self._pump = None;
         self.threads.clear();
+        self.pending_compacts.clear();
         self.jj_histories.clear();
         self.restoring_history = None;
         self.enabling_jj = None;
@@ -1438,7 +1554,7 @@ impl PhoneApp {
 
     fn viewing(&self, id: SessionId) -> bool {
         self.visible
-            && matches!(self.route(), Route::Thread(shown) | Route::Review(shown) | Route::History(shown) | Route::Subagent(shown, _) if shown == id)
+            && matches!(self.route(), Route::Thread(shown) | Route::Review(shown) | Route::History(shown) | Route::Subagents(shown) | Route::Subagent(shown, _) if shown == id)
     }
 
     fn alert(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -1480,6 +1596,24 @@ impl PhoneApp {
         }
     }
 
+    fn update_helper_notification(&self, cx: &mut Context<Self>) {
+        let update = self.store.as_ref().and_then(|store| {
+            Some((
+                store.computer.name.as_str(),
+                store.live.as_ref()?.helper.update.as_ref()?,
+            ))
+        });
+        if let Some((computer, update)) = update {
+            activity::notify(&alerts::helper_update(
+                update,
+                computer,
+                theme(cx).accent_rgb(),
+            ));
+        } else {
+            activity::cancel_notification(alerts::HELPER_UPDATE_ID);
+        }
+    }
+
     fn update_working_notification(&mut self, cx: &mut Context<Self>) {
         let wanted = self.prefs(cx).notify_working && !self.visible;
         let accent = theme(cx).accent_rgb();
@@ -1510,6 +1644,7 @@ impl PhoneApp {
             && let Route::Thread(id)
             | Route::Review(id)
             | Route::History(id)
+            | Route::Subagents(id)
             | Route::Subagent(id, _) = self.route()
         {
             activity::cancel_notification(alerts::question_id(id));
@@ -1520,6 +1655,12 @@ impl PhoneApp {
 
     /// A `pi://` link from a notification.
     pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if url == "pi://helper-update" {
+            self.close_sheet(cx);
+            self.routes = vec![Route::Sessions];
+            cx.notify();
+            return;
+        }
         #[cfg(feature = "ui-test")]
         if let Some(seconds) = url.strip_prefix("pi://test/advance/") {
             // Preview sessions are held still so screenshots are deterministic.
@@ -1614,6 +1755,7 @@ impl PhoneApp {
                 Route::Thread(id)
                 | Route::Review(id)
                 | Route::History(id)
+                | Route::Subagents(id)
                 | Route::Subagent(id, _) => self.store.as_ref().and_then(|s| s.session(id)),
                 _ => None,
             };
@@ -1792,6 +1934,7 @@ impl PhoneApp {
         self.deleting_session = None;
         self.swiping_session = None;
         self.threads.remove(&id);
+        self.pending_compacts.remove(&id);
         self.sample_models.remove(&id);
         self.jj_histories.remove(&id);
         if self
@@ -1807,7 +1950,8 @@ impl PhoneApp {
         self.scrolls.remove(&Route::Thread(id));
         self.scrolls.remove(&Route::Review(id));
         self.scrolls.remove(&Route::History(id));
-        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) | Route::History(session) | Route::Subagent(session, _) if *session == id));
+        self.scrolls.remove(&Route::Subagents(id));
+        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) | Route::History(session) | Route::Subagents(session) | Route::Subagent(session, _) if *session == id));
         if self.sheet == Some(Sheet::Delete(id)) {
             self.close_sheet(cx);
         }
@@ -2059,7 +2203,12 @@ impl PhoneApp {
         if let Some(composer) = self.threads.get(&id) {
             return composer.clone();
         }
-        let composer = cx.new(|cx| Composer::new("Ask a follow-up…", cx));
+        let compact = self.compact_available_for_session(id);
+        let composer = cx.new(|cx| {
+            let mut composer = Composer::new("Ask a follow-up…", cx);
+            composer.set_session_commands(compact);
+            composer
+        });
         let commands = self.command_catalog_for_session(id, cx);
         composer.update(cx, |composer, _| composer.use_commands(commands));
         // A live session offers the files Pi touched in it.
@@ -2165,6 +2314,21 @@ impl PhoneApp {
         }
     }
 
+    pub(crate) fn restore_compact_draft(
+        &self,
+        target: Target,
+        draft: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(composer) = self.composer(target) {
+            composer.update(cx, |composer, cx| {
+                if !composer.can_send(cx) {
+                    composer.set_text(draft, cx);
+                }
+            });
+        }
+    }
+
     fn composer_event(
         &mut self,
         target: Target,
@@ -2179,6 +2343,42 @@ impl PhoneApp {
             ComposerEvent::PreviewImage(index) => self.open_sheet(Sheet::Image(target, *index), cx),
             ComposerEvent::Send { text, attachments } => {
                 let route = self.route();
+                let compact = match target {
+                    Target::Thread(id) => self
+                        .compact_for_session(id, text)
+                        .map(|instructions| (id, instructions)),
+                    Target::Review => match route {
+                        Route::Review(id) => self
+                            .compact_for_session(id, text)
+                            .map(|instructions| (id, instructions)),
+                        _ => None,
+                    },
+                    Target::Start => None,
+                };
+                if let Some((id, instructions)) = compact {
+                    if !attachments.is_empty() {
+                        self.notify_user(
+                            "Remove attachments before compacting. Your draft has been kept.",
+                            cx,
+                        );
+                        return;
+                    }
+                    let Some(store) = &mut self.store else {
+                        return;
+                    };
+                    if let Err(error) = store.compact(id, instructions) {
+                        self.notify_user(error, cx);
+                        return;
+                    }
+                    self.pending_compacts.insert(id, (target, text.clone()));
+                    if let Some(composer) = self.composer(target) {
+                        composer.update(cx, |composer, cx| composer.clear(cx));
+                    }
+                    window.dismiss_virtual_keyboard();
+                    self.notify_user("Compacting context", cx);
+                    cx.notify();
+                    return;
+                }
                 let Some(store) = &mut self.store else {
                     return;
                 };
@@ -2505,6 +2705,7 @@ impl Render for PhoneApp {
             Route::Thread(id) => self.thread_screen(id, window, cx),
             Route::Review(id) => self.review_screen(id, window, cx),
             Route::History(id) => self.history_screen(id, window, cx),
+            Route::Subagents(id) => self.subagents_screen(id, window, cx),
             Route::Subagent(id, pick) => self.subagent_screen(id, pick, window, cx),
             Route::Settings => self.settings_screen(window, cx).into_any_element(),
         };

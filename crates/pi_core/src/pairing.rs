@@ -35,6 +35,31 @@ pub struct Request {
     pub device_name: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelperCapabilities {
+    #[serde(default)]
+    pub pi: bool,
+    #[serde(default)]
+    pub durable: bool,
+    #[serde(default)]
+    pub durable_experimental: bool,
+    #[serde(default)]
+    pub watchers: bool,
+    #[serde(default)]
+    pub sessions: bool,
+    #[serde(default)]
+    pub directories: bool,
+    #[serde(default)]
+    pub commands: bool,
+    #[serde(default)]
+    pub jj_history: bool,
+    #[serde(default)]
+    pub delete_sessions: bool,
+    #[serde(default)]
+    pub image_prompts: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Helper {
@@ -42,6 +67,14 @@ pub struct Helper {
     pub home: String,
     pub images: bool,
     pub gateway: bool,
+    #[serde(default)]
+    pub release: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<u32>,
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub capabilities: HelperCapabilities,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,5 +255,26 @@ mod tests {
             confirmation_code("pair", "ssh-ed25519 first"),
             confirmation_code("pair", "ssh-ed25519 second")
         );
+    }
+
+    #[test]
+    fn older_helper_discovery_defaults_new_metadata() {
+        let helper: Helper = serde_json::from_str(
+            r#"{"path":"/home/me/pi-desktop-remote","home":"/home/me","images":true,"gateway":true}"#,
+        )
+        .unwrap();
+        assert_eq!(helper.release, None);
+        assert_eq!(helper.protocol, None);
+        assert_eq!(helper.platform, None);
+        assert_eq!(helper.capabilities, HelperCapabilities::default());
+
+        let encoded = serde_json::to_value(HelperCapabilities {
+            durable_experimental: true,
+            image_prompts: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(encoded["durableExperimental"], true);
+        assert_eq!(encoded["imagePrompts"], true);
     }
 }

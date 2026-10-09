@@ -70,7 +70,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("fix-tests", "Fix the failing tests"),
     ("review", "Review the local changes"),
     ("explain", "Explain this project"),
-    ("compact", "Summarize to free context"),
     ("skill:lint", "Lint the code with the project's rules"),
 ];
 
@@ -85,6 +84,23 @@ pub fn sample_commands() -> Vec<SavedCommand> {
         .collect()
 }
 
+/// Recognizes the app-owned `/compact` action. A session-local command with the
+/// same exact name shadows it and remains ordinary prompt text for Pi to expand.
+pub(crate) fn compact_instructions(
+    draft: &str,
+    remote_compact_shadows: bool,
+) -> Option<Option<String>> {
+    if remote_compact_shadows {
+        return None;
+    }
+    let rest = draft.strip_prefix('/')?;
+    let (name, arguments) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    (name == "compact").then(|| {
+        let instructions = arguments.trim();
+        (!instructions.is_empty()).then(|| instructions.to_owned())
+    })
+}
+
 /// A chip in the suggestion strip: its text, what it puts in the draft, its icon.
 type Suggestion = (String, String, &'static str);
 
@@ -96,8 +112,10 @@ pub struct Composer {
     thinking_label: Option<String>,
     /// A strip sits on the composer's top edge (Working and Stop).
     joined: bool,
-    /// The `/` button, on New session only.
+    /// Whether the composer exposes the `/` button.
     command_button: bool,
+    /// Existing sessions add app-owned action commands to Pi's catalog.
+    session_commands: bool,
     /// The draft's least height: taller for a new task.
     draft_height: f32,
     imports: usize,
@@ -129,6 +147,7 @@ impl Composer {
             thinking_label: None,
             joined: false,
             command_button: false,
+            session_commands: false,
             draft_height: 24.,
             imports: 0,
             import_generation: 0,
@@ -164,9 +183,11 @@ impl Composer {
     }
 
     fn has_commands(&self) -> bool {
-        self.commands
-            .as_ref()
-            .map_or(!COMMANDS.is_empty(), |commands| !commands.is_empty())
+        self.session_commands
+            || self
+                .commands
+                .as_ref()
+                .map_or(!COMMANDS.is_empty(), |commands| !commands.is_empty())
     }
 
     pub fn set_model_label(&mut self, model: String, thinking: String) {
@@ -183,6 +204,12 @@ impl Composer {
     pub fn set_new_task(&mut self) {
         self.command_button = true;
         self.draft_height = 66.;
+    }
+
+    /// Existing sessions expose Pi's commands plus app-owned actions such as `/compact`.
+    pub fn set_session_commands(&mut self, compact: bool) {
+        self.command_button = true;
+        self.session_commands = compact;
     }
 
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -355,7 +382,7 @@ impl Composer {
         if let Some((range, word)) = area.token_before_caret('/')
             && range.start == 0
         {
-            let offered: Vec<(&str, Option<&str>)> = match &self.commands {
+            let mut offered: Vec<(&str, Option<&str>)> = match &self.commands {
                 Some(commands) => commands
                     .iter()
                     .map(|command| {
@@ -370,6 +397,11 @@ impl Composer {
                     .map(|(name, description)| (*name, Some(*description)))
                     .collect(),
             };
+            // Built-in actions belong to the app, not Pi's resource catalog. A
+            // session-local command of the same name wins, matching desktop.
+            if self.session_commands && !offered.iter().any(|(name, _)| *name == "compact") {
+                offered.insert(0, ("compact", Some("Summarize to free context")));
+            }
             let commands: Vec<_> = offered
                 .into_iter()
                 .filter(|(name, _)| !name.is_empty() && name.starts_with(word))
@@ -792,6 +824,60 @@ mod tests {
             let (title, items) = composer.suggestions(cx).expect("error state");
             assert_eq!(title, "Project files unavailable");
             assert!(items.is_empty());
+        });
+    }
+
+    #[test]
+    fn compact_action_is_exact_and_remote_commands_can_shadow_it() {
+        assert_eq!(compact_instructions("/compact", false), Some(None));
+        assert_eq!(
+            compact_instructions("/compact   keep API names ", false),
+            Some(Some("keep API names".into()))
+        );
+        assert_eq!(compact_instructions("/compactly", false), None);
+        assert_eq!(compact_instructions("x /compact", false), None);
+        assert_eq!(
+            compact_instructions("/compact preserve this text", true),
+            None
+        );
+    }
+
+    #[gpui::test]
+    fn session_commands_add_compact_without_losing_or_duplicating_remote_commands(
+        cx: &mut TestAppContext,
+    ) {
+        let composer = cx.new(|cx| Composer::new("", cx));
+        composer.update(cx, |composer, cx| {
+            composer.set_session_commands(true);
+            composer.use_commands(Some(vec![
+                SavedCommand {
+                    name: "review".into(),
+                    description: Some("Review changes".into()),
+                },
+                SavedCommand {
+                    name: "skill:lint".into(),
+                    description: Some("Lint".into()),
+                },
+            ]));
+            composer.set_text("/", cx);
+        });
+        composer.read_with(cx, |composer, cx| {
+            let (_, items) = composer.suggestions(cx).expect("session commands");
+            let labels: Vec<_> = items.iter().map(|item| item.0.as_str()).collect();
+            assert_eq!(labels, ["/compact", "/review", "/skill:lint"]);
+            assert!(composer.has_commands());
+        });
+
+        composer.update(cx, |composer, cx| {
+            composer.use_commands(Some(vec![SavedCommand {
+                name: "/compact".into(),
+                description: Some("Project compact command".into()),
+            }]));
+            composer.set_text("/", cx);
+        });
+        composer.read_with(cx, |composer, cx| {
+            let (_, items) = composer.suggestions(cx).expect("shadowing command");
+            assert_eq!(items.iter().filter(|item| item.0 == "/compact").count(), 1);
         });
     }
 

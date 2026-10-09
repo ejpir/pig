@@ -30,6 +30,12 @@ faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
   const message = transcript.messages[lastUser];
   const text = message?.role === "user" ? message.content : "";
   if (Array.isArray(text)) {
+    const written = text.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+    if (written.includes("<conversation>") && written.includes("Use this EXACT format:")) {
+      return fauxAssistantMessage(written.includes("Additional focus: keep API names")
+        ? "Compacted fixture history with API names."
+        : "Compacted fixture history.");
+    }
     const images = text.filter((part) => part.type === "image");
     return fauxAssistantMessage(`Received ${images.length} image(s): ${images.map((part) => `${part.mimeType}:${Buffer.from(part.data, "base64").length}`).join(", ")}`);
   }
@@ -55,6 +61,14 @@ faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
   // The subagents' answers, once they all finished.
   if (typeof text === "string" && text.startsWith("<subagent_report")) {
     return fauxAssistantMessage(`Heard back: ${text.split("\n").slice(3, -1).join(" ").trim()}`);
+  }
+  if (typeof text === "string" && text.startsWith("large fixture turn:")) {
+    return fauxAssistantMessage("Finished the large fixture turn.");
+  }
+  if (typeof text === "string" && text.includes("<conversation>") && text.includes("Use this EXACT format:")) {
+    return fauxAssistantMessage(text.includes("Additional focus: keep API names")
+      ? "Compacted fixture history with API names."
+      : "Compacted fixture history.");
   }
   if (text === "safe" || text === "unsafe") {
     if (!after.some((message) => message.role === "toolResult")) {

@@ -1,19 +1,89 @@
 //! Pi's helper on the computer, `pi-desktop-remote`, over SSH. Pi Desktop
-//! installs it under `~/.pi/desktop/bin/<hash>/`; the phone uses the newest copy
-//! that runs durable sessions, lets several apps watch one, and lists them.
+//! installs immutable content objects and activates one stable helper path. The
+//! phone uses that explicit selection rather than directory mtimes.
 
 use crate::ssh::{Connection, Pipe, quote};
 use anyhow::{Context as _, Result, bail, ensure};
 use pi_core::{
+    pairing::HelperCapabilities,
     remote_files::{FILE_PROTOCOL_VERSION, Request as FileRequest, Tree},
     ssh::{PROTOCOL_VERSION, RemoteBackend, SshTarget},
 };
+use semver::Version;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// Each installed helper with its version and capabilities, newest first, after
-/// the account's home folder. No single quotes: it runs inside `sh -c '…'`.
-const FIND: &str = r#"printf "home\t%s\n" "$HOME"; ls -t "$HOME"/.pi/desktop/bin/*/pi-desktop-remote 2>/dev/null | while IFS= read -r f; do printf "%s\t%s\t%s\n" "$f" "$("$f" --version 2>/dev/null)" "$("$f" --capabilities 2>/dev/null | tr -d "\n")"; done"#;
+/// The explicitly activated helper, after the account's home folder. No single
+/// quotes: this runs inside `sh -c '…'`.
+const FIND: &str = r#"printf "home\t%s\n" "$HOME"; f="$HOME/.pi/desktop/bin/pi-desktop-remote"; if test -x "$f"; then printf "%s\t%s\t%s\n" "$f" "$("$f" --version 2>/dev/null)" "$("$f" --capabilities 2>/dev/null | tr -d "\n")"; fi"#;
+
+pub const APP_RELEASE: &str = env!("CARGO_PKG_VERSION");
+const RELEASES: &str = "https://github.com/earendil-works/pi/releases";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelperUpdateState {
+    UpdateRequired,
+    UpdateRecommended,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HelperUpdate {
+    pub state: HelperUpdateState,
+    pub installed_release: Option<String>,
+    pub app_release: String,
+    pub platform: Option<String>,
+    pub reasons: Vec<String>,
+}
+
+impl HelperUpdate {
+    pub fn title(&self, computer: &str) -> String {
+        match self.state {
+            HelperUpdateState::UpdateRequired => {
+                format!("Helper update required on {computer}")
+            }
+            HelperUpdateState::UpdateRecommended => {
+                format!("Helper update recommended on {computer}")
+            }
+        }
+    }
+
+    pub fn details(&self, computer: &str) -> String {
+        let installed = self.installed_release.as_deref().unwrap_or("unknown");
+        let platform = self
+            .platform
+            .as_deref()
+            .map(|platform| format!(" for {platform}"))
+            .unwrap_or_default();
+        let comparison = match self.state {
+            HelperUpdateState::UpdateRequired => format!(
+                "Pi Android {} cannot use all requested features: {}.",
+                self.app_release,
+                self.reasons.join(", ")
+            ),
+            HelperUpdateState::UpdateRecommended => format!(
+                "It is compatible, but older than the current Pi Android {} release.",
+                self.app_release
+            ),
+        };
+        let artifact = self
+            .platform
+            .as_deref()
+            .map(|platform| format!(" (pi-desktop-remote-{platform})"))
+            .unwrap_or_default();
+        format!(
+            "{computer} has pi-desktop-remote {installed}{platform}. {comparison} Manually update `pi-desktop-remote` from the matching GitHub release{artifact}: {RELEASES}/tag/v{}, then reconnect.",
+            self.app_release
+        )
+    }
+}
+
+struct HelperMetadata {
+    release: Option<String>,
+    protocol: Option<u32>,
+    platform: Option<String>,
+    capabilities: HelperCapabilities,
+    legacy_images: bool,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Helper {
@@ -23,9 +93,43 @@ pub struct Helper {
     pub images: bool,
     /// A paired phone runs through an authorized_keys forced-command gateway.
     pub gateway: bool,
+    pub release: Option<String>,
+    pub protocol: Option<u32>,
+    pub platform: Option<String>,
+    pub capabilities: HelperCapabilities,
+    pub update: Option<HelperUpdate>,
 }
 
 impl Helper {
+    fn new(path: String, home: String, gateway: bool, metadata: HelperMetadata) -> Self {
+        let HelperMetadata {
+            release,
+            protocol,
+            platform,
+            mut capabilities,
+            legacy_images,
+        } = metadata;
+        capabilities.image_prompts |= legacy_images;
+        let images = capabilities.image_prompts;
+        let update = evaluate_update(
+            release.as_deref(),
+            protocol,
+            platform.as_deref(),
+            &capabilities,
+        );
+        Self {
+            path,
+            home,
+            images,
+            gateway,
+            release,
+            protocol,
+            platform,
+            capabilities,
+            update,
+        }
+    }
+
     fn command(&self, arguments: &str) -> Result<String> {
         Ok(format!(
             "{} {arguments}",
@@ -35,6 +139,49 @@ impl Helper {
                 quote(&self.path)?
             }
         ))
+    }
+
+    fn reevaluate(&mut self) {
+        self.capabilities.image_prompts |= self.images;
+        self.images = self.capabilities.image_prompts;
+        self.update = evaluate_update(
+            self.release.as_deref(),
+            self.protocol,
+            self.platform.as_deref(),
+            &self.capabilities,
+        );
+    }
+
+    pub fn can_list_sessions(&self) -> bool {
+        self.protocol == Some(PROTOCOL_VERSION)
+            && self.capabilities.durable
+            && self.capabilities.sessions
+    }
+
+    pub fn can_attach(&self) -> bool {
+        self.protocol == Some(PROTOCOL_VERSION)
+            && self.capabilities.durable
+            && self.capabilities.watchers
+    }
+
+    pub fn require_attach(&self, action: &str) -> Result<()> {
+        if self.can_attach() {
+            return Ok(());
+        }
+        bail!("{}", self.action_update_message(action))
+    }
+
+    fn require_capability(&self, supported: bool, action: &str) -> Result<()> {
+        if supported {
+            return Ok(());
+        }
+        bail!("{}", self.action_update_message(action))
+    }
+
+    fn action_update_message(&self, action: &str) -> String {
+        format!(
+            "Update `pi-desktop-remote` from {RELEASES}/tag/v{APP_RELEASE} and reconnect before {action}. Existing sessions and drafts are kept."
+        )
     }
 
     /// `~/repos/pi` for `/Users/nick/repos/pi`.
@@ -48,10 +195,109 @@ impl Helper {
     }
 }
 
-/// Picks a helper from what `FIND` printed.
+fn evaluate_update(
+    release: Option<&str>,
+    protocol: Option<u32>,
+    platform: Option<&str>,
+    capabilities: &HelperCapabilities,
+) -> Option<HelperUpdate> {
+    let mut reasons = Vec::new();
+    if protocol != Some(PROTOCOL_VERSION) {
+        reasons.push(match protocol {
+            Some(protocol) => format!("helper protocol {protocol}, required {PROTOCOL_VERSION}"),
+            None => format!("unknown helper protocol, required {PROTOCOL_VERSION}"),
+        });
+    }
+    for (supported, name) in [
+        (capabilities.durable, "durable sessions"),
+        (capabilities.watchers, "multi-client session watching"),
+        (capabilities.sessions, "session discovery"),
+    ] {
+        if !supported {
+            reasons.push(format!("missing {name}"));
+        }
+    }
+    if !reasons.is_empty() {
+        return Some(HelperUpdate {
+            state: HelperUpdateState::UpdateRequired,
+            installed_release: release.map(str::to_owned),
+            app_release: APP_RELEASE.into(),
+            platform: platform.map(str::to_owned),
+            reasons,
+        });
+    }
+
+    let installed =
+        release.and_then(|release| Version::parse(release.trim_start_matches('v')).ok());
+    let current = Version::parse(APP_RELEASE).ok();
+    matches!((installed, current), (Some(installed), Some(current)) if installed < current).then(
+        || HelperUpdate {
+            state: HelperUpdateState::UpdateRecommended,
+            installed_release: release.map(str::to_owned),
+            app_release: APP_RELEASE.into(),
+            platform: platform.map(str::to_owned),
+            reasons: Vec::new(),
+        },
+    )
+}
+
+fn version_metadata(version: &str) -> (Option<String>, Option<u32>, Option<String>) {
+    let mut fields = version.split_whitespace();
+    if fields.next() != Some("pi-desktop-remote") {
+        return (None, None, None);
+    }
+    let release = fields.next().map(str::to_owned);
+    let protocol = fields.next().and_then(|protocol| protocol.parse().ok());
+    let platform = fields.next().map(str::to_owned);
+    if fields.next().is_some() {
+        return (None, None, None);
+    }
+    (release, protocol, platform)
+}
+
+fn capabilities(output: &str) -> HelperCapabilities {
+    serde_json::from_str(output.trim()).unwrap_or_default()
+}
+
+fn from_discovery(helper: pi_core::pairing::Helper) -> Helper {
+    Helper::new(
+        helper.path,
+        helper.home,
+        helper.gateway,
+        HelperMetadata {
+            release: helper.release,
+            protocol: helper.protocol,
+            platform: helper.platform,
+            capabilities: helper.capabilities,
+            legacy_images: helper.images,
+        },
+    )
+}
+
+async fn probe(connection: &Connection, mut helper: Helper) -> Helper {
+    if let Ok(command) = helper.command("--version")
+        && let Ok(output) = connection.run(command).await
+        && output.status == Some(0)
+    {
+        let (release, protocol, platform) = version_metadata(output.stdout.trim());
+        helper.release = release.or(helper.release);
+        helper.protocol = protocol.or(helper.protocol);
+        helper.platform = platform.or(helper.platform);
+    }
+    if let Ok(command) = helper.command("--capabilities")
+        && let Ok(output) = connection.run(command).await
+        && output.status == Some(0)
+    {
+        helper.capabilities = capabilities(&output.stdout);
+    }
+    helper.reevaluate();
+    helper
+}
+
+/// Picks the stable helper from what `FIND` printed, retaining incompatible
+/// metadata so Android can explain a required manual update.
 pub fn choose(listing: &str) -> Result<Helper> {
     let mut home = String::new();
-    let (mut any, mut durable) = (false, false);
     for line in listing.lines() {
         let mut fields = line.splitn(3, '\t');
         let (Some(path), Some(version)) = (fields.next(), fields.next()) else {
@@ -61,49 +307,33 @@ pub fn choose(listing: &str) -> Result<Helper> {
             home = version.trim_end_matches('/').to_owned();
             continue;
         }
-        any = true;
-        let protocol = version.split_whitespace().nth(2);
-        let capabilities: Value =
-            serde_json::from_str(fields.next().unwrap_or("")).unwrap_or_default();
-        if protocol != Some(&PROTOCOL_VERSION.to_string()) || capabilities["durable"] != true {
-            continue;
-        }
-        durable = true;
-        if capabilities["watchers"] == true && capabilities["sessions"] == true {
-            return Ok(Helper {
-                path: path.to_owned(),
-                home,
-                images: capabilities["imagePrompts"] == true,
-                gateway: false,
-            });
-        }
+        let (release, protocol, platform) = version_metadata(version);
+        return Ok(Helper::new(
+            path.to_owned(),
+            home,
+            false,
+            HelperMetadata {
+                release,
+                protocol,
+                platform,
+                capabilities: capabilities(fields.next().unwrap_or("")),
+                legacy_images: false,
+            },
+        ));
     }
-    match (any, durable) {
-        (false, _) => bail!(
-            "Pi Desktop's helper isn't on this computer yet. Install one built with durable sessions (see crates/pi_android/README.md)."
-        ),
-        (true, false) => bail!(
-            "The helper on this computer can't run durable sessions. Install one built with bundled-durable."
-        ),
-        (true, true) => {
-            bail!("The helper on this computer is older than the phone. Install the current one.")
-        }
-    }
+    bail!(
+        "Pi Desktop's helper isn't on this computer yet. Install `pi-desktop-remote` from the matching GitHub release."
+    )
 }
 
 pub async fn find(connection: &Connection) -> Result<Helper> {
     // A paired key cannot run a shell to search the account. Its forced gateway
-    // exposes only this fixed discovery command and the helper's allowlisted API.
+    // exposes only discover, --version, --capabilities and the helper API.
     let discovered = connection.run("pi-desktop-remote discover".into()).await?;
     if discovered.status == Some(0)
         && let Ok(helper) = serde_json::from_str::<pi_core::pairing::Helper>(&discovered.stdout)
     {
-        return Ok(Helper {
-            path: helper.path,
-            home: helper.home,
-            images: helper.images,
-            gateway: helper.gateway,
-        });
+        return Ok(probe(connection, from_discovery(helper)).await);
     }
     let output = connection.run(format!("sh -c '{FIND}'")).await?;
     choose(&output.stdout)
@@ -139,6 +369,7 @@ pub fn parse_sessions(output: &str) -> Result<Vec<Listed>> {
 }
 
 pub async fn sessions(connection: &Connection, helper: &Helper) -> Result<Vec<Listed>> {
+    helper.require_capability(helper.can_list_sessions(), "listing sessions")?;
     let output = connection.run(helper.command("sessions")?).await?;
     if output.status != Some(0) {
         bail!("Listing sessions failed: {}", output.stderr.trim());
@@ -150,6 +381,7 @@ pub async fn models(
     connection: &Connection,
     helper: &Helper,
 ) -> Result<Vec<pi_core::protocol::Model>> {
+    helper.require_capability(helper.capabilities.durable, "loading models")?;
     let output = connection.run(helper.command("models")?).await?;
     if output.status != Some(0) {
         if output.stderr.contains("Usage:") {
@@ -170,6 +402,10 @@ pub async fn commands(
     connection: &Connection,
     helper: &Helper,
 ) -> Result<Vec<pi_core::protocol::SlashCommand>> {
+    if !helper.capabilities.commands {
+        // Session-level get_commands remains available after attaching.
+        return Ok(Vec::new());
+    }
     let output = connection.run(helper.command("commands")?).await?;
     if output.status != Some(0) {
         if output.stderr.contains("Usage:") || output.stderr.contains("cannot run that command") {
@@ -207,6 +443,7 @@ pub struct JjOperation {
 }
 
 pub async fn jj_history(connection: &Connection, helper: &Helper, path: &str) -> Result<JjHistory> {
+    helper.require_capability(helper.capabilities.jj_history, "browsing jj file history")?;
     let arguments = format!("jj-history --path {}", quote(path)?);
     let output = connection.run(helper.command(&arguments)?).await?;
     if output.status != Some(0) {
@@ -226,6 +463,7 @@ pub async fn restore_jj_operation(
     path: &str,
     operation: &str,
 ) -> Result<()> {
+    helper.require_capability(helper.capabilities.jj_history, "restoring jj file history")?;
     let arguments = format!(
         "jj-restore --path {} --operation {}",
         quote(path)?,
@@ -244,6 +482,7 @@ pub async fn restore_jj_operation(
 }
 
 pub async fn enable_jj(connection: &Connection, helper: &Helper, path: &str) -> Result<JjHistory> {
+    helper.require_capability(helper.capabilities.jj_history, "enabling jj file history")?;
     let arguments = format!("jj-enable --path {}", quote(path)?);
     let output = connection.run(helper.command(&arguments)?).await?;
     if output.status != Some(0) {
@@ -290,6 +529,7 @@ pub async fn directories(
     path: &str,
     show_hidden: bool,
 ) -> Result<Directory> {
+    helper.require_capability(helper.capabilities.directories, "browsing folders")?;
     let command = helper.command(&format!(
         "directories --path {}{}",
         quote(path)?,
@@ -416,6 +656,7 @@ pub async fn read_file(
 /// Attaches to a session, starting its daemon if it isn't up. Records from
 /// the session arrive on the pipe; commands go into it.
 pub async fn attach(connection: &Connection, helper: &Helper, target: &SshTarget) -> Result<Pipe> {
+    helper.require_attach("opening sessions")?;
     let pipe = connection.pipe(helper.command("connect --stdio")?).await?;
     pipe.input.send(target.attach_record()).await?;
     Ok(pipe)
@@ -424,6 +665,7 @@ pub async fn attach(connection: &Connection, helper: &Helper, target: &SshTarget
 /// A separate short-lived attachment keeps deletion independent of the UI's
 /// watch. The helper validates the exact key and refuses an active writer.
 pub async fn delete(connection: &Connection, helper: &Helper, target: &SshTarget) -> Result<()> {
+    helper.require_capability(helper.capabilities.delete_sessions, "deleting sessions")?;
     target.validate()?;
     let pipe = attach(connection, helper, target).await?;
     let id = format!("phone-delete-{:016x}", rand::random::<u64>());
@@ -507,33 +749,121 @@ mod tests {
         r#"{"pi":true,"durable":true,"durableExperimental":true,"watchers":true,"sessions":true}"#;
 
     #[test]
-    fn the_newest_helper_that_can_do_everything_is_chosen() {
+    fn the_explicitly_activated_helper_is_chosen() {
         let listing = format!(
             "home\t/Users/nick\n\
-             /Users/nick/.pi/desktop/bin/new/pi-desktop-remote\tpi-desktop-remote 0.2.0 1 macos-arm64\t{DURABLE}\n\
-             /Users/nick/.pi/desktop/bin/old/pi-desktop-remote\tpi-desktop-remote 0.1.0 1 macos-arm64\t{DURABLE}\n"
+             /Users/nick/.pi/desktop/bin/pi-desktop-remote\tpi-desktop-remote 0.2.0 1 macos-arm64\t{DURABLE}\n"
         );
         let helper = choose(&listing).unwrap();
-        assert_eq!(
-            helper.path,
-            "/Users/nick/.pi/desktop/bin/new/pi-desktop-remote"
-        );
+        assert_eq!(helper.path, "/Users/nick/.pi/desktop/bin/pi-desktop-remote");
+        assert_eq!(helper.release.as_deref(), Some("0.2.0"));
+        assert_eq!(helper.protocol, Some(PROTOCOL_VERSION));
+        assert_eq!(helper.platform.as_deref(), Some("macos-arm64"));
+        assert!(helper.capabilities.durable && helper.capabilities.watchers);
         assert_eq!(helper.short("/Users/nick/repos/pi"), "~/repos/pi");
         assert_eq!(helper.short("/Users/nickel/x"), "/Users/nickel/x");
         assert_eq!(helper.short("/opt/work"), "/opt/work");
     }
 
     #[test]
-    fn each_missing_piece_is_named() {
-        let error = |listing: &str| choose(listing).unwrap_err().to_string();
-        assert!(error("home\t/Users/nick\n").contains("isn't on this computer"));
-        let stock = "home\t/h\n/h/a\tpi-desktop-remote 0.1.0 1 macos-arm64\t{\"pi\":true,\"durable\":false}\n";
-        assert!(error(stock).contains("can't run durable"));
-        let old = "home\t/h\n/h/a\tpi-desktop-remote 0.1.0 1 macos-arm64\t{\"pi\":true,\"durable\":true}\n";
-        assert!(error(old).contains("older than the phone"));
+    fn incompatible_helpers_are_retained_for_a_required_update() {
+        assert!(
+            choose("home\t/Users/nick\n")
+                .unwrap_err()
+                .to_string()
+                .contains("isn't on this computer")
+        );
+        let stock = "home\t/h\n/h/a\tpi-desktop-remote 0.0.4 1 macos-arm64\t{\"pi\":true,\"durable\":false}\n";
+        let helper = choose(stock).unwrap();
+        let update = helper.update.unwrap();
+        assert_eq!(update.state, HelperUpdateState::UpdateRequired);
+        assert!(update.reasons.contains(&"missing durable sessions".into()));
+        assert!(update.reasons.contains(&"missing session discovery".into()));
+
         let other_protocol =
-            format!("home\t/h\n/h/a\tpi-desktop-remote 0.1.0 2 linux-amd64\t{DURABLE}\n");
-        assert!(error(&other_protocol).contains("can't run durable"));
+            format!("home\t/h\n/h/a\tpi-desktop-remote 0.0.4 2 linux-amd64\t{DURABLE}\n");
+        let update = choose(&other_protocol).unwrap().update.unwrap();
+        assert_eq!(update.state, HelperUpdateState::UpdateRequired);
+        assert!(update.reasons[0].contains("protocol 2"));
+    }
+
+    #[test]
+    fn releases_compare_semantically_without_downgrade_notices() {
+        let compatible = capabilities(DURABLE);
+        let recommended = evaluate_update(
+            Some("0.0.4"),
+            Some(PROTOCOL_VERSION),
+            Some("linux-arm64"),
+            &compatible,
+        )
+        .unwrap();
+        assert_eq!(recommended.state, HelperUpdateState::UpdateRecommended);
+
+        assert_eq!(
+            evaluate_update(
+                Some(APP_RELEASE),
+                Some(PROTOCOL_VERSION),
+                Some("linux-arm64"),
+                &compatible,
+            ),
+            None
+        );
+        assert_eq!(
+            evaluate_update(
+                Some("0.0.10"),
+                Some(PROTOCOL_VERSION),
+                Some("linux-arm64"),
+                &compatible,
+            ),
+            None,
+            "a newer compatible helper must not suggest a downgrade"
+        );
+
+        let mut reconnected = Helper::new(
+            "/helper".into(),
+            "/home/me".into(),
+            true,
+            HelperMetadata {
+                release: Some("0.0.4".into()),
+                protocol: Some(0),
+                platform: Some("linux-arm64".into()),
+                capabilities: HelperCapabilities::default(),
+                legacy_images: false,
+            },
+        );
+        assert_eq!(
+            reconnected.update.as_ref().map(|update| update.state),
+            Some(HelperUpdateState::UpdateRequired)
+        );
+        reconnected.release = Some("0.0.10".into());
+        reconnected.protocol = Some(PROTOCOL_VERSION);
+        reconnected.capabilities = compatible;
+        reconnected.reevaluate();
+        assert_eq!(reconnected.update, None, "reconnect clears the warning");
+    }
+
+    #[test]
+    fn paired_metadata_probes_use_only_allowlisted_commands() {
+        let helper = Helper::new(
+            "/ignored/by/gateway".into(),
+            "/home/me".into(),
+            true,
+            HelperMetadata {
+                release: None,
+                protocol: None,
+                platform: None,
+                capabilities: HelperCapabilities::default(),
+                legacy_images: false,
+            },
+        );
+        assert_eq!(
+            helper.command("--version").unwrap(),
+            "pi-desktop-remote --version"
+        );
+        assert_eq!(
+            helper.command("--capabilities").unwrap(),
+            "pi-desktop-remote --capabilities"
+        );
     }
 
     #[test]

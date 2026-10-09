@@ -6,12 +6,14 @@
 use super::scroll_area;
 use crate::{
     app::{PhoneApp, Pick, Route},
-    model::{SessionId, Turn, duration_label},
+    model::{SessionId, Turn, duration_label, session_subagents, subagent_summary},
     projection,
     theme::{Theme, theme},
     ui::{self, icon},
 };
-use gpui::{AnyElement, Context, Div, ElementId, FontWeight, Hsla, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, Div, ElementId, FontWeight, Hsla, Stateful, Window, div, prelude::*, px,
+};
 use pi_core::subagent::{Handoff, Mode, Status, Subagent};
 use std::time::Duration;
 
@@ -123,11 +125,12 @@ fn first_line(text: &str) -> String {
 
 /// What a subagent's row says under its task.
 fn status_line(subagent: &Subagent, mixed: bool) -> String {
-    let said = match (subagent.status, &subagent.now) {
+    let progress = subagent.now.as_deref().or(subagent.output.as_deref());
+    let said = match (subagent.status, progress) {
         (Status::Waiting, _) => "Waiting its turn".to_owned(),
         (Status::Stopped, None) => "Stopped".to_owned(),
         (Status::Failed, None) => "Failed".to_owned(),
-        (_, Some(now)) => first_line(now),
+        (_, Some(progress)) => first_line(progress),
         (Status::Running, None) => "Starting".to_owned(),
         (Status::Done, None) => "Done".to_owned(),
     };
@@ -253,6 +256,84 @@ pub(crate) fn at_work(turns: &[Turn]) -> Option<&Handoff> {
 }
 
 impl PhoneApp {
+    /// The shared subagent row used in a hand-off card and the session-wide directory.
+    #[allow(clippy::too_many_arguments)]
+    fn subagent_row(
+        &self,
+        id: SessionId,
+        pick: Pick,
+        subagent: &Subagent,
+        first: bool,
+        chain_number: Option<usize>,
+        mixed: bool,
+        probe: String,
+        now: u64,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let opens = subagent.conversation_id.is_some();
+        let waiting = subagent.status == Status::Waiting;
+        let time = subagent
+            .elapsed_ms(now)
+            .map(|ms| duration_label(Duration::from_millis(ms)));
+        ui::row(ElementId::Name(probe.clone().into()), first, colors)
+            .debug_selector(move || probe.clone())
+            .min_h(px(64.))
+            .gap(px(12.))
+            .children(chain_number.map(|number| {
+                div()
+                    .w(px(14.))
+                    .flex_none()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.muted)
+                    .child(number.to_string())
+            }))
+            .child(tile(subagent, colors))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(if waiting { colors.faint } else { colors.text })
+                            .child(first_line(&subagent.task)),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .text_color(match subagent.status {
+                                Status::Failed => colors.coral,
+                                _ if waiting => colors.faint,
+                                _ => colors.muted,
+                            })
+                            .child(status_line(subagent, mixed)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(4.))
+                    .text_size(px(12.5))
+                    .text_color(colors.muted)
+                    .children(time)
+                    .children(subagent.cost.filter(|cost| *cost > 0.).map(cost_label)),
+            )
+            .when(opens, |row| {
+                row.child(icon("chev_r", 16., colors.faint).mr(px(-4.)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_subagent(id, pick, window, cx)
+                    }))
+            })
+    }
+
     /// Hand-off `n` of a turn: who Pi handed work to, and how each is doing.
     pub(crate) fn handoff_card(
         &self,
@@ -393,73 +474,18 @@ impl PhoneApp {
                         handoff: n,
                         index,
                     };
-                    let opens = subagent.conversation_id.is_some();
-                    let waiting = subagent.status == Status::Waiting;
-                    let time = subagent
-                        .elapsed_ms(now)
-                        .map(|ms| duration_label(Duration::from_millis(ms)));
-                    let row = ui::row(
-                        ElementId::Name(format!("subagent-{turn_index}-{n}-{index}").into()),
+                    let row = self.subagent_row(
+                        id,
+                        pick,
+                        subagent,
                         position == 0,
+                        (handoff.mode == Mode::Chain).then_some(index + 1),
+                        mixed,
+                        format!("subagent-{turn_index}-{n}-{index}"),
+                        now,
                         colors,
-                    )
-                    .debug_selector(move || format!("subagent-{turn_index}-{n}-{index}"))
-                    .min_h(px(64.))
-                    .gap(px(12.))
-                    .when(handoff.mode == Mode::Chain, |row| {
-                        row.child(
-                            div()
-                                .w(px(14.))
-                                .flex_none()
-                                .text_size(px(12.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(colors.muted)
-                                .child(format!("{}", index + 1)),
-                        )
-                    })
-                    .child(tile(subagent, colors))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(15.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(if waiting { colors.faint } else { colors.text })
-                                    .child(first_line(&subagent.task)),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(12.5))
-                                    .text_color(match subagent.status {
-                                        Status::Failed => colors.coral,
-                                        _ if waiting => colors.faint,
-                                        _ => colors.muted,
-                                    })
-                                    .child(status_line(subagent, mixed)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .flex_col()
-                            .items_end()
-                            .gap(px(4.))
-                            .text_size(px(12.5))
-                            .text_color(colors.muted)
-                            .children(time)
-                            .children(subagent.cost.filter(|cost| *cost > 0.).map(cost_label)),
-                    )
-                    .when(opens, |row| {
-                        row.child(icon("chev_r", 16., colors.faint).mr(px(-4.)))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_subagent(id, pick, window, cx)
-                            }))
-                    });
+                        cx,
+                    );
                     std::iter::once(row.into_any_element())
                         .chain(interrupted_note(subagent).map(|text| {
                             note("alert", colors.amber, text, colors).into_any_element()
@@ -477,6 +503,91 @@ impl PhoneApp {
                 .child(ui::label(shape(handoff), colors))
                 .child(ui::card(colors).child(header).children(rows).children(more)),
         )
+    }
+
+    /// Every subagent started anywhere in a session, without hunting through chat.
+    pub(crate) fn subagents_screen(
+        &mut self,
+        id: SessionId,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = theme(cx);
+        let scroll = self.scroll(Route::Subagents(id));
+        let back = ui::tap("back", "back", &colors).on_click(cx.listener(|this, _, window, cx| {
+            this.back(window, cx);
+        }));
+        let Some(session) = self.store.as_ref().and_then(|store| store.session(id)) else {
+            return div()
+                .flex_1()
+                .child(ui::appbar(back, "Subagents", None, &colors))
+                .child(ui::hint("This session is no longer on this phone.", &colors).px(px(20.)))
+                .into_any_element();
+        };
+        let title = session.title.clone();
+        let summary = subagent_summary(&session.turns);
+        let now = now_ms();
+        let rows = session_subagents(&session.turns)
+            .into_iter()
+            .enumerate()
+            .map(|(position, item)| {
+                self.subagent_row(
+                    id,
+                    Pick {
+                        turn: item.turn,
+                        handoff: item.handoff,
+                        index: item.index,
+                    },
+                    item.subagent,
+                    position == 0,
+                    None,
+                    true,
+                    format!(
+                        "directory-subagent-{}-{}-{}",
+                        item.turn, item.handoff, item.index
+                    ),
+                    now,
+                    &colors,
+                    cx,
+                )
+            })
+            .collect::<Vec<_>>();
+        let appbar = ui::appbar(back, "Subagents", Some(title.into()), &colors);
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(appbar)
+            .child(
+                scroll_area("subagents-directory", &scroll).child(
+                    div()
+                        .px(px(20.))
+                        .pt(px(8.))
+                        .pb(px(24.))
+                        .children(summary.map(|summary| {
+                            div()
+                                .text_size(px(14.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(summary)
+                        }))
+                        .child(
+                            ui::hint(
+                                "Every hand-off in this session. Active work stays at the top.",
+                                &colors,
+                            )
+                            .mt(px(4.))
+                            .mb(px(12.)),
+                        )
+                        .when(rows.is_empty(), |body| {
+                            body.child(ui::hint("This session has no subagents.", &colors))
+                        })
+                        .when(!rows.is_empty(), |body| {
+                            body.child(ui::card(&colors).children(rows))
+                        }),
+                ),
+            )
+            .into_any_element()
     }
 
     pub(crate) fn open_subagent(

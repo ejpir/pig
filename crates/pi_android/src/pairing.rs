@@ -76,13 +76,14 @@ pub async fn enroll(
     drop(bootstrap_connection);
 
     let connection = Connection::open_with_host_keys(address.clone(), identity, trusted).await?;
-    let helper = remote::Helper {
-        path: paired.path,
-        home: paired.home,
-        images: paired.images,
-        gateway: true,
+    // The lasting paired key may run only the gateway's allowlisted discovery,
+    // version and capability commands. Use that same path on every connection.
+    let helper = remote::find(&connection).await?;
+    let listed = if helper.can_list_sessions() {
+        remote::sessions(&connection, &helper).await?
+    } else {
+        Vec::new()
     };
-    let listed = remote::sessions(&connection, &helper).await?;
     Ok((address, connection, helper, listed))
 }
 
@@ -120,6 +121,8 @@ mod tests {
         );
         assert!(std::fs::read(&keys).unwrap().is_empty());
         let pairing_dir = directory.join("pairing");
+        let home = directory.join("home");
+        std::fs::create_dir(&home).unwrap();
         let helper = variable("PI_ANDROID_TEST_HELPER");
         let port = address.port.to_string();
         let mut process = Command::new(&helper)
@@ -134,6 +137,7 @@ mod tests {
                 "--json",
                 "--yes",
             ])
+            .env("HOME", &home)
             .env("PI_DESKTOP_AUTHORIZED_KEYS_FILE", &keys)
             .env("PI_DESKTOP_PAIRING_DIR", &pairing_dir)
             .stdin(Stdio::null())

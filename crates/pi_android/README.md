@@ -17,23 +17,23 @@ Home).
 1. Turn on SSH: on a Mac, **System Settings → General → Sharing → Remote
    Login**.
 2. Install a helper built with durable sessions. The macOS and Linux helpers
-   in the releases (`pi-desktop-remote-*`) have it built in; put one in
-   `~/.pi/desktop/bin/`. Or build it from the repository root on that computer
-   (see [backend/durable](../../backend/durable/README.md)):
+   in the releases (`pi-desktop-remote-*`) have it built in; make the downloaded
+   file executable and run its `activate` command. Or build and activate it from
+   the repository root on that computer (see
+   [backend/durable](../../backend/durable/README.md)):
 
    ```sh
    cd backend/durable && npm ci --ignore-scripts \
      && npm exec --yes --package=bun@1.4.2 -- bun run build && cd ../..
    PI_DESKTOP_DURABLE_BINARY="$PWD/artifacts/durable/pi-desktop-durable" \
      cargo build --release -p pi_remote --features bundled-durable
-   mkdir -p ~/.pi/desktop/bin/phone
-   cp target/release/pi-desktop-remote ~/.pi/desktop/bin/phone/
-   ln -sfn ~/.pi/desktop/bin/phone/pi-desktop-remote ~/.pi/desktop/bin/pi-desktop-remote
+   target/release/pi-desktop-remote activate
    ```
 
-   The phone uses the newest helper under `~/.pi/desktop/bin/` that runs
-   durable sessions, lets several apps watch one, and lists sessions. A helper
-   Pi Desktop installed over SSH counts too.
+   Activation verifies and stores the executable under
+   `~/.pi/desktop/bin/<sha256>/`, then atomically selects it through the stable
+   `~/.pi/desktop/bin/pi-desktop-remote` symlink. A helper Pi Desktop installed
+   over SSH is activated the same way and counts too.
 3. Give the durable runner a model provider, as backend/durable's README
    describes. The phone sets the model from its settings, or the first the
    computer offers.
@@ -153,9 +153,9 @@ shows an update message and leaves recent projects available.
 - **Large lists and replies:** proportional scrollbars expose overflow and
   allow direct dragging, independently of sheet dismissal.
 
-Not yet: Pi's commands/resources in durable sessions, background connection
-service, multiple computers at once, reopening past-message images on the phone,
-and persistent phone-side unsent drafts across process death. Computer-side admitted history is durable. Session
+Not yet: background connection service, multiple computers at once, reopening
+past-message images on the phone, and persistent phone-side unsent drafts across
+process death. Computer-side admitted history is durable. Session
 updates still carry the full text projection; image bytes are replaced with
 small content-hash references and can be retrieved with `get_image`.
 

@@ -7,7 +7,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
 import {
-  Harness, createRegistry, defineDoc, defineExtension, section,
+  CompactionEntry, Harness, createRegistry, defineDoc, defineExtension, section,
   type Extension, type ConversationId, type ConversationView, type SubmissionId, type UsageState,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -37,14 +37,14 @@ const commands = [
   "get_session_stats", "get_backend_info", "get_active_tools", "get_available_models",
   "get_available_thinking_levels", "get_auth_providers", "get_commands", "get_settings",
   "set_model", "set_thinking_level", "set_session_name", "set_auto_compaction",
-  "get_image",
+  "compact", "get_image",
   "cancel_submission",
   "get_subagent", "stop_subagent",
 ];
 const info = {
   backend: "pi-durable", version: "1", piVersion: "1.0.2", protocolVersion: 1,
   bunVersion: Bun.version, workerPid: process.pid, commands,
-  features: ["durable_execution", "committed_snapshots", "request_deduplication", "remote_pi_credentials", "builtin_providers", "image_prompts", "image_references", "prompt_templates", "skills", "subagents"],
+  features: ["durable_execution", "committed_snapshots", "request_deduplication", "remote_pi_credentials", "builtin_providers", "image_prompts", "image_references", "prompt_templates", "skills", "subagents", "manual_compaction"],
   experimental: true,
   limitations: ["Login on the SSH host; no interactive durable login flow yet", "No stock Pi extensions, Pi packages or session-tree migration"],
 };
@@ -90,6 +90,27 @@ function contextTokens(messages: readonly Message[]): number | undefined {
     return measured + trailing;
   }
   return undefined;
+}
+
+function estimatedContextTokens(messages: readonly Message[]): number {
+  return contextTokens(messages) ?? messages.reduce(
+    (tokens, message) => tokens + Math.ceil(JSON.stringify(message).length / 4), 0,
+  );
+}
+
+const SUMMARY_PREFIX = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+const SUMMARY_SUFFIX = "\n</summary>";
+
+function compactionSummary(messages: readonly Message[] | undefined): string {
+  const message = messages?.find((candidate) => candidate.role === "user");
+  if (!message || message.role !== "user") throw new Error("Compaction summary entry has no user message");
+  const text = typeof message.content === "string"
+    ? message.content
+    : message.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+  if (!text.startsWith(SUMMARY_PREFIX) || !text.endsWith(SUMMARY_SUFFIX)) {
+    throw new Error("Compaction summary entry has an invalid wrapper");
+  }
+  return text.slice(SUMMARY_PREFIX.length, -SUMMARY_SUFFIX.length);
 }
 
 export function sessionStats(
@@ -341,6 +362,48 @@ export async function run(
         await snapshot(state.value);
         return {};
       }
+      case "compact": {
+        const instructions = record.customInstructions === undefined
+          ? undefined
+          : string(record, "customInstructions");
+        // The durable task can compact concurrently, but its response would
+        // then wait for a busy run's next boundary and block this JSONL pipe.
+        // Refuse instead of aborting (which would also discard queued inputs).
+        const live = state.value.docs["pi.live"] as { run?: unknown } | undefined;
+        const inbox = state.value.docs["pi.inbox"] as { items?: unknown[] } | undefined;
+        if (live?.run || (inbox?.items?.length ?? 0) > 0) {
+          throw new Error("Stop the session and clear queued prompts before compacting");
+        }
+        const before = await root.context(context);
+        const tokensBefore = estimatedContextTokens(before.messages);
+        const task = await harness.waitForTask(await root.compact(instructions, context), context);
+        const outcome = task.state.outcome;
+        if (outcome.status === "failed" || outcome.status === "faulted") throw new Error(outcome.error.message);
+        if (outcome.status === "aborted") throw new Error(outcome.reason ?? "Compaction cancelled");
+        if (outcome.status === "orphaned") throw new Error(outcome.reason);
+        const result = outcome.result;
+        let entryId = result.entryId;
+        if (result.submissionId !== undefined) {
+          const submission = await harness.submission(result.submissionId, context);
+          if (!submission) throw new Error("Compaction summary submission disappeared");
+          const settled = await submission.wait(context);
+          if (settled.status === "unanswered") throw new Error(settled.reason);
+          if (settled.type !== "write") throw new Error("Compaction produced an invalid submission");
+          entryId = settled.entry;
+        }
+        if (entryId === undefined) throw new Error("Nothing to compact (session too small)");
+        const after = await root.context(context);
+        const entry = after.entries.find((candidate) => candidate.id === entryId);
+        if (!CompactionEntry.is(entry) || entry.head === undefined) {
+          throw new Error("Compaction summary was not placed in the active context");
+        }
+        return {
+          summary: compactionSummary(entry.model),
+          firstKeptEntryId: String(entry.head),
+          tokensBefore,
+          estimatedTokensAfter: estimatedContextTokens(after.messages),
+        };
+      }
       case "prompt": {
         const typed = string(record, "message"), requestId = string(record, "requestId");
         if (!/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) throw new Error("Invalid persistent requestId");
@@ -385,17 +448,39 @@ export async function run(
       default: throw new Error(`${record.type} is not supported by the experimental durable backend`);
     }
   };
+  const answer = async (record: Record<string, unknown>): Promise<void> => {
+    try {
+      const data = await respond(record);
+      await send({ type: "response", id: record.id, command: record.type, success: true, data });
+    } catch (error) {
+      await send({ type: "response", id: record.id, command: record.type, success: false, error: String(error) });
+    }
+  };
+  let compacting: Promise<void> | undefined;
   try {
     for await (const record of records(process.stdin)) {
       if (typeof record.id !== "string" || !record.id.length || record.id.length > 256) throw new Error("Missing request correlation ID");
-      try {
-        const data = await respond(record);
-        await send({ type: "response", id: record.id, command: record.type, success: true, data });
-      } catch (error) {
-        await send({ type: "response", id: record.id, command: record.type, success: false, error: String(error) });
+      if (record.type === "compact") {
+        if (compacting !== undefined) {
+          await send({ type: "response", id: record.id, command: record.type, success: false, error: "A compaction is already running" });
+          continue;
+        }
+        const operation = answer(record);
+        const tracked = operation.finally(() => {
+          if (compacting === tracked) compacting = undefined;
+        });
+        compacting = tracked;
+        tracked.catch((error) => console.error("Durable report:", error));
+        continue;
       }
+      if (compacting !== undefined && record.type !== "abort") {
+        await send({ type: "response", id: record.id, command: record.type, success: false, error: "Wait for compaction to finish" });
+        continue;
+      }
+      await answer(record);
     }
   } finally {
+    await compacting?.catch(() => {});
     // Owner-pipe EOF stops this process, NOT the durable run. close preserves pending checkpoints.
     await watch.stop();
     unsubscribe();

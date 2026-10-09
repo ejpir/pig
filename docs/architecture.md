@@ -37,6 +37,8 @@ Project selection is independent of session selection. Selecting a project does 
 
 Each local session owns one pi subprocess. SSH sessions own a local bridge; a detached remote helper owns Pi. Remote close/disconnect detaches without aborting, reconnect replaces the projection from a live snapshot, and remote filesystem identities never enter local file services. Remote editors use detached Zed buffers over a separate `files --stdio` helper channel; reads, optimistic revision-checked saves and polling happen on the host, without a local Zed Project/file handle or language server. See [Remote Pi](remote.md) for the protocol, bootstrap and current capability limits.
 
+On Unix, remote helper releases are immutable SHA-256 content objects. The verified installer invokes the object’s pathless `activate` command even on cache hits; activation serializes with a private lock, verifies checksum/version, and atomically selects a relative `~/.pi/desktop/bin/pi-desktop-remote` symlink. QR pairing and discovery use that stable path, while existing running helpers and old content directories remain untouched.
+
 `pi_core` handles strict LF-framed UTF-8 JSONL, bounded queues, request correlation and deadlines. Records are limited to 16 MiB; stderr is diagnostic output, never protocol input. Responses must match both request ID and command. A timeout leaves the outcome unknown and never triggers an automatic prompt retry.
 
 Submission stays disabled until state, messages, statistics and saved-session bootstrap complete. Resume checks the requested session identity against pi's response. Optional metadata, including the extension's versions and features, is not an identity gate.

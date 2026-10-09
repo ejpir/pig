@@ -36,6 +36,7 @@ rand = "0.10"
 russh = { version = "0.64", default-features = false, features = ["ring", "flate2"] }
 serde.workspace = true
 serde_json.workspace = true
+semver = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
 unicode-segmentation = "1.12"
 

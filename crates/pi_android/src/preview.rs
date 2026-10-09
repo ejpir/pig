@@ -6,7 +6,8 @@ use crate::{
     app::{PhoneApp, Resume, Route, Sheet, Target},
     composer::Attachment,
     model::{
-        Answer, LineKind, SessionId, StageKind, StageStatus, State, Summary, ToolActivity, Turn,
+        Answer, Flow, LineKind, SessionId, StageKind, StageStatus, State, Summary, ToolActivity,
+        Turn,
     },
     theme::Appearance,
 };
@@ -77,6 +78,11 @@ pub const SCREENS: &[&str] = &[
     "subagents",
     "subagents-many",
     "subagents-done",
+    "subagents-directory",
+    "subagents-directory-done",
+    "subagents-directory-stopped",
+    "subagents-directory-failed",
+    "subagents-directory-empty",
     "subagent",
     "logs",
 ];
@@ -420,6 +426,34 @@ impl PhoneApp {
                     );
                 }
             }
+            "subagents-directory"
+            | "subagents-directory-done"
+            | "subagents-directory-stopped"
+            | "subagents-directory-failed"
+            | "subagents-directory-empty" => {
+                finish(self);
+                let empty = name == "subagents-directory-empty";
+                if let Some(store) = &mut self.store {
+                    if !empty && let Some(shown) = store.sessions.iter_mut().find(|s| s.id == QWEN)
+                    {
+                        let mut sample = subagent_directory_sample(match name {
+                            "subagents-directory-done" => DirectoryCrew::Done,
+                            "subagents-directory-stopped" => DirectoryCrew::Stopped,
+                            "subagents-directory-failed" => DirectoryCrew::Failed,
+                            _ => DirectoryCrew::Mixed,
+                        });
+                        sample.title = "Provider retries".into();
+                        *shown = sample;
+                    }
+                    store.sample_subagents.insert("12".into(), scout_sample());
+                }
+                self.show_session(QWEN, window, cx);
+                if empty {
+                    self.open_sheet(Sheet::Details(QWEN), cx);
+                } else {
+                    self.push(Route::Subagents(QWEN), window, cx);
+                }
+            }
             "tool-image" => {
                 finish(self);
                 // A page screenshot: a header, a hero and three cards.
@@ -684,6 +718,75 @@ enum Crew {
     Reported,
 }
 
+#[derive(Clone, Copy)]
+enum DirectoryCrew {
+    Mixed,
+    Done,
+    Stopped,
+    Failed,
+}
+
+fn subagent_directory_sample(state: DirectoryCrew) -> crate::model::Session {
+    use pi_core::subagent::{Handoff, Status};
+    use serde_json::json;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mut session = subagent_sample(Crew::Working);
+    let handoff = Handoff::from_details(&json!({
+        "version": 1,
+        "mode": "parallel",
+        "background": true,
+        "results": [
+            {"index":0,"agent":"planner","task":"Plan the shared retry helper","status":"waiting"},
+            {"index":1,"agent":"worker","task":"Stop the duplicate retry paths","status":"stopped","conversationId":"31","now":"Stopped before editing","startedAt":now - 42_000,"endedAt":now - 18_000,"cost":0.03},
+            {"index":2,"agent":"reviewer","task":"Run the provider regression checks","status":"failed","conversationId":"32","now":"Two provider tests failed","startedAt":now - 36_000,"endedAt":now - 12_000,"cost":0.04}
+        ]
+    }))
+    .expect("directory handoff");
+    let mut turn = Turn::new("Keep the hand-offs together.", "09:48");
+    turn.stages.clear();
+    turn.flow.push(Flow::Handoff(0));
+    turn.handoffs.push(handoff);
+    session.turns.push(turn);
+
+    if !matches!(state, DirectoryCrew::Mixed) {
+        for subagent in session
+            .turns
+            .iter_mut()
+            .flat_map(|turn| &mut turn.handoffs)
+            .flat_map(|handoff| &mut handoff.subagents)
+        {
+            subagent.status = Status::Done;
+            subagent.now = Some(
+                subagent
+                    .output
+                    .clone()
+                    .unwrap_or_else(|| "Finished the task".into()),
+            );
+            subagent.ended_at.get_or_insert(now - 8_000);
+        }
+        let exceptional = session.turns[1].handoffs[0]
+            .subagents
+            .get_mut(1)
+            .expect("sample subagent");
+        match state {
+            DirectoryCrew::Stopped => {
+                exceptional.status = Status::Stopped;
+                exceptional.now = Some("Stopped before editing".into());
+            }
+            DirectoryCrew::Failed => {
+                exceptional.status = Status::Failed;
+                exceptional.now = Some("Two provider tests failed".into());
+            }
+            DirectoryCrew::Mixed | DirectoryCrew::Done => {}
+        }
+    }
+    session
+}
+
 fn subagent_sample(crew: Crew) -> crate::model::Session {
     use serde_json::json;
     let now = std::time::SystemTime::now()
@@ -844,6 +947,39 @@ mod tests {
     }
 
     #[gpui::test]
+    fn failed_compaction_restores_its_command_without_overwriting_new_text(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("done", window, cx)));
+        cx.run_until_parked();
+        let id = app.read_with(cx, |app, _| match app.route() {
+            Route::Thread(id) => id,
+            route => panic!("expected thread, got {route:?}"),
+        });
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.restore_compact_draft(Target::Thread(id), "/compact keep API names", cx)
+            })
+        });
+        app.read_with(cx, |app, cx| {
+            assert_eq!(
+                app.threads[&id].read(cx).area.read(cx).text(),
+                "/compact keep API names"
+            );
+        });
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.threads[&id].update(cx, |composer, cx| composer.set_text("new draft", cx));
+                app.restore_compact_draft(Target::Thread(id), "/compact old", cx);
+            })
+        });
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.threads[&id].read(cx).area.read(cx).text(), "new draft");
+        });
+    }
+
+    #[gpui::test]
     fn every_screen_renders(cx: &mut TestAppContext) {
         for (width, height) in [(320., 640.), (384., 854.), (640., 360.)] {
             for name in SCREENS {
@@ -865,6 +1001,10 @@ mod tests {
                         "review" => Route::Review(QWEN),
                         "html-page" => Route::Thread(crate::model::SessionId(7)),
                         "history" => Route::History(QWEN),
+                        "subagents-directory"
+                        | "subagents-directory-done"
+                        | "subagents-directory-stopped"
+                        | "subagents-directory-failed" => Route::Subagents(QWEN),
                         "subagent" => Route::Subagent(
                             QWEN,
                             crate::app::Pick {
@@ -876,6 +1016,7 @@ mod tests {
                         "projects" | "project-empty" | "project-error" | "project-loading"
                         | "project-long-path" => Route::Projects,
                         "settings" | "models" | "resources" | "logs" => Route::Settings,
+                        "subagents-directory-empty" => Route::Thread(QWEN),
                         _ => Route::Thread(QWEN),
                     };
                     assert_eq!(app.route(), expected, "{name}");
@@ -940,6 +1081,158 @@ mod tests {
             cx.debug_bounds("stop-subagent").is_some(),
             "a running subagent can be stopped"
         );
+    }
+
+    /// Details exposes one live session-wide directory, whose rows keep their behavior.
+    #[gpui::test]
+    fn details_opens_the_ordered_subagent_directory(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("subagents-directory", window, cx);
+                app.back(window, cx);
+                app.open_sheet(Sheet::Details(QWEN), cx);
+                app.sheet_motion.finish();
+            })
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let session = app.store.as_ref().unwrap().session(QWEN).unwrap();
+            assert_eq!(app.route(), Route::Thread(QWEN));
+            assert_eq!(app.sheet, Some(Sheet::Details(QWEN)));
+            assert_eq!(
+                crate::model::subagent_summary(&session.turns).as_deref(),
+                Some("2 working · 1 waiting · 3 finished (1 stopped, 1 failed)")
+            );
+            assert_eq!(
+                crate::model::subagent_details_summary(&session.turns).as_deref(),
+                Some("6 total · 2 working · 1 waiting")
+            );
+        });
+        let details = cx
+            .debug_bounds("details-subagents")
+            .expect("sessions with subagents show the Details row");
+        let sheet = cx.debug_bounds("bottom-sheet").unwrap();
+        let summary = cx.debug_bounds("details-subagents-value").unwrap();
+        let chevron = cx.debug_bounds("details-subagents-chevron").unwrap();
+        assert!(
+            details.left() >= sheet.left() && details.right() <= sheet.right(),
+            "Details row is outside the sheet: row={details:?} sheet={sheet:?}"
+        );
+        assert!(
+            summary.left() >= details.left()
+                && summary.right() <= chevron.left()
+                && chevron.right() <= details.right(),
+            "compact summary and chevron overflow the row: row={details:?} summary={summary:?} chevron={chevron:?}"
+        );
+        assert_eq!(
+            chevron.size.width,
+            gpui::px(16.),
+            "the disclosure chevron must not shrink"
+        );
+        cx.simulate_click(details.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(
+                app.route(),
+                Route::Subagents(QWEN),
+                "row={details:?} sheet={sheet:?} sheet_state={:?}",
+                app.sheet
+            )
+        });
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.sheet_motion.finish();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        let bounds = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            cx.debug_bounds(selector).unwrap().top()
+        };
+        let ordered = [
+            "directory-subagent-0-0-1",
+            "directory-subagent-0-0-2",
+            "directory-subagent-1-0-0",
+            "directory-subagent-0-0-0",
+            "directory-subagent-1-0-1",
+            "directory-subagent-1-0-2",
+        ];
+        assert!(
+            ordered
+                .windows(2)
+                .all(|pair| bounds(cx, pair[0]) < bounds(cx, pair[1]))
+        );
+
+        let running = cx.debug_bounds(ordered[0]).unwrap();
+        cx.simulate_click(running.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(
+                app.route(),
+                Route::Subagent(
+                    QWEN,
+                    crate::app::Pick {
+                        turn: 0,
+                        handoff: 0,
+                        index: 1,
+                    }
+                )
+            )
+        });
+        assert!(
+            cx.debug_bounds("stop-subagent").is_some(),
+            "directory rows retain the existing stop action"
+        );
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.back(window, cx));
+            })
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| assert_eq!(app.route(), Route::Subagents(QWEN)));
+    }
+
+    #[gpui::test]
+    fn terminal_subagent_details_summaries_only_show_the_total(cx: &mut TestAppContext) {
+        for (fixture, directory) in [
+            ("subagents-directory-done", "6 subagents"),
+            ("subagents-directory-stopped", "6 subagents · 1 stopped"),
+            ("subagents-directory-failed", "6 subagents · 1 failed"),
+        ] {
+            let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+            cx.update(|window, cx| app.update(cx, |app, cx| app.preview(fixture, window, cx)));
+            cx.run_until_parked();
+            app.read_with(cx, |app, _| {
+                let session = app.store.as_ref().unwrap().session(QWEN).unwrap();
+                assert_eq!(
+                    crate::model::subagent_summary(&session.turns).as_deref(),
+                    Some(directory),
+                    "{fixture} keeps terminal status detail in the directory"
+                );
+                assert_eq!(
+                    crate::model::subagent_details_summary(&session.turns).as_deref(),
+                    Some("6 subagents"),
+                    "{fixture} keeps the Details row compact"
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn details_hides_subagents_for_an_empty_session(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("subagents-directory-empty", window, cx)
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("bottom-sheet").is_some());
+        assert!(cx.debug_bounds("details-subagents").is_none());
     }
 
     /// The shared sample (`pi_markdown::sample`), as a session from the

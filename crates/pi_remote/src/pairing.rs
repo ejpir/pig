@@ -1,7 +1,7 @@
 //! One-use QR enrollment through the computer's existing OpenSSH server.
 //! No Pi TCP service listens: a restricted bootstrap key can only run `pair exchange`.
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use fs2::FileExt as _;
 use pi_core::pairing::{self, Helper, Offer, Request, Response, VERSION, confirmation_code};
@@ -100,6 +100,24 @@ pub fn pair(arguments: &[String]) -> Result<()> {
         bail!("QR pairing currently requires OpenSSH on macOS or Linux");
     }
     let mut options = Options::parse(arguments)?;
+    crate::activation::activate()?;
+    let stable = match crate::activation::active_path() {
+        Ok(stable) => stable,
+        Err(_) => {
+            // A helper launched from a build tree or release download cannot
+            // become the canonical target of its new symlink in-place. Re-exec
+            // the verified stable copy before writing any lasting key entry.
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt as _;
+                let stable = crate::activation::stable_path()?;
+                let error = Command::new(&stable).arg("pair").args(arguments).exec();
+                return Err(error).context("Could not continue pairing through the active helper");
+            }
+            #[cfg(not(unix))]
+            unreachable!();
+        }
+    };
     cleanup_expired()?;
     if options.hosts.is_empty() {
         options.hosts = local_hosts();
@@ -123,7 +141,7 @@ pub fn pair(arguments: &[String]) -> Result<()> {
         expires_at: pairing::now() + options.lifetime,
         bootstrap_marker: marker.clone(),
     };
-    let helper = helper(true)?;
+    let helper = helper_at(&stable, true)?;
     let forced = forced_command(&helper.path, &["pair", "exchange", &id])?;
     let line = format!("restrict,command={forced} {bootstrap_public}\n");
     edit_authorized_keys(&[&marker], None, Some(&line))?;
@@ -281,11 +299,21 @@ pub fn exchange(id: &str) -> Result<()> {
 }
 
 pub fn helper(gateway: bool) -> Result<Helper> {
+    #[cfg(unix)]
+    let executable = crate::activation::stable_path()?;
+    #[cfg(not(unix))]
     let executable = env::current_exe()?
         .canonicalize()
-        .context("The running helper cannot be used for a lasting pairing")?;
+        .context("The running helper cannot be discovered")?;
+    helper_at(&executable, gateway)
+}
+
+fn helper_at(executable: &Path, gateway: bool) -> Result<Helper> {
     Ok(Helper {
-        path: executable.to_string_lossy().into_owned(),
+        path: executable
+            .to_str()
+            .context("The helper path is not valid UTF-8")?
+            .to_owned(),
         home: dirs::home_dir()
             .context("This account has no home folder")?
             .to_string_lossy()
@@ -293,6 +321,21 @@ pub fn helper(gateway: bool) -> Result<Helper> {
             .to_owned(),
         images: cfg!(feature = "bundled-durable"),
         gateway,
+        release: Some(pi_core::ssh::VERSION.to_owned()),
+        protocol: Some(pi_core::ssh::PROTOCOL_VERSION),
+        platform: Some(crate::platform().to_owned()),
+        capabilities: pairing::HelperCapabilities {
+            pi: true,
+            durable: cfg!(unix),
+            durable_experimental: true,
+            watchers: true,
+            sessions: true,
+            directories: true,
+            commands: true,
+            jj_history: true,
+            delete_sessions: cfg!(unix),
+            image_prompts: cfg!(feature = "bundled-durable"),
+        },
     })
 }
 
@@ -304,7 +347,11 @@ pub fn print_discovery(gateway: bool) -> Result<()> {
 /// Returns the original app command accepted by a paired phone's forced command.
 pub fn gateway_command() -> Result<Vec<String>> {
     let original = env::var("SSH_ORIGINAL_COMMAND").context("The SSH gateway needs a command")?;
-    let mut command = shell_words::split(&original).context("Invalid SSH command")?;
+    gateway_arguments(&original)
+}
+
+fn gateway_arguments(original: &str) -> Result<Vec<String>> {
+    let mut command = shell_words::split(original).context("Invalid SSH command")?;
     if command.first().map(String::as_str) != Some("pi-desktop-remote") {
         bail!("This phone key can only run Pi's remote helper");
     }
@@ -338,19 +385,23 @@ fn validate_request(state: &State, request: &Request) -> Result<PublicKey> {
 }
 
 fn permanent_line(path: &str, mut key: PublicKey) -> Result<(String, String)> {
-    let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
-    let short: String = fingerprint
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(16)
-        .collect();
-    let device = format!("{PHONE_COMMENT}{short}");
+    let device = phone_marker(&key);
     key.set_comment(device.as_str());
     let forced = forced_command(path, &["gateway", &device])?;
     Ok((
         format!("restrict,command={forced} {}\n", key.to_openssh()?),
         device,
     ))
+}
+
+fn phone_marker(key: &PublicKey) -> String {
+    let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+    let short: String = fingerprint
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(16)
+        .collect();
+    format!("{PHONE_COMMENT}{short}")
 }
 
 fn forced_command(program: &str, arguments: &[&str]) -> Result<String> {
@@ -492,26 +543,6 @@ fn edit_authorized_keys_at(
     remove_key: Option<&PublicKey>,
     append: Option<&str>,
 ) -> Result<()> {
-    let parent = requested
-        .parent()
-        .context("authorized_keys has no parent")?;
-    fs::create_dir_all(parent)?;
-    set_mode(parent, 0o700)?;
-    let path = if requested.exists() {
-        requested.canonicalize().unwrap_or(requested)
-    } else {
-        requested
-    };
-    let parent = path.parent().context("authorized_keys has no parent")?;
-    let lock_path = parent.join(".pi-authorized-keys.lock");
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)?;
-    lock.lock_exclusive()?;
-    let original = fs::read_to_string(&path).unwrap_or_default();
     let remove_key = remove_key
         .map(PublicKey::to_openssh)
         .transpose()?
@@ -519,43 +550,334 @@ fn edit_authorized_keys_at(
             let mut fields = line.split_whitespace();
             Some((fields.next()?.to_owned(), fields.next()?.to_owned()))
         });
-    let mut next = original
-        .lines()
-        .filter(|line| {
-            !remove_markers.iter().any(|marker| line.contains(*marker))
-                && !remove_key
-                    .as_ref()
-                    .is_some_and(|key| line_contains_public_key(line, key))
-        })
-        .map(|line| format!("{line}\n"))
-        .collect::<String>();
-    if let Some(line) = append
-        && !next.lines().any(|existing| existing == line.trim_end())
-    {
-        next.push_str(line);
+    update_authorized_keys_at(requested, |original| {
+        let mut next = Vec::with_capacity(original.len() + append.map_or(0, str::len));
+        for raw in original.split_inclusive(|byte| *byte == b'\n') {
+            let body = line_body(raw);
+            let remove_marker =
+                managed_entry(body).is_some_and(|entry| remove_markers.contains(&entry.marker));
+            let remove_public_key = remove_key
+                .as_ref()
+                .is_some_and(|key| line_contains_public_key(body, key));
+            if !remove_marker && !remove_public_key {
+                next.extend_from_slice(raw);
+            }
+        }
+        if let Some(line) = append {
+            let wanted = line.trim_end_matches(['\r', '\n']).as_bytes();
+            let exists = next
+                .split_inclusive(|byte| *byte == b'\n')
+                .any(|raw| line_body(raw) == wanted);
+            if !exists {
+                if !next.is_empty() && !next.ends_with(b"\n") {
+                    next.push(b'\n');
+                }
+                next.extend_from_slice(line.as_bytes());
+            }
+        }
+        Ok(next)
+    })
+}
+
+/// Rewrites only entries emitted by `permanent_line`: an exact `pi-phone:`
+/// comment whose exact forced command invokes `gateway` with the same marker.
+pub(crate) fn migrate_phone_entries(stable: &Path) -> Result<usize> {
+    migrate_phone_entries_at(authorized_keys_path()?, stable)
+}
+
+fn migrate_phone_entries_at(requested: PathBuf, stable: &Path) -> Result<usize> {
+    match fs::symlink_metadata(&requested) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
     }
+    let stable = stable
+        .to_str()
+        .context("The stable helper path is not valid UTF-8")?;
+    let mut migrated = 0;
+    update_authorized_keys_at(requested, |original| {
+        let mut next = Vec::with_capacity(original.len());
+        for raw in original.split_inclusive(|byte| *byte == b'\n') {
+            let body = line_body(raw);
+            let Some(entry) = managed_entry(body).filter(|entry| entry.kind == ManagedKind::Phone)
+            else {
+                next.extend_from_slice(raw);
+                continue;
+            };
+            let replacement = format!(
+                "command={}",
+                forced_command(stable, &["gateway", entry.marker])?
+            );
+            let option = &entry.command_option;
+            if entry.text[option.clone()] == replacement {
+                next.extend_from_slice(raw);
+                continue;
+            }
+            next.extend_from_slice(&entry.text.as_bytes()[..option.start]);
+            next.extend_from_slice(replacement.as_bytes());
+            next.extend_from_slice(&entry.text.as_bytes()[option.end..]);
+            next.extend_from_slice(&raw[body.len()..]);
+            migrated += 1;
+        }
+        Ok(next)
+    })?;
+    Ok(migrated)
+}
+
+fn update_authorized_keys_at(
+    requested: PathBuf,
+    update: impl FnOnce(&[u8]) -> Result<Vec<u8>>,
+) -> Result<()> {
+    let requested_parent = requested
+        .parent()
+        .context("authorized_keys has no parent")?;
+    fs::create_dir_all(requested_parent)?;
+    set_mode(requested_parent, 0o700)?;
+    let path = match requested.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => requested,
+        Err(error) => return Err(error.into()),
+    };
+    let parent = path.parent().context("authorized_keys has no parent")?;
+    let lock_path = parent.join(".pi-authorized-keys.lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let lock = options.open(&lock_path)?;
+    ensure!(
+        lock.metadata()?.is_file(),
+        "The authorized_keys lock is not a regular file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        lock.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    set_mode(&lock_path, 0o600)?;
+    lock.lock_exclusive()?;
+    let original = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let next = update(&original)?;
     if next != original {
         let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-        temporary.write_all(next.as_bytes())?;
+        temporary.write_all(&next)?;
         temporary.as_file().sync_all()?;
         set_mode(temporary.path(), 0o600)?;
         temporary.persist(&path).map_err(|error| error.error)?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
     }
     fs2::FileExt::unlock(&lock)?;
     Ok(())
 }
 
+fn line_body(raw: &[u8]) -> &[u8] {
+    let raw = raw.strip_suffix(b"\n").unwrap_or(raw);
+    raw.strip_suffix(b"\r").unwrap_or(raw)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManagedKind {
+    Bootstrap,
+    Phone,
+}
+
+struct ManagedEntry<'a> {
+    text: &'a str,
+    command_option: std::ops::Range<usize>,
+    marker: &'a str,
+    kind: ManagedKind,
+}
+
+fn managed_entry(line: &[u8]) -> Option<ManagedEntry<'_>> {
+    let text = std::str::from_utf8(line).ok()?;
+    let fields = authorized_fields(text)?;
+    let (key_index, key) = public_key(text, &fields)?;
+    if key_index != 1 || fields.len() != 4 || key.algorithm() != Algorithm::Ed25519 {
+        return None;
+    }
+    let options = &text[fields[0].clone()];
+    let option_ranges = authorized_options(options)?;
+    if !option_ranges
+        .iter()
+        .any(|range| &options[range.clone()] == "restrict")
+    {
+        return None;
+    }
+    let commands: Vec<_> = option_ranges
+        .iter()
+        .filter(|range| options[(*range).clone()].starts_with("command="))
+        .cloned()
+        .collect();
+    let [command_option] = commands.as_slice() else {
+        return None;
+    };
+    let command = forced_option_command(&options[command_option.clone()])?;
+    let command = shell_words::split(&command).ok()?;
+    let marker = &text[fields[3].clone()];
+    let program = command.get(1).map(Path::new)?;
+    if !program.is_absolute() || !managed_helper_name(program.file_name()?.to_str()?) {
+        return None;
+    }
+    let kind = match command.as_slice() {
+        [exec, _program, gateway, argument]
+            if exec == "exec"
+                && gateway == "gateway"
+                && argument == marker
+                && marker == phone_marker(&key) =>
+        {
+            ManagedKind::Phone
+        }
+        [exec, _program, pair, exchange, id]
+            if exec == "exec"
+                && pair == "pair"
+                && exchange == "exchange"
+                && marker == format!("{BOOTSTRAP_COMMENT}{id}")
+                && valid_id(id).is_ok() =>
+        {
+            ManagedKind::Bootstrap
+        }
+        _ => return None,
+    };
+    Some(ManagedEntry {
+        text,
+        command_option: fields[0].start + command_option.start
+            ..fields[0].start + command_option.end,
+        marker,
+        kind,
+    })
+}
+
+fn managed_helper_name(name: &str) -> bool {
+    matches!(
+        name,
+        "pi-desktop-remote"
+            | "pi-desktop-remote-linux-amd64"
+            | "pi-desktop-remote-linux-arm64"
+            | "pi-desktop-remote-macos-arm64"
+    )
+}
+
+fn authorized_options(options: &str) -> Option<Vec<std::ops::Range<usize>>> {
+    let bytes = options.as_bytes();
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut cursor = 0;
+    let mut quoted = false;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' if quoted => {
+                cursor += 1;
+                if cursor == bytes.len() {
+                    return None;
+                }
+            }
+            b'"' => quoted = !quoted,
+            b',' if !quoted => {
+                if start == cursor {
+                    return None;
+                }
+                ranges.push(start..cursor);
+                start = cursor + 1;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    if quoted || start == bytes.len() {
+        return None;
+    }
+    ranges.push(start..bytes.len());
+    Some(ranges)
+}
+
+fn forced_option_command(option: &str) -> Option<String> {
+    let quoted = option.strip_prefix("command=\"")?.strip_suffix('"')?;
+    let mut command = String::with_capacity(quoted.len());
+    let mut bytes = quoted.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'\\' {
+            let escaped = bytes.next()?;
+            if escaped != b'\\' && escaped != b'"' {
+                return None;
+            }
+            command.push(escaped as char);
+        } else if byte == b'"' {
+            return None;
+        } else {
+            command.push(byte as char);
+        }
+    }
+    Some(command)
+}
+
+fn authorized_fields(line: &str) -> Option<Vec<std::ops::Range<usize>>> {
+    let bytes = line.as_bytes();
+    let mut fields = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor == bytes.len() {
+            break;
+        }
+        let start = cursor;
+        let mut quoted = false;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'\\' if quoted => {
+                    cursor += 1;
+                    if cursor == bytes.len() {
+                        return None;
+                    }
+                    cursor += 1;
+                }
+                b'"' => {
+                    quoted = !quoted;
+                    cursor += 1;
+                }
+                byte if !quoted && byte.is_ascii_whitespace() => break,
+                _ => cursor += 1,
+            }
+        }
+        if quoted {
+            return None;
+        }
+        fields.push(start..cursor);
+    }
+    Some(fields)
+}
+
+fn public_key(line: &str, fields: &[std::ops::Range<usize>]) -> Option<(usize, PublicKey)> {
+    fields.windows(2).enumerate().find_map(|(index, pair)| {
+        let candidate = format!("{} {}", &line[pair[0].clone()], &line[pair[1].clone()]);
+        PublicKey::from_openssh(&candidate)
+            .ok()
+            .map(|key| (index, key))
+    })
+}
+
 /// Finds the adjacent OpenSSH key type and base64 fields even when the entry
 /// starts with quoted options whose forced command contains spaces.
-fn line_contains_public_key(line: &str, key: &(String, String)) -> bool {
-    let mut previous = None;
-    for field in line.split_whitespace() {
-        if previous == Some(key.0.as_str()) && field == key.1 {
-            return true;
-        }
-        previous = Some(field);
-    }
-    false
+fn line_contains_public_key(line: &[u8], key: &(String, String)) -> bool {
+    let Ok(text) = std::str::from_utf8(line) else {
+        return false;
+    };
+    let Some(fields) = authorized_fields(text) else {
+        return false;
+    };
+    fields
+        .windows(2)
+        .any(|pair| text[pair[0].clone()] == key.0 && text[pair[1].clone()] == key.1)
 }
 
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
@@ -679,25 +1001,64 @@ mod tests {
     }
 
     #[test]
-    fn key_edits_preserve_unrelated_lines_and_replace_only_the_bootstrap() {
+    fn key_edits_preserve_bytes_and_remove_only_an_exact_managed_bootstrap() {
         let directory = isolated();
         let keys = directory.path().join("authorized_keys");
-        fs::write(
-            &keys,
-            "ssh-ed25519 existing user@host\nrestrict ssh-ed25519 old pi-pair-bootstrap:old\n",
+        let id = "0123456789abcdef0123456789abcdef";
+        let marker = format!("{BOOTSTRAP_COMMENT}{id}");
+        let mut bootstrap = PrivateKey::from(Ed25519Keypair::from_seed(&[5; 32]));
+        bootstrap.set_comment(marker.clone());
+        let forced =
+            forced_command("/old/helper/pi-desktop-remote", &["pair", "exchange", id]).unwrap();
+        let managed = format!(
+            "restrict,command={forced} {}\r\n",
+            bootstrap.public_key().to_openssh().unwrap()
+        );
+        let unrelated = format!("ssh-ed25519 not-a-key note-{marker}\n");
+        let mut original = unrelated.as_bytes().to_vec();
+        original.extend_from_slice(b"# non-utf8: \xff\n");
+        original.extend_from_slice(managed.as_bytes());
+        fs::write(&keys, &original).unwrap();
+
+        let append_key = PrivateKey::from(Ed25519Keypair::from_seed(&[6; 32]));
+        let (append, _) = permanent_line("/new helper", append_key.public_key().clone()).unwrap();
+        edit_authorized_keys_at(keys.clone(), &[&marker], None, Some(&append)).unwrap();
+
+        let bytes = fs::read(&keys).unwrap();
+        assert!(bytes.starts_with(unrelated.as_bytes()));
+        assert!(
+            bytes
+                .windows(b"non-utf8: \xff".len())
+                .any(|window| window == b"non-utf8: \xff")
+        );
+        assert!(
+            !bytes
+                .windows(managed.len())
+                .any(|window| window == managed.as_bytes())
+        );
+        assert!(String::from_utf8_lossy(&bytes).contains("/new helper"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorized_keys_lock_never_follows_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = isolated();
+        let keys = directory.path().join(".ssh/authorized_keys");
+        fs::create_dir_all(keys.parent().unwrap()).unwrap();
+        fs::write(&keys, b"keep\n").unwrap();
+        let victim = directory.path().join("victim");
+        fs::write(&victim, b"victim\n").unwrap();
+        symlink(
+            &victim,
+            keys.parent().unwrap().join(".pi-authorized-keys.lock"),
         )
         .unwrap();
-        edit_authorized_keys_at(
-            keys.clone(),
-            &["pi-pair-bootstrap:old"],
-            None,
-            Some("restrict ssh-ed25519 new pi-phone:new\n"),
-        )
-        .unwrap();
-        let text = fs::read_to_string(&keys).unwrap();
-        assert!(text.contains("ssh-ed25519 existing user@host"));
-        assert!(text.contains("pi-phone:new"));
-        assert!(!text.contains("pi-pair-bootstrap:old"));
+
+        assert!(edit_authorized_keys_at(keys.clone(), &[], None, Some("append\n")).is_err());
+        assert_eq!(fs::read(&keys).unwrap(), b"keep\n");
+        assert_eq!(fs::read(&victim).unwrap(), b"victim\n");
     }
 
     #[test]
@@ -708,18 +1069,17 @@ mod tests {
         let public = private.public_key().clone();
         let openssh = public.to_openssh().unwrap();
         let encoded = openssh.split_whitespace().nth(1).unwrap();
+        let (old, old_marker) = permanent_line("/old helper", public.clone()).unwrap();
         fs::write(
             &keys,
-            format!(
-                "ssh-ed25519 unrelated user@host\n{openssh} manual-copy\nrestrict,command=\"exec /old helper gateway old\" {openssh} pi-phone:old\n"
-            ),
+            format!("ssh-ed25519 unrelated user@host\n{openssh} manual-copy\n{old}"),
         )
         .unwrap();
         let (permanent, marker) = permanent_line("/new helper", public.clone()).unwrap();
 
         edit_authorized_keys_at(
             keys.clone(),
-            &["pi-phone:old"],
+            &[&old_marker],
             Some(&public),
             Some(&permanent),
         )
@@ -732,6 +1092,103 @@ mod tests {
         assert!(!text.contains("manual-copy"));
         assert!(!text.contains("/old helper"));
         assert_eq!(text.matches(encoded).count(), 1);
+    }
+
+    #[test]
+    fn managed_helper_names_are_exact_release_artifacts() {
+        for name in [
+            "pi-desktop-remote",
+            "pi-desktop-remote-linux-amd64",
+            "pi-desktop-remote-linux-arm64",
+            "pi-desktop-remote-macos-arm64",
+        ] {
+            assert!(managed_helper_name(name));
+        }
+        assert!(!managed_helper_name("pi-desktop-remote-malware"));
+        assert!(!managed_helper_name("not-pi-desktop-remote"));
+    }
+
+    #[test]
+    fn migration_changes_only_recognized_phone_gateways_and_is_idempotent() {
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        let private = PrivateKey::from(Ed25519Keypair::from_seed(&[9; 32]));
+        let (old, marker) =
+            permanent_line("/old/hash/pi-desktop-remote", private.public_key().clone()).unwrap();
+        let old = old
+            .replacen(
+                "restrict,command=",
+                "from=\"10.0.0.0/8\",restrict,command=",
+                1,
+            )
+            .replacen(" ssh-ed25519 ", ",no-port-forwarding ssh-ed25519 ", 1);
+        let wrong_program = old.replace(
+            "/old/hash/pi-desktop-remote",
+            "/old/hash/not-pi-desktop-remote",
+        );
+        let prefixed_program = old.replace(
+            "/old/hash/pi-desktop-remote",
+            "/old/hash/pi-desktop-remote-malware",
+        );
+        let mismatched = old.replace(
+            &format!("gateway {marker}"),
+            "gateway pi-phone:someone-else",
+        );
+        let forged_marker = old.replace(&marker, "pi-phone:0000000000000000");
+        let unrestricted = old.replacen("restrict,", "", 1);
+        let mut original = b"# keep this exact\r\n\xffbinary\n".to_vec();
+        original.extend_from_slice(wrong_program.as_bytes());
+        original.extend_from_slice(prefixed_program.as_bytes());
+        original.extend_from_slice(mismatched.as_bytes());
+        original.extend_from_slice(forged_marker.as_bytes());
+        original.extend_from_slice(unrestricted.as_bytes());
+        original.extend_from_slice(old.as_bytes());
+        fs::write(&keys, &original).unwrap();
+        let stable = Path::new("/home/me/.pi/desktop/bin/pi-desktop-remote");
+
+        assert_eq!(migrate_phone_entries_at(keys.clone(), stable).unwrap(), 1);
+        let once = fs::read(&keys).unwrap();
+        assert!(once.starts_with(b"# keep this exact\r\n\xffbinary\n"));
+        for unchanged in [
+            &wrong_program,
+            &prefixed_program,
+            &mismatched,
+            &forged_marker,
+            &unrestricted,
+        ] {
+            assert!(
+                once.windows(unchanged.len())
+                    .any(|window| window == unchanged.as_bytes())
+            );
+        }
+        let migrated = String::from_utf8_lossy(&once);
+        assert!(migrated.contains("from=\"10.0.0.0/8\",restrict,command="));
+        assert!(migrated.contains(",no-port-forwarding ssh-ed25519 "));
+        assert!(migrated.contains(&format!("exec {} gateway {marker}", stable.display())));
+        assert_eq!(migrate_phone_entries_at(keys.clone(), stable).unwrap(), 0);
+        assert_eq!(fs::read(&keys).unwrap(), once);
+    }
+
+    #[test]
+    fn stable_pairing_commands_use_the_activated_absolute_path() {
+        let stable = Path::new("/home/me/.pi/desktop/bin/pi-desktop-remote");
+        let helper = helper_at(stable, true).unwrap();
+        assert_eq!(helper.path, stable.to_str().unwrap());
+        let key = PrivateKey::from(Ed25519Keypair::from_seed(&[11; 32]));
+        let (line, marker) = permanent_line(&helper.path, key.public_key().clone()).unwrap();
+        assert!(line.contains(&format!("exec {} gateway {marker}", stable.display())));
+        let bootstrap = forced_command(
+            &helper.path,
+            &["pair", "exchange", "0123456789abcdef0123456789abcdef"],
+        )
+        .unwrap();
+        assert!(bootstrap.contains(&format!("exec {} pair exchange", stable.display())));
+    }
+
+    #[test]
+    fn the_forced_gateway_never_allows_activation() {
+        assert!(gateway_arguments("pi-desktop-remote sessions").is_ok());
+        assert!(gateway_arguments("pi-desktop-remote activate").is_err());
     }
 
     #[test]

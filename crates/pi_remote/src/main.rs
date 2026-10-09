@@ -1,4 +1,5 @@
 //! Headless SSH helper. The stdio bridge is disposable; the detached daemon owns Pi.
+mod activation;
 #[cfg_attr(not(unix), allow(dead_code))]
 mod deletion;
 mod directories;
@@ -12,7 +13,7 @@ mod sessions;
 use anyhow::{Context, Result, bail};
 use pi_core::ssh::{PROTOCOL_VERSION, VERSION};
 
-fn platform() -> &'static str {
+pub(crate) fn platform() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "linux-amd64",
         ("linux", "aarch64") => "linux-arm64",
@@ -49,6 +50,26 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
             "{}",
             serde_json::json!({"pi":true,"durable":cfg!(unix),"durableExperimental":true,"watchers":true,"sessions":true,"directories":true,"commands":true,"jjHistory":true,"deleteSessions":cfg!(unix),"imagePrompts":cfg!(feature = "bundled-durable")})
         ),
+        Some("activate") => {
+            anyhow::ensure!(
+                !gateway,
+                "Activation is not available through the SSH gateway"
+            );
+            anyhow::ensure!(args.next().is_none(), "Unexpected activate argument");
+            let activated = activation::activate_with_report()?;
+            println!(
+                "Activated {} -> {} (sha256 {}); migrated {} paired phone {}.",
+                activated.stable.display(),
+                activated.target.display(),
+                activated.hash,
+                activated.migrated,
+                if activated.migrated == 1 {
+                    "key"
+                } else {
+                    "keys"
+                }
+            );
+        }
         Some("discover") => {
             anyhow::ensure!(args.next().is_none(), "Unexpected discover argument");
             pairing::print_discovery(gateway)?;
@@ -133,7 +154,7 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
             server::daemon(target)?;
         }
         _ => bail!(
-            "Usage: pi-desktop-remote pair [OPTIONS] | connect --stdio | files --stdio | sessions | models | commands | directories --path PATH [--show-hidden] | jj-history --path PATH | jj-enable --path PATH | jj-restore --path PATH --operation ID | pi [ARGS] | --version | --licenses"
+            "Usage: pi-desktop-remote activate | pair [OPTIONS] | connect --stdio | files --stdio | sessions | models | commands | directories --path PATH [--show-hidden] | jj-history --path PATH | jj-enable --path PATH | jj-restore --path PATH --operation ID | pi [ARGS] | --version | --licenses"
         ),
     }
     Ok(())

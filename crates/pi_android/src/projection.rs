@@ -1422,6 +1422,71 @@ mod tests {
     }
 
     #[test]
+    fn a_session_wide_subagent_directory_survives_compaction_and_completion() {
+        use pi_core::subagent::Status;
+
+        let first_args = json!({"tasks":[
+            {"agent":"scout","task":"find alpha"},
+            {"agent":"reviewer","task":"check alpha"}
+        ]});
+        let second_args = json!({"chain":[
+            {"agent":"worker","task":"fix beta"},
+            {"agent":"reviewer","task":"review beta"}
+        ]});
+        let first_details = json!({"version":1,"mode":"parallel","background":true,"results":[
+            {"index":0,"agent":"scout","task":"find alpha","status":"done","conversationId":"1","output":"found alpha"},
+            {"index":1,"agent":"reviewer","task":"check alpha","status":"failed","conversationId":"2","now":"Could not run tests"}
+        ]});
+        let second_details = json!({"version":1,"mode":"chain","background":true,"results":[
+            {"index":0,"agent":"worker","task":"fix beta","status":"running","conversationId":"3","now":"Editing beta.rs"},
+            {"index":1,"agent":"reviewer","task":"review beta","status":"waiting"}
+        ]});
+        // This is the shape received after reconnecting: full durable history,
+        // including the compaction marker, plus current tool summaries.
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":"first turn"},
+                {"role":"assistant","content":[{"type":"toolCall","id":"first","name":"subagent","arguments":first_args}]},
+                {"role":"toolResult","toolCallId":"first","toolName":"subagent","content":[],"isError":false},
+                {"role":"assistant","content":"First turn done."},
+                {"role":"compactionSummary","summary":"The first turn was compacted."},
+                {"role":"user","content":"second turn"},
+                {"role":"assistant","content":[{"type":"toolCall","id":"second","name":"subagent","arguments":second_args}]},
+                {"role":"toolResult","toolCallId":"second","toolName":"subagent","content":[],"isError":false},
+                {"role":"assistant","content":"The background work can continue.","stopReason":"stop"}
+            ]}}),
+            json!({"type":"tool_execution_start","toolCallId":"first","toolName":"subagent","args":first_args}),
+            json!({"type":"tool_execution_update","toolCallId":"first","toolName":"subagent","partialResult":{"content":[],"details":first_details}}),
+            json!({"type":"tool_execution_start","toolCallId":"second","toolName":"subagent","args":second_args}),
+            json!({"type":"tool_execution_update","toolCallId":"second","toolName":"subagent","partialResult":{"content":[],"details":second_details}}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        assert_eq!(shown.state, State::Done, "the parent run has completed");
+        assert!(
+            shown.turns[0]
+                .flow
+                .iter()
+                .any(|step| matches!(step, Flow::Compacted(_)))
+        );
+        assert_eq!(
+            session_subagents(&shown.turns)
+                .into_iter()
+                .map(|item| (item.turn, item.handoff, item.index, item.subagent.status))
+                .collect::<Vec<_>>(),
+            [
+                (1, 0, 0, Status::Running),
+                (1, 0, 1, Status::Waiting),
+                (0, 0, 0, Status::Done),
+                (0, 0, 1, Status::Failed),
+            ]
+        );
+        assert_eq!(
+            subagent_summary(&shown.turns).as_deref(),
+            Some("1 working · 1 waiting · 2 finished (1 failed)")
+        );
+    }
+
+    #[test]
     fn a_call_without_its_details_yet_lists_what_it_was_asked() {
         let pi = session(&[
             json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[

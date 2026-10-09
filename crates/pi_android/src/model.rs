@@ -369,6 +369,141 @@ impl Turn {
     }
 }
 
+/// One subagent anywhere in a session, with the coordinates that open it.
+#[derive(Clone, Copy, Debug)]
+pub struct SessionSubagent<'a> {
+    pub turn: usize,
+    pub handoff: usize,
+    pub index: usize,
+    pub subagent: &'a pi_core::subagent::Subagent,
+}
+
+/// Every subagent in a session: active first, then waiting, then terminal,
+/// preserving call/task order within each group.
+pub fn session_subagents(turns: &[Turn]) -> Vec<SessionSubagent<'_>> {
+    let mut subagents: Vec<_> = turns
+        .iter()
+        .enumerate()
+        .flat_map(|(turn, item)| {
+            item.handoffs
+                .iter()
+                .enumerate()
+                .flat_map(move |(handoff, item)| {
+                    item.subagents
+                        .iter()
+                        .enumerate()
+                        .map(move |(index, subagent)| SessionSubagent {
+                            turn,
+                            handoff,
+                            index,
+                            subagent,
+                        })
+                })
+        })
+        .collect();
+    subagents.sort_by_key(|item| match item.subagent.status {
+        pi_core::subagent::Status::Running => 0,
+        pi_core::subagent::Status::Waiting => 1,
+        pi_core::subagent::Status::Done
+        | pi_core::subagent::Status::Stopped
+        | pi_core::subagent::Status::Failed => 2,
+    });
+    subagents
+}
+
+/// A detailed live summary for the session-wide subagent directory.
+pub fn subagent_summary(turns: &[Turn]) -> Option<String> {
+    use pi_core::subagent::Status;
+
+    let mut counts = [0usize; 5];
+    for item in turns
+        .iter()
+        .flat_map(|turn| &turn.handoffs)
+        .flat_map(|handoff| &handoff.subagents)
+    {
+        let index = match item.status {
+            Status::Running => 0,
+            Status::Waiting => 1,
+            Status::Done => 2,
+            Status::Stopped => 3,
+            Status::Failed => 4,
+        };
+        counts[index] += 1;
+    }
+    let [working, waiting, done, stopped, failed] = counts;
+    let total = counts.into_iter().sum::<usize>();
+    if total == 0 {
+        return None;
+    }
+    if working == 0 && waiting == 0 {
+        let noun = if total == 1 { "subagent" } else { "subagents" };
+        let mut parts = vec![format!("{total} {noun}")];
+        if stopped > 0 {
+            parts.push(format!("{stopped} stopped"));
+        }
+        if failed > 0 {
+            parts.push(format!("{failed} failed"));
+        }
+        return Some(parts.join(" · "));
+    }
+    let mut parts = [(working, "working"), (waiting, "waiting")]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, label)| format!("{count} {label}"))
+        .collect::<Vec<_>>();
+    let terminal = done + stopped + failed;
+    if terminal > 0 && stopped == 0 && failed == 0 {
+        parts.push(format!("{done} done"));
+    } else if terminal > 0 {
+        let exceptions = [(stopped, "stopped"), (failed, "failed")]
+            .into_iter()
+            .filter(|(count, _)| *count > 0)
+            .map(|(count, label)| format!("{count} {label}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!("{terminal} finished ({exceptions})"));
+    }
+    Some(parts.join(" · "))
+}
+
+/// A short status-preserving summary for the constrained session Details row.
+pub fn subagent_details_summary(turns: &[Turn]) -> Option<String> {
+    use pi_core::subagent::Status;
+
+    let mut total = 0;
+    let mut working = 0;
+    let mut waiting = 0;
+    for subagent in turns
+        .iter()
+        .flat_map(|turn| &turn.handoffs)
+        .flat_map(|handoff| &handoff.subagents)
+    {
+        total += 1;
+        match subagent.status {
+            Status::Running => working += 1,
+            Status::Waiting => waiting += 1,
+            Status::Done | Status::Stopped | Status::Failed => {}
+        }
+    }
+    if total == 0 {
+        return None;
+    }
+    if working == 0 && waiting == 0 {
+        return Some(format!(
+            "{total} {}",
+            if total == 1 { "subagent" } else { "subagents" }
+        ));
+    }
+    let mut parts = vec![format!("{total} total")];
+    if working > 0 {
+        parts.push(format!("{working} working"));
+    }
+    if waiting > 0 {
+        parts.push(format!("{waiting} waiting"));
+    }
+    Some(parts.join(" · "))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Answer {
     AllowOnce,
@@ -548,5 +683,85 @@ mod tests {
             [Flow::Text("Changing it.".into()), Flow::Page(0)],
             "where it last changed"
         );
+    }
+
+    fn subagent_turn(statuses: &[pi_core::subagent::Status]) -> Turn {
+        let mut handoff = pi_core::subagent::Handoff::from_args(&serde_json::json!({
+            "tasks": statuses
+                .iter()
+                .enumerate()
+                .map(|(index, _)| serde_json::json!({
+                    "agent": "scout",
+                    "task": format!("task {index}")
+                }))
+                .collect::<Vec<_>>()
+        }));
+        for (subagent, status) in handoff.subagents.iter_mut().zip(statuses) {
+            subagent.status = *status;
+        }
+        let mut turn = Turn::new("", "");
+        turn.handoffs.push(handoff);
+        turn
+    }
+
+    #[test]
+    fn a_session_directory_orders_and_summarizes_every_status() {
+        use pi_core::subagent::Status::*;
+
+        let turns = vec![
+            subagent_turn(&[Done, Running, Waiting]),
+            subagent_turn(&[Stopped, Failed, Running]),
+        ];
+        assert_eq!(
+            session_subagents(&turns)
+                .into_iter()
+                .map(|item| (item.turn, item.index, item.subagent.status))
+                .collect::<Vec<_>>(),
+            [
+                (0, 1, Running),
+                (1, 2, Running),
+                (0, 2, Waiting),
+                (0, 0, Done),
+                (1, 0, Stopped),
+                (1, 1, Failed),
+            ]
+        );
+        assert_eq!(
+            subagent_summary(&turns).as_deref(),
+            Some("2 working · 1 waiting · 3 finished (1 stopped, 1 failed)")
+        );
+        assert_eq!(
+            subagent_details_summary(&turns).as_deref(),
+            Some("6 total · 2 working · 1 waiting")
+        );
+    }
+
+    #[test]
+    fn terminal_and_empty_subagent_summaries_stay_compact() {
+        use pi_core::subagent::Status::*;
+
+        assert_eq!(
+            subagent_summary(&[subagent_turn(&[
+                Running, Running, Running, Waiting, Waiting, Done, Done, Done, Done, Done,
+            ])])
+            .as_deref(),
+            Some("3 working · 2 waiting · 5 done")
+        );
+        let terminal = [subagent_turn(&[Done; 4])];
+        assert_eq!(subagent_summary(&terminal).as_deref(), Some("4 subagents"));
+        assert_eq!(
+            subagent_details_summary(&terminal).as_deref(),
+            Some("4 subagents")
+        );
+        assert_eq!(
+            subagent_summary(&[subagent_turn(&[Done, Stopped, Done])]).as_deref(),
+            Some("3 subagents · 1 stopped")
+        );
+        assert_eq!(
+            subagent_summary(&[subagent_turn(&[Done, Failed])]).as_deref(),
+            Some("2 subagents · 1 failed")
+        );
+        assert_eq!(subagent_summary(&[]), None);
+        assert_eq!(subagent_details_summary(&[]), None);
     }
 }

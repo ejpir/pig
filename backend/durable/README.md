@@ -127,7 +127,7 @@ Progress is the session document `app.subagent-calls`, by call ID: per subagent 
 
 The standalone `pi-desktop-durable` is an internal JSONL worker, **not a network or browser server**. It needs `--state`, `--cwd`, `--key` and the Rust owner's inherited writer lock. Do not bypass that lock by setting internal ownership variables yourself.
 
-Build the durable-enabled Rust helper on the Mac/SSH host, then install it under `~/.pi/desktop/bin/<sha256>/pi-desktop-remote` (or let the desktop upload it). The current phone client discovers helpers there and needs `durable`, `watchers` and `sessions` in `--capabilities`. See [Pi for Android](../../crates/pi_android/README.md) for setup.
+Build the durable-enabled Rust helper on the Mac/SSH host, then run its `activate` command (or let the desktop upload and activate it). Activation keeps immutable content under `~/.pi/desktop/bin/<sha256>/` and selects `~/.pi/desktop/bin/pi-desktop-remote`; the phone uses that stable path and needs `durable`, `watchers` and `sessions` in `--capabilities`. See [Pi for Android](../../crates/pi_android/README.md) for setup.
 
 Enable SSH, add the phone's public key to the account's `~/.ssh/authorized_keys`, and connect the phone to `user@<computer-IP-or-name>`, **not `localhost`**. You do not need to keep Pi Desktop or a foreground worker running: the phone invokes `connect --stdio` over SSH and creates/reconnects detached daemons on demand. New phone sessions use durable and the host's own credentials. There is no separate Pi HTTP port or browser UI to expose.
 
@@ -139,7 +139,7 @@ Enable SSH, add the phone's public key to the account's `~/.ssh/authorized_keys`
 - After worker/daemon/host failure, **explicit reconnect** opens the same storage and calls `resume()`. No unattended boot service or automatic daemon-restart loop yet.
 - Unsafe interrupted tools return an interrupted error, not an automatic replay. The model may choose subsequent actions; no task-success or exactly-once external-side-effect guarantee.
 - Prompt `requestId` is separate from transport correlation IDs. Admission is acknowledged after commit. `get_submission` resolves an uncertain admission; explicit same-key/same-payload retry deduplicates, a payload collision fails. There is no automatic retry or persistent desktop outbox yet. Receipt retention is bounded at 10,000 prompts without silent key eviction.
-- Stock host-side API-key/OAuth credentials, built-in providers, global model configuration, prompt templates and skills are integrated (see below). No interactive durable login, stock extension host, Pi packages, manual compaction, session-tree/fork migration or Windows durable ownership yet. Unsupported commands fail instead of starting stock Pi or local services.
+- Stock host-side API-key/OAuth credentials, built-in providers, global model configuration, prompt templates, skills and manual compaction are integrated (see below). No interactive durable login, stock extension host, Pi packages, session-tree/fork migration or Windows durable ownership yet. Unsupported commands fail instead of starting stock Pi or local services.
 - Files work through the existing independent SSH channel. Remote terminals and LSP remain separate milestones.
 
 Before making this the default: validate native runtimes/live SSH and real provider/OAuth flows, add resource/extension compatibility, explicit capabilities/UI gating, a persisted desktop outbox and supported migration/version policy. Existing stock sessions retain their original backend.

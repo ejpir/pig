@@ -3,7 +3,10 @@
 //! to act. Answering from one still opens the app, so the lock screen asks
 //! to unlock first.
 
-use crate::model::{Session, SessionId, State};
+use crate::{
+    model::{Session, SessionId, State},
+    remote::HelperUpdate,
+};
 use gpui_android::activity::{Channel, Importance, Notification};
 
 pub const QUESTIONS: Channel = Channel {
@@ -24,8 +27,15 @@ pub const WORKING: Channel = Channel {
     importance: Importance::Low,
 };
 
+pub const HELPER_UPDATES: Channel = Channel {
+    id: "helper_updates",
+    name: "Computer helper updates",
+    importance: Importance::Default,
+};
+
 /// The one ongoing notification while sessions work.
 pub const WORKING_ID: i32 = 1;
+pub const HELPER_UPDATE_ID: i32 = 2;
 
 pub fn question_id(session: SessionId) -> i32 {
     1000 + session.0 as i32
@@ -107,6 +117,20 @@ pub fn finished(session: &Session, computer: &str, accent: u32) -> Notification 
         subtext: Some(computer.to_owned()),
         url: Link::Session(session.id).url(),
         actions,
+        ongoing: false,
+        color: accent,
+    }
+}
+
+pub fn helper_update(update: &HelperUpdate, computer: &str, accent: u32) -> Notification {
+    Notification {
+        id: HELPER_UPDATE_ID,
+        channel: HELPER_UPDATES,
+        title: update.title(computer),
+        text: update.details(computer),
+        subtext: Some(computer.to_owned()),
+        url: "pi://helper-update".into(),
+        actions: vec![("Open Pi".into(), "pi://helper-update".into())],
         ongoing: false,
         color: accent,
     }
@@ -206,5 +230,22 @@ mod tests {
                 .text
                 .starts_with("Qwen signatures: editing a file")
         );
+    }
+
+    #[test]
+    fn helper_notification_names_the_computer_and_manual_release() {
+        let update = HelperUpdate {
+            state: crate::remote::HelperUpdateState::UpdateRequired,
+            installed_release: Some("0.0.4".into()),
+            app_release: "0.0.5".into(),
+            platform: Some("linux-arm64".into()),
+            reasons: vec!["missing session discovery".into()],
+        };
+        let notification = helper_update(&update, "build-box", 0);
+        assert_eq!(notification.title, "Helper update required on build-box");
+        assert!(notification.text.contains("pi-desktop-remote 0.0.4"));
+        assert!(notification.text.contains("Pi Android 0.0.5"));
+        assert!(notification.text.contains("pi-desktop-remote-linux-arm64"));
+        assert!(notification.text.contains("then reconnect"));
     }
 }

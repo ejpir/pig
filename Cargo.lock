@@ -9313,6 +9313,7 @@ dependencies = [
  "pi_markdown",
  "rand 0.10.3",
  "russh",
+ "semver",
  "serde",
  "serde_json",
  "tokio",

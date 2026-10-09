@@ -334,6 +334,31 @@ fn remote_command(platform: Platform, hash: &str, arguments: &str) -> String {
     }
 }
 
+fn probe_command(platform: Platform, hash: &str) -> String {
+    if platform == Platform::WindowsX64 {
+        return remote_command(platform, hash, "--version");
+    }
+    let executable = platform.executable();
+    shell_script(&format!(
+        "set -eu; p=\"$HOME/.pi/desktop/bin/{hash}/{executable}\"; test -f \"$p\"; test ! -L \"$p\"; actual=$( (sha256sum \"$p\" 2>/dev/null || shasum -a 256 \"$p\") | cut -d ' ' -f 1); test \"$actual\" = '{hash}'; exec \"$p\" --version"
+    ))
+}
+
+fn unix_install_object_command(
+    directory: &str,
+    temporary: &str,
+    executable: &str,
+    hash: &str,
+) -> String {
+    format!(
+        "set -eu; cd \"$HOME/{directory}\"; trap 'rm -f {temporary}' EXIT; test -f '{temporary}'; test ! -L '{temporary}'; actual=$( (sha256sum '{temporary}' 2>/dev/null || shasum -a 256 '{temporary}') | cut -d ' ' -f 1); test \"$actual\" = '{hash}'; chmod 700 '{temporary}'; if test -e '{executable}' || test -L '{executable}'; then test -f '{executable}'; test ! -L '{executable}'; existing=$( (sha256sum '{executable}' 2>/dev/null || shasum -a 256 '{executable}') | cut -d ' ' -f 1); test \"$existing\" = '{hash}'; else ln '{temporary}' '{executable}'; fi; rm -f '{temporary}'; trap - EXIT"
+    )
+}
+
+fn activation_command(platform: Platform, hash: &str) -> Option<String> {
+    (platform != Platform::WindowsX64).then(|| remote_command(platform, hash, "activate"))
+}
+
 /// Blocking bootstrap; call on a background executor. No remote cwd is interpolated into a shell.
 pub fn install(target: &SshTarget) -> Result<Launch> {
     install_mode(target, "connect --stdio")
@@ -351,7 +376,7 @@ fn install_mode(target: &SshTarget, mode: &str) -> Result<Launch> {
     let hash = digest(&helper)?;
     let executable = platform.executable();
     let probe = bounded_output(
-        ssh(&target.host).arg(remote_command(platform, &hash, "--version")),
+        ssh(&target.host).arg(probe_command(platform, &hash)),
         Duration::from_secs(30),
     )?;
     let expected = format!(
@@ -364,7 +389,7 @@ fn install_mode(target: &SshTarget, mode: &str) -> Result<Launch> {
         if platform == Platform::WindowsX64 {
             checked(ssh(&target.host).arg(format!("powershell -NoProfile -NonInteractive -Command \"New-Item -ItemType Directory -Force ($env:USERPROFILE + '/{directory}') | Out-Null\"")))?;
         } else {
-            checked(ssh(&target.host).arg(shell_script(&format!("set -eu; umask 077; mkdir -p \"$HOME/{directory}\"; chmod 700 \"$HOME/.pi/desktop\" \"$HOME/{directory}\""))))?;
+            checked(ssh(&target.host).arg(shell_script(&format!("set -eu; umask 077; mkdir -p \"$HOME/{directory}\"; chmod 700 \"$HOME/.pi\" \"$HOME/.pi/desktop\" \"$HOME/.pi/desktop/bin\" \"$HOME/{directory}\""))))?;
         }
         checked(
             ProcessCommand::new("scp")
@@ -385,9 +410,7 @@ fn install_mode(target: &SshTarget, mode: &str) -> Result<Launch> {
                 "powershell -NoProfile -NonInteractive -Command \"$p=$env:USERPROFILE+'/{directory}/{temporary}'; if ((Get-FileHash -Algorithm SHA256 $p).Hash.ToLower() -ne '{hash}') {{ throw 'Helper checksum mismatch' }}; Move-Item -Force $p ($env:USERPROFILE+'/{directory}/{executable}')\""
             )
         } else {
-            format!(
-                "set -eu; cd \"$HOME/{directory}\"; actual=$( (sha256sum '{temporary}' 2>/dev/null || shasum -a 256 '{temporary}') | cut -d ' ' -f 1); test \"$actual\" = '{hash}'; chmod 700 '{temporary}'; mv '{temporary}' '{executable}'"
-            )
+            unix_install_object_command(&directory, &temporary, executable, &hash)
         };
         let command = if platform == Platform::WindowsX64 {
             command
@@ -395,12 +418,14 @@ fn install_mode(target: &SshTarget, mode: &str) -> Result<Launch> {
             shell_script(&command)
         };
         checked(ssh(&target.host).arg(command))?;
-        let verified =
-            checked(ssh(&target.host).arg(remote_command(platform, &hash, "--version")))?;
+        let verified = checked(ssh(&target.host).arg(probe_command(platform, &hash)))?;
         ensure!(
             String::from_utf8_lossy(&verified.stdout).trim() == expected,
             "Remote helper version mismatch"
         );
+    }
+    if let Some(command) = activation_command(platform, &hash) {
+        checked(ssh(&target.host).arg(command))?;
     }
     if mode == "connect --stdio" && target.backend == RemoteBackend::Durable {
         let capabilities = checked(ssh(&target.host).arg(remote_command(
@@ -489,14 +514,32 @@ mod tests {
         assert!(checksum(&format!("{hash}  helper-other"), "helper").is_err());
     }
     #[test]
-    fn installation_shell_commands_contain_no_project_path() {
-        let command = remote_command(Platform::LinuxX64, &"a".repeat(64), "connect --stdio");
+    fn installation_shell_commands_verify_immutable_objects_and_activate_unix() {
+        let hash = "a".repeat(64);
+        let command = remote_command(Platform::LinuxX64, &hash, "connect --stdio");
         assert!(command.starts_with("sh -c "));
         assert!(command.contains("exec "));
         assert!(!command.contains("--cwd"));
+        let probe = probe_command(Platform::LinuxX64, &hash);
+        assert!(probe.contains("sha256sum"));
+        assert!(probe.contains(&hash));
+        let install = unix_install_object_command(
+            ".pi/desktop/bin/hash",
+            "helper.partial",
+            "pi-desktop-remote",
+            &hash,
+        );
+        assert!(install.contains("test ! -L 'helper.partial'"));
+        assert!(install.contains("test ! -L 'pi-desktop-remote'"));
+        assert!(install.contains("ln 'helper.partial' 'pi-desktop-remote'"));
+        assert!(!install.contains("mv -f 'helper.partial'"));
+        let activation = activation_command(Platform::LinuxX64, &hash).unwrap();
+        assert!(activation.contains(&format!(
+            "$HOME/.pi/desktop/bin/{hash}/pi-desktop-remote\" activate"
+        )));
+        assert_eq!(activation_command(Platform::WindowsX64, &hash), None);
         assert!(
-            remote_command(Platform::WindowsX64, &"a".repeat(64), "connect --stdio")
-                .contains("USERPROFILE")
+            remote_command(Platform::WindowsX64, &hash, "connect --stdio").contains("USERPROFILE")
         );
     }
 }
