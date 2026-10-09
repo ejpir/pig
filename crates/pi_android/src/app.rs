@@ -21,9 +21,9 @@ use crate::{
 };
 use gpui::{
     Animation, AnimationExt, App, Context, Edges, Entity, FocusHandle, Focusable,
-    PathPromptOptions, Pixels, ScrollHandle, SharedString, Subscription, Task, TextInputAction,
-    TextInputConfiguration, Window, WindowAppearance, WindowVisibility, actions, div, prelude::*,
-    px, relative,
+    PathPromptOptions, Pixels, Role, ScrollHandle, SharedString, Subscription, Task,
+    TextInputAction, TextInputConfiguration, Window, WindowAppearance, WindowVisibility, actions,
+    div, prelude::*, px, relative,
 };
 use gpui_android::activity;
 use std::{
@@ -833,20 +833,24 @@ impl PhoneApp {
     }
 
     pub(crate) fn notify_user(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.notice = Some(text.into());
+        let text = text.into();
+        let auto_dismiss = text.chars().count() <= 80;
+        self.notice = Some(text);
         self.notice_generation += 1;
         let generation = self.notice_generation;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(5)).await;
-            this.update(cx, |this, cx| {
-                if this.notice_generation == generation {
-                    this.notice = None;
-                    cx.notify();
-                }
+        if auto_dismiss {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+                this.update(cx, |this, cx| {
+                    if this.notice_generation == generation {
+                        this.notice = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+        }
         cx.notify();
     }
 
@@ -2792,6 +2796,7 @@ impl Render for PhoneApp {
         let notice = self.notice.clone().map(|notice| {
             let generation = self.notice_generation;
             let top = insets.top + px(68.);
+            let announcement = notice.clone();
             let drawer = div()
                 .id("notice-drawer-layer")
                 .absolute()
@@ -2806,12 +2811,14 @@ impl Render for PhoneApp {
                         .debug_selector(|| "notice-drawer".into())
                         .relative()
                         .child(crate::testing::probe("notice-drawer"))
+                        .role(Role::Alert)
+                        .aria_label(announcement)
                         .occlude()
                         .w_full()
                         .max_w(px(560.))
                         .min_w_0()
                         .flex()
-                        .items_start()
+                        .items_center()
                         .overflow_hidden()
                         .rounded(px(16.))
                         .bg(colors.composer)
@@ -2824,11 +2831,11 @@ impl Render for PhoneApp {
                             spread_radius: px(0.),
                             inset: false,
                         }])
-                        .child(div().w(px(4.)).self_stretch().flex_none().bg(colors.accent))
                         .child(
                             div()
                                 .p(px(12.))
-                                .pr(px(10.))
+                                .pl(px(14.))
+                                .pr(px(8.))
                                 .flex()
                                 .flex_1()
                                 .min_w_0()
@@ -2855,15 +2862,20 @@ impl Render for PhoneApp {
                                         .text_color(colors.text)
                                         .child(notice),
                                 )
-                                .child(crate::ui::icon("x", 16., colors.muted).mt(px(8.))),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.notice_generation == generation {
-                                this.notice = None;
-                                this.notice_generation += 1;
-                                cx.notify();
-                            }
-                        })),
+                                .child(
+                                    crate::ui::tap(("dismiss-notice", generation), "x", &colors)
+                                        .role(Role::Button)
+                                        .aria_label("Dismiss notification")
+                                        .debug_selector(|| "dismiss-notice".into())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if this.notice_generation == generation {
+                                                this.notice = None;
+                                                this.notice_generation += 1;
+                                                cx.notify();
+                                            }
+                                        })),
+                                ),
+                        ),
                 );
             if cx.reduce_motion() {
                 drawer.into_any_element()

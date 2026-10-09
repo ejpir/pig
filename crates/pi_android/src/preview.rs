@@ -1694,6 +1694,35 @@ mod tests {
     }
 
     #[gpui::test]
+    fn wrapped_attachments_keep_the_draft_and_send_clear_when_height_is_tight(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(520.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("image-only", window, cx);
+                app.start.update(cx, |composer, cx| {
+                    let image = composer.attachments()[0].clone();
+                    for _ in 0..3 {
+                        composer.attach(image.clone(), cx);
+                    }
+                });
+            })
+        });
+        cx.run_until_parked();
+        let last = cx.debug_bounds("attachment-3").unwrap();
+        let draft = cx.debug_bounds("composer-draft").unwrap();
+        let send = cx.debug_bounds("send").unwrap();
+        assert!(last.bottom() <= draft.top(), "{last:?} overlaps {draft:?}");
+        assert!(
+            send.bottom() <= gpui::px(520.),
+            "send moved offscreen: {send:?}"
+        );
+    }
+
+    #[gpui::test]
     fn notices_unroll_below_the_app_bar_wrap_and_dismiss(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
@@ -1716,7 +1745,9 @@ mod tests {
             drawer.size.height > gpui::px(56.),
             "long notice should wrap: {drawer:?}"
         );
-        cx.simulate_click(drawer.center(), gpui::Modifiers::none());
+        let dismiss = cx.debug_bounds("dismiss-notice").unwrap();
+        assert!(dismiss.size.width >= gpui::px(48.) && dismiss.size.height >= gpui::px(48.));
+        cx.simulate_click(dismiss.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         app.read_with(cx, |app, _| assert!(app.notice.is_none()));
         assert!(cx.debug_bounds("notice-drawer").is_none());
