@@ -585,6 +585,9 @@ impl Render for Composer {
             .any(|attachment| !matches!(attachment, Attachment::Lines(_)));
         let attachments = has_body_attachments.then(|| {
             div()
+                // The dock can be squeezed by the keyboard. Keep the attachment
+                // row's measured height so the editor never paints through it.
+                .flex_none()
                 .flex()
                 .flex_wrap()
                 .gap(px(12.))

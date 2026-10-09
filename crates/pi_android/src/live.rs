@@ -623,7 +623,7 @@ impl Live {
             return Err("Wait for this session's commands to finish loading.".into());
         }
         if !self.supports_compact(id) {
-            return Err("Update the computer's helper before using manual compaction.".into());
+            return Err("This session is still using an older helper. Start a new session to use manual compaction; your draft has been kept.".into());
         }
         let watch = self
             .watches

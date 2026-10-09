@@ -33,6 +33,7 @@ pub const SCREENS: &[&str] = &[
     "many-files",
     "review",
     "typing",
+    "notice",
     "details",
     "evening",
     "settings",
@@ -562,6 +563,14 @@ impl PhoneApp {
                     composer.set_text("Same for DeepSeek, see the log. Start with @deep", cx);
                     composer.focus(window, cx);
                 });
+            }
+            "notice" => {
+                finish(self);
+                self.show_session(QWEN, window, cx);
+                self.notify_user(
+                    "This session is still using an older helper. Start a new session to use manual compaction; your draft has been kept.",
+                    cx,
+                );
             }
             "details" => {
                 finish(self);
@@ -1656,7 +1665,12 @@ mod tests {
         cx.run_until_parked();
         let preview = cx.debug_bounds("attachment-0").unwrap();
         let remove = cx.debug_bounds("remove-attachment-0").unwrap();
+        let draft = cx.debug_bounds("composer-draft").unwrap();
         assert!(preview.right() <= remove.left());
+        assert!(
+            preview.bottom() <= draft.top(),
+            "{preview:?} overlaps {draft:?}"
+        );
         assert!(remove.size.width >= gpui::px(44.) && remove.size.height >= gpui::px(44.));
         cx.simulate_click(preview.center(), gpui::Modifiers::none());
         cx.run_until_parked();
@@ -1677,6 +1691,35 @@ mod tests {
             assert!(app.start.read(cx).attachments().is_empty());
             assert!(!app.start.read(cx).can_send(cx));
         });
+    }
+
+    #[gpui::test]
+    fn notices_unroll_below_the_app_bar_wrap_and_dismiss(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(640.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("image-input", window, cx);
+                app.notify_user(
+                    "This session is still using an older helper. Start a new session to use manual compaction; your draft has been kept.",
+                    cx,
+                );
+            })
+        });
+        cx.run_until_parked();
+        let drawer = cx.debug_bounds("notice-drawer").unwrap();
+        assert!(drawer.left() >= gpui::px(12.));
+        assert!(drawer.right() <= gpui::px(308.));
+        assert!(drawer.top() >= gpui::px(68.));
+        assert!(
+            drawer.size.height > gpui::px(56.),
+            "long notice should wrap: {drawer:?}"
+        );
+        cx.simulate_click(drawer.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| assert!(app.notice.is_none()));
+        assert!(cx.debug_bounds("notice-drawer").is_none());
     }
 
     #[gpui::test]

@@ -1,6 +1,6 @@
 //! The phone app: a stack of screens, at most one bottom sheet over them, a
-//! short notice at the bottom, and a computer's sessions underneath, or the
-//! sample ones.
+//! short notice drawer below the app bar, and a computer's sessions underneath,
+//! or the sample ones.
 //!
 //! Back closes the sheet, then the search, then the screen; on the first
 //! screen it leaves the app, as Android expects.
@@ -20,9 +20,10 @@ use crate::{
     theme::{Appearance, SANS, Theme, theme},
 };
 use gpui::{
-    App, Context, Edges, Entity, FocusHandle, Focusable, PathPromptOptions, Pixels, ScrollHandle,
-    SharedString, Subscription, Task, TextInputAction, TextInputConfiguration, Window,
-    WindowAppearance, WindowVisibility, actions, div, prelude::*, px, relative,
+    Animation, AnimationExt, App, Context, Edges, Entity, FocusHandle, Focusable,
+    PathPromptOptions, Pixels, ScrollHandle, SharedString, Subscription, Task, TextInputAction,
+    TextInputConfiguration, Window, WindowAppearance, WindowVisibility, actions, div, prelude::*,
+    px, relative,
 };
 use gpui_android::activity;
 use std::{
@@ -836,7 +837,7 @@ impl PhoneApp {
         self.notice_generation += 1;
         let generation = self.notice_generation;
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(3)).await;
+            cx.background_executor().timer(Duration::from_secs(5)).await;
             this.update(cx, |this, cx| {
                 if this.notice_generation == generation {
                     this.notice = None;
@@ -2789,23 +2790,96 @@ impl Render for PhoneApp {
                 })
         });
         let notice = self.notice.clone().map(|notice| {
-            div()
+            let generation = self.notice_generation;
+            let top = insets.top + px(68.);
+            let drawer = div()
+                .id("notice-drawer-layer")
                 .absolute()
-                .left(insets.left + px(16.))
-                .right(insets.right + px(16.))
-                .bottom(insets.bottom + px(84.))
+                .left(insets.left + px(12.))
+                .right(insets.right + px(12.))
+                .top(top)
                 .flex()
                 .justify_center()
                 .child(
                     div()
-                        .px(px(16.))
-                        .py(px(12.))
-                        .rounded(px(12.))
-                        .bg(colors.text)
-                        .text_color(colors.canvas)
-                        .text_size(px(14.))
-                        .child(notice),
-                )
+                        .id("notice-drawer")
+                        .debug_selector(|| "notice-drawer".into())
+                        .relative()
+                        .child(crate::testing::probe("notice-drawer"))
+                        .occlude()
+                        .w_full()
+                        .max_w(px(560.))
+                        .min_w_0()
+                        .flex()
+                        .items_start()
+                        .overflow_hidden()
+                        .rounded(px(16.))
+                        .bg(colors.composer)
+                        .border_1()
+                        .border_color(colors.line_strong)
+                        .shadow(vec![gpui::BoxShadow {
+                            color: colors.shadow,
+                            offset: gpui::point(px(0.), px(8.)),
+                            blur_radius: px(24.),
+                            spread_radius: px(0.),
+                            inset: false,
+                        }])
+                        .child(div().w(px(4.)).self_stretch().flex_none().bg(colors.accent))
+                        .child(
+                            div()
+                                .p(px(12.))
+                                .pr(px(10.))
+                                .flex()
+                                .flex_1()
+                                .min_w_0()
+                                .items_start()
+                                .gap(px(10.))
+                                .child(
+                                    div()
+                                        .size(px(32.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .bg(colors.tint(colors.accent))
+                                        .child(crate::ui::icon("info", 17., colors.accent)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .pt(px(4.))
+                                        .text_size(px(14.))
+                                        .line_height(relative(1.35))
+                                        .text_color(colors.text)
+                                        .child(notice),
+                                )
+                                .child(crate::ui::icon("x", 16., colors.muted).mt(px(8.))),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.notice_generation == generation {
+                                this.notice = None;
+                                this.notice_generation += 1;
+                                cx.notify();
+                            }
+                        })),
+                );
+            if cx.reduce_motion() {
+                drawer.into_any_element()
+            } else {
+                drawer
+                    .with_animation(
+                        ("notice-drawer-unroll", generation),
+                        Animation::new(Duration::from_millis(220)),
+                        move |drawer, progress| {
+                            drawer
+                                .top(top - px(14.) * (1. - progress))
+                                .opacity(progress)
+                        },
+                    )
+                    .into_any_element()
+            }
         });
         div()
             .id("pi")
