@@ -65,7 +65,7 @@ impl PhoneApp {
         let area = composer.read(cx).area.clone();
         area.update(cx, |area, _| {
             area.set_placeholder(if running {
-                "Queue a follow-up…"
+                "Steer this run…"
             } else if pages {
                 "Ask for a change…"
             } else {
@@ -103,7 +103,7 @@ impl PhoneApp {
         let turns = self.turns(session, false, &colors, cx);
         let queued = (!session.queued.is_empty()).then(|| {
             div()
-                .child(ui::label("Queued for when this run ends", &colors).mb(px(8.)))
+                .child(ui::label("Queued messages", &colors).mb(px(8.)))
                 .child(
                     ui::card(&colors).children(session.queued.iter().enumerate().map(
                         |(index, prompt)| {
@@ -174,23 +174,6 @@ impl PhoneApp {
                     )
             })
             .collect::<Vec<_>>();
-        let review = (!running && !session.files.is_empty()).then(|| {
-            let text = match session.files.len() {
-                1 => "Review the changed file".to_owned(),
-                count => format!("Review {count} changed files"),
-            };
-            ui::button_glyph(
-                "review",
-                Button::Primary,
-                Some("diff"),
-                16.,
-                text,
-                false,
-                &colors,
-            )
-            .mx(px(12.))
-            .on_click(cx.listener(move |this, _, window, cx| this.open_review(id, 0, window, cx)))
-        });
         let dock = if asking {
             div()
                 .px(px(12.))
@@ -201,7 +184,6 @@ impl PhoneApp {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .children(review)
                 .child(
                     div()
                         .flex()
@@ -627,6 +609,7 @@ impl PhoneApp {
             .gap(px(24.))
             .children(stages.iter().enumerate().map(|(stage_index, stage)| {
                 let next = stages.get(stage_index + 1);
+                let kind = stage.kind;
                 let waits = waiting && stage.status == StageStatus::Live;
                 let row = if waits {
                     let session = session.expect("a waiting session");
@@ -645,7 +628,7 @@ impl PhoneApp {
                     .active(|style| style.bg(colors.selected))
                     .child(row)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_sheet(Sheet::Activity(id, index, stage_index), cx)
+                        this.open_sheet(Sheet::Activity(id, index, kind), cx)
                     }))
             }))
     }
@@ -1163,6 +1146,17 @@ pub(crate) fn stage_row(
             .rounded(px(12.))
             // A glance at the change: long lines are cut, Review shows them.
             .overflow_hidden()
+            .children(stage.diff_path.as_ref().map(|path| {
+                div()
+                    .px(px(10.))
+                    .pt(px(6.))
+                    .pb(px(4.))
+                    .font_family(MONO)
+                    .text_size(px(11.5))
+                    .line_height(px(16.))
+                    .text_color(colors.muted)
+                    .child(path.clone())
+            }))
             .children(
                 stage
                     .diff
@@ -1176,7 +1170,8 @@ pub(crate) fn stage_row(
         .map(|tool| {
             // The last lines, each on one line, in a box that never changes
             // height: streaming output must not move the thread under it.
-            let lines: Vec<&str> = tool.output.lines().rev().take(TAIL).collect();
+            let displayed = tool.output_for_display();
+            let lines: Vec<&str> = displayed.lines().rev().take(TAIL).collect();
             div()
                 .mt(px(12.))
                 .px(px(12.))

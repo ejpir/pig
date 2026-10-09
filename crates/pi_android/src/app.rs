@@ -9,7 +9,7 @@ use crate::{
     alerts::{self, Link},
     composer::{Attachment, Composer, ComposerEvent},
     live::{Live, Update},
-    model::{Answer, Computer, SessionId, State},
+    model::{Answer, Computer, SessionId, StageKind, State},
     motion::SwipeMotion,
     prefs::{Prefs, SavedCommand},
     projects::{FileView, ProjectBrowser},
@@ -87,7 +87,7 @@ pub enum Sheet {
     More(SessionId),
     Models,
     Resources,
-    Activity(SessionId, usize, usize),
+    Activity(SessionId, usize, StageKind),
     Delete(SessionId),
     RestoreHistory(SessionId, usize),
     EnableJj(SessionId),
@@ -1567,6 +1567,7 @@ impl PhoneApp {
             {
                 let turn = session.turn_mut();
                 let stage = turn.stage_mut(crate::model::StageKind::Change);
+                stage.diff_path = Some("crates/pi_android/src/live.rs".into());
                 let step = stage.added;
                 // A live edit shows its latest eight lines, as the projection does.
                 if stage.diff.len() >= 8 {
@@ -2219,7 +2220,7 @@ impl PhoneApp {
                         }
                         window.dismiss_virtual_keyboard();
                         if running {
-                            self.notify_user("Queued for when this run ends", cx);
+                            self.notify_user("Queued to steer this run", cx);
                         }
                     }
                     Target::Review => {
@@ -2234,7 +2235,7 @@ impl PhoneApp {
                         self.review_lines.clear();
                         self.routes.pop();
                         self.entered(window, cx);
-                        self.notify_user("Sent as a follow-up", cx);
+                        self.notify_user("Sent to this session", cx);
                     }
                 }
                 cx.notify();

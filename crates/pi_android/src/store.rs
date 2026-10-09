@@ -313,7 +313,7 @@ impl Store {
         Ok(())
     }
 
-    /// A follow-up: queued while the session runs, started when it is idle.
+    /// A prompt for an existing session. Live runs steer; samples queue it.
     pub fn send(
         &mut self,
         id: SessionId,

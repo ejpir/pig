@@ -265,7 +265,15 @@ impl PhoneApp {
                 }
                 self.show_session(QWEN, window, cx);
                 self.open_sheet(
-                    Sheet::Activity(QWEN, 0, if name == "tool-output" { 2 } else { 0 }),
+                    Sheet::Activity(
+                        QWEN,
+                        0,
+                        if name == "tool-output" {
+                            StageKind::Verify
+                        } else {
+                            StageKind::Understand
+                        },
+                    ),
                     cx,
                 );
             }
@@ -627,6 +635,7 @@ impl PhoneApp {
             "start_draft": self.start.read(cx).area.read(cx).text().to_owned(),
             "sample": self.store.as_ref().is_some_and(|store| store.is_sample()),
             "draft_chars": composer.map(|c| c.read(cx).area.read(cx).text().chars().count()),
+            "text_menu_open": composer.is_some_and(|c| c.read(cx).area.read(cx).menu_open()),
             "draft_attachments": composer.map(|c| c.read(cx).attachments().len()),
             "draft_images": composer.map(|c| c.read(cx).attachments().iter().filter(|a| matches!(a, Attachment::Image { .. })).count()),
             "model_search_chars": self.model_search.read(cx).text().chars().count(),
@@ -1560,7 +1569,7 @@ mod tests {
         cx.simulate_click(stage.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         app.read_with(cx, |app, _| {
-            assert!(matches!(app.sheet, Some(Sheet::Activity(_, _, _))))
+            assert!(matches!(app.sheet, Some(Sheet::Activity(QWEN, 0, _))))
         });
     }
 

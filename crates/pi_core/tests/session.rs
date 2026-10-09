@@ -65,6 +65,13 @@ fn commands_use_exact_pi_wire_names_and_preserve_text() {
             .unwrap()["streamingBehavior"],
         "steer"
     );
+    assert_eq!(
+        session
+            .prompt("later".into(), vec![], true)
+            .record("3")
+            .unwrap()["streamingBehavior"],
+        "followUp"
+    );
 }
 
 #[test]

@@ -121,7 +121,7 @@ pub(crate) fn new_session(
         queued: Vec::new(),
         failure: None,
         details: Details {
-            context_percent: 2,
+            context_percent: Some(2),
             context_tokens: "4k of 200k tokens".into(),
             cost: "$0.00".into(),
             turns: 0,
@@ -365,7 +365,7 @@ fn session(id: u32, title: &str, project: usize, state: State, turn: Turn) -> Se
         queued: Vec::new(),
         failure: None,
         details: Details {
-            context_percent: 18,
+            context_percent: Some(18),
             context_tokens: "36k of 200k tokens".into(),
             cost: "$0.22".into(),
             turns: 6,
@@ -413,6 +413,7 @@ fn qwen(id: SessionId) -> Session {
     ];
     let mut changing = stage(Change, Live, "Editing openai-completions.ts");
     changing.references = vec![Reference::File("openai-completions.ts".into())];
+    changing.diff_path = Some("packages/ai/src/providers/openai-completions.ts".into());
     changing.added = 3;
     changing.removed = 1;
     changing.diff = vec![
@@ -432,7 +433,7 @@ fn qwen(id: SessionId) -> Session {
     session.elapsed = Duration::from_secs(72);
     session.files = vec![qwen_completions()];
     session.details = Details {
-        context_percent: 31,
+        context_percent: Some(31),
         context_tokens: "62k of 200k tokens".into(),
         cost: "$0.41".into(),
         turns: 14,

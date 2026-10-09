@@ -432,7 +432,7 @@ fn shell_copy_controls_are_small_corner_icons_and_copy_original_text(cx: &mut Te
     let (desktop, mut cx) = setup(cx);
     let session = tab(&desktop, 0, &cx);
     let command = "printf '雪\\n'";
-    let output = "雪\n  original trailing spaces  \n";
+    let output = "10%\r100%\r\n雪\n  original trailing spaces  \n";
     receive(
         &session,
         json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[{
@@ -441,6 +441,12 @@ fn shell_copy_controls_are_small_corner_icons_and_copy_original_text(cx: &mut Te
         &mut cx,
     );
     cx.run_until_parked();
+    session.transcript.read_with(&cx, |view, cx| {
+        assert_eq!(
+            view.documents.copy_source("0:shell-output", cx),
+            Some("100%\n雪\n  original trailing spaces  \n")
+        )
+    });
     let first = cx.debug_bounds("copy-shell-command-0").unwrap();
     let second = cx.debug_bounds("copy-shell-output-0").unwrap();
     assert_eq!(first.size, size(px(20.), px(20.)));

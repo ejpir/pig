@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Build the GPUI Android demo as an APK, without Gradle.
 
-    python3 crates/gpui_android/scripts/build_apk.py [--debug] [--out dist/gpui-touch.apk]
+    python3 crates/gpui_android/scripts/build_apk.py [--debug] [--target TARGET] [--out dist/gpui-touch.apk]
 
-Builds the `touch` example for arm64 Android, compiles the Java activity
-(`java/`) to DEX, writes a binary AndroidManifest.xml, then zips and signs the
+Builds the `touch` example for Android (ARM64 by default), compiles the Java
+activity (`java/`) to DEX, writes a binary AndroidManifest.xml, then zips and signs the
 APK with the Android debug key (~/.android/debug.keystore, created if missing),
 or with ANDROID_KEYSTORE (and ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and
 ANDROID_KEY_PASSWORD) when set. The version is the workspace's.
@@ -13,8 +13,9 @@ Other apps call `build` with their own `App` (see crates/pi_android/scripts).
 Needs Python 3.9+, a JDK (javac, keytool) and the Android SDK, found through
 ANDROID_HOME or ANDROID_SDK_ROOT: a platform (android-30 or newer), build-tools
 (d8 and apksigner) and the NDK. ANDROID_JAR, D8_JAR, APKSIGNER_JAR and
-ANDROID_NDK_ROOT override the lookups. If CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER
-is set, the NDK is not needed.
+ANDROID_NDK_ROOT override the lookups. Setting the Cargo linker variable for
+the selected Rust target (for example CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER)
+avoids the NDK lookup.
 """
 
 import argparse
@@ -33,6 +34,10 @@ from pathlib import Path
 CRATE = Path(__file__).resolve().parent.parent
 WORKSPACE = CRATE.parent.parent
 TARGET = "aarch64-linux-android"
+TARGET_ABIS = {
+    "aarch64-linux-android": "arm64-v8a",
+    "x86_64-linux-android": "x86_64",
+}
 MIN_SDK = 30
 TARGET_SDK = 37
 ACTIVITY = "dev.pi.gpui.GpuiActivity"
@@ -109,9 +114,11 @@ def find_build_tool(sdk, jar):
     return best / "lib" / jar if best else None
 
 
-def ndk_linker_env(sdk):
-    """Environment to link for Android with the NDK's clang."""
-    if os.environ.get("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"):
+def ndk_linker_env(sdk, target):
+    """Environment to link the selected Android Rust target with the NDK's clang."""
+    target_env = target.upper().replace("-", "_")
+    linker_var = f"CARGO_TARGET_{target_env}_LINKER"
+    if os.environ.get(linker_var):
         return {}
     ndk = Path(os.environ["ANDROID_NDK_ROOT"]) if os.environ.get("ANDROID_NDK_ROOT") else None
     if ndk is None and sdk is not None:
@@ -121,14 +128,15 @@ def ndk_linker_env(sdk):
     host = {"darwin": "darwin-x86_64", "linux": "linux-x86_64", "win32": "windows-x86_64"}[sys.platform]
     bin_dir = ndk / "toolchains" / "llvm" / "prebuilt" / host / "bin"
     suffix = ".cmd" if sys.platform == "win32" else ""
-    clang = bin_dir / f"{TARGET}{MIN_SDK}-clang{suffix}"
+    clang = bin_dir / f"{target}{MIN_SDK}-clang{suffix}"
     if not clang.exists():
         fail(f"{clang} not found; this NDK has no toolchain for {host} ({platform.machine()})")
+    rust_env = target.replace("-", "_")
     return {
-        "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER": str(clang),
-        "CC_aarch64_linux_android": str(clang),
-        "CXX_aarch64_linux_android": str(bin_dir / f"{TARGET}{MIN_SDK}-clang++{suffix}"),
-        "AR_aarch64_linux_android": str(bin_dir / "llvm-ar"),
+        linker_var: str(clang),
+        f"CC_{rust_env}": str(clang),
+        f"CXX_{rust_env}": str(bin_dir / f"{target}{MIN_SDK}-clang++{suffix}"),
+        f"AR_{rust_env}": str(bin_dir / "llvm-ar"),
     }
 
 
@@ -404,7 +412,7 @@ def signing_key(keytool):
     return key
 
 
-def build(app, debug, out):
+def build(app, debug, out, target=TARGET):
     sdk = sdk_root()
     android_jar = tool("ANDROID_JAR", lambda: sdk and find_android_jar(sdk), f"android.jar (API {MIN_SDK}+)")
     d8 = tool("D8_JAR", lambda: sdk and find_build_tool(sdk, "d8.jar"), "d8.jar (build-tools)")
@@ -416,12 +424,12 @@ def build(app, debug, out):
         if not Path(program).is_file() and not shutil.which(program):
             fail(f"{program} not found; install a JDK (Android Studio's is in its jbr folder)")
 
-    env = {**os.environ, **ndk_linker_env(sdk)}
+    env = {**os.environ, **ndk_linker_env(sdk, target)}
     cargo = env.get("CARGO", "cargo")
     profile = [] if debug else ["--release"]
-    run([cargo, "build", *app.cargo, "--target", TARGET, *profile], cwd=WORKSPACE, env=env)
+    run([cargo, "build", *app.cargo, "--target", target, *profile], cwd=WORKSPACE, env=env)
     target_dir = Path(env.get("CARGO_TARGET_DIR", WORKSPACE / "target"))
-    library = target_dir / TARGET / ("debug" if debug else "release") / app.output / f"lib{app.library}.so"
+    library = target_dir / target / ("debug" if debug else "release") / app.output / f"lib{app.library}.so"
 
     with tempfile.TemporaryDirectory(prefix="gpui-apk-") as scratch:
         scratch = Path(scratch)
@@ -434,7 +442,7 @@ def build(app, debug, out):
         with zipfile.ZipFile(unsigned, "w", zipfile.ZIP_DEFLATED) as apk:
             apk.writestr("AndroidManifest.xml", encode_xml(manifest(app, debuggable=debug or app.debuggable)))
             apk.write(scratch / "classes.dex", "classes.dex")
-            apk.write(library, f"lib/arm64-v8a/lib{app.library}.so")
+            apk.write(library, f"lib/{TARGET_ABIS[target]}/lib{app.library}.so")
             apk.write(CRATE / "assets/fonts/OFL.txt", "assets/licenses/NotoEmoji-OFL.txt")
             if app.launcher:
                 folder, background = app.launcher
@@ -451,9 +459,11 @@ def build(app, debug, out):
 def main(app=TOUCH, default_out="gpui-touch.apk"):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--debug", action="store_true", help="build Rust without optimizations")
+    parser.add_argument("--target", choices=TARGET_ABIS, default=TARGET,
+                        help="Rust Android target (ARM64 by default; x86_64 is useful for emulators)")
     parser.add_argument("--out", type=Path, default=WORKSPACE / "dist" / default_out)
     args = parser.parse_args()
-    build(app, args.debug, args.out)
+    build(app, args.debug, args.out, args.target)
 
 
 if __name__ == "__main__":

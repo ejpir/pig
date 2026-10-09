@@ -148,8 +148,8 @@ pub fn listed(id: SessionId, listed: &crate::remote::Listed, folder: String) -> 
         failure: (state == State::Failed)
             .then(|| listed.error.clone().unwrap_or_else(|| "failed".into())),
         details: Details {
-            context_percent: 0,
-            context_tokens: String::new(),
+            context_percent: None,
+            context_tokens: "Not reported".into(),
             cost: String::new(),
             turns: 0,
             tools: Vec::new(),
@@ -432,6 +432,7 @@ fn add_tool(
                 stage.removed +=
                     lines.iter().filter(|l| l.kind == LineKind::Removed).count() as u32;
                 if !lines.is_empty() {
+                    stage.diff_path = path.clone();
                     stage.diff = lines.into_iter().take(8).collect();
                 }
             }
@@ -656,8 +657,11 @@ pub fn parse_diff(diff: &str) -> Vec<Hunk> {
         } else if let Some(rest) = line.strip_prefix('-') {
             (LineKind::Removed, rest)
         } else {
-            (LineKind::Context, line.trim_start())
+            (LineKind::Context, line)
         };
+        // Pi pads every line number to the file's width, including changed
+        // lines after their +/- marker. Scan past that padding uniformly.
+        let rest = rest.trim_start();
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
         let numbered = digits > 0 && (rest.len() == digits || rest[digits..].starts_with(' '));
         if !numbered {
@@ -834,32 +838,40 @@ fn check(pi: &Pi) -> Option<Check> {
 fn details(pi: &Pi, key: &str) -> Details {
     let usage = pi.stats.context_usage.as_ref();
     let thousands = |tokens: u64| format!("{}k", tokens.div_ceil(1000));
+    let context_percent = usage.and_then(|usage| {
+        usage.percent.or_else(|| {
+            usage
+                .tokens
+                .filter(|_| usage.context_window > 0)
+                .map(|tokens| tokens as f64 * 100. / usage.context_window as f64)
+        })
+    });
+    let mut tools = Vec::new();
+    for tool in &pi.tools {
+        if !tools.contains(&tool.name) {
+            tools.push(tool.name.clone());
+        }
+    }
     Details {
-        context_percent: usage
-            .and_then(|usage| usage.percent)
-            .map_or(0, |percent| percent.round().clamp(0., 100.) as u32),
+        context_percent: context_percent.map(|percent| percent.round().clamp(0., 100.) as u32),
         context_tokens: usage
-            .map(|usage| {
-                format!(
-                    "{} of {} tokens",
-                    thousands(usage.tokens.unwrap_or(0)),
-                    thousands(usage.context_window)
-                )
+            .and_then(|usage| {
+                usage.tokens.map(|tokens| {
+                    format!(
+                        "{} of {} tokens",
+                        thousands(tokens),
+                        thousands(usage.context_window)
+                    )
+                })
             })
-            .unwrap_or_default(),
+            .unwrap_or_else(|| "Not reported".into()),
         cost: pi
             .stats
             .cost
             .map(|cost| format!("${cost:.2}"))
             .unwrap_or_default(),
         turns: pi.messages.iter().filter(|m| m["role"] == "user").count() as u32,
-        tools: pi
-            .state
-            .active_tools
-            .iter()
-            .flatten()
-            .map(|tool| tool.name.clone())
-            .collect(),
+        tools,
         snapshots: 0,
         session_file: pi
             .state
@@ -969,7 +981,7 @@ mod tests {
         assert_eq!(summary(&single_paragraph).body, single_paragraph.trim());
     }
 
-    const DIFF: &str = "  210 const a = 1;\n-211 old();\n+211 new();\n+212 more();\n  213 end\n     ...\n  300 x\n+301 y";
+    const DIFF: &str = "   210 const a = 1;\n-  211 old();\n+  211 new();\n+  212 more();\n   213 end\n     ...\n   300 x\n+  301 y";
 
     fn finished_run() -> Pi {
         session(&[
@@ -1012,6 +1024,7 @@ mod tests {
         );
         assert_eq!(turn.stages[0].what, "Read 1 file · searched once");
         assert_eq!(turn.stages[1].what, "Edited app.rs");
+        assert_eq!(turn.stages[1].diff_path.as_deref(), Some("src/app.rs"));
         assert_eq!((turn.stages[1].added, turn.stages[1].removed), (3, 1));
         assert_eq!(turn.stages[2].what, "Ran cargo test -p app");
         let summary = turn.summary.as_ref().unwrap();
@@ -1029,6 +1042,29 @@ mod tests {
             })
         );
         assert_eq!(shown.status_line(), "1 file changed · checks passed");
+        assert_eq!(shown.details.tools, ["read", "grep", "edit", "bash"]);
+        assert_eq!(shown.details.context_percent, None);
+        assert_eq!(shown.details.context_tokens, "Not reported");
+    }
+
+    #[test]
+    fn context_use_comes_only_from_current_context_stats() {
+        let mut pi = finished_run();
+        pi.apply(&json!({
+            "type":"response",
+            "command":"get_session_stats",
+            "success":true,
+            "data":{
+                "tokens":{"input":900000,"output":20000,"cacheRead":400000},
+                "cost":17.62,
+                "contextUsage":{"tokens":50000,"contextWindow":200000,"percent":null}
+            }
+        }))
+        .unwrap();
+        let shown = project(&pi, facts(&[]));
+        assert_eq!(shown.details.context_percent, Some(25));
+        assert_eq!(shown.details.context_tokens, "50k of 200k tokens");
+        assert_eq!(shown.details.cost, "$17.62");
     }
 
     #[test]
@@ -1121,7 +1157,7 @@ mod tests {
                 {"type":"toolCall","id":"b","name":"bash","arguments":{"command":"cargo test"}}
             ],"stopReason":"toolUse"}}),
             json!({"type":"tool_execution_start","toolCallId":"b","toolName":"bash","args":{"command":"cargo test"}}),
-            json!({"type":"tool_execution_update","toolCallId":"b","partialResult":{"content":[{"type":"text","text":"running 100 tests"}]}}),
+            json!({"type":"tool_execution_update","toolCallId":"b","partialResult":{"content":[{"type":"text","text":"starting\r\nrunning 10%\rrunning 100%"}]}}),
         ]);
         let shown = project(&pi, facts(&[]));
         let turn = &shown.turns[0];
@@ -1140,7 +1176,8 @@ mod tests {
             1,
             "execution events must not duplicate tool calls"
         );
-        assert_eq!(tools[0].output, "running 100 tests");
+        assert_eq!(tools[0].output, "starting\r\nrunning 10%\rrunning 100%");
+        assert_eq!(tools[0].output_for_display(), "starting\nrunning 100%");
         pi.apply(&json!({"type":"message_end","message":{"role":"assistant","content":"All tests passed.","stopReason":"stop"}})).unwrap();
         assert_eq!(
             project(&pi, facts(&[])).turns[0]

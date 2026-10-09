@@ -23,8 +23,8 @@ use gpui::{
     KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
     RequestFrameOptions, Scene, Size, TextInputConfiguration, TextInputStateChange, TouchEvent,
-    TouchId, TouchPhase, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowInsets, WindowVisibility, px, size,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets,
+    WindowVisibility, px, size,
 };
 use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use ndk::native_window::NativeWindow;
@@ -101,9 +101,6 @@ macro_rules! with_callback {
     }};
 }
 
-/// How far a touch may travel and still count as a tap that shows the keyboard.
-const TAP_SLOP: f64 = 8.;
-
 pub(crate) struct WindowState {
     pub handle: AnyWindowHandle,
     app: AndroidApp,
@@ -125,10 +122,6 @@ pub(crate) struct WindowState {
     visibility: Cell<WindowVisibility>,
     last_touch: Cell<Point<Pixels>>,
     touches: RefCell<Touches>,
-    /// A touch that may still end as a tap.
-    tap: Cell<Option<(TouchId, Point<Pixels>)>>,
-    /// Where a tap ended; show the keyboard if it landed on the focused text input.
-    tapped: Cell<Option<Point<Pixels>>>,
     /// Whether a text input has focus.
     text_focus: Cell<bool>,
     /// Fulfilled after drawing and synchronizing the newly focused field.
@@ -179,8 +172,6 @@ impl WindowState {
             visibility: Cell::new(visibility),
             last_touch: Cell::default(),
             touches: RefCell::default(),
-            tap: Cell::new(None),
-            tapped: Cell::new(None),
             text_focus: Cell::new(false),
             keyboard_requested: Cell::new(false),
             keyed: Cell::new(false),
@@ -388,38 +379,8 @@ impl WindowState {
     pub fn touch(&self, events: Vec<TouchEvent>) {
         for event in events {
             self.last_touch.set(event.position);
-            let tapped = match event.phase {
-                TouchPhase::Started => {
-                    self.tap.set(Some((event.id, event.position)));
-                    None
-                }
-                TouchPhase::Moved => {
-                    if let Some((id, start)) = self.tap.get()
-                        && id == event.id
-                        && (event.position - start).magnitude() > TAP_SLOP
-                    {
-                        self.tap.set(None);
-                    }
-                    None
-                }
-                TouchPhase::Ended => self
-                    .tap
-                    .take()
-                    .is_some_and(|(id, _)| id == event.id)
-                    .then_some(event.position),
-                TouchPhase::Cancelled => {
-                    self.tap.set(None);
-                    None
-                }
-            };
             if self.dispatch(PlatformInput::Touch(event)).is_none() {
                 log::warn!("touch dropped: GPUI has not registered for input");
-            }
-            // GPUI draws right after a tap, so a text input it focused has
-            // already reported focus; `settle` shows the keyboard for it.
-            if tapped.is_some() {
-                self.tapped.set(tapped);
-                self.clock.request();
             }
         }
     }
@@ -518,26 +479,15 @@ impl WindowState {
     }
 
     fn settle_after_frame(&self) {
-        // A looper turn is not necessarily a draw. Keep activation pending until
-        // GPUI has painted the new focused input handler, including taps in the
-        // composer's padding outside the glyph bounds.
+        // A looper turn is not necessarily a draw. Keep explicit activation
+        // pending until GPUI has painted and synchronized the focused handler.
+        // Text controls request the keyboard from their tap handler; inferring a
+        // tap from raw touch would also classify a claimed long press as a tap,
+        // moving the field under the Paste menu as the IME opens.
         self.settle();
-        let tapped = self.tapped.take();
         let requested = self.keyboard_requested.take();
-        if self.text_focus.get() {
-            // Tapping a button while a field has focus must not bring back a
-            // keyboard the user dismissed.
-            let bounds = self
-                .with_input_handler(|handler| handler.element_bounds())
-                .flatten();
-            let on_input = tapped
-                .zip(bounds)
-                .is_some_and(|(position, bounds)| bounds.contains(&position));
-            // Unknown bounds are not an input hit. A newly mounted field must
-            // not inherit the tap that opened its screen or sheet.
-            if requested || on_input {
-                self.java.show_keyboard();
-            }
+        if self.text_focus.get() && requested {
+            self.java.show_keyboard();
         }
     }
 
@@ -804,7 +754,6 @@ impl PlatformWindow for AndroidWindow {
 
     fn hide_soft_keyboard(&self) {
         self.0.keyboard_requested.set(false);
-        self.0.tapped.set(None);
         self.0.java.hide_keyboard();
     }
 

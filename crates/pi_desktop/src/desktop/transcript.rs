@@ -1067,13 +1067,19 @@ impl TranscriptView {
             .into_iter()
             .filter(|f| !featured || f.part != "command")
         {
-            let shown = shown_output(field.text);
+            let displayed = if tool.name == "bash" && field.part == "output" {
+                pi_core::command_output::for_display(field.text)
+            } else {
+                Cow::Borrowed(field.text)
+            };
+            let shown = shown_output(&displayed);
+            let limited = shown.len() < displayed.len();
             let selector = format!("tool-{}-{}", tool.id, field.part);
             details = details.child(v_flex().w_full().gap(px(4.))
                 .when(!featured,|v|v.child(label(field.label, theme).text_color(theme.faint)))
                 .child(div().w_full().debug_selector(move || selector)
                     .child(self.document(tool_text_key(&tool.id, field.part), shown, output, field.copy, None)))
-                .when(shown.len() < field.text.len(), |body| body.child(div().text_size(px(10.)).text_color(theme.faint)
+                .when(limited, |body| body.child(div().text_size(px(10.)).text_color(theme.faint)
                     .child("Preview limited to 500 lines / 64 KiB. The tool header's copy menu has the full text."))));
         }
         body = body.child(details);
@@ -1718,6 +1724,7 @@ impl TranscriptView {
             Some("bashExecution") => {
                 let command = text(message, "command");
                 let result = text(message, "output");
+                let displayed_result = pi_core::command_output::for_display(&result).into_owned();
                 let excluded = message["excludeFromContext"] == true;
                 let status = if message["cancelled"] == true {
                     "Cancelled".to_owned()
@@ -1795,7 +1802,7 @@ impl TranscriptView {
                         )
                         .child(self.document(
                             doc_key(index, "shell-output"),
-                            &result,
+                            &displayed_result,
                             &output,
                             "Copy Output",
                             None,
@@ -2234,7 +2241,9 @@ fn markdown_sources<'a>(
             }
             Some("bashExecution") => sources.push((
                 doc_key(index, "shell-output"),
-                Source::Text(message["output"].as_str().unwrap_or("")),
+                Source::Text(pi_core::command_output::for_display(
+                    message["output"].as_str().unwrap_or(""),
+                )),
             )),
             Some("compactionSummary" | "branchSummary") => sources.push((
                 doc_key(index, "summary"),
@@ -2268,7 +2277,10 @@ fn markdown_sources<'a>(
                 tool_text_key(&tool.id, field.part),
                 match field.language {
                     Some(language) => Source::Code { text, language },
-                    None => Source::Text(text),
+                    None if tool.name == "bash" && field.part == "output" => {
+                        Source::Text(shown_command_output(field.text))
+                    }
+                    None => Source::Text(Cow::Borrowed(text)),
                 },
             ));
         }
@@ -2337,6 +2349,16 @@ fn shown_output(output: &str) -> &str {
         end -= 1;
     }
     &output[..end]
+}
+
+fn shown_command_output(output: &str) -> Cow<'_, str> {
+    let displayed = pi_core::command_output::for_display(output);
+    let shown = shown_output(&displayed);
+    if shown.len() == displayed.len() {
+        displayed
+    } else {
+        Cow::Owned(shown.to_owned())
+    }
 }
 
 struct ToolText<'a> {

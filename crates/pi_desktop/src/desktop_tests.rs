@@ -1135,7 +1135,7 @@ fn markdown_skill_cards_and_multiline_tool_commands_keep_their_behavior(cx: &mut
     );
     receive(
         &a,
-        json!({"type":"tool_execution_end","toolCallId":"script","result":{"content":[{"type":"text","text":"first\nsecond"}]}}),
+        json!({"type":"tool_execution_end","toolCallId":"script","result":{"content":[{"type":"text","text":"start\r\n10%\r50%\r100%\ndone"}]}}),
         &mut cx,
     );
     a.transcript.update(&mut cx, |view, cx| {
@@ -1161,6 +1161,10 @@ fn markdown_skill_cards_and_multiline_tool_commands_keep_their_behavior(cx: &mut
         assert_eq!(
             view.documents.copy_source("tool:script:command", cx),
             Some("echo first\necho second")
+        );
+        assert_eq!(
+            view.documents.copy_source("tool:script:output", cx),
+            Some("start\n100%\ndone")
         );
     });
 }

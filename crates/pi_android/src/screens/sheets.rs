@@ -4,7 +4,7 @@
 
 use crate::{
     app::{PhoneApp, Route, Sheet, Target},
-    model::{Reference, Session, SessionId, StageKind, StageStatus},
+    model::{Reference, Session, SessionId, Stage, StageKind, StageStatus, Turn},
     theme::{MONO, Theme, theme},
     ui::{self, Button, icon},
 };
@@ -24,6 +24,10 @@ const MODELS: [(&str, &str); 4] = [
 const COMPACTS_AT: f32 = 0.8;
 
 const THINKING: [&str; 6] = ["Off", "Minimal", "Low", "Medium", "High", "Max"];
+
+fn activity_stage(turn: &Turn, kind: StageKind) -> Option<&Stage> {
+    turn.stages.iter().find(|stage| stage.kind == kind)
+}
 
 /// What a row of the More sheet does.
 type Action = Box<dyn Fn(&mut PhoneApp, &mut Window, &mut Context<PhoneApp>)>;
@@ -59,7 +63,7 @@ impl PhoneApp {
             Sheet::More(id) => self.more_sheet(id, &colors, cx),
             Sheet::Models => self.models_sheet(&colors, cx),
             Sheet::Resources => self.resources_sheet(&colors, cx),
-            Sheet::Activity(id, turn, stage) => self.activity_sheet(id, turn, stage, &colors, cx),
+            Sheet::Activity(id, turn, kind) => self.activity_sheet(id, turn, kind, &colors, cx),
             Sheet::Delete(id) => self.delete_sheet(id, &colors, cx),
             Sheet::RestoreHistory(id, index) => self.restore_history_sheet(id, index, &colors, cx),
             Sheet::EnableJj(id) => self.enable_jj_sheet(id, &colors, cx),
@@ -210,11 +214,11 @@ impl PhoneApp {
                         .map_or_else(|| "Session".into(), |s| s.title.clone().into()),
                     Sheet::Models => format!("Models on {}", self.computer_name()).into(),
                     Sheet::Resources => format!("Resources on {}", self.computer_name()).into(),
-                    Sheet::Activity(id, turn, stage) => self
+                    Sheet::Activity(id, turn, kind) => self
                         .session(id)
                         .and_then(|s| s.turns.get(turn))
-                        .and_then(|t| t.stages.get(stage))
-                        .map_or("Activity", |s| s.kind.name(s.status))
+                        .and_then(|turn| activity_stage(turn, kind))
+                        .map_or("Activity", |stage| stage.kind.name(stage.status))
                         .into(),
                     Sheet::Delete(_) => "Delete session?".into(),
                     Sheet::RestoreHistory(_, _) => "Restore project files?".into(),
@@ -687,7 +691,7 @@ impl PhoneApp {
         &self,
         id: SessionId,
         turn_index: usize,
-        stage_index: usize,
+        kind: StageKind,
         colors: &Theme,
         cx: &Context<Self>,
     ) -> Div {
@@ -697,7 +701,7 @@ impl PhoneApp {
         let Some(stage) = session
             .turns
             .get(turn_index)
-            .and_then(|turn| turn.stages.get(stage_index))
+            .and_then(|turn| activity_stage(turn, kind))
         else {
             return div();
         };
@@ -746,6 +750,16 @@ impl PhoneApp {
                             .px(px(12.))
                             .mb(px(6.)),
                         )
+                        .children(stage.diff_path.as_ref().map(|path| {
+                            div()
+                                .px(px(12.))
+                                .pb(px(8.))
+                                .font_family(MONO)
+                                .text_size(px(12.5))
+                                .line_height(px(18.))
+                                .text_color(colors.muted)
+                                .child(path.clone())
+                        }))
                         .children(
                             stage
                                 .diff
@@ -806,6 +820,7 @@ impl PhoneApp {
             .children(stage.tools.iter().enumerate().map(|(index, tool)| {
                 let target = tool.target.clone();
                 let output = tool.output.clone();
+                let displayed_output = tool.output_for_display().into_owned();
                 let status = if tool.failed {
                     "Failed"
                 } else if tool.finished {
@@ -866,7 +881,7 @@ impl PhoneApp {
                                 ),
                         )
                         .child(if wrap {
-                            ui::mono(tool.output.clone(), 12.)
+                            ui::mono(displayed_output.clone(), 12.)
                                 .line_height(relative(1.5))
                                 .into_any_element()
                         } else {
@@ -874,7 +889,7 @@ impl PhoneApp {
                                 .id(("output-lines", index))
                                 .overflow_x_scroll()
                                 .child(
-                                    ui::mono(tool.output.clone(), 12.)
+                                    ui::mono(displayed_output.clone(), 12.)
                                         .line_height(relative(1.5))
                                         .whitespace_nowrap(),
                                 )
@@ -1163,7 +1178,7 @@ impl PhoneApp {
                         .child(value),
                 )
         };
-        let used = details.context_percent.min(100) as f32 / 100.;
+        let used = details.context_percent.unwrap_or(0).min(100) as f32 / 100.;
         div()
             .pb(px(8.))
             .children(run)
@@ -1249,7 +1264,13 @@ impl PhoneApp {
                         div()
                             .mt(px(8.))
                             .flex()
-                            .child(meta(format!("{}% used", details.context_percent)).flex_1())
+                            .child(
+                                meta(details.context_percent.map_or_else(
+                                    || "Usage not reported".into(),
+                                    |percent| format!("{percent}% used"),
+                                ))
+                                .flex_1(),
+                            )
                             .child(meta(format!(
                                 "compacts at {}%",
                                 (COMPACTS_AT * 100.) as u32
@@ -1406,7 +1427,7 @@ impl PhoneApp {
                     .child(self.sheet_title("Choose model", colors, cx))
                     .child(ui::hint(
                         if self.model_session().is_some() {
-                            "For follow-ups in this session."
+                            "For prompts in this session."
                         } else {
                             "Default for new sessions."
                         },
@@ -1678,7 +1699,29 @@ fn shorten(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::shorten;
+    use super::{activity_stage, shorten};
+    use crate::model::{Stage, StageKind, StageStatus, Turn};
+
+    #[test]
+    fn an_open_activity_stays_with_its_stage_when_stages_reorder() {
+        let mut turn = Turn::new("prompt", "now");
+        turn.stages = vec![
+            Stage::new(StageKind::Change, StageStatus::Live, "Changing"),
+            Stage::new(StageKind::HandOff, StageStatus::Planned, "Reporting"),
+        ];
+        assert_eq!(
+            activity_stage(&turn, StageKind::Change).unwrap().what,
+            "Changing"
+        );
+        turn.stages.insert(
+            0,
+            Stage::new(StageKind::Understand, StageStatus::Done, "Understood"),
+        );
+        assert_eq!(
+            activity_stage(&turn, StageKind::Change).unwrap().what,
+            "Changing"
+        );
+    }
 
     #[test]
     fn long_paths_keep_their_start_and_file() {

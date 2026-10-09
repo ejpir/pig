@@ -1,4 +1,5 @@
 use pi_core::{
+    command_output::for_display,
     protocol::Command,
     session::{Session, ShellExecution},
 };
@@ -17,6 +18,38 @@ fn shell_protocol_is_explicit_long_running_and_context_policy_survives() {
     );
     assert!(command.replies_when_finished());
     assert_eq!(Command::AbortBash.name(), "abort_bash");
+}
+
+#[test]
+fn command_output_handles_crlf_progress_rewrites_and_split_chunks() {
+    assert_eq!(for_display("plain\ntext"), "plain\ntext");
+    assert_eq!(
+        for_display("start\r\n10%\r50%\r100%\ndone"),
+        "start\n100%\ndone"
+    );
+    assert_eq!(for_display("12345\rxy"), "xy");
+    assert_eq!(for_display("still visible\r"), "still visible");
+
+    let mut session = Session::default();
+    session.shell = Some(ShellExecution {
+        id: "shell-1".into(),
+        command: "progress".into(),
+        exclude_from_context: true,
+        output: String::new(),
+        finished: false,
+        result: None,
+    });
+    session
+        .apply(&json!({"type":"bash_execution_update","id":"shell-1","delta":"one\r"}))
+        .unwrap();
+    assert_eq!(for_display(&session.shell.as_ref().unwrap().output), "one");
+    session
+        .apply(&json!({"type":"bash_execution_update","id":"shell-1","delta":"\ntwo"}))
+        .unwrap();
+    assert_eq!(
+        for_display(&session.shell.as_ref().unwrap().output),
+        "one\ntwo"
+    );
 }
 
 #[test]

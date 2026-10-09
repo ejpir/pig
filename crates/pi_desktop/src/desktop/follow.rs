@@ -171,6 +171,10 @@ impl FollowView {
                         tool.output.clone(),
                         super::diff_preview::language(&tool.target()),
                     ),
+                    "bash" => (
+                        pi_core::command_output::for_display(&tool.output).into_owned(),
+                        "text",
+                    ),
                     _ => (tool.output.clone(), "text"),
                 };
                 let language = if language == "Not identified" {

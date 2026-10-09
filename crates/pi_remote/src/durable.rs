@@ -215,6 +215,10 @@ pub fn project(record: &Value, previous: &Session, target: &SshTarget) -> Result
     model.commands = previous.commands.clone();
     model.commands_loaded = previous.commands_loaded;
     model.settings = previous.settings.clone();
+    // Current context is measured by the runner's get_session_stats response,
+    // not derivable from the committed lifetime usage ledger. Keep that latest
+    // measurement when a subsequent durable snapshot rebuilds the projection.
+    model.stats.context_usage = previous.stats.context_usage.clone();
     model.backend = BackendInfo::Found(record["backend"].clone());
     model.state.session_id = Some(target.key.clone());
     model.state.active_tools = previous.state.active_tools.clone();
@@ -342,7 +346,12 @@ mod tests {
     fn committed_projection_preserves_partial_tools_queue_and_remote_identity() {
         let mut target = SshTarget::new("dev".into(), "/remote/work".into()).unwrap();
         target.backend = pi_core::ssh::RemoteBackend::Durable;
-        let previous = Session::new(target.identity());
+        let mut previous = Session::new(target.identity());
+        previous.stats.context_usage = Some(pi_core::protocol::ContextUsage {
+            tokens: Some(60_000),
+            context_window: 200_000,
+            percent: Some(30.),
+        });
         let record = json!({"key":target.key,"backend":{"backend":"pi-durable"},"data":{
             "entries":[
                 {"model":[{"role":"system","content":"not a transcript row"}]},
@@ -369,6 +378,10 @@ mod tests {
         assert_eq!(model.steering, ["direction"]);
         assert_eq!(model.follow_up, ["next task"]);
         assert_eq!(model.stats.tokens.input, 10);
+        assert_eq!(
+            model.stats.context_usage.as_ref().unwrap().tokens,
+            Some(60_000)
+        );
         let next = project(&record, &model, &target).unwrap();
         assert_eq!(
             next.messages.len(),

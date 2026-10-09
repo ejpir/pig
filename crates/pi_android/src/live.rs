@@ -473,13 +473,13 @@ impl Live {
                     .values()
                     .any(|request| matches!(request, Request::Prompt(_)))
             {
-                record["streamingBehavior"] = json!("followUp");
+                record["streamingBehavior"] = json!("steer");
             }
             Self::send(watch, record, Request::Prompt(prompt.request_id));
         }
     }
 
-    /// A prompt for a session: it runs now, or follows the current run.
+    /// A prompt for a session: it runs now, or steers the current run.
     pub fn prompt(&mut self, id: SessionId, prompt: Prompt) -> Result<(), String> {
         self.watch(id);
         if !prompt.images.is_empty() {
@@ -686,7 +686,7 @@ impl Live {
             return Ok(());
         }
         watch.outbox.clear();
-        // Stop must not immediately run a previously queued follow-up.
+        // Stop must not immediately run a previously queued prompt.
         Self::send(watch, json!({"type": "clear_queue"}), Request::Other);
         Self::send(watch, json!({"type": "abort"}), Request::Stop);
         Ok(())
@@ -872,7 +872,7 @@ impl Live {
             } else {
                 watch.ready = true;
                 Self::flush(watch);
-                // Opening an existing session must populate its follow-up picker
+                // Opening an existing session must populate its prompt controls
                 // without replacing the session's model with the phone's default.
                 Self::send(
                     watch,
@@ -1190,7 +1190,10 @@ impl Live {
         }
         // The session's own, and those of the subagent whose screen is open.
         let followed = watch.following.as_ref().and_then(|conversation| {
-            Some((conversation, watch.subagents.get(conversation)?.as_ref().ok()?))
+            Some((
+                conversation,
+                watch.subagents.get(conversation)?.as_ref().ok()?,
+            ))
         });
         let wanted: Vec<(String, Option<String>)> = watch
             .pi
@@ -1403,6 +1406,19 @@ mod tests {
     }
 
     #[test]
+    fn prompts_steer_a_running_session_by_default() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.run = pi_core::session::RunState::Running;
+        watch.outbox.push("Change direction now".into());
+        Live::flush(&mut watch);
+        let prompt = sent.try_recv().unwrap();
+        assert_eq!(prompt["type"], "prompt");
+        assert_eq!(prompt["streamingBehavior"], "steer");
+    }
+
+    #[test]
     fn removing_one_queued_prompt_never_rebuilds_other_prompts_or_claims_an_inflight_cancel() {
         let (mut watch, sent) = watch();
         watch.current = true;
@@ -1554,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_ups_wait_for_model_confirmation_and_failed_changes_do_not_send() {
+    fn prompts_wait_for_model_confirmation_and_failed_changes_do_not_send() {
         let (mut watch, sent) = watch();
         watch.current = true;
         watch.ready = true;

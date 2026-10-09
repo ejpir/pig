@@ -971,7 +971,10 @@ impl Render for SessionView {
                                             .font_family(MONO)
                                             .text_size(px(11.))
                                             .line_height(px(17.))
-                                            .child(shell.output.clone()),
+                                            .child(
+                                                pi_core::command_output::for_display(&shell.output)
+                                                    .into_owned(),
+                                            ),
                                     ),
                             ),
                     )

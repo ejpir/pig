@@ -120,8 +120,8 @@ def story(demo, icon):
     demo.link("pi://test/advance/8")
     time.sleep(1.6)
 
-    # Review the change and ask about two of its lines.
-    demo.press('Name("review")')
+    # Review the change from the changed-file row and ask about two of its lines.
+    demo.press('NamedInteger("file", 0)')
     time.sleep(1)
     for below_top in (222, 266):  # lines 211 and 212
         demo.press_at('scroll:NamedInteger("review", 1)', 192, below_top)

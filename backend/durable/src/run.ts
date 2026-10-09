@@ -4,11 +4,11 @@ import { fstatSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { once } from "node:events";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { Message, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
 import {
   Harness, createRegistry, defineDoc, defineExtension, section,
-  type Extension, type ConversationId, type ConversationView, type SubmissionId,
+  type Extension, type ConversationId, type ConversationView, type SubmissionId, type UsageState,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -73,6 +73,48 @@ export async function* records(input: AsyncIterable<Buffer>): AsyncGenerator<Rec
 function string(record: Record<string, unknown>, key: string): string {
   if (typeof record[key] !== "string") throw new Error(`${key} must be a string`);
   return record[key] as string;
+}
+
+function contextTokens(messages: readonly Message[]): number | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "assistant" || message.stopReason === "aborted" || message.stopReason === "error") continue;
+    const usage = message.usage;
+    const measured = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+    if (measured <= 0) continue;
+    // Provider usage measures the context through this response. Messages after
+    // it (normally tool results or the next prompt) have not been measured yet.
+    const trailing = messages.slice(index + 1).reduce(
+      (tokens, next) => tokens + Math.ceil(JSON.stringify(next).length / 4), 0,
+    );
+    return measured + trailing;
+  }
+  return undefined;
+}
+
+export function sessionStats(
+  state: UsageState | undefined, messages: readonly Message[], contextWindow: number | undefined,
+) {
+  const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  let cost = 0;
+  for (const bucket of [state?.models ?? {}, state?.tools ?? {}]) {
+    for (const value of Object.values(bucket) as unknown as Usage[]) {
+      tokens.input += value.input;
+      tokens.output += value.output;
+      tokens.cacheRead += value.cacheRead;
+      tokens.cacheWrite += value.cacheWrite;
+      cost += value.cost.total;
+    }
+  }
+  const current = contextTokens(messages);
+  return {
+    tokens, cost,
+    ...(contextWindow === undefined ? {} : { contextUsage: {
+      tokens: current ?? null,
+      contextWindow,
+      percent: current === undefined ? null : current / contextWindow * 100,
+    } }),
+  };
 }
 
 /**
@@ -254,7 +296,14 @@ export async function run(
         await conversation.abort(context);
         return {};
       }
-      case "get_session_stats": return {};
+      case "get_session_stats": {
+        const current = await root.context(context);
+        return sessionStats(
+          value.docs["pi.usage"] as unknown as UsageState | undefined,
+          current.messages,
+          chosenModel()?.contextWindow,
+        );
+      }
       case "get_commands": return { commands: promptCommands(found = resources(cwd)) };
       case "get_settings": return { effective: { compaction: { enabled: autoCompaction } }, durable: true };
       case "get_active_tools": return { activeTools: (await root.agent(context)).tools.map((tool) => ({ name: tool.name, description: tool.description })) };

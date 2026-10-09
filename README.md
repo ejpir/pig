@@ -85,7 +85,8 @@ See [docs/validation.md](docs/validation.md) for the full checks and [docs/archi
 | Ctrl/Cmd+K | Search |
 | Ctrl/Cmd+B | Sidebar |
 | Ctrl/Cmd+J | Terminal |
-| Enter | Send, or queue a follow-up while pi works |
+| Enter | Send, or steer the current run while pi works |
+| Alt/Option+Enter | Queue a follow-up |
 | Ctrl/Cmd+Enter | Steer the current run |
 | Escape | Stop |
 

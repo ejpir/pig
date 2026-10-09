@@ -340,6 +340,20 @@ fn snapshot(model: &Session, target: &SshTarget) -> Result<Value> {
         json!({"type":"remote_snapshot", "version":PROTOCOL_VERSION, "key":target.key, "data":serde_json::to_value(model)?}),
     )
 }
+fn compaction_count(model: &Session) -> usize {
+    model
+        .messages
+        .iter()
+        .filter(|message| message["role"] == "compactionSummary")
+        .count()
+}
+fn durable_stats_need_refresh(
+    was_busy: bool,
+    model: &Session,
+    previous_compactions: usize,
+) -> bool {
+    (was_busy && !model.busy()) || compaction_count(model) > previous_compactions
+}
 fn reply(id: &str, command: &str, data: Value) -> Value {
     json!({"type":"response", "id":id, "command":command, "success":true, "data":data})
 }
@@ -659,7 +673,12 @@ fn run(
                         Some(json!({"remoteSnapshot":true}))
                     }
                     Command::GetState => Some(serde_json::to_value(&model.state)?),
-                    Command::GetSessionStats => Some(serde_json::to_value(&model.stats)?),
+                    // Durable context is measured by its runner on demand. Lifetime
+                    // counters alone cannot reveal that a compaction shrank context.
+                    Command::GetSessionStats if target.backend != RemoteBackend::Durable => {
+                        Some(serde_json::to_value(&model.stats)?)
+                    }
+                    Command::GetSessionStats => None,
                     // Remote saved files must not enter the desktop's local file catalog.
                     Command::ListSessions { .. } => Some(json!({"sessions":[]})),
                     Command::Bash { .. } => {
@@ -712,20 +731,19 @@ fn run(
             }
             Event::Backend(TransportEvent::Record(mut record)) => {
                 let was_busy = model.busy();
+                let durable_state =
+                    target.backend == RemoteBackend::Durable && record["type"] == "durable_state";
+                let previous_compactions = compaction_count(&model);
                 if target.backend == RemoteBackend::Durable {
-                    if record["type"] == "durable_state" {
+                    if durable_state {
                         model = crate::durable::project(&record, &model, target)?;
                         record = snapshot(&model, target)?;
                     } else if record["type"] == "response" && record["success"] == true {
-                        // Read acknowledgements must not overwrite the committed projection with an empty state.
-                        match record["command"].as_str() {
-                            Some("get_state") => {
-                                record["data"] = serde_json::to_value(&model.state)?
-                            }
-                            Some("get_session_stats") => {
-                                record["data"] = serde_json::to_value(&model.stats)?
-                            }
-                            _ => {}
+                        // The committed projection owns state. Session stats are different:
+                        // the durable runner measures current context on demand, which is
+                        // not a lifetime counter in the committed usage document.
+                        if record["command"] == "get_state" {
+                            record["data"] = serde_json::to_value(&model.state)?;
                         }
                     }
                 }
@@ -817,6 +835,12 @@ fn run(
                     let _ = backend.send(Command::GetState);
                     let _ = backend.send(Command::GetSessionStats);
                 }
+                if durable_state
+                    && bootstrap.is_empty()
+                    && durable_stats_need_refresh(was_busy, &model, previous_compactions)
+                {
+                    let _ = backend.send(Command::GetSessionStats);
+                }
             }
             Event::Backend(TransportEvent::RequestFailed {
                 id,
@@ -883,6 +907,17 @@ mod tests {
             1,
             "reconnection replaces instead of appending"
         );
+    }
+    #[test]
+    fn durable_stats_refresh_when_a_turn_settles_or_compaction_appears() {
+        let mut model = Session::new("/work".into());
+        assert!(!durable_stats_need_refresh(false, &model, 0));
+        assert!(durable_stats_need_refresh(true, &model, 0));
+        model
+            .messages
+            .push(json!({"role":"compactionSummary","summary":"shorter"}));
+        assert!(durable_stats_need_refresh(false, &model, 0));
+        assert!(!durable_stats_need_refresh(false, &model, 1));
     }
     #[test]
     fn records_are_bounded() {

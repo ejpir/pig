@@ -597,14 +597,14 @@ impl ComposerView {
                     .child(div().flex_1())
                     .when(model.busy() && !shell && model.shell.is_none(), |row| {
                         row.child(
-                            work_button("steer-now", "Steer now", theme)
-                                .w(px(114.))
+                            work_button("queue-follow-up", "Queue follow-up", theme)
+                                .w(px(136.))
                                 .justify_center()
-                                .debug_selector(|| "steer-now".into())
-                                .tooltip(|_, cx| ui::Tooltip::for_action("Steer now", &Steer, cx))
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.send_prompt(false, cx)),
-                                ),
+                                .debug_selector(|| "queue-follow-up".into())
+                                .tooltip(|_, cx| {
+                                    ui::Tooltip::for_action("Queue follow-up", &FollowUp, cx)
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| this.send_prompt(true, cx))),
                         )
                     })
                     .child(
@@ -613,7 +613,7 @@ impl ComposerView {
                             if shell {
                                 "Run ↵"
                             } else if model.busy() {
-                                "Queue follow-up ↵"
+                                "Steer now ↵"
                             } else if self.revision.is_some() {
                                 "Send revision ↵"
                             } else {
@@ -623,7 +623,7 @@ impl ComposerView {
                             theme,
                         )
                         .w(px(if model.busy() {
-                            150.
+                            122.
                         } else if self.revision.is_some() {
                             148.
                         } else {
@@ -633,8 +633,7 @@ impl ComposerView {
                         .flex_shrink_0()
                         .debug_selector(|| "submit".into())
                         .on_click(cx.listener(|this, _, _, cx| {
-                            let follow_up = this.controller.read(cx).model().busy();
-                            this.send_prompt(follow_up, cx);
+                            this.send_prompt(false, cx);
                         })),
                     ),
             )
@@ -663,9 +662,7 @@ impl Render for ComposerView {
                 } else if this.slash_query(cx).is_some() {
                     this.choose_slash(this.slash_index, window, cx);
                 } else if this.input.focus_handle(cx).is_focused(window) {
-                    let follow_up = this.controller.read(cx).model().busy()
-                        && !this.input.read(cx).content().starts_with('!');
-                    this.send_prompt(follow_up, cx);
+                    this.send_prompt(false, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &Steer, window, cx| {

@@ -236,7 +236,7 @@ pub fn element(document: &Entity<Markdown>, style: MarkdownStyle) -> DocumentEle
 
 pub enum Source<'a> {
     Markdown(Cow<'a, str>),
-    Text(&'a str),
+    Text(Cow<'a, str>),
     Code { text: &'a str, language: &'a str },
 }
 
@@ -272,7 +272,7 @@ impl Documents {
                 }
                 Source::Text(source) => {
                     self.code.remove(&key);
-                    (Cow::Borrowed(source), true)
+                    (source, true)
                 }
                 Source::Code { text, language } => {
                     if self.code.get(&key).is_some_and(|(previous, range)| {

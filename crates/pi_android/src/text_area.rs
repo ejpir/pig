@@ -21,7 +21,11 @@ use gpui::{
     fill, point, prelude::*, px, relative, size,
 };
 use gpui_android::activity;
-use std::{ops::Range, rc::Rc, time::Instant};
+use std::{
+    ops::Range,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 actions!(
@@ -52,6 +56,7 @@ enum Handle {
 }
 
 const HANDLE: f32 = 22.;
+const LONG_PRESS_LATCH: Duration = Duration::from_secs(2);
 
 /// What the bar over the selection offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +112,9 @@ pub struct TextArea {
     reveal_caret: bool,
     /// The bar with Cut, Copy and Paste, after a long press or a double tap.
     menu: bool,
+    /// A touch that began inside this field, before IME reflow can move it away
+    /// from the finger: its window position, original text offset and time.
+    pending_long_press: Option<(Point<Pixels>, usize, Instant)>,
     /// The word a long press started on; dragging extends the selection from it.
     anchor: Option<Range<usize>>,
     /// The handle being dragged, and the finger's offset from its point.
@@ -160,6 +168,7 @@ impl TextArea {
             scrollbar_motion: None,
             reveal_caret: true,
             menu: false,
+            pending_long_press: None,
             anchor: None,
             dragging: None,
             mouse_anchor: None,
@@ -208,6 +217,11 @@ impl TextArea {
 
     pub fn is_empty(&self) -> bool {
         self.content.trim().is_empty()
+    }
+
+    #[cfg(feature = "ui-test")]
+    pub(crate) fn menu_open(&self) -> bool {
+        self.menu
     }
 
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>) {
@@ -340,7 +354,22 @@ impl TextArea {
         }
     }
 
-    fn long_press(&mut self, event: &LongPressEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn prepare_long_press(&mut self, position: Point<Pixels>) {
+        self.pending_long_press = Some((position, self.offset_at(position), Instant::now()));
+    }
+
+    fn take_long_press_offset(&mut self, position: Point<Pixels>) -> Option<usize> {
+        let (started, offset, at) = self.pending_long_press.take()?;
+        (started == position && at.elapsed() <= LONG_PRESS_LATCH).then_some(offset)
+    }
+
+    fn long_press(
+        &mut self,
+        event: &LongPressEvent,
+        original_offset: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event.phase {
             TouchPhase::Started => {
                 window.focus(&self.focus, cx);
@@ -348,7 +377,9 @@ impl TextArea {
                 let word = if self.content.is_empty() {
                     0..0
                 } else {
-                    self.word_at(self.offset_at(event.start_position))
+                    self.word_at(
+                        original_offset.unwrap_or_else(|| self.offset_at(event.start_position)),
+                    )
                 };
                 self.anchor = Some(word.clone());
                 self.select(word, cx);
@@ -606,6 +637,7 @@ impl TextArea {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.pending_long_press = None;
         let focused = self.focus.is_focused(window);
         window.focus(&self.focus, cx);
         if !self.read_only {
@@ -736,6 +768,7 @@ impl TextArea {
         let place = Bounds::new(point(bounds.left() + left, top), size(width, height));
         let bar = div()
             .id("text-menu")
+            .child(crate::testing::probe("text-menu"))
             .h(height)
             .px(px(4.))
             .flex()
@@ -1565,22 +1598,47 @@ impl Element for TextBody {
 impl TextBody {
     /// Long presses select words; dragging a handle moves an end of the selection.
     fn listen(&self, prepaint: &Prepaint, window: &mut Window) {
+        // The keyboard can move the focused composer between touch-down and the
+        // long-press timer. Remember ownership and the original text offset at
+        // touch-down, before that reflow changes hit testing and geometry.
+        let area = self.area.clone();
+        let text = prepaint.hitbox.clone();
+        window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble && event.phase == TouchPhase::Started {
+                area.update(cx, |area, _| {
+                    if text.is_hovered(window) {
+                        area.prepare_long_press(event.start_position);
+                    } else {
+                        area.pending_long_press = None;
+                    }
+                });
+            }
+        });
         let area = self.area.clone();
         let text = prepaint.hitbox.clone();
         window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble {
                 return;
             }
-            if event.phase == TouchPhase::Started {
-                if !text.is_hovered(window) {
+            let original_offset = if event.phase == TouchPhase::Started {
+                let original_offset = area.update(cx, |area, _| {
+                    area.take_long_press_offset(event.start_position)
+                });
+                if !text.is_hovered(window) && original_offset.is_none() {
                     return;
                 }
                 window.prevent_default();
                 window.capture_long_press(&area);
-            } else if !window.has_long_press_capture(&area) {
-                return;
-            }
-            area.update(cx, |area, cx| area.long_press(event, window, cx));
+                original_offset
+            } else {
+                if !window.has_long_press_capture(&area) {
+                    return;
+                }
+                None
+            };
+            area.update(cx, |area, cx| {
+                area.long_press(event, original_offset, window, cx)
+            });
         });
         let area = self.area.clone();
         let handles = prepaint.handles.clone();
@@ -1680,6 +1738,33 @@ mod tests {
             area.replace(range, "@deepseek.ts ", cx);
             assert_eq!(area.text(), "Same for DeepSeek, start with @deepseek.ts ");
             assert!(area.token_before_caret('@').is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn a_long_press_keeps_the_touch_down_offset_across_reflow(cx: &mut TestAppContext) {
+        crate::theme::install_for_tests(cx);
+        let area = cx.new(|cx| TextArea::multiline("", 4, cx));
+        area.update(cx, |area, _| {
+            let started = point(px(40.), px(700.));
+            area.pending_long_press = Some((started, 12, Instant::now()));
+            area.bounds = Some(Bounds::new(
+                point(px(8.), px(400.)),
+                size(px(300.), px(80.)),
+            ));
+            assert_eq!(area.take_long_press_offset(started), Some(12));
+            assert_eq!(
+                area.take_long_press_offset(started),
+                None,
+                "the latch is one-shot"
+            );
+
+            area.pending_long_press = Some((started, 12, Instant::now()));
+            assert_eq!(
+                area.take_long_press_offset(point(px(41.), px(700.))),
+                None,
+                "another contact cannot inherit the old touch"
+            );
         });
     }
 

@@ -22,12 +22,13 @@ impl ComposerView {
             .rev()
             .find(|tool| tool.finished && tool.name == "bash" && tool.target().contains("check"))
             .and_then(|tool| {
-                tool.output
+                let output = pi_core::command_output::for_display(&tool.output);
+                output
                     .lines()
                     .rev()
                     .find(|line| !line.trim().is_empty())
-            })
-            .map(str::trim);
+                    .map(|line| line.trim().to_owned())
+            });
         let (title, detail, working, warning) = if controller.connecting() {
             ("Connecting", "Preparing the session", true, false)
         } else if !controller.is_connected() {
@@ -100,7 +101,7 @@ impl ComposerView {
         {
             (
                 "Finished",
-                completed_check.unwrap_or("Run completed"),
+                completed_check.as_deref().unwrap_or("Run completed"),
                 false,
                 false,
             )

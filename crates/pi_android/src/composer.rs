@@ -46,7 +46,7 @@ pub enum ComposerEvent {
     },
     /// The paperclip: the app offers files and the clipboard.
     Attach,
-    /// Independent controls, shared by new sessions, follow-ups and reviews.
+    /// Independent controls, shared by new sessions, later prompts and reviews.
     ChooseModel,
     ChooseThinking,
     PreviewImage(usize),

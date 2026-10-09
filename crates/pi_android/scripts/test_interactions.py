@@ -115,6 +115,13 @@ class Phone:
         scale = self.state()["scale"]
         self.run("shell", "input", "swipe", *(round(value * scale) for value in (*start, *end)), duration)
 
+    def long_press(self, point, duration=650):
+        scale = self.state()["scale"]
+        x, y = (round(value * scale) for value in point)
+        # A zero-distance swipe is one continuous injected touch stream. Separate
+        # `input motionevent` processes do not preserve a contact between calls.
+        self.run("shell", "input", "swipe", x, y, x, y, duration)
+
     def key(self, key):
         self.run("shell", "input", "keyevent", key)
 
@@ -187,6 +194,70 @@ class Phone:
 
     def report(self):
         self.output.joinpath("report.json").write_text(json.dumps(self.results, indent=2) + "\n")
+
+
+def initial_paste_menu(phone):
+    phone.fixture("sessions")
+    phone.wait_keyboard(False)
+    phone.tap("new-session")
+    phone.wait(lambda s: s["route"] == "Start" and shown(s, "draft"),
+               "the start bar opens the new composer")
+    state = phone.settled_state()
+    draft, _ = phone.bounds("draft", state=state)
+    x, y, width, height = draft
+    # Stay on the first text line rather than the composer's lower padding.
+    point = (x + min(40, width / 2), y + min(10, height / 2))
+    phone.long_press(point)
+    phone.wait(lambda s: s["text_menu_open"] and shown(s, "text-menu"),
+               "a first long press opens Paste without a preparatory tap")
+    time.sleep(0.5)
+    phone.wait(lambda s: s["text_menu_open"] and shown(s, "text-menu"),
+               "Paste remains after touch release")
+    phone.wait_keyboard(False)
+    phone.capture("first-long-press-paste")
+
+
+def focus_long_press_during_ime_reflow(phone):
+    phone.fixture("start")
+    phone.wait_keyboard(False)
+    state = phone.settled_state()
+    draft, scale = phone.bounds("draft", state=state)
+    x, y, width, height = draft
+    point = (x + min(40, width / 2), y + min(10, height / 2))
+    physical = tuple(round(value * scale) for value in point)
+    # Keep both injected gestures in one asynchronous device shell. Host-side
+    # settling or telemetry between a tap and long press would hide the race.
+    command = (
+        f"input tap {physical[0]} {physical[1]}; "
+        f"exec input swipe {physical[0]} {physical[1]} "
+        f"{physical[0]} {physical[1]} 1200"
+    )
+    process = subprocess.Popen(phone.adb + ["shell", command], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT)
+    moved_during_hold = False
+    try:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and process.poll() is None:
+            current = phone.state()
+            current_draft, _ = phone.bounds("draft", state=current)
+            if abs(current_draft[1] - y) > 1:
+                moved_during_hold = process.poll() is None
+                break
+            time.sleep(0.05)
+        output = process.communicate(timeout=5)[0]
+    except Exception:
+        process.kill()
+        process.communicate()
+        raise
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, process.args, output)
+    assert moved_during_hold, "The composer did not reflow while the second touch was held"
+    phone.results.append({"check": "IME reflow occurred during the held touch", "passed": True})
+    print("PASS IME reflow occurred during the held touch", flush=True)
+    phone.wait(lambda s: s["draft_chars"] == 0 and s["text_menu_open"],
+               "the reflowed long press opens Paste without entering text")
+    phone.wait_keyboard(True)
+    phone.capture("focus-long-press-during-ime-reflow")
 
 
 def input_and_selectors(phone):
@@ -700,7 +771,9 @@ def native_image_picker(phone):
         phone.run("shell", "rm", destination)
 
 
-CASES = {"pairing": pairing_scanner, "input": input_and_selectors, "long-input": long_input_and_stop,
+CASES = {"pairing": pairing_scanner, "initial-paste": initial_paste_menu,
+         "focus-long-press": focus_long_press_during_ime_reflow,
+         "input": input_and_selectors, "long-input": long_input_and_stop,
          "models": model_scroll, "images": images, "delete": deletion,
          "picker": native_image_picker, "gestures": gestures, "ime": gboard_typing,
          "conversation": conversation, "rich-content": rich_content, "history": history,

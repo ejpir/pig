@@ -2,7 +2,7 @@
 //! Desktop's thread: a session is turns of a prompt, the stages Pi went
 //! through, and a hand-off; its observed edits and checks are reviewed apart.
 
-use std::time::Duration;
+use std::{borrow::Cow, time::Duration};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(pub u32);
@@ -126,6 +126,8 @@ pub struct Stage {
     pub what: String,
     /// What it read or searched for; for changes, the files it edited.
     pub references: Vec<Reference>,
+    /// The file whose latest edit `diff` previews, relative to the project.
+    pub diff_path: Option<String>,
     /// The latest edit, while changing.
     pub diff: Vec<DiffLine>,
     pub added: u32,
@@ -144,6 +146,16 @@ pub struct ToolActivity {
     pub failed: bool,
 }
 
+impl ToolActivity {
+    pub fn output_for_display(&self) -> Cow<'_, str> {
+        if self.name == "bash" {
+            pi_core::command_output::for_display(&self.output)
+        } else {
+            Cow::Borrowed(&self.output)
+        }
+    }
+}
+
 impl Stage {
     pub fn new(kind: StageKind, status: StageStatus, what: impl Into<String>) -> Self {
         Self {
@@ -151,6 +163,7 @@ impl Stage {
             status,
             what: what.into(),
             references: Vec::new(),
+            diff_path: None,
             diff: Vec::new(),
             added: 0,
             removed: 0,
@@ -380,7 +393,9 @@ pub struct Question {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Details {
-    pub context_percent: u32,
+    /// Current prompt-context use, when the backend reports it. Lifetime token
+    /// totals are not a substitute for this value.
+    pub context_percent: Option<u32>,
     pub context_tokens: String,
     pub cost: String,
     pub turns: u32,
@@ -407,7 +422,7 @@ pub struct Session {
     pub files: Vec<FileChange>,
     pub check: Option<Check>,
     pub question: Option<Question>,
-    /// Follow-ups waiting for the current run to finish.
+    /// Prompts queued for this session, including steering and follow-ups.
     pub queued: Vec<String>,
     pub failure: Option<String>,
     pub details: Details,

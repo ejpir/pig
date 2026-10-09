@@ -76,17 +76,11 @@ fn global_search_does_not_filter_the_background_sidebar_or_consume_a_draft(
 }
 
 #[gpui::test]
-fn enter_queues_during_a_run_and_steering_is_explicit(cx: &mut TestAppContext) {
+fn enter_steers_during_a_run_and_follow_up_is_explicit(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
     let session = tab(&desktop, 0, &cx);
-    set_draft(&session, "Do this next", &mut cx);
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    assert!(session.controller.read_with(&cx, |c, _| {
-        c.model().follow_up.iter().any(|s| s == "Do this next")
-    }));
     set_draft(&session, "Change direction now", &mut cx);
-    cx.simulate_keystrokes("secondary-enter");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(session.controller.read_with(&cx, |c, _| {
         c.model()
@@ -94,9 +88,16 @@ fn enter_queues_during_a_run_and_steering_is_explicit(cx: &mut TestAppContext) {
             .iter()
             .any(|s| s == "Change direction now")
     }));
+    set_draft(&session, "Do this next", &mut cx);
+    click("queue-follow-up", &mut cx);
+    cx.run_until_parked();
+    assert!(session.controller.read_with(&cx, |c, _| {
+        c.model().follow_up.iter().any(|s| s == "Do this next")
+    }));
     set_draft(&session, "Unsent draft", &mut cx);
     click("stop", &mut cx);
     assert!(draft(&session, &cx).contains("Unsent draft"));
+    assert!(draft(&session, &cx).contains("Change direction now"));
     assert!(draft(&session, &cx).contains("Do this next"));
     assert!(!session.controller.read_with(&cx, |c, _| c.model().busy()));
 }
