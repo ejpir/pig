@@ -1474,6 +1474,20 @@ mod tests {
     }
 
     #[gpui::test]
+    fn opening_a_new_sheet_discards_the_previous_panels_height(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("done", window, cx);
+                app.sheet_height.set(gpui::px(180.));
+                app.open_sheet(Sheet::Details(QWEN), cx);
+                assert_eq!(app.sheet_height.get(), gpui::px(0.));
+                assert!(app.sheet_motion.animating());
+            })
+        });
+    }
+
+    #[gpui::test]
     fn panels_remain_mounted_and_follow_the_finger_until_release(cx: &mut TestAppContext) {
         use gpui::InputEvent;
         for fixture in ["computers", "model"] {

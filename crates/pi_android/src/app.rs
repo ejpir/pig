@@ -122,7 +122,7 @@ pub struct PhoneApp {
     pub(crate) enabling_jj: Option<SessionId>,
     pub(crate) sheet_motion: SwipeMotion,
     pub(crate) closing_sheet: Option<Sheet>,
-    sheet_height: Rc<Cell<Pixels>>,
+    pub(crate) sheet_height: Rc<Cell<Pixels>>,
     /// The new-session sheet as it is dragged down to close.
     pub(crate) start_motion: SwipeMotion,
     pub(crate) start_height: Rc<Cell<Pixels>>,
@@ -642,6 +642,10 @@ impl PhoneApp {
 
     pub(crate) fn open_sheet(&mut self, sheet: Sheet, cx: &mut Context<Self>) {
         self.closing_sheet = None;
+        // A different sheet can be much taller than the last measured one. Until
+        // this panel is laid out, use the viewport fallback so its first frame is
+        // completely offscreen instead of flashing stale content into view.
+        self.sheet_height.set(px(0.));
         self.sheet_motion.settle(0.);
         self.sheet_scroll = ScrollHandle::new();
         if sheet == Sheet::Model {
@@ -2736,7 +2740,9 @@ impl Render for PhoneApp {
                         .absolute()
                         .inset_0()
                         .bg(colors.scrim)
-                        .opacity(1. - progress)
+                        // Dim the exposed rounded corners before an opening panel
+                        // enters. On close, keep fading with the departing panel.
+                        .opacity(sheet_scrim_opacity(self.sheet.is_some(), progress))
                         .on_click(cx.listener(|this, _, _, cx| this.close_sheet(cx))),
                 )
                 .child(
@@ -2921,6 +2927,10 @@ impl Render for PhoneApp {
     }
 }
 
+fn sheet_scrim_opacity(open: bool, progress: f32) -> f32 {
+    if open { 1. } else { 1. - progress }
+}
+
 impl PhoneApp {
     /// Laid over a block of content: a long press opens `text` to select
     /// and copy all of it or part, with the phone's buzz.
@@ -2960,5 +2970,19 @@ impl PhoneApp {
         )
         .absolute()
         .inset_0()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sheet_scrim_opacity;
+
+    #[test]
+    fn sheet_scrim_is_immediate_on_open_and_fades_on_close() {
+        assert_eq!(sheet_scrim_opacity(true, 1.), 1.);
+        assert_eq!(sheet_scrim_opacity(true, 0.5), 1.);
+        assert_eq!(sheet_scrim_opacity(false, 0.), 1.);
+        assert_eq!(sheet_scrim_opacity(false, 0.5), 0.5);
+        assert_eq!(sheet_scrim_opacity(false, 1.), 0.);
     }
 }
