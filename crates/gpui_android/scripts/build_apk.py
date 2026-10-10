@@ -58,6 +58,8 @@ class App:
     # adaptive icon's 108 dp layer) and ic_notification.png (a white
     # silhouette for the status bar), and the 0xAARRGGBB colour behind it.
     launcher: tuple = ()  # (folder, background)
+    # Full notices for fonts/assets embedded by the app, in addition to GPUI's emoji font.
+    licenses: tuple = ()  # Paths, copied by filename to assets/licenses/.
 
 
 TOUCH = App(
@@ -412,6 +414,14 @@ def signing_key(keytool):
     return key
 
 
+def write_licenses(apk, app):
+    """Carry full copyright/license notices with embedded fonts, not just URLs."""
+    apk.write(CRATE / "assets/fonts/OFL.txt", "assets/licenses/NotoEmoji-OFL.txt")
+    for source in app.licenses:
+        source = Path(source)
+        apk.write(source, f"assets/licenses/{source.name}")
+
+
 def build(app, debug, out, target=TARGET):
     sdk = sdk_root()
     android_jar = tool("ANDROID_JAR", lambda: sdk and find_android_jar(sdk), f"android.jar (API {MIN_SDK}+)")
@@ -443,7 +453,7 @@ def build(app, debug, out, target=TARGET):
             apk.writestr("AndroidManifest.xml", encode_xml(manifest(app, debuggable=debug or app.debuggable)))
             apk.write(scratch / "classes.dex", "classes.dex")
             apk.write(library, f"lib/{TARGET_ABIS[target]}/lib{app.library}.so")
-            apk.write(CRATE / "assets/fonts/OFL.txt", "assets/licenses/NotoEmoji-OFL.txt")
+            write_licenses(apk, app)
             if app.launcher:
                 folder, background = app.launcher
                 # Stored, not compressed: Android maps resources.arsc directly.

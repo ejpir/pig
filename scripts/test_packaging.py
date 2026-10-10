@@ -12,7 +12,10 @@ from unittest.mock import patch
 
 import fetch_pi
 from package_desktop import TARGETS, archive_name, check_binary, package
-from release_desktop import ANDROID_APK, manifest, validate_tag, validate_release_version
+from release_desktop import (
+    ANDROID_APK, ANDROID_FONT_LICENSES, manifest, validate_android_notices,
+    validate_tag, validate_release_version,
+)
 from package_remote import asset_name, package as package_remote
 
 
@@ -37,6 +40,63 @@ class PackagingTests(unittest.TestCase):
         binary = self.root / target
         binary.write_bytes(header)
         return binary
+
+    def test_android_apk_carries_full_notices_for_every_embedded_font(self):
+        import runpy
+        import sys
+
+        # Load the real app configuration without invoking Android tools.
+        root = Path(__file__).resolve().parent.parent
+        app = runpy.run_path(str(root / "crates/pi_android/scripts/build_apk.py"))["PI"]
+        builder = sys.modules["build_apk"]
+        output = self.root / "pi.apk"
+        with zipfile.ZipFile(output, "w") as apk:
+            builder.write_licenses(apk, app)
+        sources = {
+            "NotoEmoji-OFL.txt": root / "crates/gpui_android/assets/fonts/OFL.txt",
+            "IBM-PLEX-OFL.txt": root / "licenses/IBM-PLEX-OFL.txt",
+            "COMMIT-MONO-OFL.txt": root / "licenses/COMMIT-MONO-OFL.txt",
+        }
+        with zipfile.ZipFile(output) as apk:
+            self.assertEqual(set(apk.namelist()), {f"assets/licenses/{name}" for name in sources})
+            for name, source in sources.items():
+                with self.subTest(font=name):
+                    notice = apk.read(f"assets/licenses/{name}")
+                    self.assertEqual(notice, source.read_bytes())
+                    self.assertIn(b"Copyright", notice)
+                    self.assertIn(b"SIL OPEN FONT LICENSE", notice)
+
+    def android_apk(self, path, missing=None, incomplete=None):
+        with zipfile.ZipFile(path, "w") as apk:
+            for name, source in ANDROID_FONT_LICENSES.items():
+                if name != missing:
+                    apk.writestr(f"assets/licenses/{name}",
+                                 b"license URL only" if name == incomplete else source.read_bytes())
+
+    def test_release_refuses_missing_or_incomplete_android_font_notices(self):
+        apk = self.root / ANDROID_APK
+        self.android_apk(apk)
+        validate_android_notices(apk)
+        for name in ANDROID_FONT_LICENSES:
+            for change in ["missing", "incomplete"]:
+                with self.subTest(font=name, change=change):
+                    self.android_apk(apk, **{change: name})
+                    with self.assertRaises(ValueError):
+                        validate_android_notices(apk)
+        apk.write_bytes(b"not an APK")
+        with self.assertRaises(ValueError):
+            validate_android_notices(apk)
+
+    def test_android_apk_refuses_missing_configured_license(self):
+        import runpy
+        import sys
+
+        root = Path(__file__).resolve().parent.parent
+        app = runpy.run_path(str(root / "crates/pi_android/scripts/build_apk.py"))["PI"]
+        app.licenses = (self.root / "missing-OFL.txt",)
+        with zipfile.ZipFile(self.root / "pi.apk", "w") as apk:
+            with self.assertRaises(FileNotFoundError):
+                sys.modules["build_apk"].write_licenses(apk, app)
 
     def test_supported_matrix_has_four_distinct_archives(self):
         self.assertEqual(set(archive_name(target) for target in TARGETS), {
@@ -128,7 +188,7 @@ class PackagingTests(unittest.TestCase):
 
     def test_pi_archives_unpack_with_the_executable_at_the_top(self):
         def tarball():
-            data = tempfile.SpooledTemporaryFile()
+            data = io.BytesIO()
             with tarfile.open(fileobj=data, mode="w:gz") as tar:
                 for name in ["pi/pi", "pi/theme/dark.json"]:
                     info = tarfile.TarInfo(name)
@@ -194,8 +254,9 @@ class PackagingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             manifest(output)
         (output / "scratch.log").unlink()
+        self.android_apk(output / ANDROID_APK)
         self.assertEqual(manifest(output).read_text(), "".join(
-            f"{hashlib.sha256(b'fixture').hexdigest()}  {name}\n" for name in names))
+            f"{hashlib.sha256((output / name).read_bytes()).hexdigest()}  {name}\n" for name in names))
 
     def test_empty_or_symlink_release_archives_are_refused(self):
         output = self.root / "release"
@@ -203,7 +264,7 @@ class PackagingTests(unittest.TestCase):
         for target in TARGETS:
             (output / archive_name(target)).write_bytes(b"fixture")
             (output / asset_name(target)).write_bytes(b"fixture")
-        (output / ANDROID_APK).write_bytes(b"fixture")
+        self.android_apk(output / ANDROID_APK)
         first = output / archive_name(next(iter(TARGETS)))
         first.write_bytes(b"")
         with self.assertRaises(ValueError):
