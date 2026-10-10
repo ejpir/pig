@@ -497,6 +497,15 @@ impl Java {
         });
     }
 
+    /// The refresh rate Android reports to this app, in hertz.
+    pub fn refresh_rate(&self) -> Option<f32> {
+        self.call("refreshRate", |env, activity| {
+            env.call_method(activity, jni_str!("refreshRate"), jni_sig!("()F"), &[])?
+                .f()
+        })
+        .filter(|rate| *rate > 0.)
+    }
+
     /// The display's fastest refresh rate at its current resolution, in hertz.
     pub fn max_refresh_rate(&self) -> Option<f32> {
         self.call("maxRefreshRate", |env, activity| {

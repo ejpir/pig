@@ -50,6 +50,10 @@ pub enum Command {
     CancelSubmission {
         #[serde(rename = "submissionId")]
         submission_id: String,
+        /// Durable request identity lets the runner cancel the same submission
+        /// even if it moved from the inbox into active execution.
+        #[serde(rename = "requestId", default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     GetEntries,
     /// Every `custom` entry of one type, from all branches.

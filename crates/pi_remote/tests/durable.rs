@@ -197,6 +197,131 @@ struct Cleanup(PathBuf, String);
 
 #[test]
 #[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn cancelling_a_submission_that_just_started_aborts_its_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut target =
+        SshTarget::new("test".into(), directory.path().to_string_lossy().into()).unwrap();
+    target.backend = RemoteBackend::Durable;
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+    bridge.send(json!({"type":"prompt","id":"work","message":"safe","requestId":"cancel-active"}));
+    let accepted = bridge.response("work");
+    assert_eq!(accepted["success"], true, "{accepted}");
+    bridge.until(|record| {
+        record["type"] == "remote_snapshot"
+            && record["data"]["run"] == "Running"
+            && record["data"]["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "safe_work"))
+    });
+    bridge.send(json!({
+        "type":"prompt", "id":"later", "message":"later",
+        "requestId":"cancel-active-later", "streamingBehavior":"followUp"
+    }));
+    let later = bridge.response("later");
+    assert_eq!(later["success"], true, "{later}");
+    assert_eq!(later["data"]["disposition"], "queued", "{later}");
+    bridge.send(json!({
+        "type":"cancel_submission",
+        "id":"cancel",
+        "submissionId":accepted["data"]["submissionId"],
+        "requestId":"cancel-active"
+    }));
+    let cancelled = bridge.response("cancel");
+    assert_eq!(cancelled["success"], true, "{cancelled}");
+    assert_eq!(cancelled["data"]["outcome"], "already_placed");
+    let resumed = bridge.until(|record| {
+        record["type"] == "remote_snapshot"
+            && record["data"]["run"] == "Idle"
+            && said(record, "Finished: later")
+    });
+    assert!(
+        resumed["data"]["queued_submissions"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "{resumed}"
+    );
+    bridge.detach();
+}
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn cancelling_an_authoritative_row_after_it_starts_preserves_the_next_prompt() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut target =
+        SshTarget::new("test".into(), directory.path().to_string_lossy().into()).unwrap();
+    target.backend = RemoteBackend::Durable;
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+
+    bridge.send(
+        json!({"type":"prompt","id":"first","message":"safe","requestId":"queue-race-first"}),
+    );
+    assert_eq!(bridge.response("first")["success"], true);
+    bridge.until(|record| {
+        record["type"] == "remote_snapshot"
+            && record["data"]["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "safe_work"))
+    });
+    bridge.send(json!({
+        "type":"prompt", "id":"target", "message":"queued hold",
+        "requestId":"queue-race-target", "streamingBehavior":"followUp"
+    }));
+    let target_prompt = bridge.response("target");
+    assert_eq!(
+        target_prompt["data"]["disposition"], "queued",
+        "{target_prompt}"
+    );
+    bridge.send(json!({
+        "type":"prompt", "id":"later", "message":"later",
+        "requestId":"queue-race-later", "streamingBehavior":"followUp"
+    }));
+    let later = bridge.response("later");
+    assert_eq!(later["data"]["disposition"], "queued", "{later}");
+
+    std::fs::write(directory.path().join("release"), b"").unwrap();
+    let target_running = bridge.until(|record| {
+        record["type"] == "remote_snapshot"
+            && record["data"]["run"] == "Running"
+            && record["data"]["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "queued_work"))
+    });
+    assert!(
+        target_running["data"]["queued_submissions"]
+            .as_array()
+            .is_some_and(|queued| queued.iter().any(|id| id == &later["data"]["submissionId"])),
+        "{target_running}"
+    );
+
+    // This is the wire shape used by a row from an authoritative queue snapshot:
+    // it has the durable submission ID, but not the phone's original request ID.
+    bridge.send(json!({
+        "type":"cancel_submission", "id":"cancel",
+        "submissionId":target_prompt["data"]["submissionId"]
+    }));
+    let cancelled = bridge.response("cancel");
+    assert_eq!(cancelled["success"], true, "{cancelled}");
+    assert_eq!(cancelled["data"]["outcome"], "already_placed");
+    let resumed = bridge.until(|record| {
+        record["type"] == "remote_snapshot"
+            && record["data"]["run"] == "Idle"
+            && said(record, "Finished: later")
+    });
+    assert!(
+        resumed["data"]["queued_submissions"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "{resumed}"
+    );
+    bridge.detach();
+}
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
 fn images_survive_queue_cancellation_completion_and_reconnection() {
     let directory = tempfile::tempdir().unwrap();
     let mut target =

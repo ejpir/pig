@@ -160,8 +160,10 @@ impl PhoneApp {
                     if name == "mentions" {
                         composer.set_text("Read @src/main.rs and @\"my folder/中文.rs\". Compare with @README.md, then explain the changes.", cx);
                     } else {
-                        let pixels = image::ImageBuffer::from_fn(96, 96, |x, y| image::Rgb([
-                            if x < 48 { 240 } else { 20 }, if y < 48 { 60 } else { 210 }, 100,
+                        // Deliberately portrait: square fixtures cannot expose
+                        // intrinsic overflow below the 56dp thumbnail viewport.
+                        let pixels = image::ImageBuffer::from_fn(96, 192, |x, y| image::Rgb([
+                            if x < 48 { 240 } else { 20 }, if y < 96 { 60 } else { 210 }, 100,
                         ]));
                         let mut png = std::io::Cursor::new(Vec::new());
                         image::DynamicImage::ImageRgb8(pixels).write_to(&mut png, image::ImageFormat::Png).unwrap();
@@ -457,13 +459,14 @@ impl PhoneApp {
             }
             "tool-image" => {
                 finish(self);
-                // A page screenshot: a header, a hero and three cards.
-                let pixels = image::ImageBuffer::from_fn(640, 400, |x, y| {
-                    let card = y > 250 && y < 370 && (x % 210) > 20 && (x % 210) < 200;
+                // A portrait page screenshot: its full-width preview must be
+                // vertically scrollable all the way to the final cards.
+                let pixels = image::ImageBuffer::from_fn(400, 800, |x, y| {
+                    let card = y > 560 && y < 750 && (x % 130) > 12 && (x % 130) < 118;
                     image::Rgb(match (y, card) {
-                        (0..48, _) => [24, 28, 38],
+                        (0..72, _) => [24, 28, 38],
                         (_, true) => [250, 250, 252],
-                        (48..230, _) => [40 + (x / 8) as u8, 60 + (y / 4) as u8, 140],
+                        (72..500, _) => [40 + (x / 8) as u8, 60 + (y / 8) as u8, 140],
                         _ => [232, 234, 240],
                     })
                 });
@@ -1767,6 +1770,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_portrait_tool_image_preview_scrolls_to_its_bottom(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(640.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("tool-image", window, cx);
+                let turn = app
+                    .store
+                    .as_ref()
+                    .unwrap()
+                    .session(QWEN)
+                    .unwrap()
+                    .turns
+                    .len()
+                    - 1;
+                app.open_sheet(Sheet::ToolImage(QWEN, turn, 0), cx);
+            })
+        });
+        cx.run_until_parked();
+        let image = cx.debug_bounds("tool-image-view").unwrap();
+        let scroll = app.read_with(cx, |app, _| app.sheet_scroll.clone());
+        assert!(
+            scroll.max_offset().y > gpui::px(0.),
+            "the tall full-width image should overflow the sheet body"
+        );
+        assert!(image.bottom() > scroll.bounds().bottom());
+        scroll.scroll_to_bottom();
+        cx.update(|_, cx| app.update(cx, |_, cx| cx.notify()));
+        cx.run_until_parked();
+        let image = cx.debug_bounds("tool-image-view").unwrap();
+        assert!(
+            image.bottom() <= scroll.bounds().bottom() + gpui::px(1.),
+            "the image bottom must be reachable: image={image:?}, scroll={:?}",
+            scroll.bounds()
+        );
+    }
+
+    #[gpui::test]
     fn tool_images_keep_the_same_height_when_remote_bytes_arrive(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
@@ -2048,19 +2090,75 @@ mod tests {
     }
 
     #[gpui::test]
+    fn latest_reply_consumes_the_tap_before_the_content_under_it_moves(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("tool-image", window, cx)));
+        cx.run_until_parked();
+        let list = app.read_with(cx, |app, _| app.thread_lists.get(&QWEN).unwrap().clone());
+        list.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: gpui::px(0.),
+        });
+        assert!(!list.is_following_tail());
+        cx.update(|_, cx| app.update(cx, |_, cx| cx.notify()));
+        cx.run_until_parked();
+        assert!(!list.is_following_tail());
+        assert!(
+            !crate::scroll::settled(),
+            "virtual-list motion must catch the next touch instead of tapping content"
+        );
+        let latest = cx.debug_bounds("latest").unwrap();
+        cx.simulate_click(latest.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(app.sheet.is_none(), "the moved card underneath was clicked");
+            assert!(app.thread_lists[&QWEN].is_following_tail());
+        });
+    }
+
+    #[gpui::test]
+    fn sending_a_follow_up_restores_thread_tail_following(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        let composer = cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("done", window, cx);
+                app.thread_composer(QWEN, window, cx)
+            })
+        });
+        cx.run_until_parked();
+        let list = app.read_with(cx, |app, _| app.thread_lists.get(&QWEN).unwrap().clone());
+        list.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: gpui::px(0.),
+        });
+        assert!(!list.is_following_tail());
+        composer.update(cx, |composer, cx| {
+            composer.set_text("One more thing", cx);
+            composer.send(cx);
+        });
+        cx.run_until_parked();
+        assert!(list.is_following_tail());
+    }
+
+    #[gpui::test]
     fn reading_a_long_reply_does_not_snap_back_on_render(cx: &mut TestAppContext) {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
         cx.update(|window, cx| app.update(cx, |app, cx| app.preview("long-reply", window, cx)));
         cx.run_until_parked();
-        let scroll = cx.update(|_, cx| app.update(cx, |app, _| app.scroll(Route::Thread(QWEN))));
-        let reading = gpui::point(gpui::px(0.), -scroll.max_offset().y + gpui::px(30.));
-        scroll.set_offset(reading);
+        let list = cx
+            .update(|_, cx| app.update(cx, |app, _| app.thread_lists.get(&QWEN).unwrap().clone()));
+        list.scroll_by(gpui::px(-30.));
+        let reading = list.logical_scroll_top();
+        assert!(!list.is_following_tail());
         cx.update(|_, cx| app.update(cx, |_, cx| cx.notify()));
         cx.run_until_parked();
+        let after = list.logical_scroll_top();
         assert_eq!(
-            scroll.offset(),
-            reading,
+            (after.item_ix, after.offset_in_item),
+            (reading.item_ix, reading.offset_in_item),
             "even a small upward scroll belongs to the reader"
         );
     }

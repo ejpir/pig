@@ -7,8 +7,9 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
 import {
-  CompactionEntry, Harness, createRegistry, defineDoc, defineExtension, section,
-  type Extension, type ConversationId, type ConversationView, type SubmissionId, type UsageState,
+  CompactionEntry, GenerationTask, Harness, InboxDoc, LiveDoc, UserEntry, createRegistry, defineDoc,
+  defineExtension, section, type Conversation, type ConversationId, type ConversationView,
+  type EntryDraft, type Extension, type SubmissionId, type UsageState,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -73,6 +74,92 @@ export async function* records(input: AsyncIterable<Buffer>): AsyncGenerator<Rec
 function string(record: Record<string, unknown>, key: string): string {
   if (typeof record[key] !== "string") throw new Error(`${key} must be a string`);
   return record[key] as string;
+}
+
+function submissionId(value: string): SubmissionId {
+  if (!/^[1-9][0-9]*$/.test(value)) throw new Error("submissionId must be a positive integer string");
+  const id = Number(value);
+  if (!Number.isSafeInteger(id)) throw new Error("submissionId is out of range");
+  return id as SubmissionId;
+}
+
+/**
+ * A targeted task abort leaves the inbox intact, unlike Conversation.abort().
+ * The harness normally advances that inbox from a run's final boundary; an
+ * aborted generation has no such boundary, so place the next batch here using
+ * the pinned harness's one-at-a-time queue policy.
+ */
+async function resumeInboxAfterTargetedAbort(root: Conversation): Promise<void> {
+  await root.commit(async (tx) => {
+    let head = (await tx.latestHeadMarker(root.id))?.head;
+    const inbox = await tx.doc(InboxDoc, root.id);
+    const live = await tx.doc(LiveDoc, root.id);
+    if (live.run !== undefined) return;
+
+    const items = inbox.items;
+    const writes = items.flatMap((item, index) => item.mode === "write" ? [index] : []);
+    const first = (mode: "steer" | "followUp") => {
+      const index = items.findIndex((item) => item.mode === mode);
+      return index < 0 ? [] : [index];
+    };
+    const users = [...first("steer"), ...first("followUp")].sort((a, b) => a - b);
+
+    for (const index of writes) {
+      const item = items[index];
+      if (item?.mode !== "write") continue;
+      const draft = item.entry as unknown as EntryDraft;
+      if (typeof draft.head === "number" && head !== undefined && draft.head < head) {
+        tx.settleSubmission(item.id, { status: "unanswered", reason: "stale" });
+        continue;
+      }
+      const entry = await tx.appendEntry(root.id, draft);
+      if (draft.head !== undefined) head = draft.head === "self" ? entry.id : draft.head;
+      tx.placeSubmission(item.id, entry.id);
+    }
+
+    const placed: SubmissionId[] = [];
+    for (const index of users) {
+      const item = items[index];
+      if (item === undefined || item.mode === "write") continue;
+      const message = { role: "user" as const, content: item.content, timestamp: Date.now() };
+      const entry = await tx.appendEntry(UserEntry, root.id, { model: [message] });
+      tx.placeSubmission(item.id, entry.id);
+      placed.push(item.id);
+    }
+    for (const index of [...writes, ...users].sort((a, b) => b - a)) items.splice(index, 1);
+
+    if (placed.length > 0) {
+      live.run = {
+        taskId: await tx.createTask(GenerationTask, {}, {
+          ownership: { kind: "conversation" }, conversationId: root.id,
+        }),
+        inputs: placed,
+      };
+    }
+  }, context);
+}
+
+/** Stop the run that owns an exact placed submission without withdrawing peers in the inbox. */
+async function abortPlacedSubmission(harness: Harness, root: Conversation, submissionId: SubmissionId): Promise<void> {
+  for (;;) {
+    const submission = await harness.submission(submissionId, context);
+    if (submission === undefined) throw new Error("This prompt is no longer available to cancel");
+    const status = await submission.status(context);
+    if (status.status === "done" || status.status === "unanswered") break;
+    if (status.status !== "placed") throw new Error("This prompt is no longer available to cancel");
+    const taskId = await root.commit(async (tx) => {
+      const live = await tx.doc(LiveDoc, root.id);
+      return live.run?.inputs.includes(submissionId) ? live.run.taskId : undefined;
+    }, context);
+    if (taskId === undefined) {
+      const refreshed = await submission.status(context);
+      if (refreshed.status === "done" || refreshed.status === "unanswered") break;
+      throw new Error("This prompt is no longer available to cancel");
+    }
+    await harness.abortTask(taskId, context);
+    await harness.waitForTask(taskId, context);
+  }
+  await resumeInboxAfterTargetedAbort(root);
 }
 
 function contextTokens(messages: readonly Message[]): number | undefined {
@@ -427,21 +514,39 @@ export async function run(
         }, context);
         const submission = await root.submit({ type: "input", content, requestId, whenBusy: mode ?? "reject" }, context);
         const receipt = await submission.status(context);
-        return { disposition: duplicate ? "handled" : receipt.status === "queued" ? "queued" : "started", submissionId: submission.id, requestId, duplicate };
+        return { disposition: duplicate ? "handled" : receipt.status === "queued" ? "queued" : "started", submissionId: String(submission.id), requestId, duplicate };
       }
-      case "get_submission": return { submission: await root.commit((tx) => tx.submissionByRequest(root.id, string(record, "requestId")), context) ?? null };
+      case "get_submission": {
+        const submission = await root.commit(
+          (tx) => tx.submissionByRequest(root.id, string(record, "requestId")), context,
+        );
+        return { submission: submission === undefined ? null : { ...submission, id: String(submission.id) } };
+      }
       case "clear_queue": {
         const inbox = value.docs["pi.inbox"].items as { id: SubmissionId }[];
         for (const item of inbox) await harness.abortSubmission(item.id, context, root.id);
         return {};
       }
       case "cancel_submission": {
-        const wanted = string(record, "submissionId");
-        const inbox = value.docs["pi.inbox"].items as { id: SubmissionId }[];
-        const item = inbox.find((item) => String(item.id) === wanted);
-        if (!item) throw new Error("This prompt is no longer queued; refresh the session");
-        await harness.abortSubmission(item.id, context, root.id);
-        return {};
+        const id = submissionId(string(record, "submissionId"));
+        const requestId = typeof record.requestId === "string" ? record.requestId : undefined;
+        const handle = await harness.submission(id, context);
+        if (handle === undefined) throw new Error("This prompt is no longer available to cancel");
+        const submission = await handle.status(context);
+        if (submission.conversationId !== root.id || (requestId !== undefined && submission.requestId !== requestId)) {
+          throw new Error("This prompt is no longer available to cancel");
+        }
+        // Submission IDs are durable session-wide identities. requestId adds a
+        // second check for locally admitted rows, but authoritative queue rows
+        // can safely use the ID alone even if the scheduler just placed them.
+        const outcome = await harness.abortSubmission(id, context, root.id);
+        if (outcome === "already_placed") {
+          // Abort only the task owning this placed submission;
+          // Conversation.abort() would discard unrelated queued prompts.
+          await abortPlacedSubmission(harness, root, id);
+        }
+        if (outcome === "not_found") throw new Error("This prompt is no longer available to cancel");
+        return { outcome };
       }
       // Stopping the session stops the subagents working in the background too.
       case "abort": await root.abort(context, { background: true }); return {};

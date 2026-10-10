@@ -36,6 +36,8 @@ pub enum Update {
 /// What a request was for, to act on its response.
 enum Request {
     Prompt(String),
+    /// Durable cancellation of a hidden queued prompt, correlated by request id.
+    CancelPrompt(String),
     Models,
     AvailableModels,
     Commands,
@@ -70,6 +72,18 @@ struct PendingPrompt {
     /// present, neither text nor images are rebuilt or replaced.
     prompt: Prompt,
     admission: Option<Admission>,
+    /// User turns visible when an idle/new-turn admission first left the phone.
+    /// This distinguishes its later snapshot from an older identical prompt.
+    user_turns_before: Option<usize>,
+    /// Hidden immediately after its queued-row X is tapped. If delivery is
+    /// already in flight, its acknowledgement supplies the durable id to cancel.
+    cancelled: bool,
+    submission_id: Option<String>,
+}
+
+struct AcceptedTurn {
+    text: String,
+    user_turns_before: usize,
 }
 
 impl PendingPrompt {
@@ -77,6 +91,9 @@ impl PendingPrompt {
         Self {
             prompt,
             admission: None,
+            user_turns_before: None,
+            cancelled: false,
+            submission_id: None,
         }
     }
 
@@ -124,6 +141,9 @@ struct Watch {
     /// Prompts typed on the phone that Pi hasn't taken yet. Each item owns its
     /// immutable admission mode after the first transport accepts it.
     outbox: Vec<PendingPrompt>,
+    /// An idle admission acknowledged before its user-message snapshot. Keep
+    /// projecting it as the new turn so stale tools cannot leak into it.
+    accepted_turn: Option<AcceptedTurn>,
     /// Rejected payloads remain recoverable, including images. They never retry
     /// automatically or make the session look as though it is still running.
     failed: Vec<FailedPrompt>,
@@ -156,6 +176,13 @@ pub struct FailedPrompt {
     pub error: String,
 }
 
+fn user_turns(pi: &Pi) -> usize {
+    pi.messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .count()
+}
+
 fn seconds_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -163,12 +190,38 @@ fn seconds_now() -> u64 {
 }
 
 impl Watch {
+    fn starts_turn(&self, pending: &PendingPrompt) -> bool {
+        pending.admission.map_or(!self.pi.busy(), |admission| {
+            admission.streaming_behavior.is_none()
+        })
+    }
+
+    fn projected_outbox(&self) -> Vec<projection::PendingPrompt> {
+        self.accepted_turn
+            .iter()
+            .map(|accepted| projection::PendingPrompt {
+                text: accepted.text.clone(),
+                starts_turn: true,
+            })
+            .chain(
+                self.outbox
+                    .iter()
+                    .filter(|pending| !pending.cancelled)
+                    .map(|pending| projection::PendingPrompt {
+                        text: pending.prompt.label(),
+                        starts_turn: self.starts_turn(pending),
+                    }),
+            )
+            .collect()
+    }
+
     /// Nothing to follow: Pi and its subagents rest, and nothing waits on
     /// the phone or the computer.
     fn idle(&self) -> bool {
         self.current
             && !self.pi.busy()
             && self.outbox.is_empty()
+            && self.accepted_turn.is_none()
             && self.failed.is_empty()
             && self.sent.is_empty()
             && self.dialogs.is_empty()
@@ -192,6 +245,7 @@ impl Watch {
             current: false,
             ready: false,
             outbox: Vec::new(),
+            accepted_turn: None,
             failed: Vec::new(),
             sent: HashMap::new(),
             dialogs: Vec::new(),
@@ -546,10 +600,35 @@ impl Live {
         {
             return;
         }
+        let cancellations: Vec<(String, String)> = watch
+            .outbox
+            .iter()
+            .filter(|pending| pending.cancelled)
+            .filter_map(|pending| {
+                let submission = pending.submission_id.clone()?;
+                let request_id = pending.prompt.request_id.clone();
+                (!watch.sent.values().any(|sent| {
+                    matches!(&sent.request, Request::CancelPrompt(sent_id) if *sent_id == request_id)
+                }))
+                .then_some((request_id, submission))
+            })
+            .collect();
+        for (request_id, submission) in cancellations {
+            Self::send(
+                watch,
+                json!({
+                    "type":"cancel_submission",
+                    "submissionId":submission,
+                    "requestId":request_id.clone(),
+                }),
+                Request::CancelPrompt(request_id),
+            );
+        }
         let pending: Vec<usize> = watch
             .outbox
             .iter()
             .enumerate()
+            .filter(|(_, pending)| pending.submission_id.is_none())
             .filter(|(_, pending)| {
                 !watch.sent.values().any(|sent| {
                     matches!(&sent.request, Request::Prompt(request_id) if *request_id == pending.prompt.request_id)
@@ -568,11 +647,20 @@ impl Live {
             });
             let request_id = watch.outbox[index].prompt.request_id.clone();
             let record = watch.outbox[index].record(admission);
+            let user_turns_before = admission
+                .streaming_behavior
+                .is_none()
+                .then(|| user_turns(&watch.pi));
             if Self::send(watch, record, Request::Prompt(request_id)) {
                 // Freeze only once the channel accepted the record. Before that,
                 // no admission was attempted and current session state may still
                 // choose its behavior.
                 watch.outbox[index].admission.get_or_insert(admission);
+                if let Some(user_turns_before) = user_turns_before {
+                    watch.outbox[index]
+                        .user_turns_before
+                        .get_or_insert(user_turns_before);
+                }
             }
         }
     }
@@ -900,17 +988,35 @@ impl Live {
             .collect();
         if index >= queued.len() {
             let local = index - queued.len();
-            let unsent = watch
+            let mut visible = watch
                 .outbox
-                .len()
-                .saturating_sub(usize::from(!watch.pi.busy()));
-            if local < unsent {
-                let at = watch.outbox.len() - unsent + local;
-                if watch.outbox[at].admission.is_some()
-                    || watch.sent.values().any(|sent| matches!(&sent.request, Request::Prompt(request_id) if *request_id == watch.outbox[at].prompt.request_id))
-                {
-                    return Err("This prompt is being delivered. Wait for its queue confirmation, then remove it.".into());
-                }
+                .iter()
+                .enumerate()
+                .filter(|(_, pending)| !pending.cancelled);
+            if watch.accepted_turn.is_none()
+                && visible
+                    .clone()
+                    .next()
+                    .is_some_and(|(_, pending)| watch.starts_turn(pending))
+            {
+                visible.next();
+            }
+            let Some((at, _)) = visible.nth(local) else {
+                return Ok(());
+            };
+            if watch.outbox[at].submission_id.as_deref() == Some("") {
+                return Err(
+                    "This helper cannot remove one queued prompt safely. Update the helper or use Stop to clear all queued work."
+                        .into(),
+                );
+            }
+            let delivering = watch.outbox[at].admission.is_some()
+                || watch.sent.values().any(|sent| {
+                    matches!(&sent.request, Request::Prompt(request_id) if *request_id == watch.outbox[at].prompt.request_id)
+                });
+            if delivering {
+                watch.outbox[at].cancelled = true;
+            } else {
                 watch.outbox.remove(at);
             }
             return Ok(());
@@ -1071,6 +1177,27 @@ impl Live {
         if let Err(error) = watch.pi.apply(record) {
             log::warn!("Skipping a record Pi's session model refused: {error:#}");
         }
+        let queued_text: HashSet<&str> = watch
+            .pi
+            .steering
+            .iter()
+            .chain(&watch.pi.follow_up)
+            .map(String::as_str)
+            .collect();
+        watch.outbox.retain(|pending| {
+            pending.submission_id.as_deref() != Some("")
+                || !queued_text.contains(pending.prompt.message.as_str())
+        });
+        if kind == "remote_snapshot"
+            || watch
+                .accepted_turn
+                .as_ref()
+                .is_some_and(|accepted| user_turns(&watch.pi) > accepted.user_turns_before)
+        {
+            // A snapshot after acknowledgement is authoritative even when
+            // compaction/rebase reduced the retained user-message count.
+            watch.accepted_turn = None;
+        }
         Self::fetch_images(watch);
         if kind == "remote_snapshot" {
             Self::fetch_subagent(watch);
@@ -1120,20 +1247,66 @@ impl Live {
                     // must not turn an already accepted prompt into a failure.
                     return None;
                 };
-                let prompt = watch.outbox.remove(index).prompt;
-                watch.sent.retain(
-                    |_, sent| !matches!(&sent.request, Request::Prompt(id) if *id == request_id),
-                );
-                if failed {
-                    watch.failed.push(FailedPrompt {
-                        prompt,
-                        error: error.clone(),
-                    });
-                    if watch.pi.messages.is_empty() {
-                        watch.pi.error = Some(error.clone());
+                if watch.outbox[index].cancelled {
+                    if failed {
+                        watch.outbox.remove(index);
+                        return None;
                     }
-                    Some(error)
+                    let Some(submission) = record["data"]["submissionId"].as_str() else {
+                        // Keep it visible after acknowledgement rather than let
+                        // unsupported hidden work execute. A later queue snapshot
+                        // replaces this local placeholder with the remote row.
+                        watch.outbox[index].cancelled = false;
+                        watch.outbox[index].submission_id = Some(String::new());
+                        return Some(
+                            "This helper cannot cancel a prompt while it is being delivered. Update the helper and try again."
+                                .into(),
+                        );
+                    };
+                    watch.outbox[index].submission_id = Some(submission.to_owned());
+                    Self::flush(watch);
+                    None
                 } else {
+                    let pending = watch.outbox.remove(index);
+                    if failed {
+                        watch.failed.push(FailedPrompt {
+                            prompt: pending.prompt,
+                            error: error.clone(),
+                        });
+                        if watch.pi.messages.is_empty() {
+                            watch.pi.error = Some(error.clone());
+                        }
+                        Some(error)
+                    } else {
+                        if let Some(user_turns_before) = pending.user_turns_before
+                            && user_turns(&watch.pi) <= user_turns_before
+                        {
+                            watch.accepted_turn = Some(AcceptedTurn {
+                                text: pending.prompt.label(),
+                                user_turns_before,
+                            });
+                        }
+                        None
+                    }
+                }
+            }
+            Request::CancelPrompt(request_id) => {
+                let index = watch
+                    .outbox
+                    .iter()
+                    .position(|pending| pending.prompt.request_id == request_id)?;
+                if failed {
+                    watch.outbox.remove(index);
+                    // An older helper cannot target a submission after it has
+                    // started. Do not use Stop here: that would also discard
+                    // unrelated queued prompts. Its snapshots will show the
+                    // prompt either in the authoritative queue or transcript.
+                    Some(
+                        "This helper could not cancel the prompt after it started. Update the helper and try again."
+                            .into(),
+                    )
+                } else {
+                    watch.outbox.remove(index);
                     None
                 }
             }
@@ -1456,11 +1629,7 @@ impl Live {
                     cwd: &watch.target.cwd,
                     folder: self.helper.short(&watch.target.cwd),
                     question: watch.dialogs.first().and_then(projection::question),
-                    outbox: &watch
-                        .outbox
-                        .iter()
-                        .map(|pending| pending.prompt.label())
-                        .collect::<Vec<_>>(),
+                    outbox: &watch.projected_outbox(),
                     key: &watch.target.key,
                 },
             ));
@@ -1656,6 +1825,81 @@ mod tests {
     }
 
     #[test]
+    fn an_acknowledged_idle_prompt_stays_a_new_turn_until_its_snapshot_arrives() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch
+            .pi
+            .apply(&json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":"Fix it"},
+                {"role":"assistant","content":[{"type":"toolCall","id":"old-edit","name":"edit","arguments":{"path":"/Users/nick/repos/pi/src/app.rs","oldText":"old","newText":"new"}}]}
+            ]}}))
+            .unwrap();
+        watch
+            .pi
+            .apply(&json!({"type":"tool_execution_start","toolCallId":"old-edit","toolName":"edit","args":{"path":"/Users/nick/repos/pi/src/app.rs","oldText":"old","newText":"new"}}))
+            .unwrap();
+        watch.pi.apply(&json!({"type":"agent_settled"})).unwrap();
+        watch.outbox.push("One more thing".into());
+
+        Live::flush(&mut watch);
+        let request = sent.try_recv().unwrap();
+        assert!(request.get("streamingBehavior").is_none());
+        Live::record(
+            &mut watch,
+            &json!({"type":"agent_start"}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":request["id"],"command":"prompt","success":true}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert!(watch.outbox.is_empty());
+        assert!(watch.accepted_turn.is_some());
+
+        let shown = projection::project(
+            &watch.pi,
+            projection::Facts {
+                id: SessionId(1),
+                cwd: &watch.target.cwd,
+                folder: "~/repos/pi".into(),
+                question: None,
+                outbox: &watch.projected_outbox(),
+                key: &watch.target.key,
+            },
+        );
+        let latest = shown.turns.last().unwrap();
+        assert_eq!(latest.prompt, "One more thing");
+        assert!(
+            latest
+                .stages
+                .iter()
+                .all(|stage| stage.kind != crate::model::StageKind::Change)
+        );
+
+        let mut rebased = watch.pi.clone();
+        rebased.messages.truncate(1);
+        rebased.run = pi_core::session::RunState::Compacting;
+        Live::record(
+            &mut watch,
+            &json!({"type":"remote_snapshot","data":serde_json::to_value(rebased).unwrap()}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert!(
+            watch.accepted_turn.is_none(),
+            "an authoritative compacted snapshot clears optimism even when its user count did not grow"
+        );
+    }
+
+    #[test]
     fn a_genuine_collision_rejection_remains_recoverable_with_images_and_a_new_identity() {
         let (mut watch, sent) = watch();
         watch.ready = true;
@@ -1750,7 +1994,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_one_queued_prompt_never_rebuilds_other_prompts_or_claims_an_inflight_cancel() {
+    fn removing_one_queued_prompt_hides_it_immediately_and_cancels_after_delivery() {
         let (mut watch, sent) = watch();
         watch.current = true;
         watch.ready = true;
@@ -1764,13 +2008,105 @@ mod tests {
         assert!(sent.try_recv().is_err());
         watch.outbox.push("delivering".into());
         Live::flush(&mut watch);
-        assert_eq!(sent.try_recv().unwrap()["type"], "prompt");
+        let prompt = sent.try_recv().unwrap();
+        assert_eq!(prompt["type"], "prompt");
+        Live::cancel_queued(&mut watch, 2).unwrap();
+        assert!(watch.outbox[0].cancelled);
+        assert!(watch.projected_outbox().is_empty());
+
+        let accepted = json!({"type":"response","id":prompt["id"],"command":"prompt","success":true,"data":{"submissionId":"43"}});
+        assert!(Live::record(&mut watch, &accepted, "", "", &mut Vec::new()).is_none());
+        let cancel = sent.try_recv().unwrap();
+        assert_eq!(cancel["type"], "cancel_submission");
+        assert_eq!(cancel["submissionId"], "43");
+        assert_eq!(cancel["requestId"], prompt["requestId"]);
+        assert_eq!(watch.outbox.len(), 1, "a hidden tombstone remains");
+        let cancelled = json!({"type":"response","id":cancel["id"],"command":"cancel_submission","success":true,"data":{}});
+        assert!(Live::record(&mut watch, &cancelled, "", "", &mut Vec::new()).is_none());
+        assert!(watch.outbox.is_empty());
+    }
+
+    #[test]
+    fn a_hidden_cancel_tombstone_retries_after_the_transport_returns() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.run = pi_core::session::RunState::Running;
+        watch.outbox.push("remove me".into());
+        Live::flush(&mut watch);
+        let prompt = sent.try_recv().unwrap();
+        Live::cancel_queued(&mut watch, 0).unwrap();
+        watch.input = None;
+        let accepted = json!({"type":"response","id":prompt["id"],"command":"prompt","success":true,"data":{"submissionId":"44"}});
+        Live::record(&mut watch, &accepted, "", "", &mut Vec::new());
+        assert!(watch.outbox[0].cancelled);
+        assert_eq!(watch.outbox[0].submission_id.as_deref(), Some("44"));
+
+        let (input, retried) = async_channel::unbounded();
+        watch.input = Some(input);
+        Live::flush(&mut watch);
+        let cancel = retried.try_recv().unwrap();
+        assert_eq!(cancel["type"], "cancel_submission");
+        assert_eq!(cancel["submissionId"], "44");
+        let response = json!({"type":"response","id":cancel["id"],"command":"cancel_submission","success":true,"data":{}});
+        Live::record(&mut watch, &response, "", "", &mut Vec::new());
+        assert!(watch.outbox.is_empty());
+    }
+
+    #[test]
+    fn an_older_helper_cancel_failure_never_stops_other_queued_work() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.run = pi_core::session::RunState::Running;
+        watch.outbox.push("remove me".into());
+        Live::flush(&mut watch);
+        let prompt = sent.try_recv().unwrap();
+        Live::cancel_queued(&mut watch, 0).unwrap();
+        let accepted = json!({"type":"response","id":prompt["id"],"command":"prompt","success":true,"data":{"submissionId":"44"}});
+        Live::record(&mut watch, &accepted, "", "", &mut Vec::new());
+        let cancel = sent.try_recv().unwrap();
+        let failed = json!({"type":"response","id":cancel["id"],"command":"cancel_submission","success":false,"error":"already started"});
+        let notice = Live::record(&mut watch, &failed, "", "", &mut Vec::new()).unwrap();
+        assert!(notice.contains("Update the helper"));
+        assert!(watch.outbox.is_empty());
         assert!(
-            Live::cancel_queued(&mut watch, 2)
-                .unwrap_err()
-                .contains("being delivered")
+            sent.try_recv().is_err(),
+            "must not send a conversation-wide abort"
         );
-        assert_eq!(watch.outbox.len(), 1);
+    }
+
+    #[test]
+    fn a_helper_without_durable_receipts_makes_the_uncancelled_row_visible_again() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.run = pi_core::session::RunState::Running;
+        watch.outbox.push("still queued".into());
+        Live::flush(&mut watch);
+        let prompt = sent.try_recv().unwrap();
+        Live::cancel_queued(&mut watch, 0).unwrap();
+        let accepted = json!({"type":"response","id":prompt["id"],"command":"prompt","success":true,"data":{"disposition":"queued"}});
+        assert!(
+            Live::record(&mut watch, &accepted, "", "", &mut Vec::new())
+                .unwrap()
+                .contains("cannot cancel")
+        );
+        assert!(!watch.outbox[0].cancelled);
+        assert_eq!(watch.outbox[0].submission_id.as_deref(), Some(""));
+        assert_eq!(watch.projected_outbox()[0].text, "still queued");
+
+        Live::record(
+            &mut watch,
+            &json!({"type":"queue_update","steering":[],"followUp":["still queued"]}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert!(
+            watch.outbox.is_empty(),
+            "the authoritative remote row replaces the local placeholder"
+        );
     }
 
     #[test]

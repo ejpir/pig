@@ -118,11 +118,7 @@ impl PhoneApp {
                 let shown = image.as_ref().map(|image| self.tool_image(id, image));
                 div().pb(px(8.)).child(match shown {
                     Some(Ok(Some(shown))) => self
-                        .zoomable_image(
-                            shown.image,
-                            window.fully_visible_bounds().size.height * 0.65,
-                            cx,
-                        )
+                        .zoomable_image(shown.image, shown.ratio, cx)
                         .rounded(px(12.))
                         .bg(colors.panel)
                         .into_any_element(),
@@ -263,7 +259,7 @@ impl PhoneApp {
     fn zoomable_image(
         &self,
         image: impl Into<gpui::ImageSource>,
-        height: gpui::Pixels,
+        aspect_ratio: f32,
         cx: &Context<Self>,
     ) -> gpui::Stateful<Div> {
         const MAX_ZOOM: f32 = 6.;
@@ -288,9 +284,13 @@ impl PhoneApp {
         }
         div()
             .id("tool-image-view")
+            .debug_selector(|| "tool-image-view".into())
             .relative()
             .w_full()
-            .h(height)
+            // At the natural full-width ratio, portrait screenshots become a
+            // tall sheet-body item. The sheet scroll then reaches every pixel
+            // instead of clipping the bottom inside a viewport-sized box.
+            .aspect_ratio(aspect_ratio)
             .overflow_hidden()
             .child(
                 gpui::canvas(move |bounds, _, _| image_box.set(bounds), |_, _, _, _| {})
@@ -1595,6 +1595,19 @@ impl PhoneApp {
             "File history",
             colors.muted,
             Box::new(move |this, window, cx| this.open_history(id, window, cx)),
+        ));
+        rows.push((
+            "info",
+            if self.render_stats.visible {
+                "Hide rendering stats"
+            } else {
+                "Show rendering stats"
+            },
+            colors.muted,
+            Box::new(move |this, _, cx| {
+                this.toggle_render_stats(cx);
+                this.close_sheet(cx);
+            }),
         ));
         if session.state.is_running() {
             rows.push((

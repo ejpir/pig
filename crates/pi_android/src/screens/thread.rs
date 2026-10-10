@@ -4,9 +4,8 @@
 //! time, with the report card under it. What moves the work forward sits in the
 //! dock: Working and Stop on the composer, the question in its place, Review.
 
-use super::scroll_area;
 use crate::{
-    app::{PhoneApp, Route, Sheet},
+    app::{PhoneApp, Sheet},
     model::{
         CheckResult, Flow, Reference, Session, SessionId, Stage, StageKind, StageStatus, State,
         Turn, duration_label,
@@ -15,9 +14,10 @@ use crate::{
     ui::{self, Button, icon},
 };
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Hsla, SharedString, Window, div, prelude::*, px, relative,
+    AnyElement, Context, Div, FollowMode, FontWeight, Hsla, ListAlignment, SharedString, Window,
+    div, list, prelude::*, px, relative,
 };
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// How many files and searches a stage shows before "+4 more".
 const CHIPS: usize = 3;
@@ -25,6 +25,12 @@ const CHIPS: usize = 3;
 const TAIL: usize = 4;
 /// How many changed files the report card lists before "Show 5 more files".
 const FILES: usize = 3;
+fn new_thread_list_state(item_count: usize) -> gpui::ListState {
+    // Accurate off-screen heights keep the draggable thumb mapped to the whole
+    // conversation. Rows remain virtualized for painting after this first
+    // measurement pass, and later renders only remeasure changed rows below.
+    gpui::ListState::new(item_count, ListAlignment::Top, px(320.)).measure_all()
+}
 
 impl PhoneApp {
     pub(crate) fn thread_screen(
@@ -34,8 +40,6 @@ impl PhoneApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = theme(cx);
-        let scroll = self.scroll(Route::Thread(id));
-        let away_from_bottom = scroll.max_offset().y + scroll.offset().y > px(80.);
         let composer = self.thread_composer(id, window, cx);
         let commands = self.command_catalog_for_session(id, cx);
         composer.update(cx, |composer, _| composer.use_commands(commands));
@@ -44,18 +48,33 @@ impl PhoneApp {
         let back = ui::tap("back", "back", &colors).on_click(cx.listener(|this, _, window, cx| {
             this.back(window, cx);
         }));
-        let Some(store) = &self.store else {
-            return div().into_any_element();
-        };
-        let Some(session) = store.session(id) else {
+        let scrolling = self.scroll_in_motion();
+        let cached = scrolling
+            .then(|| self.thread_snapshots.get(&id).cloned())
+            .flatten();
+        let session = cached.or_else(|| {
+            let snapshot = Arc::new(self.store.as_ref()?.session(id)?.clone());
+            self.thread_snapshots.insert(id, snapshot.clone());
+            Some(snapshot)
+        });
+        let Some(session) = session else {
             return div()
                 .flex_1()
                 .child(ui::appbar(back, "Session", None, &colors))
                 .child(ui::hint("This session is no longer on this phone.", &colors).px(px(20.)))
                 .into_any_element();
         };
-        let running = session.state.is_running();
+        let Some(store) = &self.store else {
+            return div().into_any_element();
+        };
+        let computer_name = store.computer.name.clone();
         let stopping = store.live.as_ref().is_some_and(|live| live.is_stopping(id));
+        let failed_prompts = store
+            .live
+            .as_ref()
+            .map(|live| live.failed_prompts(id).to_vec())
+            .unwrap_or_default();
+        let running = session.state.is_running();
         let asking = session.state == State::NeedsYou
             && session.question.is_some()
             && !self.questions_later.contains(&id);
@@ -74,7 +93,7 @@ impl PhoneApp {
         });
         let subtitle = match session.state {
             State::NeedsYou | State::Working => {
-                format!("{} · {}", session.project, store.computer.name)
+                format!("{} · {}", session.project, computer_name)
             }
             State::Done => match super::subagents::at_work(&session.turns) {
                 // Pi answered, and its subagents carry on.
@@ -100,84 +119,96 @@ impl PhoneApp {
                 .child(ui::tap("more", "dots", &colors).on_click(
                     cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
                 ));
-        let turns = self.turns(session, false, &colors, cx);
-        let queued = (!session.queued.is_empty()).then(|| {
-            div()
-                .child(ui::label("Queued messages", &colors).mb(px(8.)))
-                .child(
-                    ui::card(&colors).children(session.queued.iter().enumerate().map(
-                        |(index, prompt)| {
-                            ui::row(("queued", index), index == 0, &colors)
-                                .child(icon("queue", 16., colors.muted))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(14.))
-                                        .child(prompt.clone()),
-                                )
-                                .child(
-                                    ui::tap(("unqueue", index), "x", &colors)
-                                        .size(px(40.))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if let Some(store) = &mut this.store
-                                                && let Err(error) = store.unqueue(id, index)
-                                            {
-                                                this.notify_user(error, cx);
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                        },
-                    )),
-                )
-        });
-        let failed = store
-            .live
-            .as_ref()
-            .map(|live| live.failed_prompts(id))
-            .unwrap_or(&[])
-            .iter()
-            .enumerate()
-            .map(|(index, failed)| {
-                let request_id = failed.prompt.request_id.clone();
-                ui::card(&colors)
-                    .p(px(16.))
-                    .border_color(colors.coral)
-                    .child(ui::label(
-                        "Message not sent · text and images kept",
-                        &colors,
-                    ))
-                    .child(ui::hint(failed.error.clone(), &colors).my(px(8.)))
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .max_h(px(80.))
-                            .overflow_hidden()
-                            .child(failed.prompt.label()),
-                    )
-                    .child(
-                        ui::button(
-                            ("recover-prompt", index),
-                            Button::Plain,
-                            Some("pencil"),
-                            "Edit and retry",
-                            false,
-                            &colors,
-                        )
-                        .mt(px(12.))
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                this.recover_prompt(id, &request_id, window, cx)
-                            },
-                        )),
-                    )
+        let turn_count = session.turns.len();
+        let failed_count = failed_prompts.len();
+        let has_queued = !session.queued.is_empty();
+        let item_count = turn_count + failed_count + usize::from(has_queued);
+        let list_state = self
+            .thread_lists
+            .entry(id)
+            .or_insert_with(|| {
+                let state = new_thread_list_state(item_count);
+                state.set_follow_mode(FollowMode::Tail);
+                state
             })
-            .collect::<Vec<_>>();
+            .clone();
+        let shape = (turn_count, failed_count, has_queued);
+        let previous = self.thread_list_shapes.entry(id).or_insert(shape);
+        if *previous != shape {
+            let (old_turns, old_failed, old_queued) = *previous;
+            if old_turns < turn_count {
+                list_state.splice(old_turns..old_turns, turn_count - old_turns);
+            } else if old_turns > turn_count {
+                list_state.splice(turn_count..old_turns, 0);
+            }
+            if old_failed < failed_count {
+                let at = turn_count + old_failed;
+                list_state.splice(at..at, failed_count - old_failed);
+            } else if old_failed > failed_count {
+                let start = turn_count + failed_count;
+                list_state.splice(start..turn_count + old_failed, 0);
+            }
+            let queue_index = turn_count + failed_count;
+            match (old_queued, has_queued) {
+                (false, true) => list_state.splice(queue_index..queue_index, 1),
+                (true, false) => list_state.splice(queue_index..queue_index + 1, 0),
+                _ => {}
+            }
+            *previous = shape;
+        }
+        debug_assert_eq!(list_state.item_count(), item_count);
+        if item_count > 0 && !scrolling {
+            // The active turn, failed prompts, and queue can change height without
+            // changing item count. Historical turns keep their measurements.
+            list_state.remeasure_items(turn_count.saturating_sub(1)..item_count);
+        }
+        let offset = list_state.scroll_px_offset_for_scrollbar().y;
+        if let Some(previous) = self.thread_list_offsets.insert(id, offset) {
+            crate::scroll::note_movement(offset - previous);
+        }
+        let away_from_bottom = !list_state.is_following_tail();
+        let list_session = session.clone();
+        let list_failed = failed_prompts;
+        let list_colors = colors;
+        let thread_list = list(
+            list_state.clone(),
+            cx.processor(move |this, index, _, cx| {
+                let content = if index < list_session.turns.len() {
+                    this.turn(&list_session, index, false, &list_colors, cx)
+                        .into_any_element()
+                } else if let Some((failed_index, failed)) = index
+                    .checked_sub(list_session.turns.len())
+                    .and_then(|failed_index| {
+                        list_failed
+                            .get(failed_index)
+                            .map(|failed| (failed_index, failed))
+                    })
+                {
+                    this.failed_prompt(id, failed_index, failed, &list_colors, cx)
+                        .into_any_element()
+                } else {
+                    this.queued_messages(id, &list_session.queued, &list_colors, cx)
+                        .into_any_element()
+                };
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .px(px(20.))
+                    .when(index == 0, |item| item.pt(px(8.)))
+                    .pb(if index + 1 == item_count {
+                        px(16.)
+                    } else {
+                        px(24.)
+                    })
+                    .child(content)
+                    .into_any_element()
+            }),
+        )
+        .size_full();
         let dock = if asking {
             div()
                 .px(px(12.))
-                .child(self.question_card(session, &store.computer.name.clone(), &colors, cx))
+                .child(self.question_card(&session, &computer_name, &colors, cx))
                 .into_any_element()
         } else {
             div()
@@ -189,7 +220,7 @@ impl PhoneApp {
                         .flex()
                         .flex_col()
                         .when(running, |dock| {
-                            dock.child(working_strip(session, stopping, &colors, cx))
+                            dock.child(working_strip(&session, stopping, &colors, cx))
                         })
                         .child(composer),
                 )
@@ -212,19 +243,10 @@ impl PhoneApp {
                     .flex()
                     .flex_col()
                     .child(
-                        scroll_area(("thread", id.0 as usize), &scroll).child(
-                            div()
-                                .px(px(20.))
-                                .pt(px(8.))
-                                .min_w_0()
-                                .pb(px(16.))
-                                .flex()
-                                .flex_col()
-                                .gap(px(24.))
-                                .children(turns)
-                                .children(failed)
-                                .children(queued),
-                        ),
+                        crate::scroll::virtual_list(("thread", id.0 as usize), &list_state)
+                            .flex_1()
+                            .min_h_0()
+                            .child(thread_list),
                     )
                     .when(away_from_bottom, |thread| {
                         thread.child(
@@ -237,6 +259,7 @@ impl PhoneApp {
                                     true,
                                     &colors,
                                 )
+                                .debug_selector(|| "latest".into())
                                 .shadow(vec![gpui::BoxShadow {
                                     color: colors.shadow,
                                     offset: gpui::point(px(0.), px(4.)),
@@ -245,8 +268,15 @@ impl PhoneApp {
                                     inset: false,
                                 }])
                                 .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.scroll(Route::Thread(id)).scroll_to_bottom();
+                                    move |this, _, window, cx| {
+                                        // This button disappears after the jump. Consume the
+                                        // release so the image or change card newly underneath
+                                        // cannot receive the same tap.
+                                        cx.stop_propagation();
+                                        window.prevent_default();
+                                        if let Some(list) = this.thread_lists.get(&id) {
+                                            list.set_follow_mode(FollowMode::Tail);
+                                        }
                                         cx.notify();
                                     },
                                 )),
@@ -267,51 +297,132 @@ impl PhoneApp {
         colors: &Theme,
         cx: &Context<Self>,
     ) -> Vec<gpui::Stateful<Div>> {
-        let id = session.id;
-        let running = session.state.is_running();
-        let last = session.turns.len().saturating_sub(1);
-        let many = session.turns.len() > 1;
         session
             .turns
             .iter()
             .enumerate()
-            .map(|(index, turn)| {
-                let live = index == last && running;
-                // Review and the report card belong to the session the user runs.
-                let ending =
-                    (index == last && !running && !read_only).then(|| self.ending(session, cx));
-                div()
-                    .id(("turn", index))
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(24.))
-                    .when(index > 0, |turn| {
-                        turn.pt(px(24.)).border_t_1().border_color(colors.line)
-                    })
-                    .child(self.prompt(id, index, turn, live, many, colors, cx))
-                    .child(if live {
-                        self.stations(session, index, turn, true, colors, cx)
-                    } else {
-                        self.turn_activity(id, index, turn, false, colors, cx)
-                    })
-                    .map(|column| {
-                        if turn.interleaved() {
-                            column.children(self.flow(id, index, turn, colors, cx))
-                        } else {
-                            column
-                                .children(reply(turn, index == last, colors).map(|reply| {
-                                    let text =
-                                        turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
-                                    reply.relative().child(self.copyable(text, cx))
-                                }))
-                                .children(self.image_cards(id, index, turn, colors, cx))
-                                .children(self.page_cards(index, turn, colors, cx))
-                        }
-                    })
-                    .children(ending)
-            })
+            .map(|(index, _)| self.turn(session, index, read_only, colors, cx))
             .collect()
+    }
+
+    fn turn(
+        &self,
+        session: &Session,
+        index: usize,
+        read_only: bool,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        let id = session.id;
+        let turn = &session.turns[index];
+        let running = session.state.is_running();
+        let last = session.turns.len().saturating_sub(1);
+        let live = index == last && running;
+        let many = session.turns.len() > 1;
+        // Review and the report card belong to the session the user runs.
+        let ending = (index == last && !running && !read_only).then(|| self.ending(session, cx));
+        div()
+            .id(("turn", index))
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(24.))
+            .when(index > 0, |turn| {
+                turn.pt(px(24.)).border_t_1().border_color(colors.line)
+            })
+            .child(self.prompt(id, index, turn, live, many, colors, cx))
+            .child(if live {
+                self.stations(session, index, turn, true, colors, cx)
+            } else {
+                self.turn_activity(id, index, turn, false, colors, cx)
+            })
+            .map(|column| {
+                if turn.interleaved() {
+                    column.children(self.flow(id, index, turn, colors, cx))
+                } else {
+                    column
+                        .children(reply(turn, index == last, colors).map(|reply| {
+                            let text = turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
+                            reply.relative().child(self.copyable(text, cx))
+                        }))
+                        .children(self.image_cards(id, index, turn, colors, cx))
+                        .children(self.page_cards(index, turn, colors, cx))
+                }
+            })
+            .children(ending)
+    }
+
+    fn failed_prompt(
+        &self,
+        id: SessionId,
+        index: usize,
+        failed: &crate::live::FailedPrompt,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let request_id = failed.prompt.request_id.clone();
+        ui::card(colors)
+            .p(px(16.))
+            .border_color(colors.coral)
+            .child(ui::label("Message not sent · text and images kept", colors))
+            .child(ui::hint(failed.error.clone(), colors).my(px(8.)))
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .max_h(px(80.))
+                    .overflow_hidden()
+                    .child(failed.prompt.label()),
+            )
+            .child(
+                ui::button(
+                    ("recover-prompt", index),
+                    Button::Plain,
+                    Some("pencil"),
+                    "Edit and retry",
+                    false,
+                    colors,
+                )
+                .mt(px(12.))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.recover_prompt(id, &request_id, window, cx)
+                })),
+            )
+    }
+
+    fn queued_messages(
+        &self,
+        id: SessionId,
+        queued: &[String],
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        div()
+            .child(ui::label("Queued messages", colors).mb(px(8.)))
+            .child(
+                ui::card(colors).children(queued.iter().enumerate().map(|(index, prompt)| {
+                    ui::row(("queued", index), index == 0, colors)
+                        .child(icon("queue", 16., colors.muted))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(14.))
+                                .child(prompt.clone()),
+                        )
+                        .child(
+                            ui::tap(("unqueue", index), "x", colors)
+                                .size(px(40.))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(store) = &mut this.store
+                                        && let Err(error) = store.unqueue(id, index)
+                                    {
+                                        this.notify_user(error, cx);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                })),
+            )
     }
 
     /// A reply with pictures or pages between Pi's words, in the order Pi
@@ -391,6 +502,9 @@ impl PhoneApp {
                     })
                     .child(rule())
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(list) = this.thread_lists.get(&id) {
+                            list.pause_following_tail();
+                        }
                         if !this.expanded_compactions.remove(&(id, index, step)) {
                             this.expanded_compactions.insert((id, index, step));
                         }
@@ -499,6 +613,9 @@ impl PhoneApp {
                 .child(self.copyable(turn.prompt.clone(), cx))
                 .when(!live || turn.reported, |prompt| {
                     prompt.on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(list) = this.thread_lists.get(&id) {
+                            list.pause_following_tail();
+                        }
                         if !this.expanded_prompts.remove(&(id, index)) {
                             this.expanded_prompts.insert((id, index));
                         }
@@ -554,6 +671,9 @@ impl PhoneApp {
                     .active(|style| style.bg(colors.selected))
                     .child(summary)
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(list) = this.thread_lists.get(&id) {
+                            list.pause_following_tail();
+                        }
                         this.expanded_turns.insert((id, index), !expanded);
                         cx.notify();
                     })),
@@ -693,6 +813,9 @@ impl PhoneApp {
                     format!("Show {hidden} more files")
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(list) = this.thread_lists.get(&id) {
+                        list.pause_following_tail();
+                    }
                     if !this.all_files.remove(&id) {
                         this.all_files.insert(id);
                     }
@@ -1304,6 +1427,13 @@ fn reply(turn: &Turn, latest: bool, colors: &Theme) -> Option<Div> {
 fn working_strip(session: &Session, stopping: bool, colors: &Theme, cx: &Context<PhoneApp>) -> Div {
     let id = session.id;
     let waiting = session.state == State::NeedsYou;
+    let status = if waiting {
+        "Needs you"
+    } else if session.activity == "Compacting" {
+        "Compacting"
+    } else {
+        "Working"
+    };
     let stop = div()
         .id("stop")
         .relative()
@@ -1350,7 +1480,7 @@ fn working_strip(session: &Session, stopping: bool, colors: &Theme, cx: &Context
                 .flex_none()
                 .text_size(px(14.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(if waiting { "Needs you" } else { "Working" }),
+                .child(status),
         )
         .child(meta(duration_label(session.elapsed), colors).flex_1())
         .when(waiting, |strip| {
@@ -1372,4 +1502,44 @@ fn capitalized(text: &str) -> String {
         .next()
         .map(|first| first.to_uppercase().chain(chars).collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Render, TestAppContext};
+
+    struct TallTurns {
+        state: gpui::ListState,
+    }
+
+    impl Render for TallTurns {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let rows = list(
+                self.state.clone(),
+                cx.processor(|_, _, _, _| div().h(px(1000.)).into_any_element()),
+            )
+            .size_full();
+            div().size_full().child(rows)
+        }
+    }
+
+    #[gpui::test]
+    fn multi_turn_scrollbar_reaches_unseen_history_on_its_first_drag(cx: &mut TestAppContext) {
+        let state = new_thread_list_state(3);
+        state.set_follow_mode(FollowMode::Tail);
+        let (_, cx) = cx.add_window_view({
+            let state = state.clone();
+            move |_, _| TallTurns { state }
+        });
+        cx.simulate_resize(gpui::size(px(320.), px(500.)));
+        cx.run_until_parked();
+
+        assert_eq!(state.max_offset_for_scrollbar().y, px(2500.));
+        state.scrollbar_drag_started();
+        state.set_offset_from_scrollbar(gpui::point(px(0.), px(0.)));
+        state.scrollbar_drag_ended();
+        assert_eq!(state.logical_scroll_top().item_ix, 0);
+        assert_eq!(state.logical_scroll_top().offset_in_item, px(0.));
+    }
 }

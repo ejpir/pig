@@ -28,9 +28,10 @@ use gpui::{
 use gpui_android::activity;
 use std::{
     cell::Cell,
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -111,6 +112,128 @@ pub(crate) enum JjHistoryState {
     Failed(SharedString),
 }
 
+pub(crate) struct RenderStats {
+    pub(crate) visible: bool,
+    last_frame: Option<Instant>,
+    intervals: VecDeque<Duration>,
+    refresh_rate: Option<f32>,
+    max_refresh_rate: Option<f32>,
+    last_rate_read: Option<Instant>,
+    frames_since_label: u8,
+    cached_label: SharedString,
+}
+
+impl Default for RenderStats {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            last_frame: None,
+            intervals: VecDeque::new(),
+            refresh_rate: None,
+            max_refresh_rate: None,
+            last_rate_read: None,
+            frames_since_label: 0,
+            cached_label: "".into(),
+        }
+    }
+}
+
+impl RenderStats {
+    fn observe(&mut self, now: Instant) {
+        let Some(last) = self.last_frame.replace(now) else {
+            return;
+        };
+        let interval = now.duration_since(last);
+        // Idle time is not a slow frame. Start a fresh active-render window.
+        if interval > Duration::from_millis(250) {
+            self.intervals.clear();
+            self.frames_since_label = 10;
+            return;
+        }
+        if self.intervals.len() == 120 {
+            self.intervals.pop_front();
+        }
+        self.intervals.push_back(interval);
+        self.frames_since_label = self.frames_since_label.saturating_add(1);
+    }
+
+    fn reset(&mut self) {
+        self.last_frame = None;
+        self.intervals.clear();
+        self.frames_since_label = 10;
+        self.cached_label = "".into();
+    }
+
+    fn refresh_display_rates(&mut self, now: Instant) {
+        if self
+            .last_rate_read
+            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(2))
+        {
+            return;
+        }
+        self.refresh_rate = activity::refresh_rate();
+        self.max_refresh_rate = activity::max_refresh_rate();
+        self.last_rate_read = Some(now);
+        self.frames_since_label = 10;
+    }
+
+    fn label(&mut self) -> SharedString {
+        // Updating the text at 10-12 Hz is readable without sorting and
+        // formatting on every frame that the diagnostic is measuring.
+        if self.frames_since_label < 10 && !self.cached_label.is_empty() {
+            return self.cached_label.clone();
+        }
+        self.frames_since_label = 0;
+        let seconds: f32 = self.intervals.iter().map(Duration::as_secs_f32).sum();
+        let fps = if seconds > 0. {
+            self.intervals.len() as f32 / seconds
+        } else {
+            0.
+        };
+        let latest = self
+            .intervals
+            .back()
+            .map_or(0., |duration| duration.as_secs_f32() * 1_000.);
+        let mut sorted: Vec<_> = self.intervals.iter().copied().collect();
+        sorted.sort_unstable();
+        let p95 = if sorted.is_empty() {
+            0.
+        } else {
+            sorted[(sorted.len() - 1) * 95 / 100].as_secs_f32() * 1_000.
+        };
+        let (rate, late) = self.refresh_rate.map_or_else(
+            || ("? Hz".to_string(), 0),
+            |rate| {
+                // Allow normal scheduler/vsync jitter; count frames that
+                // clearly missed the next refresh opportunity.
+                let late_after = Duration::from_secs_f32(1. / rate).mul_f32(1.25);
+                let late = self
+                    .intervals
+                    .iter()
+                    .filter(|interval| **interval > late_after)
+                    .count();
+                let label = self.max_refresh_rate.map_or_else(
+                    || format!("{rate:.0} Hz"),
+                    |max| {
+                        if (max - rate).abs() < 0.5 {
+                            format!("{rate:.0} Hz")
+                        } else {
+                            format!("{rate:.0} Hz ({max:.0} max)")
+                        }
+                    },
+                );
+                (label, late)
+            },
+        );
+        self.cached_label = format!(
+            "{fps:.0} FPS / {rate}\n{latest:.1} ms · p95 {p95:.1} · late {late}/{}",
+            self.intervals.len()
+        )
+        .into();
+        self.cached_label.clone()
+    }
+}
+
 pub struct PhoneApp {
     pub(crate) store: Option<Store>,
     pub(crate) routes: Vec<Route>,
@@ -156,6 +279,7 @@ pub struct PhoneApp {
     pub(crate) expanded: HashSet<&'static str>,
     pub(crate) notice: Option<SharedString>,
     notice_generation: usize,
+    pub(crate) render_stats: RenderStats,
     pub(crate) focus: FocusHandle,
     pub(crate) address: Entity<TextArea>,
     /// The text a long press opened, to select and copy parts of.
@@ -213,10 +337,19 @@ pub struct PhoneApp {
     /// Tapped review lines, as (hunk, line) of the shown file.
     pub(crate) review_lines: BTreeSet<(usize, usize)>,
     scrolls: HashMap<Route, ScrollHandle>,
+    pub(crate) thread_lists: HashMap<SessionId, gpui::ListState>,
+    pub(crate) thread_list_shapes: HashMap<SessionId, (usize, usize, bool)>,
+    /// Immutable transcript snapshots reused for every frame of a fling.
+    pub(crate) thread_snapshots: HashMap<SessionId, Arc<crate::model::Session>>,
+    /// Last virtual-list offset, for settled-fling touch filtering.
+    pub(crate) thread_list_offsets: HashMap<SessionId, Pixels>,
     pub(crate) prefs_path: Option<PathBuf>,
     visible: bool,
     /// The text of the working notification, while one is shown.
     working_posted: Option<String>,
+    /// Live transcript changes held outside the store until scrolling settles.
+    deferred_updates: Vec<(Option<SessionId>, Update)>,
+    deferred_flush_scheduled: bool,
     last_tick: Instant,
     /// Holds the sample sessions still, for previews.
     pub(crate) paused: bool,
@@ -388,6 +521,7 @@ impl PhoneApp {
             expanded: HashSet::new(),
             notice: None,
             notice_generation: 0,
+            render_stats: RenderStats::default(),
             focus: cx.focus_handle(),
             address,
             selectable,
@@ -426,9 +560,15 @@ impl PhoneApp {
             review_file: 0,
             review_lines: BTreeSet::new(),
             scrolls: HashMap::new(),
+            thread_lists: HashMap::new(),
+            thread_list_shapes: HashMap::new(),
+            thread_snapshots: HashMap::new(),
+            thread_list_offsets: HashMap::new(),
             prefs_path,
             visible: window.visibility().is_visible(),
             working_posted: None,
+            deferred_updates: Vec::new(),
+            deferred_flush_scheduled: false,
             last_tick: Instant::now(),
             paused: false,
             playing: false,
@@ -452,6 +592,15 @@ impl PhoneApp {
 
     pub fn route(&self) -> Route {
         self.routes.last().copied().unwrap_or(Route::Connect)
+    }
+
+    pub(crate) fn toggle_render_stats(&mut self, cx: &mut Context<Self>) {
+        self.render_stats.visible = !self.render_stats.visible;
+        self.render_stats.reset();
+        if self.render_stats.visible {
+            self.render_stats.refresh_display_rates(Instant::now());
+        }
+        cx.notify();
     }
 
     pub(crate) fn scroll(&mut self, route: Route) -> ScrollHandle {
@@ -865,6 +1014,7 @@ impl PhoneApp {
         self.project_browser.clear();
         self.project_files_generation += 1;
         self.project = 0;
+        self.deferred_updates.clear();
         self.store = Some(Store::sample(Computer::from_address(address)));
         self.routes = vec![Route::Sessions];
         self.threads.clear();
@@ -876,6 +1026,10 @@ impl PhoneApp {
         self.swiping_session = None;
         self.deleting_session = None;
         self.scrolls.clear();
+        self.thread_lists.clear();
+        self.thread_list_shapes.clear();
+        self.thread_snapshots.clear();
+        self.thread_list_offsets.clear();
         self._pump = None;
     }
 
@@ -1172,6 +1326,11 @@ impl PhoneApp {
             .map(|path| store.add_project(path))
             .unwrap_or(0);
         self.project_browser.clear();
+        self.deferred_updates.clear();
+        self.thread_lists.clear();
+        self.thread_list_shapes.clear();
+        self.thread_snapshots.clear();
+        self.thread_list_offsets.clear();
         self.store = Some(store);
         self.routes = vec![Route::Sessions, Route::Projects];
         self.threads.clear();
@@ -1225,6 +1384,43 @@ impl PhoneApp {
     }
 
     fn take_updates(&mut self, batch: Vec<(Option<SessionId>, Update)>, cx: &mut Context<Self>) {
+        // Once a queue exists, every later batch joins it even if motion has
+        // just ended. The one flush task then preserves protocol order.
+        if self.scroll_in_motion() || self.deferred_flush_scheduled {
+            self.deferred_updates.extend(batch);
+            if !self.deferred_flush_scheduled {
+                self.deferred_flush_scheduled = true;
+                cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(50))
+                            .await;
+                        let Ok(done) = this.update(cx, |this, cx| {
+                            if this.scroll_in_motion() {
+                                return false;
+                            }
+                            this.deferred_flush_scheduled = false;
+                            let batch = std::mem::take(&mut this.deferred_updates);
+                            if !batch.is_empty() {
+                                this.apply_updates(batch, cx);
+                            }
+                            true
+                        }) else {
+                            break;
+                        };
+                        if done {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            }
+            return;
+        }
+        self.apply_updates(batch, cx);
+    }
+
+    fn apply_updates(&mut self, batch: Vec<(Option<SessionId>, Update)>, cx: &mut Context<Self>) {
         self.keep_latest_in_view();
         let global_commands = batch
             .iter()
@@ -1470,6 +1666,11 @@ impl PhoneApp {
             .as_ref()
             .map(|store| store.computer.address.clone());
         self.store = None;
+        self.deferred_updates.clear();
+        self.thread_lists.clear();
+        self.thread_list_shapes.clear();
+        self.thread_snapshots.clear();
+        self.thread_list_offsets.clear();
         self.project_browser.clear();
         self._pump = None;
         self.threads.clear();
@@ -1508,14 +1709,20 @@ impl PhoneApp {
 
     // Sample sessions and notifications
 
+    pub(crate) fn scroll_in_motion(&self) -> bool {
+        // Every vertical viewport reports the same touch/momentum lifecycle.
+        // Freeze remote geometry changes and ticker repaints on any screen the
+        // person is actively manipulating, not only in a conversation.
+        crate::scroll::in_motion()
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
         #[cfg(feature = "ui-test")]
         self.write_fixture_state(cx);
         let now = Instant::now();
-        let elapsed = now - self.last_tick;
-        self.last_tick = now;
+        let scrolling = self.scroll_in_motion();
         let paused = self.paused && !self.playing;
-        if !paused {
+        if !paused && !scrolling {
             self.keep_latest_in_view();
         }
         if self
@@ -1526,7 +1733,12 @@ impl PhoneApp {
             // The countdown to the next try.
             cx.notify();
         }
-        let Some(store) = self.store.as_mut().filter(|_| !paused) else {
+        if paused {
+            self.last_tick = now;
+            return;
+        }
+        let Some(store) = self.store.as_mut() else {
+            self.last_tick = now;
             return;
         };
         if let Some(live) = &store.live {
@@ -1549,11 +1761,21 @@ impl PhoneApp {
             }
         }
         let Some(store) = self.store.as_mut() else {
+            self.last_tick = now;
             return;
         };
         if store.running().next().is_none() {
+            self.last_tick = now;
             return;
         }
+        // A live projection or sample transition can resize the content even
+        // without a remote record. Keep the elapsed interval intact and apply
+        // it once the manipulation and momentum have ended.
+        if scrolling {
+            return;
+        }
+        let elapsed = now - self.last_tick;
+        self.last_tick = now;
         for event in store.tick(elapsed) {
             self.alert(event, cx);
         }
@@ -1957,6 +2179,10 @@ impl PhoneApp {
         }
         self.expanded_turns.retain(|(session, _), _| *session != id);
         self.scrolls.remove(&Route::Thread(id));
+        self.thread_lists.remove(&id);
+        self.thread_list_shapes.remove(&id);
+        self.thread_snapshots.remove(&id);
+        self.thread_list_offsets.remove(&id);
         self.scrolls.remove(&Route::Review(id));
         self.scrolls.remove(&Route::History(id));
         self.scrolls.remove(&Route::Subagents(id));
@@ -2425,7 +2651,11 @@ impl PhoneApp {
                             composer.update(cx, |composer, cx| composer.clear(cx));
                         }
                         if !running {
-                            self.scroll(Route::Thread(id)).scroll_to_bottom();
+                            if let Some(list) = self.thread_lists.get(&id) {
+                                list.set_follow_mode(gpui::FollowMode::Tail);
+                            } else {
+                                self.scroll(Route::Thread(id)).scroll_to_bottom();
+                            }
                         }
                         window.dismiss_virtual_keyboard();
                         if running {
@@ -2685,6 +2915,11 @@ pub(crate) fn size_label(bytes: u64) -> String {
 
 impl Render for PhoneApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.render_stats.visible {
+            let now = Instant::now();
+            self.render_stats.refresh_display_rates(now);
+            self.render_stats.observe(now);
+        }
         #[cfg(feature = "ui-test")]
         if cx.has_global::<crate::testing::State>() {
             let state = cx.global_mut::<crate::testing::State>();
@@ -2798,6 +3033,24 @@ impl Render for PhoneApp {
                             .occlude(),
                     )
                 })
+        });
+        let rendering_stats = self.render_stats.visible.then(|| {
+            let label = self.render_stats.label();
+            div()
+                .id("rendering-stats")
+                .debug_selector(|| "rendering-stats".into())
+                .absolute()
+                .top(insets.top + px(76.))
+                .right(insets.right + px(10.))
+                .px(px(8.))
+                .py(px(6.))
+                .rounded(px(8.))
+                .bg(gpui::rgba(0x05070ddd))
+                .text_color(gpui::rgba(0xe8edf2ff))
+                .text_size(px(10.))
+                .line_height(px(14.))
+                .font_family(crate::theme::MONO)
+                .child(label)
         });
         let notice = self.notice.clone().map(|notice| {
             let generation = self.notice_generation;
@@ -2924,6 +3177,7 @@ impl Render for PhoneApp {
             )
             .children(sheet)
             .children(notice)
+            .children(rendering_stats)
     }
 }
 
@@ -2975,7 +3229,74 @@ impl PhoneApp {
 
 #[cfg(test)]
 mod tests {
-    use super::sheet_scrim_opacity;
+    use super::{PhoneApp, RenderStats, sheet_scrim_opacity};
+    use crate::{live::Update, model::SessionId};
+    use gpui::TestAppContext;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn render_stats_measure_active_frames_without_counting_idle_time() {
+        let mut stats = RenderStats::default();
+        let start = Instant::now();
+        stats.observe(start);
+        stats.observe(start + Duration::from_millis(8));
+        assert_eq!(stats.intervals.len(), 1);
+        stats.observe(start + Duration::from_secs(1));
+        assert!(stats.intervals.is_empty());
+    }
+
+    #[test]
+    fn render_stats_name_current_and_max_refresh_rates() {
+        let mut stats = RenderStats {
+            refresh_rate: Some(60.),
+            max_refresh_rate: Some(120.),
+            ..RenderStats::default()
+        };
+        let start = Instant::now();
+        stats.observe(start);
+        stats.observe(start + Duration::from_millis(22));
+        let label = stats.label();
+        assert!(label.contains("45 FPS / 60 Hz (120 max)"), "{label}");
+        assert!(label.contains("late 1/1"), "{label}");
+    }
+
+    #[test]
+    fn render_stats_tolerate_small_vsync_jitter() {
+        let mut stats = RenderStats {
+            refresh_rate: Some(60.),
+            ..RenderStats::default()
+        };
+        let start = Instant::now();
+        stats.observe(start);
+        stats.observe(start + Duration::from_millis(17));
+        let label = stats.label();
+        assert!(label.contains("late 0/1"), "{label}");
+    }
+
+    #[gpui::test]
+    fn a_later_batch_joins_an_existing_deferred_queue_in_order(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.deferred_flush_scheduled = true;
+                app.deferred_updates
+                    .push((Some(SessionId(1)), Update::Ended(1, "first".into())));
+                app.take_updates(
+                    vec![(Some(SessionId(1)), Update::Ended(1, "second".into()))],
+                    cx,
+                );
+                let reasons = app
+                    .deferred_updates
+                    .iter()
+                    .map(|(_, update)| match update {
+                        Update::Ended(_, reason) => reason.as_str(),
+                        _ => "wrong update",
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(reasons, ["first", "second"]);
+            })
+        });
+    }
 
     #[test]
     fn sheet_scrim_is_immediate_on_open_and_fades_on_close() {

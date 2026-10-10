@@ -618,6 +618,11 @@ impl Render for Composer {
                                             .debug_selector(move || format!("attachment-{index}"))
                                             .relative()
                                             .size(px(56.))
+                                            // GPUI images preserve their intrinsic aspect ratio.
+                                            // A portrait attachment must not paint below this
+                                            // square thumbnail into the following draft field.
+                                            .overflow_hidden()
+                                            .rounded(px(10.))
                                             .child(crate::testing::probe(format!(
                                                 "attachment-{index}"
                                             )))
@@ -626,8 +631,8 @@ impl Render for Composer {
                                             }))
                                             .child(
                                                 img(image.clone())
-                                                    .size(px(56.))
-                                                    .rounded(px(10.))
+                                                    .size_full()
+                                                    .aspect_ratio(1.)
                                                     .object_fit(gpui::ObjectFit::Cover),
                                             ),
                                     )

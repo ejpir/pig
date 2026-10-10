@@ -414,6 +414,9 @@ impl PhoneApp {
                 colors.faint,
             ))
             .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(list) = this.thread_lists.get(&id) {
+                    list.pause_following_tail();
+                }
                 if !this.folded_handoffs.remove(&key) {
                     this.folded_handoffs.insert(key);
                 }
@@ -457,6 +460,9 @@ impl PhoneApp {
                     format!("Show all {}", handoff.subagents.len())
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(list) = this.thread_lists.get(&id) {
+                        list.pause_following_tail();
+                    }
                     if !this.all_subagents.remove(&key) {
                         this.all_subagents.insert(key);
                     }

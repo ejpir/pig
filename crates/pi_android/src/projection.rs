@@ -8,6 +8,14 @@ use pi_core::session::{Session as Pi, Tool};
 use serde_json::Value;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// A prompt the phone still owns while the helper admits it.
+pub struct PendingPrompt {
+    pub text: String,
+    /// This was admitted while the session was idle, so it starts a fresh turn
+    /// even if `agent_start` reaches the phone before the user-message snapshot.
+    pub starts_turn: bool,
+}
+
 /// What the phone knows about a session besides Pi's state.
 pub struct Facts<'a> {
     pub id: SessionId,
@@ -17,7 +25,7 @@ pub struct Facts<'a> {
     /// Pi's open question, from an extension.
     pub question: Option<Question>,
     /// Prompts sent from the phone that Pi hasn't taken yet.
-    pub outbox: &'a [String],
+    pub outbox: &'a [PendingPrompt],
     pub key: &'a str,
 }
 
@@ -46,13 +54,14 @@ pub fn project(pi: &Pi, facts: Facts) -> Session {
     });
     let mut turns = turns;
     // The phone's prompt shows at once, before the computer has it.
-    if let Some(prompt) = facts.outbox.first().filter(|_| !pi.busy()) {
-        let mut turn = Turn::new(prompt.clone(), clock_now());
+    let optimistic = facts.outbox.first().filter(|prompt| prompt.starts_turn);
+    if let Some(prompt) = optimistic {
+        let mut turn = Turn::new(prompt.text.clone(), clock_now());
         turn.stages.clear();
         turns.push(turn);
     }
     if let Some(turn) = turns.last_mut() {
-        settle(turn, state, pi, facts.cwd);
+        settle(turn, state, pi, facts.cwd, optimistic.is_none());
         // The stage Pi is in has gone on since the last message.
         if state.is_running()
             && let Some(live) = turn.live_stage()
@@ -83,7 +92,13 @@ pub fn project(pi: &Pi, facts: Facts) -> Session {
             None => text.clone(),
         })
         .collect();
-    queued.extend(facts.outbox.iter().skip(usize::from(!pi.busy())).cloned());
+    queued.extend(
+        facts
+            .outbox
+            .iter()
+            .skip(usize::from(optimistic.is_some()))
+            .map(|prompt| prompt.text.clone()),
+    );
     let project = facts
         .cwd
         .trim_end_matches('/')
@@ -97,7 +112,11 @@ pub fn project(pi: &Pi, facts: Facts) -> Session {
         project,
         folder: facts.folder,
         state,
-        activity: activity(pi),
+        activity: if optimistic.is_some() {
+            "Working".into()
+        } else {
+            activity(pi)
+        },
         elapsed,
         finished_at: (!state.is_running()).then(|| ended.map(clock_at)).flatten(),
         turns,
@@ -160,14 +179,14 @@ pub fn listed(id: SessionId, listed: &crate::remote::Listed, folder: String) -> 
     }
 }
 
-fn title(pi: &Pi, outbox: &[String]) -> String {
+fn title(pi: &Pi, outbox: &[PendingPrompt]) -> String {
     let title = pi.title();
     if !title.is_empty() && title != "New session" {
         return title.to_owned();
     }
     outbox
         .first()
-        .map(|prompt| crate::demo::title_for(prompt))
+        .map(|prompt| crate::demo::title_for(&prompt.text))
         .unwrap_or_else(|| title.to_owned())
 }
 
@@ -189,6 +208,26 @@ fn text_of(message: &Value) -> String {
 
 fn tool<'a>(pi: &'a Pi, id: &str) -> Option<&'a Tool> {
     pi.tools.iter().find(|tool| tool.id == id)
+}
+
+/// An unfinished tool can remain in a durable snapshot after its run ended.
+/// It belongs to the current turn only if no earlier turn called that id.
+fn current_running_tool(pi: &Pi) -> Option<&Tool> {
+    let current_turn = pi
+        .messages
+        .iter()
+        .rposition(|message| message["role"] == "user")
+        .unwrap_or(0);
+    pi.tools.iter().rev().find(|tool| {
+        !tool.finished
+            && !pi.messages[..current_turn].iter().any(|message| {
+                message["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|block| block["type"] == "toolCall" && block["id"] == tool.id)
+            })
+    })
 }
 
 /// A project-relative path where Pi gave an absolute one.
@@ -464,13 +503,11 @@ fn one_line(text: &str, limit: usize) -> String {
 }
 
 /// Marks the last turn's stages for how the session stands now.
-fn settle(turn: &mut Turn, state: State, pi: &Pi, cwd: &str) {
+fn settle(turn: &mut Turn, state: State, pi: &Pi, cwd: &str, inherit_running_tools: bool) {
     if state.is_running()
-        && let Some(tool) = pi
-            .tools
-            .iter()
-            .rev()
-            .find(|tool| !tool.finished && tool.name == pi_core::subagent::TOOL)
+        && inherit_running_tools
+        && let Some(tool) =
+            current_running_tool(pi).filter(|tool| tool.name == pi_core::subagent::TOOL)
     {
         // Handed off: the stage Pi was in waits on its subagents.
         let stage = turn.stage_mut(
@@ -482,7 +519,9 @@ fn settle(turn: &mut Turn, state: State, pi: &Pi, cwd: &str) {
         stage.what = doing(tool);
         turn.stage_mut(StageKind::HandOff).status = StageStatus::Planned;
     } else if state.is_running() {
-        let running = pi.tools.iter().rev().find(|tool| !tool.finished);
+        let running = inherit_running_tools
+            .then(|| current_running_tool(pi))
+            .flatten();
         let live = running.map(|tool| kind(&tool.name)).or_else(|| {
             // Between tools, Pi is reading its results or writing.
             turn.stages.last().map(|stage| stage.kind)
@@ -597,13 +636,16 @@ pub fn at_work(handoff: &pi_core::subagent::Handoff) -> String {
 }
 
 fn activity(pi: &Pi) -> String {
-    if let Some(tool) = pi.tools.iter().rev().find(|tool| !tool.finished) {
+    // Compaction is the operation itself, even if the durable snapshot still
+    // contains an unfinished tool from the run whose context is being reduced.
+    if pi.run == pi_core::session::RunState::Compacting {
+        return "Compacting".into();
+    }
+    if let Some(tool) = current_running_tool(pi) {
         return doing(tool);
     }
-    match pi.run {
-        pi_core::session::RunState::Retrying => return "Retrying".into(),
-        pi_core::session::RunState::Compacting => return "Compacting".into(),
-        _ => {}
+    if pi.run == pi_core::session::RunState::Retrying {
+        return "Retrying".into();
     }
     match pi
         .streaming_message_index()
@@ -955,7 +997,7 @@ mod tests {
         pi
     }
 
-    fn facts(outbox: &[String]) -> Facts<'_> {
+    fn facts(outbox: &[PendingPrompt]) -> Facts<'_> {
         Facts {
             id: SessionId(1),
             cwd: "/Users/nick/repos/pi",
@@ -1123,6 +1165,91 @@ mod tests {
     }
 
     #[test]
+    fn an_unfinished_tool_from_an_earlier_turn_does_not_leak_into_a_follow_up() {
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":"Fix it"},
+                {"role":"assistant","content":[{"type":"toolCall","id":"old-edit","name":"edit","arguments":{"path":"/Users/nick/repos/pi/src/app.rs","oldText":"old","newText":"new"}}]}
+            ]}}),
+            json!({"type":"tool_execution_start","toolCallId":"old-edit","toolName":"edit","args":{"path":"/Users/nick/repos/pi/src/app.rs","oldText":"old","newText":"new"}}),
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":"Fix it"},
+                {"role":"assistant","content":[{"type":"toolCall","id":"old-edit","name":"edit","arguments":{"path":"/Users/nick/repos/pi/src/app.rs","oldText":"old","newText":"new"}}]},
+                {"role":"user","content":"One more thing"}
+            ]}}),
+            json!({"type":"agent_start"}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        assert_eq!(shown.state, State::Working);
+        assert_eq!(shown.activity, "Working");
+        let latest = shown.turns.last().unwrap();
+        assert!(
+            latest
+                .stages
+                .iter()
+                .all(|stage| stage.kind != StageKind::Change),
+            "an old edit must not become the new turn's live stage: {:?}",
+            latest
+                .stages
+                .iter()
+                .map(|stage| (stage.kind, stage.status, stage.what.as_str()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(latest.live_stage(), Some(StageKind::Understand));
+    }
+
+    #[test]
+    fn an_optimistic_phone_follow_up_does_not_inherit_a_stale_tool() {
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":"Fix it"},
+                {"role":"assistant","content":[{"type":"toolCall","id":"old-edit","name":"edit","arguments":{"path":"/Users/nick/repos/pi/src/app.rs","oldText":"old","newText":"new"}}]}
+            ]}}),
+            json!({"type":"tool_execution_start","toolCallId":"old-edit","toolName":"edit","args":{"path":"/Users/nick/repos/pi/src/app.rs","oldText":"old","newText":"new"}}),
+            json!({"type":"agent_settled"}),
+            // The helper can announce the accepted run before its snapshot has
+            // appended the new user message.
+            json!({"type":"agent_start"}),
+        ]);
+        let outbox = vec![PendingPrompt {
+            text: "One more thing".into(),
+            starts_turn: true,
+        }];
+        let shown = project(&pi, facts(&outbox));
+        assert_eq!(shown.state, State::Working);
+        assert_eq!(shown.activity, "Working");
+        assert_eq!(shown.turns.last().unwrap().prompt, "One more thing");
+        assert!(
+            shown
+                .turns
+                .last()
+                .unwrap()
+                .stages
+                .iter()
+                .all(|stage| stage.kind != StageKind::Change)
+        );
+        assert_eq!(
+            shown.turns.last().unwrap().live_stage(),
+            Some(StageKind::Understand)
+        );
+    }
+
+    #[test]
+    fn compaction_is_named_even_when_an_old_tool_is_unfinished() {
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":"Fix it"},
+                {"role":"assistant","content":[{"type":"toolCall","id":"old-edit","name":"edit","arguments":{"path":"/Users/nick/repos/pi/src/app.rs"}}]}
+            ]}}),
+            json!({"type":"tool_execution_start","toolCallId":"old-edit","toolName":"edit","args":{"path":"/Users/nick/repos/pi/src/app.rs"}}),
+            json!({"type":"compaction_start"}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        assert_eq!(shown.state, State::Working);
+        assert_eq!(shown.activity, "Compacting");
+    }
+
+    #[test]
     fn a_running_write_previews_its_content() {
         let tool = Tool {
             id: "w".into(),
@@ -1191,7 +1318,10 @@ mod tests {
 
     #[test]
     fn a_prompt_from_the_phone_shows_before_pi_takes_it() {
-        let outbox = ["Explain this project".to_owned()];
+        let outbox = [PendingPrompt {
+            text: "Explain this project".into(),
+            starts_turn: true,
+        }];
         let shown = project(&Pi::new("/Users/nick/repos/pi".into()), facts(&outbox));
         assert_eq!(shown.state, State::Working);
         assert_eq!(shown.title, "Explain this project");

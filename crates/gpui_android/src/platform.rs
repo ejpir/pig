@@ -52,7 +52,11 @@ impl PlatformGestures for AndroidGestures {
             multi_tap_slop: px(100.),
             long_press_duration: Duration::from_millis(400),
             scroll_physics: ScrollPhysics::android(),
-            min_fling_velocity: 50.,
+            // Android may batch moves while GPUI is painting. We deliberately
+            // coalesce those samples because replaying them without their
+            // device timestamps exaggerated release speed; accept a gentler
+            // final velocity so ordinary flicks still start native momentum.
+            min_fling_velocity: 20.,
         }
     }
 }
@@ -444,29 +448,14 @@ impl AndroidPlatform {
             .pointers()
             .map(|p| contact(p.pointer_id(), p.x(), p.y(), p.pressure()))
             .collect();
-        // Batched samples, regrouped from per pointer to per moment.
-        let mut history: Vec<Vec<Contact>> = Vec::new();
-        if action == Action::Move {
-            for pointer in motion.pointers() {
-                for (moment, sample) in pointer.history().enumerate() {
-                    if history.len() <= moment {
-                        history.push(Vec::new());
-                    }
-                    history[moment].push(contact(
-                        pointer.pointer_id(),
-                        sample.x(),
-                        sample.y(),
-                        sample.pressure(),
-                    ));
-                }
-            }
-        }
-        let events = window.touches().translate(action, &history, &current);
+        // Historical coordinates have device timestamps that GPUI's touch
+        // event cannot carry. Do not allocate/replay them at processing speed;
+        // the current position is the correctly coalesced sample.
+        let events = window.touches().translate(action, &[], &current);
         let pinch = window.touches().pinch();
         log::debug!(
-            "motion {action:?}: {} pointers, {} batched samples -> {:?}",
+            "motion {action:?}: {} pointers -> {:?}",
             current.len(),
-            history.len(),
             events
                 .iter()
                 .map(|event| (event.id.0, event.phase, event.position))

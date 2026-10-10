@@ -3,7 +3,7 @@
 
 use crate::theme::theme;
 use gpui::{
-    AnyElement, App, Bounds, DispatchPhase, Div, ElementId, IntoElement, MouseButton,
+    AnyElement, App, Bounds, DispatchPhase, Div, ElementId, IntoElement, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, RenderOnce, ScrollHandle, Stateful,
     StyleRefinement, TouchDragEvent, TouchPhase, Window, canvas, div, fill, point, prelude::*, px,
     size,
@@ -20,27 +20,47 @@ const THUMB_FADE: Duration = Duration::from_millis(260);
 /// tail, or one stopped at the end of its content.
 const SETTLED_WITHIN: Duration = Duration::from_millis(100);
 const SETTLED_DISTANCE: f32 = 15.;
+/// Do not release transcript mutations in the small gap between finger-up and
+/// the first momentum frame, or immediately after the final momentum frame.
+const INPUT_QUIET: Duration = Duration::from_millis(200);
 
-/// How far scroll content has moved lately, across every scroll area.
+/// Visible movement and the actual touch-scroll lifecycle, across every scroll area.
 #[derive(Default)]
-struct Motion(VecDeque<(Instant, f32)>);
+struct Motion {
+    moved: VecDeque<(Instant, f32)>,
+    scrolling: bool,
+    last_input: Option<Instant>,
+}
 
 impl Motion {
     fn moved(&mut self, distance: f32, now: Instant) {
-        self.0.push_back((now, distance));
-        while self.0.len() > 64 {
-            self.0.pop_front();
+        self.moved.push_back((now, distance));
+        while self.moved.len() > 64 {
+            self.moved.pop_front();
         }
+    }
+
+    fn input(&mut self, phase: TouchPhase, now: Instant) {
+        self.last_input = Some(now);
+        self.scrolling = matches!(phase, TouchPhase::Started | TouchPhase::Moved);
     }
 
     fn settled(&self, now: Instant) -> bool {
         let recent: f32 = self
-            .0
+            .moved
             .iter()
             .filter(|(at, _)| now.saturating_duration_since(*at) <= SETTLED_WITHIN)
             .map(|(_, distance)| distance)
             .sum();
         recent < SETTLED_DISTANCE
+    }
+
+    fn in_motion(&self, now: Instant) -> bool {
+        self.scrolling
+            || self
+                .last_input
+                .is_some_and(|at| now.saturating_duration_since(at) < INPUT_QUIET)
+            || !self.settled(now)
     }
 }
 
@@ -53,6 +73,27 @@ thread_local! {
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn settled() -> bool {
     MOTION.with(|motion| motion.borrow().settled(Instant::now()))
+}
+
+/// Whether a finger-driven scroll or its momentum is still active. Unlike
+/// `settled`, this follows GPUI's scroll phases and cannot mistake a gentle
+/// drag for an idle viewport.
+pub(crate) fn in_motion() -> bool {
+    MOTION.with(|motion| motion.borrow().in_motion(Instant::now()))
+}
+
+pub(crate) fn note_input(phase: TouchPhase) {
+    MOTION.with(|motion| motion.borrow_mut().input(phase, Instant::now()));
+}
+
+/// Records movement from a viewport that does not use `ScrollHandle`, such as
+/// GPUI's virtualized list. Settled-fling touch filtering needs pixels as well
+/// as gesture phases so catching momentum cannot become a tap on its content.
+pub(crate) fn note_movement(distance: Pixels) {
+    let distance = f32::from(distance.abs());
+    if distance > 0. {
+        MOTION.with(|motion| motion.borrow_mut().moved(distance, Instant::now()));
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -179,7 +220,7 @@ impl RenderOnce for ScrollArea {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.handle)
-                    .on_scroll_wheel(|_, window, _| window.refresh())
+                    .on_scroll_wheel(|event, _, _| note_input(event.touch_phase))
                     .children(self.children),
             )
             .child(
@@ -320,6 +361,7 @@ impl RenderOnce for ScrollArea {
                                 window.prevent_default();
                             }
                             if let Some(grab) = state.read(cx).grab {
+                                note_input(event.phase);
                                 handle.set_offset(point(
                                     handle.offset().x,
                                     geometry.offset(event.position.y, grab),
@@ -340,6 +382,214 @@ impl RenderOnce for ScrollArea {
                 .absolute()
                 .inset_0(),
             )
+    }
+}
+
+/// A virtualized list with the same proportional, draggable scrollbar and
+/// fixture telemetry as `ScrollArea`.
+#[derive(IntoElement)]
+pub(crate) struct ListScrollArea {
+    #[cfg(feature = "ui-test")]
+    name: String,
+    outer: Stateful<Div>,
+    state: ListState,
+    children: Vec<AnyElement>,
+}
+
+pub(crate) fn virtual_list(id: impl Into<ElementId>, state: &ListState) -> ListScrollArea {
+    let id = id.into();
+    ListScrollArea {
+        #[cfg(feature = "ui-test")]
+        name: format!("{id:?}"),
+        outer: div()
+            .id(id)
+            .relative()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .on_scroll_wheel(|event, _, _| note_input(event.touch_phase)),
+        state: state.clone(),
+        children: Vec::new(),
+    }
+}
+
+impl Styled for ListScrollArea {
+    fn style(&mut self) -> &mut StyleRefinement {
+        self.outer.style()
+    }
+}
+
+impl ParentElement for ListScrollArea {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.children.extend(elements);
+    }
+}
+
+impl RenderOnce for ListScrollArea {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let measure = self.state.clone();
+        let state = self.state.clone();
+        self.outer.children(self.children).child(
+            canvas(
+                move |_, window, cx| {
+                    let bounds = measure.viewport_bounds();
+                    let geometry = Geometry::new(
+                        bounds,
+                        measure.max_offset_for_scrollbar().y,
+                        measure.scroll_px_offset_for_scrollbar().y,
+                    );
+                    #[cfg(feature = "ui-test")]
+                    if cx.has_global::<crate::testing::State>() {
+                        let fixture = cx.global_mut::<crate::testing::State>();
+                        fixture.bounds.insert(
+                            format!("scroll:{}", self.name),
+                            [
+                                bounds.left().into(),
+                                bounds.top().into(),
+                                bounds.size.width.into(),
+                                bounds.size.height.into(),
+                            ],
+                        );
+                        if let Some(g) = geometry {
+                            fixture.bounds.insert(
+                                format!("thumb:{}", self.name),
+                                [
+                                    g.thumb.left().into(),
+                                    g.thumb.top().into(),
+                                    g.thumb.size.width.into(),
+                                    g.thumb.size.height.into(),
+                                ],
+                            );
+                        }
+                    }
+                    let scrollbar = window.use_keyed_state("list-scrollbar-state", cx, |_, _| {
+                        ScrollbarState::default()
+                    });
+                    let now = Instant::now();
+                    scrollbar.update(cx, |scrollbar, _| {
+                        scrollbar.observe(measure.scroll_px_offset_for_scrollbar().y, now)
+                    });
+                    let opacity = scrollbar.read(cx).opacity(now);
+                    let hitbox = geometry.filter(|_| opacity > 0.).map(|geometry| {
+                        window.insert_hitbox(geometry.track, gpui::HitboxBehavior::Normal)
+                    });
+                    (geometry, hitbox, scrollbar, opacity)
+                },
+                move |_, (geometry, hitbox, scrollbar, opacity), window, cx| {
+                    let Some(geometry) = geometry else { return };
+                    if opacity > 0. {
+                        window.paint_quad(
+                            fill(geometry.thumb, theme(cx).muted.opacity(0.65 * opacity))
+                                .corner_radii(px(2.)),
+                        );
+                        window.request_animation_frame();
+                    }
+                    let Some(hitbox) = hitbox else { return };
+                    let touch_hitbox = hitbox.clone();
+                    let down_scrollbar = scrollbar.clone();
+                    let down_state = state.clone();
+                    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Capture
+                            || event.button != MouseButton::Left
+                            || !hitbox.is_hovered(window)
+                        {
+                            return;
+                        }
+                        let grab = if geometry.thumb.top() <= event.position.y
+                            && event.position.y <= geometry.thumb.bottom()
+                        {
+                            event.position.y - geometry.thumb.top()
+                        } else {
+                            geometry.thumb.size.height / 2.
+                        };
+                        down_scrollbar.update(cx, |scrollbar, _| {
+                            scrollbar.grab = Some(grab);
+                            scrollbar.reveal(Instant::now());
+                        });
+                        down_state.scrollbar_drag_started();
+                        down_state.set_offset_from_scrollbar(point(
+                            px(0.),
+                            geometry.offset(event.position.y, grab),
+                        ));
+                        cx.stop_propagation();
+                        window.prevent_default();
+                        window.refresh();
+                    });
+                    let moving_scrollbar = scrollbar.clone();
+                    let moving_state = state.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Capture {
+                            return;
+                        }
+                        if let Some(grab) = moving_scrollbar.read(cx).grab {
+                            moving_state.set_offset_from_scrollbar(point(
+                                px(0.),
+                                geometry.offset(event.position.y, grab),
+                            ));
+                            cx.stop_propagation();
+                            window.refresh();
+                        }
+                    });
+                    let released_scrollbar = scrollbar.clone();
+                    let released_state = state.clone();
+                    window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                        if phase == DispatchPhase::Capture
+                            && released_scrollbar.read(cx).grab.is_some()
+                        {
+                            released_scrollbar.update(cx, |scrollbar, _| {
+                                scrollbar.grab = None;
+                                scrollbar.reveal(Instant::now());
+                            });
+                            released_state.scrollbar_drag_ended();
+                            cx.stop_propagation();
+                            window.refresh();
+                        }
+                    });
+                    window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Capture {
+                            return;
+                        }
+                        if event.phase == TouchPhase::Started {
+                            if !touch_hitbox.is_hovered(window) {
+                                return;
+                            }
+                            let start = event.start_position.y;
+                            let grab = if geometry.thumb.top() <= start
+                                && start <= geometry.thumb.bottom()
+                            {
+                                start - geometry.thumb.top()
+                            } else {
+                                geometry.thumb.size.height / 2.
+                            };
+                            scrollbar.update(cx, |scrollbar, _| {
+                                scrollbar.grab = Some(grab);
+                                scrollbar.reveal(Instant::now());
+                            });
+                            state.scrollbar_drag_started();
+                            window.prevent_default();
+                        }
+                        if let Some(grab) = scrollbar.read(cx).grab {
+                            note_input(event.phase);
+                            state.set_offset_from_scrollbar(point(
+                                px(0.),
+                                geometry.offset(event.position.y, grab),
+                            ));
+                            if matches!(event.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                                scrollbar.update(cx, |scrollbar, _| {
+                                    scrollbar.grab = None;
+                                    scrollbar.reveal(Instant::now());
+                                });
+                                state.scrollbar_drag_ended();
+                            }
+                            cx.stop_propagation();
+                            window.refresh();
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
     }
 }
 
@@ -374,6 +624,34 @@ mod tests {
         }
         assert!(motion.settled(at(320)), "a slow tail looks still");
         assert!(motion.settled(at(2_000)), "a fling stopped at the end");
+    }
+
+    #[test]
+    fn scroll_phases_keep_gentle_drags_and_momentum_in_motion() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut motion = Motion::default();
+        motion.input(TouchPhase::Started, start);
+        assert!(
+            motion.in_motion(at(150)),
+            "a held finger is still scrolling"
+        );
+        motion.input(TouchPhase::Ended, at(160));
+        assert!(
+            motion.in_motion(at(300)),
+            "the release-to-momentum gap stays protected"
+        );
+        motion.input(TouchPhase::Moved, at(320));
+        assert!(motion.in_motion(at(1_000)), "momentum remains active");
+        motion.input(TouchPhase::Ended, at(1_010));
+        assert!(
+            motion.in_motion(at(1_150)),
+            "the final frame gets a quiet tail"
+        );
+        assert!(
+            !motion.in_motion(at(1_220)),
+            "the gesture eventually settles"
+        );
     }
 
     #[test]

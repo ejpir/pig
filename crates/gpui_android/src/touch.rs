@@ -1,9 +1,11 @@
 //! Android motion events as GPUI touches.
 //!
-//! Android reuses pointer ids as soon as a finger lifts, and batches several
-//! samples into one move event. GPUI wants a fresh [`TouchId`] for every
-//! contact and every sample in order, so the recognizers see the real path and
-//! velocity of a fling.
+//! Android reuses pointer ids as soon as a finger lifts, and may batch several
+//! historical samples into one move event. GPUI gets a fresh [`TouchId`] for
+//! every contact, but only the latest position from each delivered move. The
+//! historical samples have device timestamps that GPUI's portable event does
+//! not carry; replaying them back-to-back inflates fling velocity and spends
+//! frame time on intermediate positions that cannot be displayed.
 
 use gpui::{Pixels, Point, TouchEvent, TouchId, TouchPhase, point, px};
 use std::cell::RefCell;
@@ -97,11 +99,9 @@ impl Touches {
                 }
             }
             Action::Move => {
-                let samples = history.iter().map(Vec::as_slice);
-                for sample in samples.chain(std::iter::once(current)) {
-                    for contact in sample {
-                        self.moved(contact, &mut events);
-                    }
+                let _ = history;
+                for contact in current {
+                    self.moved(contact, &mut events);
                 }
             }
             Action::PointerUp(index) => {
@@ -249,13 +249,13 @@ mod tests {
     }
 
     #[test]
-    fn batched_samples_arrive_in_order_and_still_samples_are_dropped() {
+    fn batched_samples_are_coalesced_to_the_latest_position() {
         let mut touches = Touches::default();
         touches.translate(Action::Down, &[], &[contact(0, 0., 0.)]);
-        let history = vec![vec![contact(0, 0., 5.)], vec![contact(0, 0., 5.)]];
+        let history = vec![vec![contact(0, 0., 5.)], vec![contact(0, 0., 9.)]];
         let moved = touches.translate(Action::Move, &history, &[contact(0, 0., 12.)]);
         let ys: Vec<_> = moved.iter().map(|e| e.position.y).collect();
-        assert_eq!(ys, [px(5.), px(12.)], "the repeated sample is not a move");
+        assert_eq!(ys, [px(12.)], "only a displayable position is dispatched");
         assert!(moved.iter().all(|e| e.phase == TouchPhase::Moved));
     }
 

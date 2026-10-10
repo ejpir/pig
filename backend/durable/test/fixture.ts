@@ -12,13 +12,13 @@ import { noResources } from "../src/commands.ts";
 const faux = fauxProvider({ tokensPerSecond: 120 });
 const models = createModels();
 models.setProvider(faux.provider);
-const work = (name: string, replay: "safe" | "unsafe") => defineTool({
+const work = (name: string, replay: "safe" | "unsafe", release = "release") => defineTool({
   name, replay, description: "Test checkpoint recovery", parameters: Type.Object({}),
   execute: async (_, api, context) => {
     const cwd = api.env!.cwd!;
     appendFileSync(join(cwd, `${name}.log`), "execution\n");
     api.output("started; waiting for release\n");
-    while (!existsSync(join(cwd, "release"))) {
+    while (!existsSync(join(cwd, release))) {
       if (context.abortSignal?.aborted) throw context.abortSignal.reason;
       await Bun.sleep(20);
     }
@@ -70,6 +70,12 @@ faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
       ? "Compacted fixture history with API names."
       : "Compacted fixture history.");
   }
+  if (text === "queued hold") {
+    if (!after.some((message) => message.role === "toolResult")) {
+      return fauxAssistantMessage(fauxToolCall("queued_work", {}, { id: "queued-work-call" }), { stopReason: "toolUse" });
+    }
+    return fauxAssistantMessage("Finished queued hold after cancellation race.");
+  }
   if (text === "safe" || text === "unsafe") {
     if (!after.some((message) => message.role === "toolResult")) {
       return fauxAssistantMessage(fauxToolCall(`${text}_work`, {}, { id: `${text}-call` }), { stopReason: "toolUse" });
@@ -79,5 +85,7 @@ faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
   return fauxAssistantMessage(`Finished: ${text}`);
 }));
 const scout = { name: "scout", description: "Finds things", prompt: "Answer in two words.", scope: "user" as const, filePath: "/agents/scout.md" };
-await run(models, [defineExtension({ name: "fixture", tools: [work("safe_work", "safe"), work("unsafe_work", "unsafe")] })],
+await run(models, [defineExtension({ name: "fixture", tools: [
+  work("safe_work", "safe"), work("unsafe_work", "unsafe"), work("queued_work", "safe", "release-queued"),
+] })],
   () => ({ ...noResources, agents: [scout] }));

@@ -92,6 +92,33 @@ pub fn notifications_enabled() -> bool {
     }
 }
 
+/// The refresh rate Android reports to this app, including rate overrides.
+pub fn refresh_rate() -> Option<f32> {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current().and_then(|java| java.refresh_rate())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        None
+    }
+}
+
+/// The fastest refresh rate offered at the display's current resolution.
+///
+/// GPUI Android requests this rate while drawing. The system may still select
+/// a lower active rate because of power, thermal, or platform policy.
+pub fn max_refresh_rate() -> Option<f32> {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current().and_then(|java| java.max_refresh_rate())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        None
+    }
+}
+
 /// Asks the user for permission to notify, on Android 13 and later, unless
 /// they already answered. Ask when notifications become useful to them.
 pub fn request_notification_permission() {

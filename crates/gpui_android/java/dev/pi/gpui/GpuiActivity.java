@@ -838,6 +838,12 @@ public class GpuiActivity extends NativeActivity {
         Notifications.cancel(this, id);
     }
 
+    /** The refresh rate Android reports to this app, including frame-rate overrides. */
+    public float refreshRate() {
+        Display display = getDisplay();
+        return display == null ? 0f : display.getRefreshRate();
+    }
+
     /** The fastest refresh rate the display offers at its current resolution. */
     public float maxRefreshRate() {
         Display display = getDisplay();
