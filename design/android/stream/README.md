@@ -4,6 +4,8 @@
 
 [Overview PNG](overview.png) · [Gallery](index.html) · Built on [next4](../next4/README.md)'s stylesheet and proportions. It changes [04 Working](../next4/screens/04-working.png) and keeps the rest.
 
+Built in [crates/pi_android](../../../crates/pi_android/src/screens/stream.rs). Try it with `cargo run -p pi_android --example preview -- working`, or `verifying`, `call`, `run-line` and `calls-shown`.
+
 ## Why
 
 The run line in 04 Working is good for seeing a run as a whole, but hard to follow while calls are still coming in. Stages group the calls, so the newest one is not always at the bottom, and chips for files read sit beside the live diff with the same weight. While Pi works, the thread now reads like a chat: newest last, one line per finished call, and Pi's own words between them.

@@ -799,6 +799,18 @@ pub fn blocks(added: u32, removed: u32, colors: &Theme) -> Div {
 /// numbers in a `gutter` wide column; selected lines carry an accent edge.
 /// Long lines wrap, or run on past the edge for a scrolling parent to show.
 pub fn code_line(line: &DiffLine, selected: bool, gutter: f32, wrap: bool, colors: &Theme) -> Div {
+    code_line_in(line, selected, gutter, wrap, None, colors)
+}
+
+/// A diff line highlighted in its file's language: "typescript", "rust".
+pub fn code_line_in(
+    line: &DiffLine,
+    selected: bool,
+    gutter: f32,
+    wrap: bool,
+    language: Option<&str>,
+    colors: &Theme,
+) -> Div {
     let background = match line.kind {
         LineKind::Added => Some(colors.added),
         LineKind::Removed => Some(colors.removed),
@@ -849,6 +861,6 @@ pub fn code_line(line: &DiffLine, selected: bool, gutter: f32, wrap: bool, color
                         text.flex_none().whitespace_nowrap()
                     }
                 })
-                .child(code_text(&line.text, colors)),
+                .child(code_text_language(&line.text, language, colors)),
         )
 }

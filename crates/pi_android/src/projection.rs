@@ -362,6 +362,9 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                         turn.handoffs.push(handoff);
                         continue;
                     }
+                    let args = observed.map_or(&block["arguments"], |tool| &tool.args);
+                    add_tool(turn, id, name, args, observed, cwd);
+                    // What a call returned follows the call.
                     if let Some(observed) = observed {
                         let path = observed.args["path"].as_str();
                         for image in pi_markdown::tool_images(&observed.images, path) {
@@ -369,8 +372,6 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                             turn.images.push(image);
                         }
                     }
-                    let args = observed.map_or(&block["arguments"], |tool| &tool.args);
-                    add_tool(turn, id, name, args, observed, cwd);
                     if observed.is_some_and(|tool| tool.finished && !tool.is_error)
                         && let Some(path) = args["path"].as_str()
                         && let Some(page) = pages.follow(name, args, &relative(path, cwd))
@@ -403,7 +404,11 @@ fn add_tool(
     cwd: &str,
 ) {
     let kind = kind(name);
+    let lines = observed.map(tool_lines).unwrap_or_default();
+    let added = lines.iter().filter(|l| l.kind == LineKind::Added).count() as u32;
+    let removed = lines.iter().filter(|l| l.kind == LineKind::Removed).count() as u32;
     let stage = turn.stage_mut(kind);
+    let step = crate::model::Flow::Tool(kind, stage.tools.len());
     stage.tools.push(crate::model::ToolActivity {
         id: id.to_owned(),
         name: name.to_owned(),
@@ -416,7 +421,15 @@ fn add_tool(
         output: observed.map_or_else(String::new, |tool| tool.output.clone()),
         finished: observed.is_some_and(|tool| tool.finished),
         failed: observed.is_some_and(|tool| tool.is_error),
+        added: if kind == StageKind::Change { added } else { 0 },
+        removed: if kind == StageKind::Change {
+            removed
+        } else {
+            0
+        },
     });
+    turn.flow.push(step);
+    let stage = turn.stage_mut(kind);
     stage.status = StageStatus::Done;
     let path = args["path"].as_str().map(|path| relative(path, cwd));
     match kind {
@@ -465,11 +478,9 @@ fn add_tool(
                 }
                 stage.what = format!("Edited {}", name_of_files(&stage.references));
             }
-            if let Some(tool) = observed {
-                let lines = tool_lines(tool);
-                stage.added += lines.iter().filter(|l| l.kind == LineKind::Added).count() as u32;
-                stage.removed +=
-                    lines.iter().filter(|l| l.kind == LineKind::Removed).count() as u32;
+            if observed.is_some() {
+                stage.added += added;
+                stage.removed += removed;
                 if !lines.is_empty() {
                     stage.diff_path = path.clone();
                     stage.diff = lines.into_iter().take(8).collect();
@@ -1501,18 +1512,28 @@ mod tests {
         ]);
         let turn = &project(&pi, facts(&[])).turns[0];
         assert!(turn.interleaved());
+        assert!(turn.streams());
+        use crate::model::StageKind::{Change, Understand};
         assert_eq!(
             turn.flow,
             [
                 Flow::Text("Writing a first version.".into()),
+                Flow::Tool(Change, 0),
                 Flow::Text("Taking a look.".into()),
+                Flow::Tool(Understand, 0),
                 Flow::Image(0),
                 Flow::Text("Too dark; brightening it.".into()),
+                Flow::Tool(Change, 1),
                 Flow::Page(0),
+                Flow::Tool(Understand, 1),
                 Flow::Image(1),
                 Flow::Text("Better now.".into()),
             ]
         );
+        // Each call keeps its own change size: the edit swapped one line.
+        let edit = turn.tool(Change, 1).expect("the edit");
+        assert_eq!(edit.name, "edit");
+        assert_eq!(turn.call_counts(), (4, 0));
         assert_eq!(turn.images[1].name, "two.png");
     }
 

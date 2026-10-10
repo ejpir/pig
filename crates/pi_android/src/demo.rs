@@ -51,7 +51,54 @@ enum Beat {
     Summary(&'static str, &'static str),
     /// The reply so far, in Markdown, as it streams in.
     Reply(String),
+    /// Pi calls a tool: its name and what it touches. The call before it ends.
+    Call(&'static str, &'static str),
+    /// Output from the running call.
+    Output(&'static str),
+    /// The running call fails.
+    Fail,
+    /// Pi says something between its calls.
+    Said(&'static str),
     Finish,
+}
+
+/// The stage a tool's calls belong to, as the projection files them.
+fn stage_of(tool: &str) -> StageKind {
+    match tool {
+        "edit" | "write" => StageKind::Change,
+        "bash" => StageKind::Verify,
+        _ => StageKind::Understand,
+    }
+}
+
+/// A call in a sample turn, in its stage and in the turn's flow.
+fn call(turn: &mut Turn, name: &str, target: &str, finished: bool) -> usize {
+    let kind = stage_of(name);
+    let stage = turn.stage_mut(kind);
+    stage.tools.push(ToolActivity {
+        id: format!("{name}-{}", stage.tools.len()),
+        name: name.into(),
+        target: target.into(),
+        output: String::new(),
+        finished,
+        failed: false,
+        added: 0,
+        removed: 0,
+    });
+    let index = stage.tools.len() - 1;
+    turn.flow.push(Flow::Tool(kind, index));
+    index
+}
+
+/// Ends the calls still running, in one stage or in all of them.
+fn finish_calls(turn: &mut Turn, kind: Option<StageKind>) {
+    for stage in &mut turn.stages {
+        if kind.is_none_or(|kind| kind == stage.kind) {
+            for tool in &mut stage.tools {
+                tool.finished = true;
+            }
+        }
+    }
 }
 
 pub const PROJECTS: [(&str, &str); 3] = [
@@ -217,6 +264,9 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
             }
             Beat::Activity(activity) => session.activity = activity.into(),
             Beat::Stage(kind, status, what) => {
+                if status != StageStatus::Live {
+                    finish_calls(session.turn_mut(), Some(kind));
+                }
                 let stage = session.turn_mut().stage_mut(kind);
                 stage.status = status;
                 stage.what = what.into();
@@ -232,6 +282,49 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
                 }
                 stage.added += added;
                 stage.removed += removed;
+                if let Some(tool) = stage
+                    .tools
+                    .iter_mut()
+                    .rev()
+                    .find(|tool| tool.target.ends_with(path))
+                {
+                    tool.added += added;
+                    tool.removed += removed;
+                }
+            }
+            Beat::Call(name, target) => {
+                let turn = session.turn_mut();
+                finish_calls(turn, None);
+                call(turn, name, target, false);
+            }
+            Beat::Output(text) => {
+                if let Some(tool) = session
+                    .turn_mut()
+                    .stages
+                    .iter_mut()
+                    .flat_map(|stage| &mut stage.tools)
+                    .find(|tool| !tool.finished)
+                {
+                    tool.output.push_str(text);
+                    tool.output.push('\n');
+                }
+            }
+            Beat::Fail => {
+                if let Some(tool) = session
+                    .turn_mut()
+                    .stages
+                    .iter_mut()
+                    .flat_map(|stage| &mut stage.tools)
+                    .find(|tool| !tool.finished)
+                {
+                    tool.finished = true;
+                    tool.failed = true;
+                }
+            }
+            Beat::Said(text) => {
+                let turn = session.turn_mut();
+                finish_calls(turn, None);
+                turn.flow.push(Flow::Text(text.into()));
             }
             Beat::Diff(lines) => session.turn_mut().stage_mut(StageKind::Change).diff = lines,
             Beat::Files(files) => session.files = files,
@@ -249,13 +342,19 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
                 })
             }
             Beat::Summary(headline, body) => {
-                session.turn_mut().summary = Some(Summary {
+                let turn = session.turn_mut();
+                if turn.streams() {
+                    // A streamed turn shows its closing words when its calls are shown.
+                    turn.flow.push(Flow::Text(format!("{headline}\n\n{body}")));
+                }
+                turn.summary = Some(Summary {
                     source: None,
                     headline: headline.into(),
                     body: body.into(),
                 })
             }
             Beat::Finish => {
+                finish_calls(session.turn_mut(), None);
                 session.state = State::Done;
                 session.activity = "Done".into();
                 session.finished_at = Some(clock_now());
@@ -427,6 +526,35 @@ fn qwen(id: SessionId) -> Session {
         Stage::planned(Verify),
         Stage::planned(HandOff),
     ];
+    // The calls in the order Pi made them, between what it said.
+    turn.flow.push(Flow::Text(
+        "I'll find where thinking signatures are checked.".into(),
+    ));
+    for file in [
+        "packages/ai/src/providers/openai-completions.ts",
+        "packages/ai/src/providers/anthropic.ts",
+        "packages/ai/src/thinking.ts",
+        "packages/ai/src/models.ts",
+        "packages/ai/src/providers/qwen.ts",
+    ] {
+        call(&mut turn, "read", file, true);
+    }
+    call(&mut turn, "grep", "signature", true);
+    call(&mut turn, "grep", "isAnthropic", true);
+    turn.flow.push(Flow::Text(
+        "The check in `readThinking` rejects an empty signature from every provider. \
+         I'll limit it to Anthropic and add a test."
+            .into(),
+    ));
+    let edit = call(
+        &mut turn,
+        "edit",
+        "packages/ai/src/providers/openai-completions.ts",
+        false,
+    );
+    let tool = &mut turn.stage_mut(Change).tools[edit];
+    tool.added = 3;
+    tool.removed = 1;
     turn.times = times([21, 51, 0, 0]);
     let mut session = session(id.0, "Qwen signatures", 0, State::Working, turn);
     session.activity = "Editing a file".into();
@@ -476,7 +604,21 @@ fn qwen(id: SessionId) -> Session {
             ]),
             Changed("openai-completions.ts", 1, 0),
             Wait(5),
+            Call("write", "packages/ai/test/qwen.test.ts"),
             Changed("qwen.test.ts", 18, 0),
+            Wait(1),
+            Call("bash", "pnpm tsc --noEmit"),
+            Output("> @pi/ai@0.9.2 typecheck"),
+            Output("> tsc --noEmit"),
+            Output(""),
+            Output("test/qwen.test.ts:14:22 - error TS18048: 'model' is possibly 'undefined'."),
+            Output(""),
+            Output("Found 1 error in test/qwen.test.ts:14"),
+            Output(""),
+            Output("Command exited with code 2"),
+            Fail,
+            Call("edit", "packages/ai/test/qwen.test.ts"),
+            Changed("qwen.test.ts", 1, 1),
             Files(vec![qwen_completions(), qwen_test()]),
             Stage(Change, Done, "Edited 2 files"),
             Stage(Verify, Live, "Waiting for you"),
@@ -501,7 +643,18 @@ fn qwen(id: SessionId) -> Session {
             ),
             Activity("Running the provider tests"),
             Stage(Verify, Live, "pnpm test --filter @pi/ai -- qwen"),
-            Wait(6),
+            Said("Now the provider tests."),
+            Call("bash", "pnpm test --filter @pi/ai -- qwen"),
+            Wait(1),
+            Output("✓ anthropic › rejects a missing signature"),
+            Wait(1),
+            Output("✓ anthropic › keeps a valid signature"),
+            Wait(2),
+            Output("✓ qwen › accepts an empty signature"),
+            Wait(1),
+            Output("▸ openai-completions › streams thinking"),
+            Wait(1),
+            Output("Tests  14 passed (14)"),
             Stage(Verify, Done, "Provider tests passed"),
             Check("pnpm test --filter @pi/ai", CheckResult::Passed),
             Activity("Writing the summary"),
@@ -959,7 +1112,7 @@ mod tests {
         // Each stage's working time, for the run line.
         assert_eq!(
             session.turn().unwrap().times,
-            [21, 60, 6, 3].map(Duration::from_secs)
+            [21, 61, 6, 3].map(Duration::from_secs)
         );
     }
 

@@ -668,6 +668,9 @@ impl PhoneApp {
         // Review and the report card belong to the session the user runs.
         let ending =
             (index == last && !running && !read_only).then(|| self.ending(session, index, cx));
+        // While Pi works its calls stream in between its words; a finished
+        // run folds them under its line until Show brings them back.
+        let streamed = turn.streams() && (live || self.expanded_streams.contains(&(id, index)));
         div()
             .id(("turn", index))
             .min_w_0()
@@ -678,13 +681,20 @@ impl PhoneApp {
                 turn.pt(px(24.)).border_t_1().border_color(colors.line)
             })
             .child(self.prompt(id, index, turn, live, many, colors, cx))
-            .child(if live {
+            .child(if live && turn.streams() {
+                div()
+            } else if live {
                 self.stations(session, index, turn, true, colors, cx)
             } else {
                 self.turn_activity(id, index, turn, false, colors, cx)
             })
+            .when(!live, |column| {
+                column.children(self.calls_fold(id, index, turn, colors, cx))
+            })
             .map(|column| {
-                if turn.interleaved() {
+                if streamed {
+                    column.child(self.stream(session, index, live, colors, cx))
+                } else if turn.interleaved() {
                     column.children(self.flow(id, index, turn, colors, cx))
                 } else {
                     column
@@ -807,13 +817,15 @@ impl PhoneApp {
                     self.compacted(id, index, n, summary, colors, cx)
                         .into_any_element(),
                 ),
+                // Calls show in the thread only as a stream.
+                Flow::Tool(..) => None,
             })
             .collect()
     }
 
     /// Where Pi's context was summarized: a line across the thread, and the
     /// summary Pi works from after it, when tapped.
-    fn compacted(
+    pub(crate) fn compacted(
         &self,
         id: SessionId,
         index: usize,
@@ -1030,7 +1042,7 @@ impl PhoneApp {
             )
             .when(expanded, |body| {
                 body.child(
-                    self.stations_of(id, None, index, turn, false, colors, cx)
+                    self.stations_of(id, None, index, turn, false, false, colors, cx)
                         .mt(px(16.)),
                 )
             })
@@ -1045,20 +1057,31 @@ impl PhoneApp {
         colors: &Theme,
         cx: &Context<Self>,
     ) -> Div {
-        self.stations_of(session.id, Some(session), index, turn, live, colors, cx)
+        self.stations_of(
+            session.id,
+            Some(session),
+            index,
+            turn,
+            live,
+            false,
+            colors,
+            cx,
+        )
     }
 
     /// The run line down the gutter: a station per stage with its icon, and
     /// under each what Pi did. Stages ahead are dashed; a hand marks a run
-    /// waiting for you.
+    /// waiting for you. `glance` leaves out the live diff and output, which the
+    /// stream shows, and marks each stage as opening its calls.
     #[allow(clippy::too_many_arguments)]
-    fn stations_of(
+    pub(crate) fn stations_of(
         &self,
         id: SessionId,
         session: Option<&Session>,
         index: usize,
         turn: &Turn,
         live: bool,
+        glance: bool,
         colors: &Theme,
         cx: &Context<Self>,
     ) -> Div {
@@ -1085,7 +1108,15 @@ impl PhoneApp {
                     let session = session.expect("a waiting session");
                     waiting_row(session, next.is_some(), colors)
                 } else {
-                    stage_row(stage, turn, index, stage_index, next.is_some(), colors)
+                    stage_row(
+                        stage,
+                        turn,
+                        index,
+                        stage_index,
+                        next.is_some(),
+                        glance,
+                        colors,
+                    )
                 };
                 div()
                     .id(("stage-details", stage_index))
@@ -1535,6 +1566,7 @@ pub(crate) fn stage_row(
     turn_index: usize,
     stage_index: usize,
     line_below: bool,
+    glance: bool,
     colors: &Theme,
 ) -> Div {
     let hue = ui::stage_hue(stage.kind, colors);
@@ -1570,10 +1602,12 @@ pub(crate) fn stage_row(
     }
     let changed = stage.added > 0 || stage.removed > 0;
     let time = turn.time(stage.kind);
-    let live_diff = stage.kind == StageKind::Change
+    let live_diff = !glance
+        && stage.kind == StageKind::Change
         && stage.status == StageStatus::Live
         && !stage.diff.is_empty();
-    let references = if live_diff {
+    // At a glance the live stage says what it is doing; its files are in the stream.
+    let references = if live_diff || (glance && stage.status == StageStatus::Live) {
         &[][..]
     } else {
         &stage.references[..]
@@ -1638,7 +1672,7 @@ pub(crate) fn stage_row(
                     .map(|line| ui::code_line(line, false, 40., false, colors)),
             )
     });
-    let output = (stage.status == StageStatus::Live)
+    let output = (!glance && stage.status == StageStatus::Live)
         .then(|| stage.tools.iter().rev().find(|t| !t.output.is_empty()))
         .flatten()
         .map(|tool| {
@@ -1690,6 +1724,9 @@ pub(crate) fn stage_row(
                         } else {
                             title
                         }
+                    })
+                    .when(glance, |title| {
+                        title.child(icon("chev_r", 16., colors.faint).ml(px(12.)))
                     }),
             )
             .child(meta(stage.what.clone(), colors).mt(px(2.)))
@@ -1785,6 +1822,11 @@ fn working_strip(
     let id = session.id;
     let waiting = !compacting && session.state == State::NeedsYou;
     let status = composer_status(session, compacting);
+    let last = session.turns.len().saturating_sub(1);
+    let stage = session
+        .turns
+        .last()
+        .and_then(|turn| turn.live_stage().map(|kind| (turn, kind)));
     let stop = div()
         .id("stop")
         .relative()
@@ -1821,19 +1863,46 @@ fn working_strip(
         .border_b_0()
         .border_color(colors.line_strong)
         .rounded_t(px(24.))
-        .child(ui::ring_dot(if waiting {
-            colors.wait
-        } else {
-            colors.read
-        }))
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(14.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(status),
-        )
+        .map(|strip| match (waiting || compacting, &stage) {
+            // The run line folded to four segments, and the stage it is in.
+            (false, Some((turn, kind))) => {
+                strip.child(super::stream::segments(turn, colors)).child(
+                    div()
+                        .flex_none()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(ui::stage_hue(*kind, colors))
+                        .child(kind.name(StageStatus::Live)),
+                )
+            }
+            _ => strip
+                .child(ui::ring_dot(if waiting {
+                    colors.wait
+                } else {
+                    colors.read
+                }))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(status),
+                ),
+        })
         .child(meta(duration_label(session.elapsed), colors).flex_1())
+        .when(stage.is_some() && !waiting, |strip| {
+            strip.child(
+                ui::tap("run-line", "chev_u", colors)
+                    .size(px(40.))
+                    .debug_selector(|| "run-line".into())
+                    .aria_label("Show the run line")
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.open_sheet(Sheet::Run(id, last), cx)
+                        }),
+                    ),
+            )
+        })
         .when(waiting, |strip| {
             strip.child(
                 ui::button("answer", Button::Primary, None, "Answer", true, colors).on_click(

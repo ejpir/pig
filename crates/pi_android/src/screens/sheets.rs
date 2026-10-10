@@ -64,6 +64,8 @@ impl PhoneApp {
             Sheet::Models => self.models_sheet(&colors, cx),
             Sheet::Resources => self.resources_sheet(&colors, cx),
             Sheet::Activity(id, turn, kind) => self.activity_sheet(id, turn, kind, &colors, cx),
+            Sheet::Call(id, turn, kind, n) => self.call_sheet(id, turn, kind, n, &colors, cx),
+            Sheet::Run(id, turn) => self.run_sheet(id, turn, &colors, cx),
             Sheet::Delete(id) => self.delete_sheet(id, &colors, cx),
             Sheet::RestoreHistory(id, index) => self.restore_history_sheet(id, index, &colors, cx),
             Sheet::EnableJj(id) => self.enable_jj_sheet(id, &colors, cx),
@@ -193,6 +195,7 @@ impl PhoneApp {
                             .on_click(cx.listener(|this, _, _, cx| this.close_sheet(cx))),
                     )
             }
+            Sheet::Call(id, turn, kind, n) => self.call_header(id, turn, kind, n, &colors, cx),
             Sheet::Computers => div()
                 .text_size(px(22.))
                 .line_height(px(28.))
@@ -216,6 +219,22 @@ impl PhoneApp {
                         .and_then(|turn| activity_stage(turn, kind))
                         .map_or("Activity", |stage| stage.kind.name(stage.status))
                         .into(),
+                    Sheet::Call(id, turn, kind, n) => self
+                        .session(id)
+                        .and_then(|s| s.turns.get(turn))
+                        .and_then(|turn| turn.tool(kind, n))
+                        .map_or_else(
+                            || "Call".into(),
+                            |tool| {
+                                format!(
+                                    "{} {}",
+                                    super::stream::verb(&tool.name, tool.finished),
+                                    super::stream::target(tool)
+                                )
+                                .into()
+                            },
+                        ),
+                    Sheet::Run(..) => "Run so far".into(),
                     Sheet::Delete(_) => "Delete session?".into(),
                     Sheet::RestoreHistory(_, _) => "Restore project files?".into(),
                     Sheet::EnableJj(_) => "Turn on jj file history?".into(),
@@ -817,100 +836,476 @@ impl PhoneApp {
                             .child(action)
                     }),
             )
-            .children(stage.tools.iter().enumerate().map(|(index, tool)| {
-                let target = tool.target.clone();
-                let output = tool.output.clone();
-                let displayed_output = tool.output_for_display().into_owned();
-                let status = if tool.failed {
-                    "Failed"
-                } else if tool.finished {
-                    "Finished"
-                } else {
-                    "Running…"
-                };
-                ui::card(colors)
-                    .mt(px(12.))
-                    .p(px(14.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(ui::label(tool.name.clone(), colors).flex_1())
-                            .child(ui::hint(status, colors).text_color(if tool.failed {
-                                colors.coral
-                            } else {
-                                colors.muted
-                            })),
-                    )
-                    .child(
-                        div()
-                            .mt(px(2.))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(ui::mono(tool.target.clone(), 12.5).flex_1().min_w_0())
-                            .child(
-                                ui::tap(("copy-command", index), "copy", colors)
-                                    .aria_label("Copy command")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                            target.clone(),
-                                        ));
-                                        this.notify_user("Copied", cx);
-                                    })),
-                            ),
-                    )
-                    .when(!tool.output.is_empty(), |card| {
-                        card.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(ui::label("Output", colors).flex_1())
-                                .child(self.wrap_toggle(("wrap-output", index), cx))
-                                .child(
-                                    ui::tap(("copy-output", index), "copy", colors)
-                                        .aria_label("Copy output")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                                output.clone(),
-                                            ));
-                                            this.notify_user("Copied output", cx);
-                                        })),
-                                ),
-                        )
-                        .child(if wrap {
-                            ui::mono(displayed_output.clone(), 12.)
-                                .line_height(relative(1.5))
-                                .into_any_element()
-                        } else {
-                            div()
-                                .id(("output-lines", index))
-                                .overflow_x_scroll()
-                                .child(
-                                    ui::mono(displayed_output.clone(), 12.)
-                                        .line_height(relative(1.5))
-                                        .whitespace_nowrap(),
-                                )
-                                .into_any_element()
-                        })
-                    })
-                    .when(tool.output.is_empty(), |card| {
-                        card.child(ui::hint(
-                            if tool.finished {
-                                "No output was recorded."
-                            } else {
-                                "Waiting for output…"
-                            },
-                            colors,
-                        ))
-                    })
-            }))
+            .children(
+                stage
+                    .tools
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tool)| self.tool_card(index, tool, wrap, colors, cx).mt(px(12.))),
+            )
             .when(
                 stage.tools.is_empty() && stage.references.is_empty(),
                 |body| body.child(ui::hint("No tool calls recorded for this stage.", colors)),
             )
+    }
+
+    /// A tool call: its name, how it went, what it ran with a copy button,
+    /// and its output.
+    fn tool_card(
+        &self,
+        index: usize,
+        tool: &crate::model::ToolActivity,
+        wrap: bool,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let target = tool.target.clone();
+        let output = tool.output.clone();
+        let displayed_output = tool.output_for_display().into_owned();
+        let status = if tool.failed {
+            "Failed"
+        } else if tool.finished {
+            "Finished"
+        } else {
+            "Running…"
+        };
+        ui::card(colors)
+            .mt(px(12.))
+            .p(px(14.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(ui::label(tool.name.clone(), colors).flex_1())
+                    .child(ui::hint(status, colors).text_color(if tool.failed {
+                        colors.coral
+                    } else {
+                        colors.muted
+                    })),
+            )
+            .child(
+                div()
+                    .mt(px(2.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(ui::mono(tool.target.clone(), 12.5).flex_1().min_w_0())
+                    .child(
+                        ui::tap(("copy-command", index), "copy", colors)
+                            .aria_label("Copy command")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    target.clone(),
+                                ));
+                                this.notify_user("Copied", cx);
+                            })),
+                    ),
+            )
+            .when(!tool.output.is_empty(), |card| {
+                card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(ui::label("Output", colors).flex_1())
+                        .child(self.wrap_toggle(("wrap-output", index), cx))
+                        .child(
+                            ui::tap(("copy-output", index), "copy", colors)
+                                .aria_label("Copy output")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        output.clone(),
+                                    ));
+                                    this.notify_user("Copied output", cx);
+                                })),
+                        ),
+                )
+                .child(if wrap {
+                    ui::mono(displayed_output.clone(), 12.)
+                        .line_height(relative(1.5))
+                        .into_any_element()
+                } else {
+                    div()
+                        .id(("output-lines", index))
+                        .overflow_x_scroll()
+                        .child(
+                            ui::mono(displayed_output.clone(), 12.)
+                                .line_height(relative(1.5))
+                                .whitespace_nowrap(),
+                        )
+                        .into_any_element()
+                })
+            })
+            .when(tool.output.is_empty(), |card| {
+                card.child(ui::hint(
+                    if tool.finished {
+                        "No output was recorded."
+                    } else {
+                        "Waiting for output…"
+                    },
+                    colors,
+                ))
+            })
+    }
+
+    /// One call opened from the thread: what it ran, its whole output, what
+    /// Pi did next, and the call to copy or ask about.
+    fn call_sheet(
+        &self,
+        id: SessionId,
+        turn_index: usize,
+        kind: StageKind,
+        tool_index: usize,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let Some(session) = self.session(id) else {
+            return div();
+        };
+        let Some(turn) = session.turns.get(turn_index) else {
+            return div();
+        };
+        let Some(tool) = turn.tool(kind, tool_index) else {
+            return div();
+        };
+        let wrap = self.wrap_lines(cx);
+        let displayed = tool.output_for_display().into_owned();
+        let command = match tool.name.as_str() {
+            "bash" => format!("$ {}", tool.target),
+            "grep" | "find" => format!("{} “{}”", tool.name, tool.target),
+            _ => tool.target.clone(),
+        };
+        let next = super::stream::next_call(turn, kind, tool_index);
+        let output = tool.output.clone();
+        let asked = format!("{command}\n\n{displayed}");
+        let asked_name = format!("{} output", super::stream::target(tool));
+        div()
+            .pb(px(12.))
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .mt(px(12.))
+                    .px(px(12.))
+                    .py(px(12.))
+                    .rounded(px(12.))
+                    .bg(colors.panel)
+                    .child(ui::mono(command.clone(), 13.).text_color(colors.text)),
+            )
+            .when(tool.added > 0 || tool.removed > 0, |body| {
+                body.child(
+                    ui::hint(
+                        format!("{} lines added · {} removed", tool.added, tool.removed),
+                        colors,
+                    )
+                    .mt(px(8.)),
+                )
+            })
+            .child(
+                div()
+                    .mt(px(20.))
+                    .mb(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(ui::label("Output", colors).flex_1())
+                    .child(self.wrap_toggle("wrap-call-output", cx)),
+            )
+            .child(
+                div()
+                    .id("call-output")
+                    .debug_selector(|| "call-output".into())
+                    .p(px(12.))
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(colors.line)
+                    .bg(colors.canvas)
+                    .when(!wrap, |output| output.overflow_x_scroll())
+                    .map(|box_| {
+                        if displayed.trim().is_empty() {
+                            box_.child(ui::hint(
+                                if tool.finished {
+                                    "No output was recorded."
+                                } else {
+                                    "Waiting for output…"
+                                },
+                                colors,
+                            ))
+                        } else {
+                            box_.children(displayed.lines().map(|line| {
+                                div()
+                                    .font_family(MONO)
+                                    .text_size(px(12.))
+                                    .min_h(px(18.))
+                                    .line_height(px(18.))
+                                    .when(!wrap, |line| line.whitespace_nowrap())
+                                    .text_color(colors.plain)
+                                    .child(super::stream::output_text(line, colors))
+                            }))
+                        }
+                    }),
+            )
+            .children(next.map(|(next_kind, next_index, next_tool)| {
+                let label = format!(
+                    "{} {}",
+                    super::stream::verb(&next_tool.name, next_tool.finished),
+                    super::stream::target(next_tool)
+                );
+                div()
+                    .id("call-next")
+                    .debug_selector(|| "call-next".into())
+                    .mt(px(16.))
+                    .min_h(px(48.))
+                    .px(px(16.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .rounded(px(12.))
+                    .bg(colors.panel)
+                    .active(|style| style.bg(colors.selected))
+                    .child(icon(
+                        super::stream::glyph(&next_tool.name),
+                        16.,
+                        ui::stage_hue(next_kind, colors),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .text_color(colors.secondary)
+                            .child(if tool.failed {
+                                format!("Pi went on to: {label}")
+                            } else {
+                                format!("Next: {label}")
+                            }),
+                    )
+                    .child(icon("chev_r", 16., colors.faint))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_sheet(Sheet::Call(id, turn_index, next_kind, next_index), cx)
+                    }))
+            }))
+            .child(
+                div()
+                    .mt(px(16.))
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        ui::button(
+                            "copy-call-output",
+                            Button::Plain,
+                            Some("copy"),
+                            "Copy output",
+                            false,
+                            colors,
+                        )
+                        .flex_1()
+                        .debug_selector(|| "copy-call-output".into())
+                        .when(output.is_empty(), |button| button.opacity(0.5))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !output.is_empty() {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    output.clone(),
+                                ));
+                                this.notify_user("Copied output", cx);
+                            }
+                        })),
+                    )
+                    // Synthetic subagent sessions are read-only and have no visible composer.
+                    .when(
+                        self.store
+                            .as_ref()
+                            .is_some_and(|store| store.session(id).is_some()),
+                        |actions| {
+                            actions.child(
+                                ui::button(
+                                    "ask-about-call",
+                                    Button::Plain,
+                                    Some("clip"),
+                                    "Ask about this",
+                                    false,
+                                    colors,
+                                )
+                                .flex_1()
+                                .bg(colors.tint(colors.accent))
+                                .border_color(gpui::transparent_black())
+                                .text_color(colors.accent)
+                                .debug_selector(|| "ask-about-call".into())
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        if !this
+                                            .store
+                                            .as_ref()
+                                            .is_some_and(|store| store.session(id).is_some())
+                                        {
+                                            return;
+                                        }
+                                        let composer = this.thread_composer(id, window, cx);
+                                        let attachment = crate::composer::Attachment::File {
+                                            name: asked_name.clone(),
+                                            size: crate::app::size_label(asked.len() as u64),
+                                            contents: asked.clone(),
+                                        };
+                                        let attached = composer.update(cx, |composer, cx| {
+                                            composer.try_attach(attachment, cx)
+                                        });
+                                        match attached {
+                                            Ok(()) => {
+                                                this.close_sheet(cx);
+                                                composer.update(cx, |composer, cx| {
+                                                    composer.focus(window, cx)
+                                                });
+                                            }
+                                            Err(error) => this.notify_user(error, cx),
+                                        }
+                                    },
+                                )),
+                            )
+                        },
+                    ),
+            )
+    }
+
+    /// The call sheet's header: the call's icon, what it did, where, and how
+    /// it ended.
+    fn call_header(
+        &self,
+        id: SessionId,
+        turn_index: usize,
+        kind: StageKind,
+        tool_index: usize,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let session = self.session(id);
+        let tool = session
+            .and_then(|session| session.turns.get(turn_index))
+            .and_then(|turn| turn.tool(kind, tool_index));
+        let (glyph, title, hue, badge) = match tool {
+            Some(tool) => {
+                let hue = if tool.failed {
+                    colors.coral
+                } else {
+                    ui::stage_hue(kind, colors)
+                };
+                let badge = match (tool.finished, tool.failed) {
+                    (false, _) => ("Running".to_owned(), ui::stage_hue(kind, colors)),
+                    (true, true) => (
+                        super::stream::exit_code(&tool.output)
+                            .map_or_else(|| "Failed".to_owned(), |code| format!("Exit {code}")),
+                        colors.coral,
+                    ),
+                    (true, false) => ("Done".to_owned(), colors.green),
+                };
+                (
+                    super::stream::glyph(&tool.name),
+                    format!(
+                        "{} {}",
+                        super::stream::verb(&tool.name, tool.finished),
+                        super::stream::target(tool)
+                    ),
+                    hue,
+                    Some(badge),
+                )
+            }
+            None => ("spark", "Call".to_owned(), colors.muted, None),
+        };
+        let place = session.map_or_else(String::new, |session| {
+            format!("{} · Turn {}", session.folder, turn_index + 1)
+        });
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(ui::tile_box(32., 10., hue, colors).child(icon(glyph, 16., hue)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .line_height(px(24.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .line_height(px(16.))
+                            .text_color(colors.muted)
+                            .truncate()
+                            .child(place),
+                    ),
+            )
+            .children(badge.map(|(text, hue)| {
+                div()
+                    .h(px(24.))
+                    .px(px(10.))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .rounded(px(12.))
+                    .bg(colors.tint(hue))
+                    .text_color(hue)
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(text)
+            }))
+            .child(
+                ui::tap("close-sheet", "x", colors)
+                    .mr(px(-12.))
+                    .on_click(cx.listener(|this, _, _, cx| this.close_sheet(cx))),
+            )
+    }
+
+    /// The run line pulled up from the working strip: a station per stage,
+    /// each opening what Pi did in it.
+    fn run_sheet(
+        &self,
+        id: SessionId,
+        turn_index: usize,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let Some(session) = self.session(id) else {
+            return div();
+        };
+        let Some(turn) = session.turns.get(turn_index) else {
+            return div();
+        };
+        let (calls, failed) = turn.call_counts();
+        let mut said = vec![crate::model::duration_label(session.elapsed)];
+        said.push(if calls == 1 {
+            "1 call".to_owned()
+        } else {
+            format!("{calls} calls")
+        });
+        if failed > 0 {
+            said.push(format!("{failed} failed"));
+        }
+        let changing = turn
+            .stages
+            .iter()
+            .find(|stage| stage.kind == StageKind::Change)
+            .map_or(0, |stage| stage.references.len());
+        let live = session.state.is_running() && turn_index + 1 == session.turns.len();
+        match (changing, live) {
+            (0, _) => {}
+            (1, true) => said.push("1 file changing".into()),
+            (count, true) => said.push(format!("{count} files changing")),
+            (1, false) => said.push("1 file changed".into()),
+            (count, false) => said.push(format!("{count} files changed")),
+        }
+        div()
+            .pb(px(16.))
+            .min_w_0()
+            .child(ui::hint(said.join(" · "), colors).mb(px(20.)))
+            .child(self.stations_of(id, Some(session), turn_index, turn, live, true, colors, cx))
     }
 
     /// The models to offer, with a detail: the computer's once a session

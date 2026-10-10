@@ -28,6 +28,11 @@ pub const SCREENS: &[&str] = &[
     "search",
     "start",
     "working",
+    "verifying",
+    "evening-verifying",
+    "call",
+    "run-line",
+    "calls-shown",
     "waiting",
     "done",
     "many-files",
@@ -108,6 +113,8 @@ impl PhoneApp {
         self.closing_sheet = None;
         self.sheet_motion = crate::motion::SwipeMotion::at(1.);
         self.expanded_turns.clear();
+        self.expanded_streams.clear();
+        self.expanded_calls.clear();
         self.searching = false;
         self.preview_models.clear();
         self.expanded.clear();
@@ -270,6 +277,8 @@ impl PhoneApp {
                         ),
                         finished: true,
                         failed: false,
+                        added: 0,
+                        removed: 0,
                     });
                 }
                 self.show_session(QWEN, window, cx);
@@ -380,6 +389,31 @@ impl PhoneApp {
                 self.show_session(QWEN, window, cx);
             }
             "working" => self.show_session(QWEN, window, cx),
+            // The provider tests running, their output streaming in.
+            "verifying" | "call" | "evening-verifying" => {
+                if name == "evening-verifying" {
+                    self.update_prefs(cx, |prefs| prefs.appearance = Appearance::Evening);
+                    self.apply_theme(window, cx);
+                }
+                if let Some(store) = &mut self.store {
+                    store.tick(Duration::from_secs(10));
+                    store.answer(QWEN, Answer::AllowOnce);
+                    store.tick(Duration::from_secs(5));
+                }
+                self.show_session(QWEN, window, cx);
+                if name == "call" {
+                    self.open_sheet(Sheet::Call(QWEN, 0, StageKind::Verify, 0), cx);
+                }
+            }
+            "run-line" => {
+                self.show_session(QWEN, window, cx);
+                self.open_sheet(Sheet::Run(QWEN, 0), cx);
+            }
+            "calls-shown" => {
+                finish(self);
+                self.expanded_streams.insert((QWEN, 0));
+                self.show_session(QWEN, window, cx);
+            }
             "waiting" => {
                 if let Some(store) = &mut self.store {
                     store.tick(Duration::from_secs(10));
@@ -2053,6 +2087,141 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(cx.debug_bounds("sheet-header").unwrap(), before);
         assert!(before.top() >= gpui::px(0.) && before.bottom() <= gpui::px(854.));
+    }
+
+    #[gpui::test]
+    fn streamed_calls_fold_open_and_lead_to_their_sheets(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(412.), gpui::px(915.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("working", window, cx)));
+        cx.run_until_parked();
+        // The run streams: no stations in the thread, the reads folded.
+        assert!(cx.debug_bounds("stage-details").is_none());
+        let folded = cx.debug_bounds("folded-calls").unwrap();
+        cx.simulate_click(folded.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let opened: Vec<_> = app.expanded_calls.iter().copied().collect();
+            assert!(
+                matches!(opened.as_slice(), [(QWEN, 0, 1 | 6)]),
+                "{opened:?}"
+            );
+        });
+        let call = cx.debug_bounds("call").unwrap();
+        cx.simulate_click(call.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(
+                matches!(app.sheet, Some(Sheet::Call(QWEN, 0, _, _))),
+                "{:?}",
+                app.sheet
+            )
+        });
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("working", window, cx)));
+        cx.run_until_parked();
+        let run_line = cx.debug_bounds("run-line").unwrap();
+        cx.simulate_click(run_line.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.sheet, Some(Sheet::Run(QWEN, 0)))
+        });
+    }
+
+    #[gpui::test]
+    fn readonly_subagent_call_sheet_has_no_attach_action(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(412.), gpui::px(915.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("subagent", window, cx)));
+        cx.run_until_parked();
+        let own = app.read_with(cx, |app, _| app.subagent_ids[&(QWEN, "12".into())]);
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.subagent_sessions.contains_key(&own));
+                app.open_sheet(Sheet::Call(own, 0, StageKind::Understand, 0), cx);
+                app.sheet_motion.finish();
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("call-output").is_some());
+        assert!(cx.debug_bounds("ask-about-call").is_none());
+        let copy = cx
+            .debug_bounds("copy-call-output")
+            .expect("read-only calls still copy");
+        cx.simulate_click(copy.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some("…")
+        );
+        let next = cx
+            .debug_bounds("call-next")
+            .expect("read-only calls still navigate");
+        cx.simulate_click(next.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(
+                app.sheet,
+                Some(Sheet::Call(own, 0, StageKind::Understand, 1))
+            );
+            assert!(
+                !app.threads.contains_key(&own),
+                "no invisible synthetic composer"
+            );
+        });
+        assert!(cx.debug_bounds("ask-about-call").is_none());
+    }
+
+    #[gpui::test]
+    fn editable_call_sheet_attaches_output_to_its_composer(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(412.), gpui::px(915.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("call", window, cx)));
+        cx.run_until_parked();
+        let expected = app.read_with(cx, |app, _| {
+            let tool = app.store.as_ref().unwrap().session(QWEN).unwrap().turns[0]
+                .tool(StageKind::Verify, 0)
+                .unwrap();
+            format!("$ {}\n\n{}", tool.target, tool.output_for_display())
+        });
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.sheet_motion.finish();
+                app.sheet_scroll
+                    .set_offset(gpui::point(gpui::px(0.), gpui::px(-10_000.)));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let ask = cx
+            .debug_bounds("ask-about-call")
+            .expect("editable calls can attach");
+        cx.simulate_click(ask.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, cx| {
+            assert!(app.sheet.is_none(), "attaching closes the sheet");
+            assert_eq!(app.route(), Route::Thread(QWEN));
+            let composer = app.threads[&QWEN].read(cx);
+            let [Attachment::File { contents, .. }] = composer.attachments() else {
+                panic!("expected one output attachment");
+            };
+            assert_eq!(contents, &expected);
+        });
+    }
+
+    #[gpui::test]
+    fn a_finished_run_folds_its_calls_until_shown(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(412.), gpui::px(915.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("done", window, cx)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("call").is_none());
+        let fold = cx.debug_bounds("calls-fold").unwrap();
+        cx.simulate_click(fold.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(app.expanded_streams.contains(&(QWEN, 0)))
+        });
+        assert!(cx.debug_bounds("call").is_some());
     }
 
     #[gpui::test]

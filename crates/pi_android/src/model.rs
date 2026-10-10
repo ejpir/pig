@@ -144,6 +144,9 @@ pub struct ToolActivity {
     pub output: String,
     pub finished: bool,
     pub failed: bool,
+    /// Lines this call added and removed, for an edit or a write.
+    pub added: u32,
+    pub removed: u32,
 }
 
 impl ToolActivity {
@@ -271,12 +274,40 @@ pub enum Flow {
     /// Pi's context was summarized here, to make room: the summary. What came
     /// before stays in the thread.
     Compacted(String),
+    /// A tool Pi called: `stages[stage].tools[index]` of the stage of that kind.
+    Tool(StageKind, usize),
 }
 
 impl Turn {
     /// Whether pictures or pages sit between Pi's words, so the reply reads in order.
     pub fn interleaved(&self) -> bool {
-        self.flow.iter().any(|step| !matches!(step, Flow::Text(_)))
+        self.flow
+            .iter()
+            .any(|step| !matches!(step, Flow::Text(_) | Flow::Tool(..)))
+    }
+
+    /// Whether the order of Pi's tool calls is known, so they can stream into
+    /// the thread between its words.
+    pub fn streams(&self) -> bool {
+        self.flow.iter().any(|step| matches!(step, Flow::Tool(..)))
+    }
+
+    /// A tool call the flow names.
+    pub fn tool(&self, kind: StageKind, index: usize) -> Option<&ToolActivity> {
+        self.stages
+            .iter()
+            .find(|stage| stage.kind == kind)
+            .and_then(|stage| stage.tools.get(index))
+    }
+
+    /// How many tools Pi called, and how many of those failed.
+    pub fn call_counts(&self) -> (usize, usize) {
+        self.stages
+            .iter()
+            .flat_map(|stage| &stage.tools)
+            .fold((0, 0), |(calls, failed), tool| {
+                (calls + 1, failed + usize::from(tool.failed))
+            })
     }
 
     /// Notes a page that was written or changed: shown once, where it last changed.

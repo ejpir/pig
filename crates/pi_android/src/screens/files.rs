@@ -14,7 +14,7 @@ use gpui::{Context, Window, div, prelude::*, px};
 const LINES: usize = 3_000;
 
 /// The language a file's extension names, for highlighting.
-fn language(name: &str) -> Option<&'static str> {
+pub(crate) fn language(name: &str) -> Option<&'static str> {
     Some(match name.rsplit_once('.')?.1 {
         "rs" => "rust",
         "ts" | "mts" | "cts" => "typescript",

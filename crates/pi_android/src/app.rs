@@ -92,6 +92,10 @@ pub enum Sheet {
     Models,
     Resources,
     Activity(SessionId, usize, StageKind),
+    /// One tool call: session, turn, its stage, which of the stage's tools.
+    Call(SessionId, usize, StageKind, usize),
+    /// The run line of a turn, pulled up from the working strip.
+    Run(SessionId, usize),
     Delete(SessionId),
     RestoreHistory(SessionId, usize),
     EnableJj(SessionId),
@@ -259,6 +263,10 @@ pub struct PhoneApp {
     pub(crate) expanded_prompts: HashSet<(SessionId, usize)>,
     /// Compaction summaries opened in the thread: session, turn, step of its flow.
     pub(crate) expanded_compactions: HashSet<(SessionId, usize, usize)>,
+    /// Finished turns whose calls are shown in the thread again.
+    pub(crate) expanded_streams: HashSet<(SessionId, usize)>,
+    /// Folded runs of calls opened in the thread: session, turn, first step.
+    pub(crate) expanded_calls: HashSet<(SessionId, usize, usize)>,
     /// Subagents whose screen was opened, drawn like a session: an ID of the
     /// phone's own for each (session, conversation), and how it is now.
     pub(crate) subagent_ids: HashMap<(SessionId, String), SessionId>,
@@ -521,6 +529,8 @@ impl PhoneApp {
             expanded_turns: HashMap::new(),
             expanded_prompts: HashSet::new(),
             expanded_compactions: HashSet::new(),
+            expanded_streams: HashSet::new(),
+            expanded_calls: HashSet::new(),
             subagent_ids: HashMap::new(),
             subagent_sessions: HashMap::new(),
             questions_later: HashSet::new(),
@@ -2002,6 +2012,8 @@ impl PhoneApp {
                         output: String::new(),
                         finished: false,
                         failed: false,
+                        added: 0,
+                        removed: 0,
                     });
                 }
                 let tool = stage.tools.last_mut().unwrap();
@@ -2219,6 +2231,8 @@ impl PhoneApp {
             self.enabling_jj = None;
         }
         self.expanded_turns.retain(|(session, _), _| *session != id);
+        self.expanded_streams.retain(|(session, _)| *session != id);
+        self.expanded_calls.retain(|(session, _, _)| *session != id);
         self.scrolls.remove(&Route::Thread(id));
         self.thread_lists.remove(&id);
         self.thread_list_shapes.remove(&id);

@@ -3,6 +3,7 @@
 
 mod connect;
 mod files;
+pub(crate) use files::language;
 mod history;
 mod pages;
 pub(crate) use pages::ShownImage;
@@ -12,6 +13,7 @@ mod sessions;
 mod settings;
 mod sheets;
 mod start;
+mod stream;
 mod subagents;
 mod thread;
 
