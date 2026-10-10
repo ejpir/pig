@@ -58,16 +58,27 @@ pub(crate) fn private_file(path: &std::path::Path) -> Result<File> {
     }
     Ok(options.open(path)?)
 }
-fn write_record(writer: &mut impl Write, record: &Value) -> Result<()> {
+const LEGACY_PROTOCOL_VERSION: u32 = 1;
+const LEGACY_MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+
+fn write_record_with_limit(
+    writer: &mut impl Write,
+    record: &Value,
+    max_record_bytes: usize,
+) -> Result<()> {
     let bytes = serde_json::to_vec(record)?;
     ensure!(
-        bytes.len() < MAX_RECORD_BYTES,
-        "Remote record exceeds 16 MiB"
+        bytes.len() < max_record_bytes,
+        "Remote record exceeds {} MiB",
+        max_record_bytes / (1024 * 1024)
     );
     writer.write_all(&bytes)?;
     writer.write_all(b"\n")?;
     writer.flush()?;
     Ok(())
+}
+fn write_record(writer: &mut impl Write, record: &Value) -> Result<()> {
+    write_record_with_limit(writer, record, MAX_RECORD_BYTES)
 }
 fn spawn_daemon(target: &SshTarget) -> Result<()> {
     let command = |breakaway: bool| -> Result<ProcessCommand> {
@@ -124,7 +135,106 @@ fn spawn_daemon(target: &SshTarget) -> Result<()> {
     });
     Ok(())
 }
-fn attach(target: &SshTarget) -> Result<TcpStream> {
+struct Attachment {
+    reader: BufReader<TcpStream>,
+    prefetched: Vec<Value>,
+    daemon_version: u32,
+    max_record_bytes: usize,
+}
+
+fn read_endpoint(path: &std::path::Path, target: &SshTarget) -> Result<Endpoint> {
+    let endpoint: Endpoint = serde_json::from_slice(&fs::read(path)?)?;
+    ensure!(
+        endpoint.cwd == target.cwd && endpoint.backend == target.backend,
+        "Remote session identity mismatch"
+    );
+    Ok(endpoint)
+}
+
+fn session_lock_is_held(endpoint_path: &std::path::Path) -> Result<bool> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(endpoint_path.with_extension("lock"))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(false),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn connect_endpoint(target: &SshTarget, endpoint: &Endpoint) -> Result<BufReader<TcpStream>> {
+    let stream = TcpStream::connect_timeout(
+        &([127, 0, 0, 1], endpoint.port).into(),
+        Duration::from_secs(2),
+    )?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let mut reader = BufReader::new(stream);
+    write_record_with_limit(
+        reader.get_mut(),
+        &json!({"type":"hello", "token":endpoint.token, "version":endpoint.version, "cwd":target.cwd, "backend":target.backend}),
+        if endpoint.version == LEGACY_PROTOCOL_VERSION {
+            LEGACY_MAX_RECORD_BYTES
+        } else {
+            MAX_RECORD_BYTES
+        },
+    )?;
+    let hello = read_record(&mut reader)?.context("Daemon closed before hello")?;
+    ensure!(
+        hello["type"] == "remote_hello"
+            && hello["version"] == endpoint.version
+            && hello["key"] == target.key,
+        "Remote daemon handshake mismatch"
+    );
+    // Keep this reader: replacing it could discard bytes it buffered after the hello.
+    write_record_with_limit(
+        reader.get_mut(),
+        &json!({"type":"ready"}),
+        if endpoint.version == LEGACY_PROTOCOL_VERSION {
+            LEGACY_MAX_RECORD_BYTES
+        } else {
+            MAX_RECORD_BYTES
+        },
+    )?;
+    Ok(reader)
+}
+
+fn attach_legacy(endpoint: &Endpoint, mut reader: BufReader<TcpStream>) -> Result<Attachment> {
+    let snapshot = read_record(&mut reader)?.context(
+        "Protocol-1 daemon closed before its snapshot; its session may exceed the legacy 16 MiB limit",
+    )?;
+    reader.get_mut().set_read_timeout(None)?;
+    // An old daemon cannot be retired atomically: another attached client could
+    // submit work between its idle snapshot and its v1 shutdown check. Keep it
+    // attached at its negotiated limit until it exits on its own.
+    Ok(Attachment {
+        reader,
+        prefetched: vec![snapshot],
+        daemon_version: endpoint.version,
+        max_record_bytes: LEGACY_MAX_RECORD_BYTES,
+    })
+}
+
+fn current_attachment(target: &SshTarget, path: &std::path::Path) -> Result<Attachment> {
+    let endpoint = read_endpoint(path, target)?;
+    ensure!(
+        endpoint.version == PROTOCOL_VERSION,
+        "Remote daemon protocol mismatch"
+    );
+    let reader = connect_endpoint(target, &endpoint)?;
+    reader.get_ref().set_read_timeout(None)?;
+    Ok(Attachment {
+        reader,
+        prefetched: Vec::new(),
+        daemon_version: endpoint.version,
+        max_record_bytes: MAX_RECORD_BYTES,
+    })
+}
+
+fn attach(target: &SshTarget) -> Result<Attachment> {
     ensure!(
         !root()?
             .join(format!("{}.deleted.json", target.key))
@@ -132,45 +242,24 @@ fn attach(target: &SshTarget) -> Result<TcpStream> {
         "This session was permanently deleted"
     );
     let path = root()?.join(format!("{}.json", target.key));
-    let attempt = || -> Result<TcpStream> {
-        let endpoint: Endpoint = serde_json::from_slice(&fs::read(&path)?)?;
-        ensure!(
-            endpoint.version == PROTOCOL_VERSION
-                && endpoint.cwd == target.cwd
-                && endpoint.backend == target.backend,
-            "Remote session identity mismatch"
-        );
-        let mut stream = TcpStream::connect_timeout(
-            &([127, 0, 0, 1], endpoint.port).into(),
-            Duration::from_secs(2),
-        )?;
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-        write_record(
-            &mut stream,
-            &json!({"type":"hello", "token":endpoint.token, "version":PROTOCOL_VERSION, "cwd":target.cwd, "backend":target.backend}),
-        )?;
-        let mut reader = BufReader::new(stream.try_clone()?);
-        let hello = read_record(&mut reader)?.context("Daemon closed before hello")?;
-        ensure!(
-            hello["type"] == "remote_hello"
-                && hello["version"] == PROTOCOL_VERSION
-                && hello["key"] == target.key,
-            "Remote daemon handshake mismatch"
-        );
-        // No buffered protocol frames may be lost: the daemon waits for this ready message.
-        write_record(&mut stream, &json!({"type":"ready"}))?;
-        stream.set_read_timeout(None)?;
-        Ok(stream)
-    };
-    if let Ok(stream) = attempt() {
-        return Ok(stream);
+    if let Ok(endpoint) = read_endpoint(&path, target) {
+        if endpoint.version == PROTOCOL_VERSION {
+            if let Ok(attachment) = current_attachment(target, &path) {
+                return Ok(attachment);
+            }
+        } else if endpoint.version == LEGACY_PROTOCOL_VERSION {
+            if let Ok(reader) = connect_endpoint(target, &endpoint) {
+                return attach_legacy(&endpoint, reader);
+            }
+        } else if session_lock_is_held(&path)? {
+            bail!("Unsupported remote daemon protocol {}", endpoint.version);
+        }
     }
     spawn_daemon(target)?;
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        match attempt() {
-            Ok(stream) => return Ok(stream),
+        match current_attachment(target, &path) {
+            Ok(attachment) => return Ok(attachment),
             Err(error) if Instant::now() >= deadline => {
                 use std::io::Read as _;
                 let mut detail = String::new();
@@ -184,6 +273,13 @@ fn attach(target: &SshTarget) -> Result<TcpStream> {
     }
 }
 
+fn normalize_daemon_record(mut record: Value, daemon_version: u32) -> Value {
+    if daemon_version != PROTOCOL_VERSION && record["type"] == "remote_snapshot" {
+        record["version"] = json!(PROTOCOL_VERSION);
+    }
+    record
+}
+
 pub fn connect() -> Result<()> {
     let mut input = BufReader::new(std::io::stdin());
     let request = read_record(&mut input)?.context("Missing remote attachment")?;
@@ -193,23 +289,36 @@ pub fn connect() -> Result<()> {
     );
     let target: SshTarget = serde_json::from_value(request["target"].clone())?;
     target.validate()?;
-    let stream = attach(&target)?;
-    let mut upstream = stream.try_clone()?;
+    let attachment = attach(&target)?;
+    let daemon_version = attachment.daemon_version;
+    let max_record_bytes = attachment.max_record_bytes;
+    let mut upstream = attachment.reader.get_ref().try_clone()?;
     thread::spawn(move || {
         while let Ok(Some(record)) = read_record(&mut input) {
-            if write_record(&mut upstream, &record).is_err() {
+            if let Err(error) = write_record_with_limit(&mut upstream, &record, max_record_bytes) {
+                eprintln!("Remote bridge write failed: {error:#}");
                 break;
             }
         }
         // EOF detaches the bridge, never aborts the daemon's Pi.
         let _ = upstream.shutdown(Shutdown::Both);
     });
-    let mut reader = BufReader::new(stream);
+    let mut reader = attachment.reader;
     let mut output = std::io::stdout().lock();
     let mut received = false;
+    for record in attachment.prefetched {
+        received = true;
+        write_record(
+            &mut output,
+            &normalize_daemon_record(record, daemon_version),
+        )?;
+    }
     while let Some(record) = read_record(&mut reader)? {
         received = true;
-        write_record(&mut output, &record)?;
+        write_record(
+            &mut output,
+            &normalize_daemon_record(record, daemon_version),
+        )?;
     }
     if !received {
         use std::io::Read as _;
@@ -262,7 +371,7 @@ impl Client {
         if record["type"] == "remote_snapshot"
             && serde_json::to_vec(&record).map_or(true, |bytes| bytes.len() >= MAX_RECORD_BYTES)
         {
-            let _ = self.output.try_send(json!({"type":"remote_error", "error":"Remote snapshot exceeds the 16 MiB transport limit"}));
+            let _ = self.output.try_send(json!({"type":"remote_error", "error":"Remote snapshot exceeds the 64 MiB transport limit"}));
             self.output.close();
             return false;
         }
@@ -928,5 +1037,156 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn stale_unknown_protocol_endpoints_do_not_block_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = directory.path().join("unknown.json");
+        assert!(!session_lock_is_held(&endpoint).unwrap());
+        let owner = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(endpoint.with_extension("lock"))
+            .unwrap();
+        owner.try_lock().unwrap();
+        assert!(session_lock_is_held(&endpoint).unwrap());
+        drop(owner);
+        assert!(!session_lock_is_held(&endpoint).unwrap());
+    }
+
+    #[test]
+    fn busy_protocol_one_daemon_remains_attached_with_its_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = SshTarget::new(
+            "legacy-busy".into(),
+            directory.path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = Endpoint {
+            port: listener.local_addr().unwrap().port(),
+            token: "legacy-token".into(),
+            cwd: target.cwd.clone(),
+            version: LEGACY_PROTOCOL_VERSION,
+            backend: target.backend,
+            pid: 1,
+        };
+        let server_target = target.clone();
+        let server_token = endpoint.token.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let hello = read_record(&mut reader).unwrap().unwrap();
+            assert_eq!(hello["version"], LEGACY_PROTOCOL_VERSION);
+            assert_eq!(hello["token"], server_token);
+            write_record_with_limit(
+                reader.get_mut(),
+                &json!({"type":"remote_hello", "version":LEGACY_PROTOCOL_VERSION, "key":server_target.key}),
+                LEGACY_MAX_RECORD_BYTES,
+            )
+            .unwrap();
+            assert_eq!(read_record(&mut reader).unwrap().unwrap()["type"], "ready");
+            let mut model = Session::new(server_target.cwd.clone().into());
+            model.apply(&json!({"type":"agent_start"})).unwrap();
+            let mut initial = snapshot(&model, &server_target).unwrap();
+            initial["version"] = json!(LEGACY_PROTOCOL_VERSION);
+            write_record_with_limit(reader.get_mut(), &initial, LEGACY_MAX_RECORD_BYTES).unwrap();
+        });
+
+        let reader = connect_endpoint(&target, &endpoint).unwrap();
+        let attachment = attach_legacy(&endpoint, reader).unwrap();
+        assert_eq!(attachment.daemon_version, LEGACY_PROTOCOL_VERSION);
+        assert_eq!(attachment.max_record_bytes, LEGACY_MAX_RECORD_BYTES);
+        assert_eq!(attachment.prefetched.len(), 1);
+        let session: Session =
+            serde_json::from_value(attachment.prefetched[0]["data"].clone()).unwrap();
+        assert!(session.busy());
+        drop(attachment);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn idle_protocol_one_daemon_is_not_raced_by_automatic_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = SshTarget::new(
+            "legacy-idle".into(),
+            directory.path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let lock_path = directory.path().join("legacy-idle.lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        lock.try_lock().unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = Endpoint {
+            port: listener.local_addr().unwrap().port(),
+            token: "legacy-token".into(),
+            cwd: target.cwd.clone(),
+            version: LEGACY_PROTOCOL_VERSION,
+            backend: target.backend,
+            pid: 1,
+        };
+        let server_target = target.clone();
+        let server_token = endpoint.token.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let hello = read_record(&mut reader).unwrap().unwrap();
+            assert_eq!(hello["version"], LEGACY_PROTOCOL_VERSION);
+            assert_eq!(hello["token"], server_token);
+            write_record_with_limit(
+                reader.get_mut(),
+                &json!({"type":"remote_hello", "version":LEGACY_PROTOCOL_VERSION, "key":server_target.key}),
+                LEGACY_MAX_RECORD_BYTES,
+            )
+            .unwrap();
+            assert_eq!(read_record(&mut reader).unwrap().unwrap()["type"], "ready");
+            let mut model = Session::new(server_target.cwd.clone().into());
+            model.state.session_file = Some("/remote/original-session.jsonl".into());
+            let mut initial = snapshot(&model, &server_target).unwrap();
+            initial["version"] = json!(LEGACY_PROTOCOL_VERSION);
+            write_record_with_limit(reader.get_mut(), &initial, LEGACY_MAX_RECORD_BYTES).unwrap();
+            assert!(
+                read_record(&mut reader).unwrap().is_none(),
+                "compatibility attach must not send automatic shutdown"
+            );
+            drop(lock);
+        });
+
+        let reader = connect_endpoint(&target, &endpoint).unwrap();
+        let attachment = attach_legacy(&endpoint, reader).unwrap();
+        let session: Session =
+            serde_json::from_value(attachment.prefetched[0]["data"].clone()).unwrap();
+        assert_eq!(
+            session.state.session_file.as_deref(),
+            Some("/remote/original-session.jsonl")
+        );
+        let replacement_lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(matches!(
+            replacement_lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(attachment);
+        server.join().unwrap();
+        replacement_lock.try_lock().unwrap();
+    }
+
+    #[test]
+    fn legacy_snapshots_are_normalized_for_protocol_two_clients() {
+        let normalized = normalize_daemon_record(
+            json!({"type":"remote_snapshot", "version":LEGACY_PROTOCOL_VERSION}),
+            LEGACY_PROTOCOL_VERSION,
+        );
+        assert_eq!(normalized["version"], PROTOCOL_VERSION);
     }
 }

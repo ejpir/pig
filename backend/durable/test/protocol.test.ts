@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { records } from "../src/run.ts";
+import { MAX_RECORD, records } from "../src/run.ts";
 
 async function collect(chunks: Buffer[]) {
   const result = [];
@@ -22,5 +22,5 @@ test("unterminated, invalid, non-object and malformed UTF-8 records fail closed"
   }
 });
 test("record bounds", async () => {
-  await expect(collect([Buffer.alloc(16 * 1024 * 1024, 32)])).rejects.toThrow("16 MiB");
+  await expect(collect([Buffer.alloc(MAX_RECORD, 32)])).rejects.toThrow("64 MiB");
 });

@@ -11,8 +11,8 @@ use gpui::{
 
 pub fn render(source: &str, colors: &Theme) -> Div {
     div().min_w_0().flex().flex_col().gap(px(12.)).children(
-        pi_markdown::blocks(source)
-            .into_iter()
+        pi_markdown::blocks_cached(source)
+            .iter()
             .enumerate()
             .map(|(index, block)| {
                 let text = block.text();
@@ -149,7 +149,7 @@ pub fn render(source: &str, colors: &Theme) -> Div {
                 let mut urls = Vec::new();
                 let runs = block
                     .spans
-                    .into_iter()
+                    .iter()
                     .map(|span| {
                         let mut face = font(if span.code { MONO } else { SANS });
                         if span.bold || block.heading.is_some() {
@@ -158,7 +158,7 @@ pub fn render(source: &str, colors: &Theme) -> Div {
                         if span.italic {
                             face.style = FontStyle::Italic;
                         }
-                        let link = span.link.filter(|url| {
+                        let link = span.link.as_deref().filter(|url| {
                             url.starts_with("https://")
                                 || url.starts_with("http://")
                                 || url.starts_with("mailto:")
@@ -168,9 +168,9 @@ pub fn render(source: &str, colors: &Theme) -> Div {
                         } else {
                             colors.text
                         };
-                        if let Some(url) = link.as_ref() {
+                        if let Some(url) = link {
                             ranges.push(offset..offset + span.text.len());
-                            urls.push(url.clone());
+                            urls.push(url.to_owned());
                         }
                         offset += span.text.len();
                         TextRun {

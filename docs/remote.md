@@ -32,7 +32,7 @@ Only one desktop attachment controls a remote session at a time. A new attachmen
 
 A disconnect leaves the last known agent state visible as disconnected, not falsely idle. Requests with unknown outcomes are never automatically retried. If text is restored to the composer, reconnect and inspect the conversation before submitting it again.
 
-A slow client is detached rather than blocking agent execution. Records and snapshots have the existing 16 MiB transport limit. IPC listens only on loopback and authenticates using a random token stored in the private per-user state directory. Unix state directories/files use 0700/0600; Windows relies on the user's profile ACLs. Startup diagnostics are stored beside endpoints in `.pi/desktop/run/1/<key>.log`.
+A slow client is detached rather than blocking agent execution. Protocol-2 records and snapshots have a 64 MiB transport limit. A still-running protocol-1 daemon remains safely attached through a compatibility bridge at its negotiated 16 MiB limit until that daemon exits; it is not automatically killed or restarted because another attached client could be submitting work. IPC listens only on loopback and authenticates using a random token stored in the private per-user state directory. Unix state directories/files use 0700/0600; Windows relies on the user's profile ACLs. Startup diagnostics are stored beside endpoints in `.pi/desktop/run/1/<key>.log`.
 
 **Stock Pi remains the default.** Its runs survive SSH/desktop disconnects, but a daemon/host crash does not automatically continue the interrupted run. Reopening can resume the saved conversation; it does not replay the prompt or tools. Idle daemons are not automatically evicted yet.
 

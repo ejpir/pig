@@ -5,7 +5,7 @@
 //! dock: Working and Stop on the composer, the question in its place, Review.
 
 use crate::{
-    app::{PhoneApp, Sheet},
+    app::{PhoneApp, Route, Sheet},
     model::{
         CheckResult, Flow, Reference, Session, SessionId, Stage, StageKind, StageStatus, State,
         Turn, duration_label,
@@ -17,7 +17,7 @@ use gpui::{
     AnyElement, Context, Div, FollowMode, FontWeight, Hsla, ListAlignment, SharedString, Window,
     div, list, prelude::*, px, relative,
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 /// How many files and searches a stage shows before "+4 more".
 const CHIPS: usize = 3;
@@ -25,6 +25,11 @@ const CHIPS: usize = 3;
 const TAIL: usize = 4;
 /// How many changed files the report card lists before "Show 5 more files".
 const FILES: usize = 3;
+/// Small conversations appear immediately; large first opens get a painted
+/// loading frame before exact full-history measurement starts.
+const LARGE_THREAD_ITEMS: usize = 24;
+const THREAD_LOADING_PAINT: Duration = Duration::from_millis(80);
+
 fn new_thread_list_state(item_count: usize) -> gpui::ListState {
     // Accurate off-screen heights keep the draggable thumb mapped to the whole
     // conversation. Rows remain virtualized for painting after this first
@@ -32,7 +37,267 @@ fn new_thread_list_state(item_count: usize) -> gpui::ListState {
     gpui::ListState::new(item_count, ListAlignment::Top, px(320.)).measure_all()
 }
 
+fn thread_running(session: &Session, compacting: bool) -> bool {
+    session.state.is_running() || compacting
+}
+
+fn composer_status(session: &Session, compacting: bool) -> &'static str {
+    if compacting {
+        "Compacting"
+    } else if session.state == State::NeedsYou {
+        "Needs you"
+    } else {
+        "Working"
+    }
+}
+
+fn large_thread(item_count: usize) -> bool {
+    item_count >= LARGE_THREAD_ITEMS
+}
+
+#[derive(Default)]
+struct ThreadLayoutChanges {
+    turns: Vec<usize>,
+    queue: bool,
+}
+
+impl ThreadLayoutChanges {
+    fn turn(&mut self, index: usize) {
+        if !self.turns.contains(&index) {
+            self.turns.push(index);
+        }
+    }
+}
+
+/// Compare only geometry-relevant turn state. Most duration increments repaint
+/// in place; the timing signature below catches the transitions that add rows.
+fn turn_layout_changed(before: &Turn, after: &Turn) -> bool {
+    before.prompt != after.prompt
+        || before.at != after.at
+        || before.attachments != after.attachments
+        || before.stages != after.stages
+        || before.summary != after.summary
+        || before.pages != after.pages
+        || before.images != after.images
+        || before.handoffs != after.handoffs
+        || before.reported != after.reported
+        || before.flow != after.flow
+        || timing_layout_signature(before) != timing_layout_signature(after)
+}
+
+/// Time text itself paints within a fixed line. Geometry changes only when
+/// real timings add that line, or when a page turn's two-column key gains or
+/// loses rows because some stages have no reported duration.
+fn timing_layout_signature(turn: &Turn) -> (bool, usize) {
+    let (times, show_times) = run_times(turn);
+    let key_rows = if turn.pages.is_empty() {
+        0
+    } else {
+        turn.stages
+            .iter()
+            .filter(|stage| {
+                stage.status == StageStatus::Done && !times[stage.kind.index()].is_zero()
+            })
+            .count()
+            .div_ceil(2)
+    };
+    (show_times, key_rows)
+}
+
+fn failed_prompt_layouts(failed: &[crate::live::FailedPrompt]) -> Vec<(String, String)> {
+    failed
+        .iter()
+        .map(|failed| (failed.error.clone(), failed.prompt.label()))
+        .collect()
+}
+
+fn changed_failed_layouts(
+    before: Option<&Vec<(String, String)>>,
+    after: &[(String, String)],
+) -> Vec<usize> {
+    let Some(before) = before.filter(|before| before.len() == after.len()) else {
+        return Vec::new();
+    };
+    before
+        .iter()
+        .zip(after)
+        .enumerate()
+        .filter_map(|(index, (before, after))| (before != after).then_some(index))
+        .collect()
+}
+
+fn thread_shape_remeasure_range(
+    turn_count: usize,
+    item_count: usize,
+) -> Option<std::ops::Range<usize>> {
+    (item_count > 0).then(|| {
+        let start = turn_count.saturating_sub(1).min(item_count - 1);
+        start..item_count
+    })
+}
+
+/// Failed-prompt recovery can splice the list during a retained-snapshot
+/// fling. Remember that shape change and perform exact measurement on settle.
+fn thread_shape_remeasure_needed(
+    pending: &mut HashSet<SessionId>,
+    id: SessionId,
+    scrolling: bool,
+    shape_changed: bool,
+) -> bool {
+    if scrolling {
+        if shape_changed {
+            pending.insert(id);
+        }
+        false
+    } else {
+        let was_pending = pending.remove(&id);
+        shape_changed || was_pending
+    }
+}
+
+fn thread_layout_changes(before: &Session, after: &Session) -> ThreadLayoutChanges {
+    let mut changes = ThreadLayoutChanges::default();
+    let shared_turns = before.turns.len().min(after.turns.len());
+
+    // Once there is more than one turn, every prompt gains its numbered header.
+    if (before.turns.len() > 1) != (after.turns.len() > 1) {
+        for index in 0..shared_turns {
+            changes.turn(index);
+        }
+    } else {
+        for (index, (before, after)) in before.turns.iter().zip(&after.turns).enumerate() {
+            if turn_layout_changed(before, after) {
+                changes.turn(index);
+            }
+        }
+    }
+
+    if before.turns.len() < after.turns.len() && !before.turns.is_empty() {
+        // The preceding last turn stops being the latest one.
+        changes.turn(before.turns.len() - 1);
+    } else if before.turns.len() > after.turns.len() && !after.turns.is_empty() {
+        // The remaining final turn becomes the latest one.
+        changes.turn(after.turns.len() - 1);
+    }
+
+    if (before.state != after.state
+        || before.files != after.files
+        || before.check != after.check
+        || before.failure != after.failure)
+        && !after.turns.is_empty()
+    {
+        changes.turn(after.turns.len() - 1);
+    }
+    changes.queue =
+        !before.queued.is_empty() && !after.queued.is_empty() && before.queued != after.queued;
+    changes
+}
+
 impl PhoneApp {
+    pub(crate) fn begin_thread_loading(&mut self, id: SessionId) {
+        if self.thread_lists.contains_key(&id) {
+            return;
+        }
+        let Some(store) = &self.store else {
+            return;
+        };
+        let waiting_for_snapshot = store.live.as_ref().is_some_and(|live| live.is_loading(id));
+        let item_count = store.session(id).map_or(0, |session| {
+            session.turns.len()
+                + usize::from(!session.queued.is_empty())
+                + store
+                    .live
+                    .as_ref()
+                    .map_or(0, |live| live.failed_prompts(id).len())
+        });
+        if waiting_for_snapshot || large_thread(item_count) {
+            self.thread_loading_generation = self.thread_loading_generation.wrapping_add(1).max(1);
+            self.thread_loading
+                .insert(id, self.thread_loading_generation);
+            self.thread_loading_release_scheduled.remove(&id);
+        }
+    }
+
+    fn thread_visible(&self, id: SessionId) -> bool {
+        self.visible && matches!(self.route(), Route::Thread(shown) if shown == id)
+    }
+
+    fn thread_is_loading(
+        &mut self,
+        id: SessionId,
+        item_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(generation) = self.thread_loading.get(&id).copied() else {
+            return false;
+        };
+        let waiting_for_snapshot = self
+            .store
+            .as_ref()
+            .and_then(|store| store.live.as_ref())
+            .is_some_and(|live| live.is_loading(id));
+        if waiting_for_snapshot {
+            return true;
+        }
+        if !large_thread(item_count) {
+            self.thread_loading.remove(&id);
+            self.thread_loading_release_scheduled.remove(&id);
+            return false;
+        }
+        if self.thread_loading_release_scheduled.get(&id) != Some(&generation) {
+            self.thread_loading_release_scheduled.insert(id, generation);
+            // This callback runs on the frame after the loading element was
+            // rendered, so at least one loading frame has reached presentation
+            // before the exact measure_all pass can begin.
+            cx.on_next_frame(window, move |this, _, cx| {
+                let same_load = this.thread_loading.get(&id) == Some(&generation);
+                let still_visible = this.thread_visible(id);
+                let waiting = this
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.live.as_ref())
+                    .is_some_and(|live| live.is_loading(id));
+                if !same_load || !still_visible || waiting {
+                    if this.thread_loading_release_scheduled.get(&id) == Some(&generation) {
+                        this.thread_loading_release_scheduled.remove(&id);
+                    }
+                    return;
+                }
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(THREAD_LOADING_PAINT).await;
+                    let _ = this.update(cx, |this, cx| {
+                        let same_load = this.thread_loading.get(&id) == Some(&generation);
+                        let release = same_load
+                            && this.thread_visible(id)
+                            && !this
+                                .store
+                                .as_ref()
+                                .and_then(|store| store.live.as_ref())
+                                .is_some_and(|live| live.is_loading(id));
+                        if this.thread_loading_release_scheduled.get(&id) == Some(&generation) {
+                            this.thread_loading_release_scheduled.remove(&id);
+                        }
+                        if release {
+                            this.thread_loading.remove(&id);
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            });
+        }
+        true
+    }
+
+    pub(crate) fn remeasure_thread_turn(&self, id: SessionId, index: usize) {
+        if let Some(list) = self.thread_lists.get(&id)
+            && index < list.item_count()
+        {
+            list.remeasure_items(index..index + 1);
+        }
+    }
+
     pub(crate) fn thread_screen(
         &mut self,
         id: SessionId,
@@ -49,11 +314,19 @@ impl PhoneApp {
             this.back(window, cx);
         }));
         let scrolling = self.scroll_in_motion();
+        let mut layout_changes = ThreadLayoutChanges::default();
         let cached = scrolling
             .then(|| self.thread_snapshots.get(&id).cloned())
             .flatten();
         let session = cached.or_else(|| {
-            let snapshot = Arc::new(self.store.as_ref()?.session(id)?.clone());
+            let current = self.store.as_ref()?.session(id)?;
+            if let Some(previous) = self.thread_snapshots.get(&id).cloned() {
+                if previous.as_ref() == current {
+                    return Some(previous);
+                }
+                layout_changes = thread_layout_changes(&previous, current);
+            }
+            let snapshot = Arc::new(current.clone());
             self.thread_snapshots.insert(id, snapshot.clone());
             Some(snapshot)
         });
@@ -69,13 +342,29 @@ impl PhoneApp {
         };
         let computer_name = store.computer.name.clone();
         let stopping = store.live.as_ref().is_some_and(|live| live.is_stopping(id));
+        let compacting = self.compact_pending(id)
+            || store
+                .live
+                .as_ref()
+                .is_some_and(|live| live.is_compacting(id))
+            || session.activity == "Compacting";
         let failed_prompts = store
             .live
             .as_ref()
             .map(|live| live.failed_prompts(id).to_vec())
             .unwrap_or_default();
-        let running = session.state.is_running();
-        let asking = session.state == State::NeedsYou
+        let failed_layouts = failed_prompt_layouts(&failed_prompts);
+        let failed_layout_changes = if scrolling {
+            Vec::new()
+        } else {
+            let changes =
+                changed_failed_layouts(self.thread_failed_layouts.get(&id), &failed_layouts);
+            self.thread_failed_layouts.insert(id, failed_layouts);
+            changes
+        };
+        let running = thread_running(&session, compacting);
+        let asking = !compacting
+            && session.state == State::NeedsYou
             && session.question.is_some()
             && !self.questions_later.contains(&id);
         let working = running && !asking;
@@ -91,25 +380,29 @@ impl PhoneApp {
                 "Ask a follow-up…"
             })
         });
-        let subtitle = match session.state {
-            State::NeedsYou | State::Working => {
-                format!("{} · {}", session.project, computer_name)
+        let subtitle = if compacting {
+            format!("{} · {}", session.project, computer_name)
+        } else {
+            match session.state {
+                State::NeedsYou | State::Working => {
+                    format!("{} · {}", session.project, computer_name)
+                }
+                State::Done => match super::subagents::at_work(&session.turns) {
+                    // Pi answered, and its subagents carry on.
+                    Some(handoff) => format!(
+                        "{} · {}",
+                        session.project,
+                        crate::projection::at_work(handoff)
+                    ),
+                    None => format!(
+                        "{} · done in {}",
+                        session.project,
+                        duration_label(session.elapsed)
+                    ),
+                },
+                State::Stopped => format!("{} · stopped by you", session.project),
+                State::Failed => format!("{} · {}", session.project, session.status_line()),
             }
-            State::Done => match super::subagents::at_work(&session.turns) {
-                // Pi answered, and its subagents carry on.
-                Some(handoff) => format!(
-                    "{} · {}",
-                    session.project,
-                    crate::projection::at_work(handoff)
-                ),
-                None => format!(
-                    "{} · done in {}",
-                    session.project,
-                    duration_label(session.elapsed)
-                ),
-            },
-            State::Stopped => format!("{} · stopped by you", session.project),
-            State::Failed => format!("{} · {}", session.project, session.status_line()),
         };
         let appbar =
             ui::appbar(back, session.title.clone(), Some(subtitle.into()), &colors)
@@ -123,6 +416,31 @@ impl PhoneApp {
         let failed_count = failed_prompts.len();
         let has_queued = !session.queued.is_empty();
         let item_count = turn_count + failed_count + usize::from(has_queued);
+        if self.thread_is_loading(id, item_count, window, cx) {
+            return div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(appbar)
+                .child(
+                    div()
+                        .id("thread-loading")
+                        .debug_selector(|| "thread-loading".into())
+                        .relative()
+                        .child(crate::testing::probe("thread-loading"))
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(10.))
+                        .text_size(px(14.))
+                        .text_color(colors.secondary)
+                        .child(ui::working_indicator(&colors))
+                        .child("Loading conversation…"),
+                )
+                .into_any_element();
+        }
         let list_state = self
             .thread_lists
             .entry(id)
@@ -134,7 +452,8 @@ impl PhoneApp {
             .clone();
         let shape = (turn_count, failed_count, has_queued);
         let previous = self.thread_list_shapes.entry(id).or_insert(shape);
-        if *previous != shape {
+        let shape_changed = *previous != shape;
+        if shape_changed {
             let (old_turns, old_failed, old_queued) = *previous;
             if old_turns < turn_count {
                 list_state.splice(old_turns..old_turns, turn_count - old_turns);
@@ -157,10 +476,37 @@ impl PhoneApp {
             *previous = shape;
         }
         debug_assert_eq!(list_state.item_count(), item_count);
-        if item_count > 0 && !scrolling {
-            // The active turn, failed prompts, and queue can change height without
-            // changing item count. Historical turns keep their measurements.
-            list_state.remeasure_items(turn_count.saturating_sub(1)..item_count);
+        let shape_remeasure = thread_shape_remeasure_needed(
+            &mut self.thread_pending_remeasure,
+            id,
+            scrolling,
+            shape_changed,
+        );
+        if !scrolling {
+            for index in layout_changes.turns {
+                if index < turn_count {
+                    list_state.remeasure_items(index..index + 1);
+                }
+            }
+            if shape_remeasure {
+                // Inserted rows have no measured size, and the preceding row's
+                // last-item padding may also have changed. Re-arm measure_all
+                // from the latest turn through failed and queued rows.
+                if let Some(range) = thread_shape_remeasure_range(turn_count, item_count) {
+                    list_state.remeasure_items(range);
+                }
+            } else {
+                for index in failed_layout_changes {
+                    let index = turn_count + index;
+                    if index < turn_count + failed_count {
+                        list_state.remeasure_items(index..index + 1);
+                    }
+                }
+                if layout_changes.queue && has_queued {
+                    let queue_index = turn_count + failed_count;
+                    list_state.remeasure_items(queue_index..queue_index + 1);
+                }
+            }
         }
         let offset = list_state.scroll_px_offset_for_scrollbar().y;
         if let Some(previous) = self.thread_list_offsets.insert(id, offset) {
@@ -220,7 +566,7 @@ impl PhoneApp {
                         .flex()
                         .flex_col()
                         .when(running, |dock| {
-                            dock.child(working_strip(&session, stopping, &colors, cx))
+                            dock.child(working_strip(&session, stopping, compacting, &colors, cx))
                         })
                         .child(composer),
                 )
@@ -320,7 +666,8 @@ impl PhoneApp {
         let live = index == last && running;
         let many = session.turns.len() > 1;
         // Review and the report card belong to the session the user runs.
-        let ending = (index == last && !running && !read_only).then(|| self.ending(session, cx));
+        let ending =
+            (index == last && !running && !read_only).then(|| self.ending(session, index, cx));
         div()
             .id(("turn", index))
             .min_w_0()
@@ -508,6 +855,7 @@ impl PhoneApp {
                         if !this.expanded_compactions.remove(&(id, index, step)) {
                             this.expanded_compactions.insert((id, index, step));
                         }
+                        this.remeasure_thread_turn(id, index);
                         cx.notify();
                     })),
             )
@@ -619,6 +967,7 @@ impl PhoneApp {
                         if !this.expanded_prompts.remove(&(id, index)) {
                             this.expanded_prompts.insert((id, index));
                         }
+                        this.remeasure_thread_turn(id, index);
                         cx.notify();
                     }))
                 }),
@@ -675,6 +1024,7 @@ impl PhoneApp {
                             list.pause_following_tail();
                         }
                         this.expanded_turns.insert((id, index), !expanded);
+                        this.remeasure_thread_turn(id, index);
                         cx.notify();
                     })),
             )
@@ -755,7 +1105,7 @@ impl PhoneApp {
 
     /// The report card under a finished run: each file with its change size,
     /// and the check.
-    fn ending(&self, session: &Session, cx: &Context<Self>) -> Div {
+    fn ending(&self, session: &Session, turn_index: usize, cx: &Context<Self>) -> Div {
         let colors = theme(cx);
         let id = session.id;
         let has_files = !session.files.is_empty();
@@ -819,6 +1169,7 @@ impl PhoneApp {
                     if !this.all_files.remove(&id) {
                         this.all_files.insert(id);
                     }
+                    this.remeasure_thread_turn(id, turn_index);
                     cx.notify();
                 }))
         });
@@ -1424,16 +1775,16 @@ fn reply(turn: &Turn, latest: bool, colors: &Theme) -> Option<Div> {
 }
 
 /// Working, the time and Stop, on the composer's top edge.
-fn working_strip(session: &Session, stopping: bool, colors: &Theme, cx: &Context<PhoneApp>) -> Div {
+fn working_strip(
+    session: &Session,
+    stopping: bool,
+    compacting: bool,
+    colors: &Theme,
+    cx: &Context<PhoneApp>,
+) -> Div {
     let id = session.id;
-    let waiting = session.state == State::NeedsYou;
-    let status = if waiting {
-        "Needs you"
-    } else if session.activity == "Compacting" {
-        "Compacting"
-    } else {
-        "Working"
-    };
+    let waiting = !compacting && session.state == State::NeedsYou;
+    let status = composer_status(session, compacting);
     let stop = div()
         .id("stop")
         .relative()
@@ -1508,6 +1859,10 @@ fn capitalized(text: &str) -> String {
 mod tests {
     use super::*;
     use gpui::{Render, TestAppContext};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
 
     struct TallTurns {
         state: gpui::ListState,
@@ -1522,6 +1877,309 @@ mod tests {
             .size_full();
             div().size_full().child(rows)
         }
+    }
+
+    struct SizedTurns {
+        state: gpui::ListState,
+        heights: Rc<RefCell<Vec<gpui::Pixels>>>,
+    }
+
+    impl Render for SizedTurns {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let heights = self.heights.clone();
+            let rows = list(
+                self.state.clone(),
+                cx.processor(move |_, index, _, _| {
+                    div().h(heights.borrow()[index]).into_any_element()
+                }),
+            )
+            .size_full();
+            div().size_full().child(rows)
+        }
+    }
+
+    #[test]
+    fn only_large_first_loads_get_the_measurement_indicator() {
+        assert!(!large_thread(LARGE_THREAD_ITEMS - 1));
+        assert!(large_thread(LARGE_THREAD_ITEMS));
+    }
+
+    #[gpui::test]
+    fn large_thread_loading_waits_for_a_visible_presented_frame(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_store("sample@computer.local");
+                app.visible = true;
+                app.routes = vec![Route::Sessions, Route::Thread(id)];
+                app.thread_loading.insert(id, 1);
+                assert!(app.thread_is_loading(id, LARGE_THREAD_ITEMS, window, cx));
+                assert_eq!(app.thread_loading_release_scheduled.get(&id), Some(&1));
+            })
+        });
+
+        // Time alone cannot release a loader that has not reached the next frame.
+        cx.executor().advance_clock(THREAD_LOADING_PAINT);
+        cx.run_until_parked();
+        assert!(app.read_with(cx, |app, _| app.thread_loading.contains_key(&id)));
+
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            app.update(cx, |app, _| app.routes = vec![Route::Sessions]);
+        });
+        cx.executor().advance_clock(THREAD_LOADING_PAINT);
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(app.thread_loading.contains_key(&id));
+            assert!(!app.thread_loading_release_scheduled.contains_key(&id));
+        });
+
+        // Returning to the thread presents its loader again before release.
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.routes.push(Route::Thread(id));
+                assert!(app.thread_is_loading(id, LARGE_THREAD_ITEMS, window, cx));
+            })
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        cx.executor().advance_clock(THREAD_LOADING_PAINT);
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(!app.thread_loading.contains_key(&id));
+            assert!(!app.thread_loading_release_scheduled.contains_key(&id));
+        });
+    }
+
+    #[gpui::test]
+    fn hidden_thread_keeps_loader_until_the_visibility_observer_redraws(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_store("sample@computer.local");
+                app.visible = true;
+                app.routes = vec![Route::Sessions, Route::Thread(id)];
+                let session = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == id)
+                    .unwrap();
+                let turn = session.turns[0].clone();
+                while session.turns.len() < LARGE_THREAD_ITEMS {
+                    session.turns.push(turn.clone());
+                }
+                app.thread_loading.insert(id, 1);
+                assert!(app.thread_is_loading(id, LARGE_THREAD_ITEMS, window, cx));
+            })
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+
+        cx.executor().advance_clock(THREAD_LOADING_PAINT);
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(!app.visible);
+            assert!(app.thread_loading.contains_key(&id));
+            assert!(!app.thread_loading_release_scheduled.contains_key(&id));
+        });
+
+        let notifications = Rc::new(Cell::new(0));
+        let _visibility_observer = cx.update(|_, cx| {
+            cx.observe(&app, {
+                let notifications = notifications.clone();
+                move |_, _| notifications.set(notifications.get() + 1)
+            })
+        });
+        cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+        cx.run_until_parked();
+        assert!(notifications.get() > 0);
+        assert!(app.read_with(cx, |app, _| app.visible));
+
+        // Draw the invalidated foreground frame through the real thread screen;
+        // it must show the loader and arm release only for the following frame.
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        app.read_with(cx, |app, _| {
+            assert!(app.thread_loading.contains_key(&id));
+            assert_eq!(app.thread_loading_release_scheduled.get(&id), Some(&1));
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        cx.executor().advance_clock(THREAD_LOADING_PAINT);
+        cx.run_until_parked();
+        assert!(!app.read_with(cx, |app, _| app.thread_loading.contains_key(&id)));
+    }
+
+    #[gpui::test]
+    fn stale_loading_timer_cannot_release_a_new_generation(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_store("sample@computer.local");
+                app.visible = true;
+                app.routes = vec![Route::Sessions, Route::Thread(id)];
+                app.thread_loading.insert(id, 1);
+                assert!(app.thread_is_loading(id, LARGE_THREAD_ITEMS, window, cx));
+            })
+        });
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            app.update(cx, |app, cx| {
+                app.thread_loading.insert(id, 2);
+                assert!(app.thread_is_loading(id, LARGE_THREAD_ITEMS, window, cx));
+            });
+        });
+
+        cx.executor().advance_clock(THREAD_LOADING_PAINT);
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.thread_loading.get(&id), Some(&2));
+            assert_eq!(app.thread_loading_release_scheduled.get(&id), Some(&2));
+        });
+
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        cx.executor().advance_clock(THREAD_LOADING_PAINT);
+        cx.run_until_parked();
+        assert!(!app.read_with(cx, |app, _| app.thread_loading.contains_key(&id)));
+    }
+
+    #[test]
+    fn pending_compaction_immediately_joins_and_labels_the_composer() {
+        let mut session = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+        session.state = State::Done;
+        session.activity.clear();
+
+        assert!(!thread_running(&session, false));
+        assert!(thread_running(&session, true));
+        assert_eq!(composer_status(&session, true), "Compacting");
+    }
+
+    #[test]
+    fn retained_thread_layout_skips_time_only_remeasurement() {
+        let mut before = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+        before.turns[0].times[0] = Duration::from_secs(1);
+        let mut after = before.clone();
+        after.elapsed = Duration::from_secs(10);
+        after.turns[0].times[0] = Duration::from_secs(10);
+
+        let changes = thread_layout_changes(&before, &after);
+        assert!(changes.turns.is_empty());
+        assert!(!changes.queue);
+    }
+
+    #[test]
+    fn first_real_timing_line_remeasures_the_finished_turn() {
+        let before = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+        let mut after = before.clone();
+        after.turns[0].times[0] = Duration::from_secs(1);
+
+        assert_eq!(thread_layout_changes(&before, &after).turns, [0]);
+    }
+
+    #[test]
+    fn changed_thread_content_remeasures_only_affected_rows() {
+        let mut before = crate::demo::new_session(SessionId(1), 0, "First".into(), Vec::new());
+        before.queued = vec!["old follow-up".into()];
+        let mut after = before.clone();
+        after.turns[0].summary = Some(crate::model::Summary {
+            headline: "Done".into(),
+            body: "A new reply".into(),
+            source: None,
+        });
+        after.queued = vec!["new follow-up".into()];
+
+        let changes = thread_layout_changes(&before, &after);
+        assert_eq!(changes.turns, [0]);
+        assert!(changes.queue);
+    }
+
+    #[test]
+    fn changed_failure_detail_remeasures_the_ending_card() {
+        let mut before = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+        before.state = State::Failed;
+        before.failure = Some("brief failure".into());
+        let mut after = before.clone();
+        after.failure = Some("a much longer failure detail that can wrap".into());
+        assert_eq!(thread_layout_changes(&before, &after).turns, [0]);
+    }
+
+    #[test]
+    fn failed_prompt_text_changes_remeasure_the_same_row() {
+        let before = vec![("old error".into(), "prompt".into())];
+        let after = vec![("a longer error".into(), "prompt".into())];
+        assert_eq!(changed_failed_layouts(Some(&before), &after), [0]);
+        assert!(changed_failed_layouts(None, &after).is_empty());
+    }
+
+    #[test]
+    fn a_shape_change_during_a_fling_is_remeasured_on_settle() {
+        let id = SessionId(1);
+        let mut pending = HashSet::new();
+        assert!(!thread_shape_remeasure_needed(&mut pending, id, true, true));
+        assert!(pending.contains(&id));
+        assert!(!thread_shape_remeasure_needed(
+            &mut pending,
+            id,
+            true,
+            false
+        ));
+        assert!(thread_shape_remeasure_needed(
+            &mut pending,
+            id,
+            false,
+            false
+        ));
+        assert!(!pending.contains(&id));
+    }
+
+    #[test]
+    fn adding_a_second_turn_remeasures_the_numbered_first_prompt() {
+        let before = crate::demo::new_session(SessionId(1), 0, "First".into(), Vec::new());
+        let mut after = before.clone();
+        after.turns.push(Turn::new("Second", "10:00"));
+
+        let changes = thread_layout_changes(&before, &after);
+        assert_eq!(changes.turns, [0]);
+    }
+
+    #[gpui::test]
+    fn an_offscreen_inserted_status_row_updates_the_exact_scrollbar_range(cx: &mut TestAppContext) {
+        let state = new_thread_list_state(3);
+        let heights = Rc::new(RefCell::new(vec![px(1000.), px(1000.), px(1000.)]));
+        let (view, cx) = cx.add_window_view({
+            let state = state.clone();
+            let heights = heights.clone();
+            move |_, _| SizedTurns { state, heights }
+        });
+        cx.simulate_resize(gpui::size(px(320.), px(500.)));
+        cx.run_until_parked();
+        state.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+
+        heights.borrow_mut().push(px(400.));
+        state.splice(3..3, 1);
+        // Thread shape changes invalidate the preceding last row and every
+        // failed/queued row, which also re-arms eager exact measurement.
+        state.remeasure_items(thread_shape_remeasure_range(3, 4).unwrap());
+        cx.update(|_, cx| view.update(cx, |_, cx| cx.notify()));
+        cx.run_until_parked();
+
+        assert_eq!(state.max_offset_for_scrollbar().y, px(2900.));
     }
 
     #[gpui::test]

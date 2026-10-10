@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 
 /// Where a command goes: pi's RPC mode, or the desktop extension pi loads
 /// (`extension/pi-desktop.ts`), which supplies what RPC mode lacks.

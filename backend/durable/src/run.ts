@@ -23,7 +23,7 @@ import { History } from "./history.ts";
 import { Calls, subagentExtension, transcript } from "./subagents.ts";
 
 const context = BACKGROUND_CONTEXT;
-const MAX_RECORD = 16 * 1024 * 1024;
+export const MAX_RECORD = 64 * 1024 * 1024;
 const Metadata = defineDoc<{ name: string; autoCompaction: boolean; initialized: boolean }>({
   kind: "app.desktop", version: 1, scope: "conversation", history: "latest", fork: "initial",
   initial: () => ({ name: "", autoCompaction: true, initialized: false }),
@@ -58,7 +58,7 @@ export async function* records(input: AsyncIterable<Buffer>): AsyncGenerator<Rec
     pending = Buffer.concat([pending, chunk]);
     let end: number;
     while ((end = pending.indexOf(10)) !== -1) {
-      if (end + 1 > MAX_RECORD) throw new Error("Durable request exceeds 16 MiB");
+      if (end + 1 > MAX_RECORD) throw new Error("Durable request exceeds 64 MiB");
       const record: unknown = JSON.parse(decoder.decode(pending.subarray(0, end)));
       pending = pending.subarray(end + 1);
       if (!record || typeof record !== "object" || Array.isArray(record) || typeof (record as { type?: unknown }).type !== "string") {
@@ -66,7 +66,7 @@ export async function* records(input: AsyncIterable<Buffer>): AsyncGenerator<Rec
       }
       yield record as Record<string, unknown>;
     }
-    if (pending.length >= MAX_RECORD) throw new Error("Durable request exceeds 16 MiB");
+    if (pending.length >= MAX_RECORD) throw new Error("Durable request exceeds 64 MiB");
   }
   if (pending.length) throw new Error("Unterminated durable request");
 }
@@ -317,7 +317,7 @@ export async function run(
   let output = Promise.resolve();
   const send = (record: unknown): Promise<void> => {
     const line = JSON.stringify(record) + "\n";
-    if (Buffer.byteLength(line) > MAX_RECORD) throw new Error("Durable response exceeds 16 MiB");
+    if (Buffer.byteLength(line) > MAX_RECORD) throw new Error("Durable response exceeds 64 MiB");
     const next = output.then(async () => {
       if (!process.stdout.write(line)) await once(process.stdout, "drain");
     });

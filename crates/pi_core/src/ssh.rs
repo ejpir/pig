@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{bounded_output, transport::Launch};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Backend choice is persisted with a session identity, never changed by reconnect.

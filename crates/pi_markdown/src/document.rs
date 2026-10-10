@@ -13,6 +13,9 @@ use std::{
 
 const MAX_EMBEDDED_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MERMAID_SOURCE_BYTES: usize = 64 * 1024;
+const MAX_CACHED_MARKDOWN_SOURCE_BYTES: usize = 256 * 1024;
+const MAX_MARKDOWN_CACHE_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_MARKDOWN_CACHE_ENTRIES: usize = 128;
 
 #[derive(Clone, Default)]
 pub struct Span {
@@ -46,6 +49,53 @@ impl Block {
     pub fn text(&self) -> String {
         self.spans.iter().map(|span| span.text.as_str()).collect()
     }
+}
+
+#[derive(Default)]
+struct MarkdownCache {
+    source_bytes: usize,
+    entries: HashMap<String, Arc<[Block]>>,
+}
+
+static MARKDOWN_BLOCKS: OnceLock<Mutex<MarkdownCache>> = OnceLock::new();
+
+/// Reuse immutable Markdown semantics when a retained conversation is painted
+/// again after navigating away or replacing Android's native surface. The
+/// source is kept as the collision-proof key, with strict bounds so image data
+/// and unusually large generated replies cannot accumulate here.
+pub fn blocks_cached(source: &str) -> Arc<[Block]> {
+    if source.len() <= MAX_CACHED_MARKDOWN_SOURCE_BYTES {
+        let cache = MARKDOWN_BLOCKS.get_or_init(Default::default);
+        if let Some(blocks) = cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entries
+            .get(source)
+            .cloned()
+        {
+            return blocks;
+        }
+    }
+
+    let parsed: Arc<[Block]> = blocks(source).into();
+    if source.len() > MAX_CACHED_MARKDOWN_SOURCE_BYTES {
+        return parsed;
+    }
+
+    let cache = MARKDOWN_BLOCKS.get_or_init(Default::default);
+    let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(blocks) = cache.entries.get(source).cloned() {
+        return blocks;
+    }
+    if cache.entries.len() >= MAX_MARKDOWN_CACHE_ENTRIES
+        || cache.source_bytes.saturating_add(source.len()) > MAX_MARKDOWN_CACHE_SOURCE_BYTES
+    {
+        cache.entries.clear();
+        cache.source_bytes = 0;
+    }
+    cache.source_bytes += source.len();
+    cache.entries.insert(source.to_owned(), parsed.clone());
+    parsed
 }
 
 /// Parse the full Markdown block vocabulary once, independently of the view
@@ -397,6 +447,13 @@ mod tests {
                 .flat_map(|block| &block.spans)
                 .any(|span| span.link.as_deref() == Some("https://example.com"))
         );
+    }
+
+    #[test]
+    fn cached_blocks_are_reused_for_a_retained_reply() {
+        let first = blocks_cached("A **retained** reply.");
+        let second = blocks_cached("A **retained** reply.");
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     #[test]

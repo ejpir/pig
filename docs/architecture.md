@@ -39,7 +39,7 @@ Each local session owns one pi subprocess. SSH sessions own a local bridge; a de
 
 On Unix, remote helper releases are immutable SHA-256 content objects. The verified installer invokes the object’s pathless `activate` command even on cache hits; activation serializes with a private lock, verifies checksum/version, and atomically selects a relative `~/.pi/desktop/bin/pi-desktop-remote` symlink. QR pairing and discovery use that stable path, while existing running helpers and old content directories remain untouched.
 
-`pi_core` handles strict LF-framed UTF-8 JSONL, bounded queues, request correlation and deadlines. Records are limited to 16 MiB; stderr is diagnostic output, never protocol input. Responses must match both request ID and command. A timeout leaves the outcome unknown and never triggers an automatic prompt retry.
+`pi_core` handles strict LF-framed UTF-8 JSONL, bounded queues, request correlation and deadlines. Protocol-2 records are limited to 64 MiB; a compatibility bridge retains the negotiated 16 MiB limit when attached to a still-running protocol-1 daemon. Stderr is diagnostic output, never protocol input. Responses must match both request ID and command. A timeout leaves the outcome unknown and never triggers an automatic prompt retry.
 
 Submission stays disabled until state, messages, statistics and saved-session bootstrap complete. Resume checks the requested session identity against pi's response. Optional metadata, including the extension's versions and features, is not an identity gate.
 

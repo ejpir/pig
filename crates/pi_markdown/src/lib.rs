@@ -13,7 +13,7 @@ mod portable;
 pub mod sample;
 mod svg;
 
-pub use document::{Block, DiagramPalette, Media, Span, blocks, mermaid_image};
+pub use document::{Block, DiagramPalette, Media, Span, blocks, blocks_cached, mermaid_image};
 pub use images::{DecodeError, Decoded, ToolImage, decode, decode_base64, tool_images};
 pub use pages::{Page, Pages, is_page};
 pub use portable::{SyntaxPalette, code_source, highlight};

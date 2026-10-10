@@ -420,6 +420,7 @@ impl PhoneApp {
                 if !this.folded_handoffs.remove(&key) {
                     this.folded_handoffs.insert(key);
                 }
+                this.remeasure_thread_turn(id, turn_index);
                 cx.notify();
             }));
         let visible = if folded {
@@ -466,6 +467,7 @@ impl PhoneApp {
                     if !this.all_subagents.remove(&key) {
                         this.all_subagents.insert(key);
                     }
+                    this.remeasure_thread_turn(id, turn_index);
                     cx.notify();
                 }))
         });

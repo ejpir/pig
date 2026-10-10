@@ -190,6 +190,14 @@ fn seconds_now() -> u64 {
 }
 
 impl Watch {
+    fn compacting(&self) -> bool {
+        self.pi.run == pi_core::session::RunState::Compacting
+            || self
+                .sent
+                .values()
+                .any(|sent| matches!(&sent.request, Request::Compact))
+    }
+
     fn starts_turn(&self, pending: &PendingPrompt) -> bool {
         pending.admission.map_or(!self.pi.busy(), |admission| {
             admission.streaming_behavior.is_none()
@@ -490,6 +498,13 @@ impl Live {
 
     pub fn is_watched(&self, id: SessionId) -> bool {
         self.watches.contains_key(&id)
+    }
+
+    /// The first authoritative state for this attached session has not arrived yet.
+    pub fn is_loading(&self, id: SessionId) -> bool {
+        self.watches
+            .get(&id)
+            .is_some_and(|watch| !watch.current && watch.ended.is_none())
     }
 
     pub fn target(&self, id: SessionId) -> Option<SshTarget> {
@@ -858,6 +873,12 @@ impl Live {
                 .values()
                 .any(|sent| matches!(&sent.request, Request::Stop))
         })
+    }
+
+    /// A locally requested compaction is visible before the computer's first
+    /// compaction snapshot reaches the phone.
+    pub fn is_compacting(&self, id: SessionId) -> bool {
+        self.watches.get(&id).is_some_and(Watch::compacting)
     }
 
     pub fn failed_prompts(&self, id: SessionId) -> &[FailedPrompt] {
@@ -1424,7 +1445,24 @@ impl Live {
                 }
                 failed.then_some(error)
             }
-            Request::Compact => failed.then_some(error),
+            Request::Compact => {
+                if !failed {
+                    // Durable compaction returns an immediate post-compaction
+                    // estimate. Publish it now instead of leaving Details on
+                    // the pre-compaction percentage until the next stats pass.
+                    if let Some(tokens) = record["data"]["estimatedTokensAfter"].as_u64()
+                        && let Some(usage) = watch.pi.stats.context_usage.as_mut()
+                    {
+                        usage.tokens = Some(tokens);
+                        usage.percent = (usage.context_window > 0)
+                            .then(|| tokens as f64 * 100. / usage.context_window as f64);
+                    }
+                    // The estimate is only a bridge. Refresh every backend's
+                    // authoritative context usage as soon as compaction ends.
+                    Self::send(watch, json!({"type":"get_session_stats"}), Request::Quiet);
+                }
+                failed.then_some(error)
+            }
             Request::Image(id) => {
                 use base64::Engine as _;
                 let image = &record["data"]["image"];
@@ -2114,6 +2152,11 @@ mod tests {
         let (mut watch, sent) = watch();
         watch.current = true;
         watch.ready = true;
+        watch.pi.stats.context_usage = Some(pi_core::protocol::ContextUsage {
+            tokens: Some(80_000),
+            context_window: 200_000,
+            percent: Some(40.),
+        });
         let messages = watch.pi.messages.len();
 
         Live::compact_watch(&mut watch, Some("keep API names".into())).unwrap();
@@ -2124,14 +2167,23 @@ mod tests {
         );
         assert!(watch.outbox.is_empty());
         assert_eq!(watch.pi.messages.len(), messages);
+        assert!(watch.compacting());
         assert!(sent.try_recv().is_err());
         assert_eq!(
             Live::compact_watch(&mut watch, None).unwrap_err(),
             "This session is already compacting."
         );
 
-        let response = json!({"type":"response","id":request["id"],"command":"compact","success":true,"data":{}});
+        let response = json!({"type":"response","id":request["id"],"command":"compact","success":true,"data":{"estimatedTokensAfter":20_000}});
         assert!(Live::record(&mut watch, &response, "", "", &mut Vec::new()).is_none());
+        assert!(!watch.compacting());
+        let usage = watch.pi.stats.context_usage.as_ref().unwrap();
+        assert_eq!(usage.tokens, Some(20_000));
+        assert_eq!(usage.percent, Some(10.));
+        assert_eq!(
+            admission(sent.try_recv().unwrap()),
+            json!({"type":"get_session_stats"})
+        );
         Live::compact_watch(&mut watch, None).unwrap();
         assert_eq!(
             admission(sent.try_recv().unwrap()),

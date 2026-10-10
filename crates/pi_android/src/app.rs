@@ -339,12 +339,23 @@ pub struct PhoneApp {
     scrolls: HashMap<Route, ScrollHandle>,
     pub(crate) thread_lists: HashMap<SessionId, gpui::ListState>,
     pub(crate) thread_list_shapes: HashMap<SessionId, (usize, usize, bool)>,
+    /// First-time large threads keep a painted loading frame while exact
+    /// full-history measurement begins.
+    pub(crate) thread_loading: HashMap<SessionId, u64>,
+    pub(crate) thread_loading_release_scheduled: HashMap<SessionId, u64>,
+    /// Monotonic within this app instance so detached callbacks from an old
+    /// connection cannot release a newer load that reused the same session ID.
+    pub(crate) thread_loading_generation: u64,
+    /// Height-relevant failed-prompt text, retained across navigation.
+    pub(crate) thread_failed_layouts: HashMap<SessionId, Vec<(String, String)>>,
+    /// Shape changes spliced during a fling and awaiting exact remeasurement.
+    pub(crate) thread_pending_remeasure: HashSet<SessionId>,
     /// Immutable transcript snapshots reused for every frame of a fling.
     pub(crate) thread_snapshots: HashMap<SessionId, Arc<crate::model::Session>>,
     /// Last virtual-list offset, for settled-fling touch filtering.
     pub(crate) thread_list_offsets: HashMap<SessionId, Pixels>,
     pub(crate) prefs_path: Option<PathBuf>,
-    visible: bool,
+    pub(crate) visible: bool,
     /// The text of the working notification, while one is shown.
     working_posted: Option<String>,
     /// Live transcript changes held outside the store until scrolling settles.
@@ -562,6 +573,11 @@ impl PhoneApp {
             scrolls: HashMap::new(),
             thread_lists: HashMap::new(),
             thread_list_shapes: HashMap::new(),
+            thread_loading: HashMap::new(),
+            thread_loading_release_scheduled: HashMap::new(),
+            thread_loading_generation: 0,
+            thread_failed_layouts: HashMap::new(),
+            thread_pending_remeasure: HashSet::new(),
             thread_snapshots: HashMap::new(),
             thread_list_offsets: HashMap::new(),
             prefs_path,
@@ -682,6 +698,10 @@ impl PhoneApp {
             .is_some_and(|live| live.commands(id).is_some() && live.supports_compact(id))
     }
 
+    pub(crate) fn compact_pending(&self, id: SessionId) -> bool {
+        self.pending_compacts.contains_key(&id)
+    }
+
     fn compact_for_session(&self, id: SessionId, draft: &str) -> Option<Option<String>> {
         let live = self.store.as_ref()?.live.as_ref()?;
         let parsed = compact_instructions(draft, false)?;
@@ -745,6 +765,7 @@ impl PhoneApp {
         if let Some(store) = &mut self.store {
             store.watch(id);
         }
+        self.begin_thread_loading(id);
         if !self.scrolls.contains_key(&Route::Thread(id)) {
             self.scroll(Route::Thread(id)).scroll_to_bottom();
         }
@@ -1028,6 +1049,10 @@ impl PhoneApp {
         self.scrolls.clear();
         self.thread_lists.clear();
         self.thread_list_shapes.clear();
+        self.thread_loading.clear();
+        self.thread_loading_release_scheduled.clear();
+        self.thread_failed_layouts.clear();
+        self.thread_pending_remeasure.clear();
         self.thread_snapshots.clear();
         self.thread_list_offsets.clear();
         self._pump = None;
@@ -1329,6 +1354,10 @@ impl PhoneApp {
         self.deferred_updates.clear();
         self.thread_lists.clear();
         self.thread_list_shapes.clear();
+        self.thread_loading.clear();
+        self.thread_loading_release_scheduled.clear();
+        self.thread_failed_layouts.clear();
+        self.thread_pending_remeasure.clear();
         self.thread_snapshots.clear();
         self.thread_list_offsets.clear();
         self.store = Some(store);
@@ -1669,6 +1698,10 @@ impl PhoneApp {
         self.deferred_updates.clear();
         self.thread_lists.clear();
         self.thread_list_shapes.clear();
+        self.thread_loading.clear();
+        self.thread_loading_release_scheduled.clear();
+        self.thread_failed_layouts.clear();
+        self.thread_pending_remeasure.clear();
         self.thread_snapshots.clear();
         self.thread_list_offsets.clear();
         self.project_browser.clear();
@@ -1870,7 +1903,9 @@ impl PhoneApp {
     }
 
     fn set_visible(&mut self, visibility: WindowVisibility, cx: &mut Context<Self>) {
-        self.visible = visibility.is_visible();
+        let visible = visibility.is_visible();
+        let changed = self.visible != visible;
+        self.visible = visible;
         if self.visible
             && let Route::Thread(id)
             | Route::Review(id)
@@ -1882,6 +1917,12 @@ impl PhoneApp {
             activity::cancel_notification(alerts::finished_id(id));
         }
         self.update_working_notification(cx);
+        if changed {
+            // Foregrounding does not otherwise invalidate GPUI's retained
+            // frame. Rerender so deferred work such as a large-thread loading
+            // barrier can be armed only after a visible presentation.
+            cx.notify();
+        }
     }
 
     /// A `pi://` link from a notification.
@@ -2181,6 +2222,10 @@ impl PhoneApp {
         self.scrolls.remove(&Route::Thread(id));
         self.thread_lists.remove(&id);
         self.thread_list_shapes.remove(&id);
+        self.thread_loading.remove(&id);
+        self.thread_loading_release_scheduled.remove(&id);
+        self.thread_failed_layouts.remove(&id);
+        self.thread_pending_remeasure.remove(&id);
         self.thread_snapshots.remove(&id);
         self.thread_list_offsets.remove(&id);
         self.scrolls.remove(&Route::Review(id));

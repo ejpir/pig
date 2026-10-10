@@ -752,7 +752,7 @@ mod tests {
     fn the_explicitly_activated_helper_is_chosen() {
         let listing = format!(
             "home\t/Users/nick\n\
-             /Users/nick/.pi/desktop/bin/pi-desktop-remote\tpi-desktop-remote 0.2.0 1 macos-arm64\t{DURABLE}\n"
+             /Users/nick/.pi/desktop/bin/pi-desktop-remote\tpi-desktop-remote 0.2.0 {PROTOCOL_VERSION} macos-arm64\t{DURABLE}\n"
         );
         let helper = choose(&listing).unwrap();
         assert_eq!(helper.path, "/Users/nick/.pi/desktop/bin/pi-desktop-remote");
@@ -773,18 +773,26 @@ mod tests {
                 .to_string()
                 .contains("isn't on this computer")
         );
-        let stock = "home\t/h\n/h/a\tpi-desktop-remote 0.0.4 1 macos-arm64\t{\"pi\":true,\"durable\":false}\n";
-        let helper = choose(stock).unwrap();
+        let stock = format!(
+            "home\t/h\n/h/a\tpi-desktop-remote 0.0.4 {PROTOCOL_VERSION} macos-arm64\t{{\"pi\":true,\"durable\":false}}\n"
+        );
+        let helper = choose(&stock).unwrap();
         let update = helper.update.unwrap();
         assert_eq!(update.state, HelperUpdateState::UpdateRequired);
         assert!(update.reasons.contains(&"missing durable sessions".into()));
         assert!(update.reasons.contains(&"missing session discovery".into()));
 
-        let other_protocol =
-            format!("home\t/h\n/h/a\tpi-desktop-remote 0.0.4 2 linux-amd64\t{DURABLE}\n");
+        let old_protocol = PROTOCOL_VERSION - 1;
+        let other_protocol = format!(
+            "home\t/h\n/h/a\tpi-desktop-remote 0.0.4 {old_protocol} linux-amd64\t{DURABLE}\n"
+        );
         let update = choose(&other_protocol).unwrap().update.unwrap();
         assert_eq!(update.state, HelperUpdateState::UpdateRequired);
-        assert!(update.reasons[0].contains("protocol 2"));
+        assert!(
+            update.reasons[0].contains(&format!("protocol {old_protocol}")),
+            "{:?}",
+            update.reasons
+        );
     }
 
     #[test]
