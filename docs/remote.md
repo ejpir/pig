@@ -76,7 +76,7 @@ Build a helper for the **remote** platform:
 cargo build --locked -p pi_remote
 ```
 
-Without `bundled-backend`, it runs Pi installed on the remote host. A manually copied Unix helper should be activated with `path/to/pi-desktop-remote activate`; activation accepts no destination argument and installs the running executable by SHA-256. To make the self-contained helper, fetch Pi's matching platform release (for example Linux arm64) and embed it:
+Without `bundled-backend`, it runs Pi installed on the remote host. A manually copied Unix helper should be activated with `path/to/pi-desktop-remote activate`; activation accepts no destination argument and installs the running executable by SHA-256. Copying a new content-addressed binary alone does not select it for Android: activate it as the paired SSH account, then reconnect the phone to refresh helper metadata. Activation does not stop live session daemons or clear their data. To make the self-contained helper, fetch Pi's matching platform release (for example Linux arm64) and embed it:
 
 ```sh
 python3 scripts/fetch_pi.py --platform linux-arm64 --notices

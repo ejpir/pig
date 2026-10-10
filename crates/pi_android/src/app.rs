@@ -1453,7 +1453,7 @@ impl PhoneApp {
         self.keep_latest_in_view();
         let global_commands = batch
             .iter()
-            .any(|(id, update)| id.is_none() && matches!(update, Update::CommandCatalog(Ok(_))));
+            .any(|(id, update)| id.is_none() && matches!(update, Update::CommandCatalog(_, Ok(_))));
         let command_sessions: HashSet<SessionId> = batch
             .iter()
             .filter_map(|(id, update)| {

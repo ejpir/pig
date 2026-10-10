@@ -206,6 +206,7 @@ impl Session {
                 // Remote filesystem paths are never local project identities.
                 snapshot.cwd = self.cwd.clone();
                 snapshot.saved.clear();
+                snapshot.hydrate_model();
                 *self = snapshot;
             }
             "response" => self.response(record)?,
@@ -507,7 +508,22 @@ impl Session {
             }
             _ => {}
         }
+        self.hydrate_model();
         Ok(())
+    }
+
+    /// Durable snapshots can initially identify the selected model without its
+    /// catalog metadata. Missing input kinds mean unknown, not text-only.
+    fn hydrate_model(&mut self) {
+        if let Some(selected) = &self.state.model
+            && selected.input.is_empty()
+            && let Some(model) = self
+                .available_models
+                .iter()
+                .find(|model| model.provider == selected.provider && model.id == selected.id)
+        {
+            self.state.model = Some(model.clone());
+        }
     }
 
     fn upsert_tool(&mut self, id: String, name: String, args: Value) {

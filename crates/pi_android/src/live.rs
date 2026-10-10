@@ -29,8 +29,8 @@ pub enum Update {
     Ended(u64, String),
     /// A fresh listing of the computer's sessions.
     Listed(Result<Vec<Listed>, String>),
-    ModelCatalog(Result<Vec<pi_core::protocol::Model>, String>),
-    CommandCatalog(Result<Vec<pi_core::protocol::SlashCommand>, String>),
+    ModelCatalog(u64, Result<Vec<pi_core::protocol::Model>, String>),
+    CommandCatalog(u64, Result<Vec<pi_core::protocol::SlashCommand>, String>),
 }
 
 /// What a request was for, to act on its response.
@@ -281,12 +281,52 @@ impl Watch {
         self.images.retain(|_, image| image.is_some());
     }
 
+    fn require_images(&self) -> Result<(), String> {
+        if !self.current || !self.ready || self.input.as_ref().is_none_or(|input| input.is_closed())
+        {
+            return Err("Wait for the session to finish connecting before sending images.".into());
+        }
+        if self
+            .sent
+            .values()
+            .any(|sent| matches!(sent.request, Request::SetModel))
+        {
+            return Err(
+                "Wait for the selected model to be confirmed before sending images.".into(),
+            );
+        }
+        if self.target.backend == RemoteBackend::Durable {
+            let pi_core::session::BackendInfo::Found(info) = &self.pi.backend else {
+                return Err("Wait for the session to report image support before sending.".into());
+            };
+            if !info["features"]
+                .as_array()
+                .is_some_and(|features| features.iter().any(|feature| feature == "image_prompts"))
+            {
+                return Err("This session is running an older helper without image support. Start a new session with the updated helper; your draft is kept.".into());
+            }
+        }
+        let model = self
+            .pi
+            .state
+            .model
+            .as_ref()
+            .ok_or("Wait for the session's model to load before sending images.")?;
+        if model.input.is_empty() {
+            return Err("This model's image capabilities have not loaded yet. Refresh models or select a vision-capable model; your draft is kept.".into());
+        }
+        if !model.input.iter().any(|kind| kind == "image") {
+            return Err("This model does not accept images. Choose a vision-capable model.".into());
+        }
+        Ok(())
+    }
+
     fn accepts(&self, update: &Update) -> bool {
         match update {
             Update::Opened(generation, _)
             | Update::Record(generation, _)
             | Update::Ended(generation, _) => *generation == self.generation,
-            Update::Listed(_) | Update::ModelCatalog(_) | Update::CommandCatalog(_) => false,
+            Update::Listed(_) | Update::ModelCatalog(_, _) | Update::CommandCatalog(_, _) => false,
         }
     }
 }
@@ -319,6 +359,8 @@ pub struct Live {
     pub models: Vec<pi_core::protocol::Model>,
     pub models_loading: bool,
     pub models_error: Option<String>,
+    /// Global catalog replies belong to the connection that requested them.
+    catalog_generation: u64,
     /// Commands available before a new session exists. A session-specific
     /// catalog replaces this once that session attaches.
     pub commands: Vec<pi_core::protocol::SlashCommand>,
@@ -346,6 +388,7 @@ impl Live {
             models: Vec::new(),
             models_loading: false,
             models_error: None,
+            catalog_generation: 1,
             commands: Vec::new(),
             commands_loading: false,
             commands_error: None,
@@ -386,6 +429,7 @@ impl Live {
         }
         self.models_loading = true;
         self.models_error = None;
+        let generation = self.catalog_generation;
         let (connection, helper, sender) = (
             self.connection.clone(),
             self.helper.clone(),
@@ -395,7 +439,9 @@ impl Live {
             let models = remote::models(&connection, &helper)
                 .await
                 .map_err(|error| format!("{error:#}"));
-            let _ = sender.send((None, Update::ModelCatalog(models))).await;
+            let _ = sender
+                .send((None, Update::ModelCatalog(generation, models)))
+                .await;
         });
     }
 
@@ -405,6 +451,7 @@ impl Live {
         }
         self.commands_loading = true;
         self.commands_error = None;
+        let generation = self.catalog_generation;
         let (connection, helper, sender) = (
             self.connection.clone(),
             self.helper.clone(),
@@ -414,7 +461,9 @@ impl Live {
             let commands = remote::commands(&connection, &helper)
                 .await
                 .map_err(|error| format!("{error:#}"));
-            let _ = sender.send((None, Update::CommandCatalog(commands))).await;
+            let _ = sender
+                .send((None, Update::CommandCatalog(generation, commands)))
+                .await;
         });
     }
 
@@ -526,6 +575,9 @@ impl Live {
     pub fn resume(&mut self, connection: Connection, helper: Helper) {
         self.connection = connection;
         self.helper = helper;
+        self.catalog_generation += 1;
+        self.models.clear();
+        self.models_error = None;
         self.models_loading = false;
         self.commands_loading = false;
         let watched: Vec<SessionId> = self.watches.keys().copied().collect();
@@ -564,12 +616,9 @@ impl Live {
                 "Update the computer's helper to send images. Your draft has been kept.".into(),
             );
         }
-        if !prompt.images.is_empty()
-            && choose_model(&self.models, &self.model)
-                .is_some_and(|model| !model.input.iter().any(|kind| kind == "image"))
-        {
-            return Err("This model does not accept images. Choose a vision-capable model.".into());
-        }
+        // Startup selects from the session's freshly fetched catalog. A cached
+        // global catalog must not reject an image against a different model.
+        // The backend validates image support for the confirmed selection.
         let target =
             remote::new_target(&self.host, folder).map_err(|error| format!("{error:#}"))?;
         let id = self.id_for(&target.key.clone());
@@ -750,28 +799,10 @@ impl Live {
             return Err("Wait for compaction to finish before sending another prompt.".into());
         }
         if !prompt.images.is_empty() {
-            if let Some(watch) = self.watches.get(&id)
-                && watch.target.backend == RemoteBackend::Durable
-            {
-                let pi_core::session::BackendInfo::Found(info) = &watch.pi.backend else {
-                    return Err(
-                        "Wait for the session to report image support before sending.".into(),
-                    );
-                };
-                if !info["features"].as_array().is_some_and(|features| {
-                    features.iter().any(|feature| feature == "image_prompts")
-                }) {
-                    return Err("This session is running an older helper without image support. Start a new session with the updated helper; your draft is kept.".into());
-                }
-            }
-            let model = self
-                .current_model(id)
-                .ok_or("Wait for the session's model to load before sending images.")?;
-            if !model.input.iter().any(|kind| kind == "image") {
-                return Err(
-                    "This model does not accept images. Choose a vision-capable model.".into(),
-                );
-            }
+            self.watches
+                .get(&id)
+                .ok_or("This session is no longer available.")?
+                .require_images()?;
         }
         if let Some(watch) = self.watches.get_mut(&id) {
             watch.outbox.push(prompt.into());
@@ -1074,26 +1105,26 @@ impl Live {
         update: Update,
     ) -> (Vec<SessionId>, Option<Problem>) {
         let Some(id) = id else {
-            if let Update::CommandCatalog(commands) = update {
-                self.commands_loading = false;
-                match commands {
-                    Ok(commands) => {
-                        self.commands = commands;
-                        self.commands_error = None;
-                    }
-                    Err(error) => self.commands_error = Some(error),
-                }
+            if let Update::CommandCatalog(generation, commands) = update {
+                apply_catalog(
+                    generation,
+                    self.catalog_generation,
+                    commands,
+                    &mut self.commands,
+                    &mut self.commands_loading,
+                    &mut self.commands_error,
+                );
                 return (Vec::new(), None);
             }
-            if let Update::ModelCatalog(models) = update {
-                self.models_loading = false;
-                match models {
-                    Ok(models) => {
-                        self.models = models;
-                        self.models_error = None;
-                    }
-                    Err(error) => self.models_error = Some(error),
-                }
+            if let Update::ModelCatalog(generation, models) = update {
+                apply_catalog(
+                    generation,
+                    self.catalog_generation,
+                    models,
+                    &mut self.models,
+                    &mut self.models_loading,
+                    &mut self.models_error,
+                );
                 return (Vec::new(), None);
             }
             let Update::Listed(listed) = update else {
@@ -1153,7 +1184,7 @@ impl Live {
                     text,
                 });
             }
-            Update::Listed(_) | Update::ModelCatalog(_) | Update::CommandCatalog(_) => {}
+            Update::Listed(_) | Update::ModelCatalog(_, _) | Update::CommandCatalog(_, _) => {}
         }
         (vec![id], problem)
     }
@@ -1741,6 +1772,29 @@ fn thinking_label(level: &str) -> &str {
 }
 
 /// The model the settings name, by name or id, else the first offered.
+/// Ignore both successful and failed catalog replies from an obsolete SSH
+/// connection, including their attempts to clear the current loading state.
+fn apply_catalog<T>(
+    generation: u64,
+    current: u64,
+    result: Result<Vec<T>, String>,
+    values: &mut Vec<T>,
+    loading: &mut bool,
+    error: &mut Option<String>,
+) {
+    if generation != current {
+        return;
+    }
+    *loading = false;
+    match result {
+        Ok(catalog) => {
+            *values = catalog;
+            *error = None;
+        }
+        Err(reason) => *error = Some(reason),
+    }
+}
+
 fn choose_model<'a>(
     models: &'a [pi_core::protocol::Model],
     wanted: &str,
@@ -2313,6 +2367,74 @@ mod tests {
     }
 
     #[test]
+    fn new_image_prompt_uses_fresh_session_models_and_preserves_rejected_bytes() {
+        let (mut watch, sent) = watch();
+        let prompt = Prompt::new(
+            "Describe this".into(),
+            vec![pi_core::protocol::ImageContent::new(
+                "aW1hZ2U=".into(),
+                "image/png",
+            )],
+        );
+        watch.outbox.push(prompt.clone().into());
+        let mut models = vec![Model {
+            input: vec!["text".into()],
+            ..model("host", "stale", "Stale")
+        }];
+        Live::record(
+            &mut watch,
+            &json!({"type":"remote_snapshot","data":Pi::new("/Users/nick/repos/pi".into())}),
+            "vision",
+            "",
+            &mut models,
+        );
+        let ask = sent.try_recv().unwrap();
+        assert_eq!(sent.try_recv().unwrap()["type"], "get_commands");
+        assert!(sent.try_recv().is_err(), "images wait for fresh selection");
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":ask["id"],"command":"get_available_models","success":true,
+                "data":{"models":[{"provider":"host","id":"vision","input":["text","image"]}]}}),
+            "vision",
+            "",
+            &mut models,
+        );
+        let set = sent.try_recv().unwrap();
+        assert_eq!(set["modelId"], "vision");
+        assert!(
+            sent.try_recv().is_err(),
+            "images wait for model confirmation"
+        );
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":set["id"],"command":"set_model","success":true,
+                "data":{"provider":"host","id":"vision","input":["text","image"]}}),
+            "vision",
+            "",
+            &mut models,
+        );
+        assert_eq!(
+            sent.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
+        let admission = sent.try_recv().unwrap();
+        assert_eq!(admission["requestId"], prompt.request_id);
+        assert_eq!(admission["images"], json!(prompt.images));
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":admission["id"],"command":"prompt","success":false,"error":"This model does not accept images"}),
+            "vision",
+            "",
+            &mut models,
+        );
+        assert!(watch.outbox.is_empty());
+        assert_eq!(
+            watch.failed[0].prompt, prompt,
+            "the backend's authoritative rejection remains recoverable"
+        );
+    }
+
+    #[test]
     fn an_existing_session_loads_choices_without_changing_its_model() {
         let (mut watch, sent) = watch();
         let mut pi = Pi::new("/Users/nick/repos/pi".into());
@@ -2345,6 +2467,196 @@ mod tests {
         );
         assert_eq!(watch.pi.state.model.as_ref().unwrap().id, "existing");
         assert_eq!(models.len(), 1);
+    }
+
+    #[test]
+    fn obsolete_catalogs_cannot_replace_new_models_or_finish_their_refresh() {
+        let mut models = vec![model("host", "current", "Current")];
+        let mut loading = true;
+        let mut error = None;
+        apply_catalog(
+            1,
+            2,
+            Ok(vec![model("host", "stale", "Stale")]),
+            &mut models,
+            &mut loading,
+            &mut error,
+        );
+        apply_catalog(
+            1,
+            2,
+            Err("old connection failed".into()),
+            &mut models,
+            &mut loading,
+            &mut error,
+        );
+        assert_eq!(models[0].id, "current");
+        assert!(loading);
+        assert!(error.is_none());
+        apply_catalog(
+            2,
+            2,
+            Ok(vec![model("host", "fresh", "Fresh")]),
+            &mut models,
+            &mut loading,
+            &mut error,
+        );
+        assert_eq!(models[0].id, "fresh");
+        assert!(!loading);
+        assert!(error.is_none());
+        apply_catalog(
+            2,
+            2,
+            Err("current connection failed".into()),
+            &mut models,
+            &mut loading,
+            &mut error,
+        );
+        assert_eq!(models[0].id, "fresh");
+        assert_eq!(error.as_deref(), Some("current connection failed"));
+    }
+
+    #[test]
+    fn cold_vision_session_uses_catalog_metadata_without_reselecting_its_model() {
+        let (mut watch, sent) = watch();
+        let mut pi = Pi::new("/Users/nick/repos/pi".into());
+        pi.state.model = Some(model("host", "vision", "Vision"));
+        pi.backend = pi_core::session::BackendInfo::Found(json!({"features":["image_prompts"]}));
+        let mut models = Vec::new();
+        Live::record(
+            &mut watch,
+            &json!({"type":"remote_snapshot","data":pi}),
+            "text",
+            "",
+            &mut models,
+        );
+        let ask = sent.try_recv().unwrap();
+        assert_eq!(ask["type"], "get_available_models");
+        assert_eq!(
+            sent.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
+        assert_eq!(sent.try_recv().unwrap()["type"], "get_commands");
+        let unknown = watch.require_images().unwrap_err();
+        assert!(
+            unknown.contains("capabilities have not loaded"),
+            "{unknown}"
+        );
+        assert!(!unknown.contains("does not accept images"));
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":ask["id"],"command":"get_available_models","success":true,
+                "data":{"models":[{"provider":"host","id":"vision","input":["text","image"]}]}}),
+            "text",
+            "",
+            &mut models,
+        );
+        assert!(watch.require_images().is_ok());
+        assert_eq!(watch.pi.state.model.as_ref().unwrap().id, "vision");
+        assert!(
+            sent.try_recv().is_err(),
+            "catalog hydration must not change the selected model"
+        );
+    }
+
+    #[test]
+    fn image_checks_wait_for_reconnect_and_pending_model_changes_in_both_directions() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.backend =
+            pi_core::session::BackendInfo::Found(json!({"features":["image_prompts"]}));
+        watch.pi.state.model = Some(Model {
+            input: vec!["text".into()],
+            ..model("host", "text", "Text")
+        });
+        assert!(
+            watch
+                .require_images()
+                .unwrap_err()
+                .contains("does not accept images")
+        );
+        Live::configure(
+            &mut watch,
+            json!({"type":"set_model","provider":"host","modelId":"vision"}),
+            Request::SetModel,
+        )
+        .unwrap();
+        let set = sent.try_recv().unwrap();
+        assert!(
+            watch
+                .require_images()
+                .unwrap_err()
+                .contains("selected model to be confirmed")
+        );
+        let mut models = Vec::new();
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":set["id"],"command":"set_model","success":true,
+                "data":{"provider":"host","id":"vision","input":["text","image"]}}),
+            "",
+            "",
+            &mut models,
+        );
+        assert!(watch.require_images().is_ok());
+        assert_eq!(
+            sent.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
+        Live::configure(
+            &mut watch,
+            json!({"type":"set_model","provider":"host","modelId":"text"}),
+            Request::SetModel,
+        )
+        .unwrap();
+        let set = sent.try_recv().unwrap();
+        assert!(
+            watch
+                .require_images()
+                .unwrap_err()
+                .contains("selected model to be confirmed")
+        );
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":set["id"],"command":"set_model","success":true,
+                "data":{"provider":"host","id":"text","input":["text"]}}),
+            "",
+            "",
+            &mut models,
+        );
+        assert!(
+            watch
+                .require_images()
+                .unwrap_err()
+                .contains("does not accept images")
+        );
+        watch
+            .pi
+            .state
+            .model
+            .as_mut()
+            .unwrap()
+            .input
+            .push("image".into());
+        watch.reset_transport();
+        assert!(
+            watch
+                .require_images()
+                .unwrap_err()
+                .contains("finish connecting")
+        );
+        let (input, _sent) = async_channel::unbounded();
+        watch.input = Some(input);
+        watch.current = true;
+        watch.ready = true;
+        assert!(watch.require_images().is_ok());
+        watch.ready = false;
+        assert!(
+            watch
+                .require_images()
+                .unwrap_err()
+                .contains("finish connecting")
+        );
     }
 
     #[test]
