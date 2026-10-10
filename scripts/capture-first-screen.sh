@@ -87,7 +87,10 @@ sleep 0.4
 import -window "$window" artifacts/thread-bash-details.png
 xdotool mousemove --window "$window" 850 430 click --repeat 12 --delay 50 4
 sleep 0.3
-for picker in 'model-picker claude-opus-5-5' 'thinking-picker High'; do
+# The composer shows the catalog's display name ("Claude Opus 5.5"), not
+# the RPC model ID. Match its unique word within the composer controls so OCR
+# need not preserve punctuation or keep the multi-word label in one TSV token.
+for picker in 'model-picker Opus' 'thinking-picker High'; do
     read -r name word <<< "$picker"
     read -r x y < <(locate_word "$word" '215,620,700,715')
     xdotool mousemove --window "$window" "$x" "$y" click 1
