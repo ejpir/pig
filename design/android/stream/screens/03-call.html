@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>03 A call opened</title>
+<link rel="stylesheet" href="../../next4/next4.css"><link rel="stylesheet" href="../stream.css"></head>
+<body>
+<div class="phone">
+  <main class="content" data-stream="verifying">
+    <div data-scrim></div>
+    <div class="sheet" style="max-height:calc(100% - 48px);padding-bottom:12px">
+      <div class="handle"></div>
+      <div class="call two err" style="--hue:var(--h-check);gap:12px">
+        <span class="ic" style="width:32px;height:32px;border-radius:10px"><i data-i="term" style="width:16px;height:16px"></i></span>
+        <span class="what"><span class="ln t3" style="font-size:var(--t3);line-height:24px"><b>Ran a type check</b></span><span class="sub" style="color:var(--muted)">~/repos/pi/packages/ai · 0:06</span></span>
+        <span class="badge" style="--hue:var(--coral)">Exit 2</span>
+      </div>
+      <div class="well cmd" style="margin-top:16px;padding:12px;color:var(--text);font-size:13px">$ pnpm tsc --noEmit</div>
+      <div class="label" style="margin-top:20px">Output</div>
+<div class="tail" style="margin-top:8px;white-space:pre-wrap;background:var(--canvas);border:1px solid var(--line);border-radius:12px;padding:12px"><span class="dim">&gt; @pi/ai@0.9.2 typecheck
+&gt; tsc --noEmit</span>
+
+<span class="now">test/qwen.test.ts</span>:<span class="no">14:22</span> - <span class="no">error TS18048</span>: 'model' is possibly 'undefined'.
+
+<span class="dim">14   expect(readThinking(block, model)).toEqual(
+                          ~~~~~</span>
+
+Found <span class="no">1 error</span> in test/qwen.test.ts<span class="dim">:14</span></div>
+      <div class="row g12" style="margin-top:16px;padding:12px 16px;border-radius:12px;background:var(--panel)">
+        <i data-i="pencil" class="sm" style="color:var(--h-edit)"></i>
+        <span class="grow meta" style="color:var(--secondary)">Pi fixed it next: <b>Edited</b> <code>qwen.test.ts</code></span>
+        <i data-i="chev-r" class="sm faint"></i>
+      </div>
+      <div class="row g8" style="margin-top:16px">
+        <span class="btn grow"><i data-i="copy" class="sm"></i>Copy output</span>
+        <span class="btn grow tonal"><i data-i="clip" class="sm"></i>Ask about this</span>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../../next4/frags.js"></script><script src="../frag.js"></script><script src="../../next4/next4.js"></script>
+</body></html>

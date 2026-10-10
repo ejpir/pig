@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>04 The run line on demand</title>
+<link rel="stylesheet" href="../../next4/next4.css"><link rel="stylesheet" href="../stream.css"></head>
+<body>
+<div class="phone">
+  <main class="content" data-stream="changing">
+    <div data-scrim></div>
+    <div class="sheet" style="max-height:calc(100% - 48px);padding-bottom:24px">
+      <div class="handle"></div>
+      <div class="row">
+        <div class="grow"><div class="t4">Run so far</div><div class="meta" style="margin-top:4px">1:12 · 8 calls · 2 files changing</div></div>
+        <span class="tap" style="margin-right:-12px"><i data-i="x"></i></span>
+      </div>
+      <div class="col g24" style="margin-top:24px">
+        <div class="st" style="--hue:var(--h-read)">
+          <span class="stn"><i data-i="eye"></i></span><span class="to"></span>
+          <div class="body">
+            <div class="row"><span class="strong grow">Understood</span><span class="meta">0:21</span><span class="go"><i data-i="chev-r"></i></span></div>
+            <div class="meta" style="margin-top:2px">Read 5 files · searched twice</div>
+            <div class="row g8 wrap" style="margin-top:12px">
+              <span class="chip sm"><i data-i="file"></i>openai-completions.ts</span>
+              <span class="chip sm"><i data-i="file"></i>anthropic.ts</span>
+              <span class="chip sm" style="color:var(--accent);font-weight:600">+4 more</span>
+            </div>
+          </div>
+        </div>
+        <div class="st" style="--hue:var(--h-edit)">
+          <span class="stn live"><i data-i="pencil"></i></span><span class="to ahead"></span>
+          <div class="body">
+            <div class="row"><span class="strong grow">Changing</span><span class="cmd add">+3</span><span class="cmd del" style="margin-left:8px">−1</span><span class="go"><i data-i="chev-r"></i></span></div>
+            <div class="meta" style="margin-top:2px">Editing openai-completions.ts</div>
+          </div>
+        </div>
+        <div class="st ahead">
+          <span class="stn ahead"><i data-i="shield"></i></span><span class="to ahead"></span>
+          <div class="body row g8"><span class="faint">Verify</span><span class="meta faint">Run the checks</span></div>
+        </div>
+        <div class="st ahead">
+          <span class="stn ahead"><i data-i="send"></i></span>
+          <div class="body row g8"><span class="faint">Hand off</span><span class="meta faint">Summary and changes</span></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../../next4/frags.js"></script><script src="../frag.js"></script><script src="../../next4/next4.js"></script>
+</body></html>

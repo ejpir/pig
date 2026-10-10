@@ -1,0 +1,62 @@
+/* Tool calls streamed into the thread while Pi works: the same tokens and
+ * proportions as ../next4/next4.css. The run line stays, folded into the dock
+ * while Pi works and drawn in full once the run is done.
+ *
+ *   a call     one 40 px line: its tool's icon in its stage's colour, a verb,
+ *              what it touched, its time
+ *   a group    calls of one kind in a row fold into one 56 px line
+ *   the live   the one call still running is open, its output streaming in
+ */
+
+/* Pi's narration between calls: sans, secondary, never a bubble. */
+.say { line-height: 22px; color: var(--secondary); }
+.say code { color: var(--text); }
+
+.calls { display: flex; flex-direction: column; }
+.call { min-height: 40px; display: flex; align-items: center; gap: 12px; }
+.call.two { min-height: 56px; }
+.call .ic { width: 24px; height: 24px; flex: none; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  color: var(--hue, var(--muted)); background: color-mix(in srgb, var(--hue, var(--muted)) 13%, transparent); }
+.call .ic i[data-i] { width: 14px; height: 14px; }
+.call .what { flex: 1; min-width: 0; font-size: 14px; line-height: 20px; color: var(--secondary); }
+.call .what .ln { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.call .what b { font-weight: 600; color: var(--text); }
+.call .what code { font-size: 12.5px; color: var(--secondary); }
+.call .what .sub { display: block; font-size: var(--t1); line-height: 16px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.call .tm { font-size: var(--t1); color: var(--faint); flex: none; font-variant-numeric: tabular-nums; }
+.call > i[data-i] { width: 16px; height: 16px; color: var(--faint); }
+.call .cmd { flex: none; }
+/* A call that failed says so in coral, with the line that matters. */
+.call.err .ic { --hue: var(--coral); }
+.call.err .sub { color: var(--coral); }
+
+/* The live call: the only open one, ringed like the live station. */
+.open-call { background: var(--composer); border: 1px solid var(--line); border-radius: var(--r3); padding: 0 12px 12px; }
+.open-call > .call .ic { background: var(--composer); border: 1.5px solid var(--hue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--hue) 18%, transparent); }
+.open-call > .call { min-height: 48px; }
+.open-call .code { border-radius: var(--r1); overflow: hidden; }
+/* The last lines of a command's output, newest at the bottom. */
+.tail { background: var(--panel); border-radius: var(--r1); padding: 8px 12px; font-family: var(--mono); font-size: 12px; line-height: 20px;
+  color: var(--plain); white-space: pre; overflow: hidden; }
+.tail .ok { color: var(--green); } .tail .no { color: var(--coral); } .tail .dim { color: var(--faint); }
+.tail .now { color: var(--text); }
+.open-call .foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; min-height: 24px; }
+.bar-mini { flex: 1; height: 4px; border-radius: 2px; background: var(--raised); overflow: hidden; }
+.bar-mini b { display: block; height: 4px; border-radius: 2px; background: var(--hue); }
+
+/* The dock's strip carries the run line, folded to four segments; tapping it
+ * pulls the full line up as a sheet. */
+.strip .segs { width: 56px; }
+.strip .stage { font-size: 14px; font-weight: 600; }
+.strip .open { width: 32px; height: 40px; display: flex; align-items: center; justify-content: center; color: var(--muted); margin-left: -8px; }
+.strip .open i[data-i] { width: 16px; height: 16px; }
+
+/* A finished run: the stream folds to one row over the run line. */
+.fold { display: flex; align-items: center; gap: 8px; min-height: 40px; font-size: 13px; color: var(--muted); }
+.fold b { color: var(--secondary); font-weight: 600; }
+.fold i[data-i] { width: 16px; height: 16px; color: var(--faint); }
+
+/* A station row in the run-line sheet can jump to its calls. */
+.st .go { width: 32px; height: 28px; flex: none; display: flex; align-items: center; justify-content: flex-end; color: var(--faint); }
+.st .go i[data-i] { width: 16px; height: 16px; }

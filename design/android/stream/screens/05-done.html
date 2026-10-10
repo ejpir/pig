@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>05 Done, folded</title>
+<link rel="stylesheet" href="../../next4/next4.css"><link rel="stylesheet" href="../stream.css"></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="bar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="title"><b>Qwen signatures</b><span>pi · done in 4:31</span></div>
+      <span class="tap"><i data-i="info"></i></span>
+      <span class="tap"><i data-i="dots"></i></span>
+    </div>
+    <div class="scroll col g16" style="padding-top:8px">
+      <div class="you ell" style="max-width:86%">qwen3.8-flash on OpenCode returns empty thinking…</div>
+      <div style="margin-top:8px">
+        <div class="run"><b class="r" style="width:54px"></b><b class="e" style="width:159px"></b><b class="c" style="width:125px"></b><b class="h" style="width:28px"></b></div>
+        <div class="times"><span style="width:54px">0:40</span><span style="width:159px">1:58</span><span style="width:125px">1:32</span><span style="width:28px">0:21</span></div>
+        <div class="fold"><b>11 calls</b><span>· 1 failed, fixed</span><span class="grow"></span><span style="color:var(--accent);font-weight:600">Show</span><i data-i="chev-d" style="color:var(--accent)"></i></div>
+      </div>
+      <div>
+        <p class="headline">OpenCode models may now send an empty signature; Anthropic still must.</p>
+        <p class="prose" style="margin-top:12px">The check in <code>readThinking</code> only rejects a missing signature for Anthropic models. A regression test covers both providers.</p>
+      </div>
+      <div class="card list" style="padding:0 16px;margin-top:8px">
+        <div class="item one"><i data-i="file" class="sm muted"></i><span class="grow ell">openai-completions.ts</span>
+          <span class="blocks"><span class="a"></span><span class="a"></span><span class="a"></span><span class="d"></span><span></span></span><span class="cmd add" style="width:24px;text-align:right">+3</span><span class="cmd del" style="width:20px;text-align:right">−1</span></div>
+        <div class="item one"><i data-i="file" class="sm muted"></i><span class="grow ell">qwen.test.ts</span>
+          <span class="blocks"><span class="a"></span><span class="a"></span><span class="a"></span><span class="a"></span><span class="a"></span></span><span class="cmd add" style="width:24px;text-align:right">+18</span><span style="width:20px"></span></div>
+        <div class="item one"><i data-i="shield" class="sm" style="color:var(--green)"></i><span class="grow ell cmd secondary">pnpm test --filter @pi/ai</span><span class="badge" style="--hue:var(--green)">Passed</span></div>
+      </div>
+    </div>
+    <div class="dock g8">
+      <span class="btn primary wide"><i data-i="diff" class="sm"></i>Review 2 changed files</span><div data-composer="Ask a follow-up…"></div>
+    </div>
+  </main>
+</div>
+<script src="../../next4/frags.js"></script><script src="../frag.js"></script><script src="../../next4/next4.js"></script>
+</body></html>
