@@ -1000,6 +1000,7 @@ mod tests {
         assert!(rendered.contains('█'));
     }
 
+    #[cfg(unix)]
     #[test]
     fn key_edits_preserve_bytes_and_remove_only_an_exact_managed_bootstrap() {
         let directory = isolated();
@@ -1108,6 +1109,7 @@ mod tests {
         assert!(!managed_helper_name("not-pi-desktop-remote"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn migration_changes_only_recognized_phone_gateways_and_is_idempotent() {
         let directory = isolated();
