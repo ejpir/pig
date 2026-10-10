@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 const FIND: &str = r#"printf "home\t%s\n" "$HOME"; f="$HOME/.pi/desktop/bin/pi-desktop-remote"; if test -x "$f"; then printf "%s\t%s\t%s\n" "$f" "$("$f" --version 2>/dev/null)" "$("$f" --capabilities 2>/dev/null | tr -d "\n")"; fi"#;
 
 pub const APP_RELEASE: &str = env!("CARGO_PKG_VERSION");
-const RELEASES: &str = "https://github.com/earendil-works/pi/releases";
+const RELEASES: &str = "https://github.com/ejpir/pig/releases";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HelperUpdateState {
@@ -793,6 +793,21 @@ mod tests {
             "{:?}",
             update.reasons
         );
+    }
+
+    #[test]
+    fn helper_update_messages_link_to_our_matching_release() {
+        let listing =
+            format!("home\t/h\n/h/helper\tpi-desktop-remote 0.0.7 1 linux-amd64\t{DURABLE}\n");
+        let helper = choose(&listing).unwrap();
+        let release_url = format!("https://github.com/ejpir/pig/releases/tag/v{APP_RELEASE}");
+        let details = helper.update.as_ref().unwrap().details("build-box");
+        assert!(details.contains(&release_url), "{details}");
+        assert!(details.contains("pi-desktop-remote-linux-amd64"));
+        let action = helper.require_attach("attaching").unwrap_err().to_string();
+        assert!(action.contains(&release_url), "{action}");
+        assert!(!details.contains("earendil-works"));
+        assert!(!action.contains("earendil-works"));
     }
 
     #[test]
