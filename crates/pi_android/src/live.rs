@@ -198,10 +198,23 @@ impl Watch {
                 .any(|sent| matches!(&sent.request, Request::Compact))
     }
 
+    /// An acknowledged idle admission is already running on the computer even
+    /// when its busy snapshot has not reached this phone yet.
+    fn effective_busy(&self) -> bool {
+        self.pi.busy()
+            || self.accepted_turn.is_some()
+            || self
+                .sent
+                .values()
+                .any(|sent| matches!(&sent.request, Request::Prompt(_)))
+    }
+
     fn starts_turn(&self, pending: &PendingPrompt) -> bool {
-        pending.admission.map_or(!self.pi.busy(), |admission| {
-            admission.streaming_behavior.is_none()
-        })
+        pending
+            .admission
+            .map_or(!self.effective_busy(), |admission| {
+                admission.streaming_behavior.is_none()
+            })
     }
 
     fn projected_outbox(&self) -> Vec<projection::PendingPrompt> {
@@ -702,12 +715,7 @@ impl Live {
             .collect();
         for index in pending {
             let admission = watch.outbox[index].admission.unwrap_or_else(|| Admission {
-                streaming_behavior: (watch.pi.busy()
-                    || watch
-                        .sent
-                        .values()
-                        .any(|sent| matches!(&sent.request, Request::Prompt(_))))
-                .then_some("steer"),
+                streaming_behavior: watch.effective_busy().then_some("steer"),
             });
             let request_id = watch.outbox[index].prompt.request_id.clone();
             let record = watch.outbox[index].record(admission);
@@ -1246,8 +1254,10 @@ impl Live {
                 .as_ref()
                 .is_some_and(|accepted| user_turns(&watch.pi) > accepted.user_turns_before)
         {
-            // A snapshot after acknowledgement is authoritative even when
-            // compaction/rebase reduced the retained user-message count.
+            // A snapshot replaces optimism even when compaction/rebase reduced
+            // the retained user-message count. Snapshots have no admission
+            // watermark yet: an older idle frame racing an acknowledgement can
+            // still clear this hint. A correlated daemon read is not a barrier.
             watch.accepted_turn = None;
         }
         Self::fetch_images(watch);
@@ -1914,6 +1924,66 @@ mod tests {
             next_pipe.try_recv().is_err(),
             "no duplicate prompt submitted"
         );
+    }
+
+    #[test]
+    fn a_prompt_in_the_acknowledgement_snapshot_gap_is_sent_as_steering_immediately() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.outbox.push("Start working".into());
+        Live::flush(&mut watch);
+        let first = sent.try_recv().unwrap();
+        assert!(first.get("streamingBehavior").is_none());
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":first["id"],"command":"prompt","success":true}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert!(!watch.pi.busy(), "busy snapshot has not arrived");
+        assert!(watch.accepted_turn.is_some());
+        watch.outbox.push("Change direction".into());
+        let projected = watch.projected_outbox();
+        assert!(
+            projected[0].starts_turn,
+            "acknowledged admission remains a new turn"
+        );
+        assert!(
+            !projected[1].starts_turn,
+            "the next prompt must project as steering"
+        );
+        Live::flush(&mut watch);
+        let second = sent.try_recv().unwrap();
+        assert_eq!(second["streamingBehavior"], "steer");
+        assert_eq!(second["message"], "Change direction");
+        assert_eq!(second["requestId"], watch.outbox[0].prompt.request_id);
+    }
+
+    #[test]
+    fn effective_busy_never_rewrites_an_already_attempted_idle_admission() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.outbox.push("Retry the same admission".into());
+        Live::flush(&mut watch);
+        let first = sent.try_recv().unwrap();
+        assert!(first.get("streamingBehavior").is_none());
+        watch.reset_transport();
+        watch.accepted_turn = Some(AcceptedTurn {
+            text: "Another admitted turn".into(),
+            user_turns_before: 0,
+        });
+        watch.current = true;
+        watch.ready = true;
+        let (input, sent) = async_channel::unbounded();
+        watch.input = Some(input);
+        assert!(watch.effective_busy());
+        assert!(watch.starts_turn(&watch.outbox[0]));
+        Live::flush(&mut watch);
+        let retry = sent.try_recv().unwrap();
+        assert_eq!(admission(first), admission(retry));
     }
 
     #[test]
