@@ -300,8 +300,10 @@ pub fn connect() -> Result<()> {
                 break;
             }
         }
-        // EOF detaches the bridge, never aborts the daemon's Pi.
-        let _ = upstream.shutdown(Shutdown::Both);
+        // EOF detaches the bridge, never aborts the daemon's Pi. Keep the read
+        // half open so Windows receives the daemon's orderly close instead of
+        // reporting this local detach as WSAECONNABORTED.
+        let _ = upstream.shutdown(Shutdown::Write);
     });
     let mut reader = attachment.reader;
     let mut output = std::io::stdout().lock();
