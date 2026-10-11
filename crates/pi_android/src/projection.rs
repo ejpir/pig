@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// A prompt the phone still owns while the helper admits it.
 pub struct PendingPrompt {
     pub text: String,
+    pub key: Option<QueueKey>,
     /// This was admitted while the session was idle, so it starts a fresh turn
     /// even if `agent_start` reaches the phone before the user-message snapshot.
     pub starts_turn: bool,
@@ -30,6 +31,29 @@ pub struct Facts<'a> {
 }
 
 pub fn project(pi: &Pi, facts: Facts) -> Session {
+    project_queue(pi, facts, |_| true)
+}
+
+/// Filter only the UI queue; the authoritative session/history stays untouched.
+/// Indices are in steering-then-follow-up order, including hidden rows.
+pub fn project_queue(pi: &Pi, facts: Facts, visible: impl Fn(usize) -> bool) -> Session {
+    project_queue_keys(pi, facts, visible, |index| {
+        pi.queued_submissions
+            .get(index)
+            .filter(|id| !id.is_empty())
+            .cloned()
+            .map(QueueKey::Durable)
+    })
+}
+
+/// Live may preserve a local request key after its correlated durable receipt.
+/// Both visibility and identity are read from the same authoritative snapshot.
+pub fn project_queue_keys(
+    pi: &Pi,
+    facts: Facts,
+    visible: impl Fn(usize) -> bool,
+    key: impl Fn(usize) -> Option<QueueKey>,
+) -> Session {
     let turns = turns(pi, facts.cwd);
     let working = pi.busy() || !facts.outbox.is_empty();
     let last = pi.messages.iter().rev().find(|m| m["role"] == "assistant");
@@ -82,10 +106,17 @@ pub fn project(pi: &Pi, facts: Facts) -> Session {
         (Some(start), false, Some(end)) => end.saturating_sub(start),
         _ => Duration::ZERO,
     };
+    let mut queued_keys = Vec::new();
     let mut queued: Vec<String> = pi
         .steering
         .iter()
         .chain(&pi.follow_up)
+        .enumerate()
+        .filter(|(index, _)| visible(*index))
+        .map(|(index, text)| {
+            queued_keys.push(key(index));
+            text
+        })
         // Subagents' answers wait for Pi like a follow-up, but nobody typed them.
         .map(|text| match pi_core::subagent::report(text) {
             Some(_) => "Subagents reported back".to_owned(),
@@ -97,7 +128,10 @@ pub fn project(pi: &Pi, facts: Facts) -> Session {
             .outbox
             .iter()
             .skip(usize::from(optimistic.is_some()))
-            .map(|prompt| prompt.text.clone()),
+            .map(|prompt| {
+                queued_keys.push(prompt.key.clone());
+                prompt.text.clone()
+            }),
     );
     let project = facts
         .cwd
@@ -124,6 +158,7 @@ pub fn project(pi: &Pi, facts: Facts) -> Session {
         check: check(pi),
         question: facts.question,
         queued,
+        queued_keys,
         failure,
         details: details(pi, facts.key),
         script: None,
@@ -164,6 +199,7 @@ pub fn listed(id: SessionId, listed: &crate::remote::Listed, folder: String) -> 
         check: None,
         question: None,
         queued: Vec::new(),
+        queued_keys: Vec::new(),
         failure: (state == State::Failed)
             .then(|| listed.error.clone().unwrap_or_else(|| "failed".into())),
         details: Details {
@@ -1224,6 +1260,7 @@ mod tests {
         ]);
         let outbox = vec![PendingPrompt {
             text: "One more thing".into(),
+            key: Some(QueueKey::Local("one-more".into())),
             starts_turn: true,
         }];
         let shown = project(&pi, facts(&outbox));
@@ -1331,6 +1368,7 @@ mod tests {
     fn a_prompt_from_the_phone_shows_before_pi_takes_it() {
         let outbox = [PendingPrompt {
             text: "Explain this project".into(),
+            key: Some(QueueKey::Local("explain".into())),
             starts_turn: true,
         }];
         let shown = project(&Pi::new("/Users/nick/repos/pi".into()), facts(&outbox));

@@ -7,7 +7,7 @@
 //! nothing is lost when the phone goes away.
 
 use crate::{
-    model::{Answer, SessionId},
+    model::{Answer, QueueKey, SessionId},
     projection,
     prompt::Prompt,
     remote::{self, Helper, Listed},
@@ -18,7 +18,17 @@ use pi_core::{
     ssh::{RemoteBackend, SshTarget},
 };
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
+};
+
+// Never reuse a pipe identity, even if a released watch is recreated.
+fn transport_generation() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Something that happened on the computer, for the store to apply.
 pub enum Update {
@@ -36,10 +46,11 @@ pub enum Update {
 /// What a request was for, to act on its response.
 enum Request {
     Prompt(String),
-    /// Durable cancellation of a hidden queued prompt, correlated by request id.
-    CancelPrompt(String),
+    /// Cancellation of one exact durable submission, correlated by transport id.
+    CancelSubmission(String),
     Models,
     AvailableModels,
+    ImageState,
     Commands,
     SetModel,
     SetThinking(String),
@@ -129,6 +140,13 @@ impl From<&str> for PendingPrompt {
     }
 }
 
+/// Only confirmed, session-local authority can permit a first image admission.
+enum ImageReadiness {
+    Ready,
+    Waiting(&'static str),
+    Rejected(&'static str),
+}
+
 struct Watch {
     generation: u64,
     target: SshTarget,
@@ -136,14 +154,31 @@ struct Watch {
     input: Option<async_channel::Sender<Value>>,
     /// Whether Pi's state has arrived since the pipe opened.
     current: bool,
+    /// A valid authoritative snapshot remains displayable across pipe resets.
+    cached_snapshot: bool,
+    /// Failed pipes retry independently of SSH reconnection and session listings.
+    retry_at: Option<Instant>,
+    retry_failures: u32,
     /// Whether commands may go: the state arrived and a model is chosen.
     ready: bool,
+    /// At most one demand-driven metadata refresh per waiting cohort/selection.
+    image_state_requested: bool,
+    image_backend_requested: bool,
+    image_catalog_requested: bool,
     /// Prompts typed on the phone that Pi hasn't taken yet. Each item owns its
     /// immutable admission mode after the first transport accepts it.
     outbox: Vec<PendingPrompt>,
     /// An idle admission acknowledged before its user-message snapshot. Keep
     /// projecting it as the new turn so stale tools cannot leak into it.
     accepted_turn: Option<AcceptedTurn>,
+    /// Submission-ID tombstones survive transport reset. `true` means the
+    /// cancel succeeded: hide until a subsequent authoritative queue omits it.
+    cancellations: HashMap<String, bool>,
+    /// Receipts keep a rendered local request addressable after the outbox row
+    /// is replaced by a durable snapshot. Never correlate by payload text.
+    queue_receipts: HashMap<String, String>,
+    /// Reverse lookup keeps queue rendering independent of total past admissions.
+    queue_request_ids: HashMap<String, String>,
     /// Rejected payloads remain recoverable, including images. They never retry
     /// automatically or make the session look as though it is still running.
     failed: Vec<FailedPrompt>,
@@ -156,6 +191,8 @@ struct Watch {
     /// The subagent on screen, by its conversation's id: fetched again as
     /// its parent reports progress, one request at a time.
     following: Option<String>,
+    /// Parent updates/target changes coalesced while a child read is in flight.
+    subagent_refresh_pending: bool,
     /// Subagents fetched from the computer: absent until asked for.
     subagents: HashMap<String, Result<pi_core::session::Session, String>>,
     ended: Option<String>,
@@ -217,19 +254,48 @@ impl Watch {
             })
     }
 
+    fn queue_row_visible(&self, index: usize) -> bool {
+        self.pi
+            .queued_submissions
+            .get(index)
+            .is_none_or(|id| !self.cancellations.contains_key(id))
+    }
+
+    fn queue_row_key(&self, index: usize) -> Option<QueueKey> {
+        let submission = self
+            .pi
+            .queued_submissions
+            .get(index)
+            .filter(|id| !id.is_empty())?;
+        Some(match self.queue_request_ids.get(submission) {
+            Some(request_id) => QueueKey::Local(request_id.clone()),
+            None => QueueKey::Durable(submission.clone()),
+        })
+    }
+
+    fn visible_outbox(&self) -> impl Iterator<Item = (usize, &PendingPrompt)> + Clone {
+        self.outbox.iter().enumerate().filter(|(_, pending)| {
+            !pending.cancelled
+                && pending
+                    .submission_id
+                    .as_ref()
+                    .is_none_or(|id| !self.pi.queued_submissions.contains(id))
+        })
+    }
+
     fn projected_outbox(&self) -> Vec<projection::PendingPrompt> {
         self.accepted_turn
             .iter()
             .map(|accepted| projection::PendingPrompt {
                 text: accepted.text.clone(),
+                key: None,
                 starts_turn: true,
             })
             .chain(
-                self.outbox
-                    .iter()
-                    .filter(|pending| !pending.cancelled)
-                    .map(|pending| projection::PendingPrompt {
+                self.visible_outbox()
+                    .map(|(_, pending)| projection::PendingPrompt {
                         text: pending.prompt.label(),
+                        key: Some(QueueKey::Local(pending.prompt.request_id.clone())),
                         starts_turn: self.starts_turn(pending),
                     }),
             )
@@ -243,6 +309,7 @@ impl Watch {
             && !self.pi.busy()
             && self.outbox.is_empty()
             && self.accepted_turn.is_none()
+            && self.cancellations.is_empty()
             && self.failed.is_empty()
             && self.sent.is_empty()
             && self.dialogs.is_empty()
@@ -259,19 +326,29 @@ impl Watch {
     fn new(target: SshTarget) -> Self {
         let pi = Pi::new(target.cwd.clone().into());
         Self {
-            generation: 1,
+            generation: transport_generation(),
             target,
             pi,
             input: None,
             current: false,
+            cached_snapshot: false,
+            retry_at: None,
+            retry_failures: 0,
             ready: false,
+            image_state_requested: false,
+            image_backend_requested: false,
+            image_catalog_requested: false,
             outbox: Vec::new(),
             accepted_turn: None,
+            cancellations: HashMap::new(),
+            queue_receipts: HashMap::new(),
+            queue_request_ids: HashMap::new(),
             failed: Vec::new(),
             sent: HashMap::new(),
             dialogs: Vec::new(),
             images: HashMap::new(),
             following: None,
+            subagent_refresh_pending: false,
             subagents: HashMap::new(),
             ended: None,
             since: seconds_now(),
@@ -279,10 +356,14 @@ impl Watch {
     }
 
     fn reset_transport(&mut self) {
-        self.generation += 1;
+        self.generation = transport_generation();
+        self.retry_at = None;
         self.input = None;
         self.current = false;
         self.ready = false;
+        self.image_state_requested = false;
+        self.image_backend_requested = false;
+        self.image_catalog_requested = false;
         self.ended = None;
         // Session-local commands can change while disconnected. Keep their
         // display cache, but do not use it for action shadowing until refreshed.
@@ -290,48 +371,108 @@ impl Watch {
         // Requests on the old pipe cannot be acknowledged by the new pipe.
         // Prompts remain in the outbox with their stable admission identities.
         self.sent.clear();
+        self.subagent_refresh_pending = self.following.is_some();
         // Images asked for on the old pipe are asked for again.
         self.images.retain(|_, image| image.is_some());
     }
 
-    fn require_images(&self) -> Result<(), String> {
+    fn end_transport(&mut self, reason: String, now: Instant) {
+        // Retire the generation immediately, including any queued old records.
+        self.reset_transport();
+        self.ended = Some(reason);
+        // 1, 2, 4, 8, 16, then at most one attempt every 32 seconds.
+        let delay = Duration::from_secs(1 << self.retry_failures.min(5));
+        self.retry_failures = self.retry_failures.saturating_add(1);
+        self.retry_at = Some(now + delay);
+    }
+
+    fn recover(
+        &mut self,
+        now: Instant,
+        ssh_healthy: bool,
+        can_attach: bool,
+    ) -> Option<(SshTarget, u64)> {
+        if !ssh_healthy || !can_attach || self.retry_at.is_none_or(|due| now < due) {
+            return None;
+        }
+        // Clearing the deadline before dispatch also prevents in-flight repeats.
+        self.reset_transport();
+        Some((self.target.clone(), self.generation))
+    }
+
+    fn project(&self, id: SessionId, folder: String) -> Option<crate::model::Session> {
+        if !self.cached_snapshot
+            && !self.current
+            && self.outbox.is_empty()
+            && self.cancellations.is_empty()
+            && self.pi.error.is_none()
+        {
+            return None;
+        }
+        Some(projection::project_queue_keys(
+            &self.pi,
+            projection::Facts {
+                id,
+                cwd: &self.target.cwd,
+                folder,
+                question: self.dialogs.first().and_then(projection::question),
+                outbox: &self.projected_outbox(),
+                key: &self.target.key,
+            },
+            |index| self.queue_row_visible(index),
+            |index| self.queue_row_key(index),
+        ))
+    }
+
+    fn image_readiness(&self) -> ImageReadiness {
+        use ImageReadiness::*;
         if !self.current || !self.ready || self.input.as_ref().is_none_or(|input| input.is_closed())
         {
-            return Err("Wait for the session to finish connecting before sending images.".into());
+            return Waiting("Wait for the session to finish connecting before sending images.");
         }
         if self
             .sent
             .values()
             .any(|sent| matches!(sent.request, Request::SetModel))
         {
-            return Err(
-                "Wait for the selected model to be confirmed before sending images.".into(),
-            );
+            return Waiting("Wait for the selected model to be confirmed before sending images.");
         }
         if self.target.backend == RemoteBackend::Durable {
-            let pi_core::session::BackendInfo::Found(info) = &self.pi.backend else {
-                return Err("Wait for the session to report image support before sending.".into());
-            };
-            if !info["features"]
-                .as_array()
-                .is_some_and(|features| features.iter().any(|feature| feature == "image_prompts"))
-            {
-                return Err("This session is running an older helper without image support. Start a new session with the updated helper; your draft is kept.".into());
+            match &self.pi.backend {
+                pi_core::session::BackendInfo::Unknown => {
+                    return Waiting("Wait for the session to report image support before sending.");
+                }
+                pi_core::session::BackendInfo::Found(info)
+                    if info["features"].as_array().is_some_and(|features| {
+                        features.iter().any(|feature| feature == "image_prompts")
+                    }) => {}
+                _ => {
+                    return Rejected(
+                        "This session is running an older helper without image support. Start a new session with the updated helper; your draft is kept.",
+                    );
+                }
             }
         }
-        let model = self
-            .pi
-            .state
-            .model
-            .as_ref()
-            .ok_or("Wait for the session's model to load before sending images.")?;
+        let Some(model) = self.pi.state.model.as_ref() else {
+            return Waiting("Wait for the session's model to load before sending images.");
+        };
         if model.input.is_empty() {
-            return Err("This model's image capabilities have not loaded yet. Refresh models or select a vision-capable model; your draft is kept.".into());
+            return Waiting(
+                "This model's image capabilities have not loaded yet. Refresh models or select a vision-capable model; your draft is kept.",
+            );
         }
         if !model.input.iter().any(|kind| kind == "image") {
-            return Err("This model does not accept images. Choose a vision-capable model.".into());
+            return Rejected("This model does not accept images. Choose a vision-capable model.");
         }
-        Ok(())
+        Ready
+    }
+
+    #[cfg(test)]
+    fn require_images(&self) -> Result<(), String> {
+        match self.image_readiness() {
+            ImageReadiness::Ready => Ok(()),
+            ImageReadiness::Waiting(error) | ImageReadiness::Rejected(error) => Err(error.into()),
+        }
     }
 
     fn accepts(&self, update: &Update) -> bool {
@@ -530,43 +671,53 @@ impl Live {
         if !self.helper.can_attach() {
             return;
         }
-        if self
-            .watches
-            .get(&id)
-            .is_some_and(|watch| watch.ended.is_none())
-        {
+        // An existing watch owns its retry deadline; navigation cannot bypass
+        // backoff or create a second attachment while one is in flight.
+        if self.watches.contains_key(&id) {
             return;
         }
-        let target = match self.watches.get(&id) {
-            Some(watch) => watch.target.clone(),
-            None => match self
-                .listed
-                .get(&id)
-                .and_then(|listed| remote::listed_target(&self.host, listed).ok())
-            {
-                Some(target) => target,
-                None => return,
-            },
+        let Some(target) = self
+            .listed
+            .get(&id)
+            .and_then(|listed| remote::listed_target(&self.host, listed).ok())
+        else {
+            return;
         };
-        let mut watch = self
-            .watches
-            .remove(&id)
-            .unwrap_or_else(|| Watch::new(target.clone()));
+        let mut watch = Watch::new(target.clone());
         watch.reset_transport();
         let generation = watch.generation;
         self.watches.insert(id, watch);
         self.attach(id, target, generation);
     }
 
+    /// Called by the app ticker even when no session is currently busy.
+    pub fn poll_recovery(&mut self, now: Instant) {
+        let healthy = !self.connection.is_closed();
+        let can_attach = self.helper.can_attach();
+        let attaches: Vec<_> = self
+            .watches
+            .iter_mut()
+            .filter_map(|(id, watch)| {
+                watch
+                    .recover(now, healthy, can_attach)
+                    .map(|plan| (*id, plan))
+            })
+            .collect();
+        for (id, (target, generation)) in attaches {
+            self.attach(id, target, generation);
+        }
+    }
+
     pub fn is_watched(&self, id: SessionId) -> bool {
         self.watches.contains_key(&id)
     }
 
-    /// The first authoritative state for this attached session has not arrived yet.
+    /// No authoritative snapshot is available for display yet. This is not
+    /// command readiness: a cached session stays visible while reconnecting.
     pub fn is_loading(&self, id: SessionId) -> bool {
         self.watches
             .get(&id)
-            .is_some_and(|watch| !watch.current && watch.ended.is_none())
+            .is_some_and(|watch| !watch.cached_snapshot && !watch.current && watch.ended.is_none())
     }
 
     pub fn target(&self, id: SessionId) -> Option<SshTarget> {
@@ -607,10 +758,10 @@ impl Live {
             return;
         }
         for id in watched {
-            if let Some(watch) = self.watches.get_mut(&id) {
-                watch.ended = Some("Reconnecting".into());
-            }
-            self.watch(id);
+            let watch = self.watches.get_mut(&id).unwrap();
+            watch.reset_transport();
+            let (target, generation) = (watch.target.clone(), watch.generation);
+            self.attach(id, target, generation);
         }
         if self.helper.can_list_sessions() {
             self.refresh();
@@ -661,6 +812,35 @@ impl Live {
         }
     }
 
+    fn flush_cancellations(watch: &mut Watch) {
+        if !watch.ready || watch.input.is_none() {
+            return;
+        }
+        let cancellations: Vec<String> = watch
+            .cancellations
+            .iter()
+            .filter(|(_, acknowledged)| !**acknowledged)
+            .filter(|(submission, _)| {
+                !watch.sent.values().any(|sent| {
+                    matches!(&sent.request, Request::CancelSubmission(id) if id == *submission)
+                })
+            })
+            .map(|(submission, _)| submission.clone())
+            .collect();
+        for submission in cancellations {
+            let mut record = json!({
+                "type":"cancel_submission",
+                "submissionId":submission,
+            });
+            if let Some(pending) = watch.outbox.iter().find(|pending| {
+                pending.cancelled && pending.submission_id.as_ref() == Some(&submission)
+            }) {
+                record["requestId"] = json!(pending.prompt.request_id);
+            }
+            Self::send(watch, record, Request::CancelSubmission(submission));
+        }
+    }
+
     fn flush(watch: &mut Watch) {
         if !watch.ready
             || watch.input.is_none()
@@ -677,43 +857,39 @@ impl Live {
         {
             return;
         }
-        let cancellations: Vec<(String, String)> = watch
-            .outbox
-            .iter()
-            .filter(|pending| pending.cancelled)
-            .filter_map(|pending| {
-                let submission = pending.submission_id.clone()?;
-                let request_id = pending.prompt.request_id.clone();
-                (!watch.sent.values().any(|sent| {
-                    matches!(&sent.request, Request::CancelPrompt(sent_id) if *sent_id == request_id)
-                }))
-                .then_some((request_id, submission))
-            })
-            .collect();
-        for (request_id, submission) in cancellations {
-            Self::send(
-                watch,
-                json!({
-                    "type":"cancel_submission",
-                    "submissionId":submission,
-                    "requestId":request_id.clone(),
-                }),
-                Request::CancelPrompt(request_id),
-            );
-        }
-        let pending: Vec<usize> = watch
-            .outbox
-            .iter()
-            .enumerate()
-            .filter(|(_, pending)| pending.submission_id.is_none())
-            .filter(|(_, pending)| {
-                !watch.sent.values().any(|sent| {
-                    matches!(&sent.request, Request::Prompt(request_id) if *request_id == pending.prompt.request_id)
-                })
-            })
-            .map(|(index, _)| index)
-            .collect();
-        for index in pending {
+        Self::flush_cancellations(watch);
+        let mut index = 0;
+        while index < watch.outbox.len() {
+            let pending = &watch.outbox[index];
+            if pending.submission_id.is_some() || watch.sent.values().any(|sent| {
+                matches!(&sent.request, Request::Prompt(id) if *id == pending.prompt.request_id)
+            }) {
+                index += 1;
+                continue;
+            }
+            // An attempted admission is immutable: even a new text-only model
+            // must not stop its deduplicated retry of the original bytes/mode/id.
+            if pending.admission.is_none() && !pending.prompt.images.is_empty() {
+                match watch.image_readiness() {
+                    ImageReadiness::Ready => {}
+                    ImageReadiness::Waiting(reason) => {
+                        log::debug!("Queued image admission waiting: {reason}");
+                        Self::request_image_metadata(watch);
+                        break; // A held image must not be overtaken by later text.
+                    }
+                    ImageReadiness::Rejected(error) => {
+                        let pending = watch.outbox.remove(index);
+                        watch.failed.push(FailedPrompt {
+                            prompt: pending.prompt,
+                            error: error.into(),
+                        });
+                        if watch.pi.messages.is_empty() {
+                            watch.pi.error = Some(error.into());
+                        }
+                        continue;
+                    }
+                }
+            }
             let admission = watch.outbox[index].admission.unwrap_or_else(|| Admission {
                 streaming_behavior: watch.effective_busy().then_some("steer"),
             });
@@ -723,18 +899,100 @@ impl Live {
                 .streaming_behavior
                 .is_none()
                 .then(|| user_turns(&watch.pi));
-            if Self::send(watch, record, Request::Prompt(request_id)) {
-                // Freeze only once the channel accepted the record. Before that,
-                // no admission was attempted and current session state may still
-                // choose its behavior.
-                watch.outbox[index].admission.get_or_insert(admission);
-                if let Some(user_turns_before) = user_turns_before {
-                    watch.outbox[index]
-                        .user_turns_before
-                        .get_or_insert(user_turns_before);
-                }
+            if !Self::send(watch, record, Request::Prompt(request_id)) {
+                break;
+            }
+            // Freeze only once the channel accepted the record.
+            watch.outbox[index].admission.get_or_insert(admission);
+            if let Some(user_turns_before) = user_turns_before {
+                watch.outbox[index]
+                    .user_turns_before
+                    .get_or_insert(user_turns_before);
+            }
+            index += 1;
+        }
+    }
+
+    fn request_image_metadata(watch: &mut Watch) {
+        if !watch.current
+            || !watch.ready
+            || watch.input.as_ref().is_none_or(|input| input.is_closed())
+        {
+            return;
+        }
+        if watch.pi.state.model.is_none() && !watch.image_state_requested {
+            watch.image_state_requested =
+                watch.sent.values().any(|sent| sent.command == "get_state")
+                    || Self::send(watch, json!({"type":"get_state"}), Request::ImageState);
+        }
+        if watch.target.backend == RemoteBackend::Durable
+            && matches!(watch.pi.backend, pi_core::session::BackendInfo::Unknown)
+            && !watch.image_backend_requested
+        {
+            watch.image_backend_requested = watch
+                .sent
+                .values()
+                .any(|sent| sent.command == "get_backend_info")
+                || Self::send(watch, json!({"type":"get_backend_info"}), Request::Quiet);
+        }
+        if watch
+            .pi
+            .state
+            .model
+            .as_ref()
+            .is_some_and(|model| model.input.is_empty())
+            && !watch.image_catalog_requested
+        {
+            // Opening already requests a fresh session catalog. Join that read
+            // rather than issuing another; never consult Live's global cache.
+            watch.image_catalog_requested = watch
+                .sent
+                .values()
+                .any(|sent| matches!(sent.request, Request::Models | Request::AvailableModels));
+            if !watch.image_catalog_requested {
+                watch.image_catalog_requested = Self::send(
+                    watch,
+                    json!({"type":"get_available_models"}),
+                    Request::AvailableModels,
+                );
             }
         }
+    }
+
+    fn fail_waiting_images(watch: &mut Watch, error: &str) {
+        for pending in std::mem::take(&mut watch.outbox) {
+            if pending.admission.is_none() && !pending.prompt.images.is_empty() {
+                watch.failed.push(FailedPrompt {
+                    prompt: pending.prompt,
+                    error: error.into(),
+                });
+            } else {
+                watch.outbox.push(pending);
+            }
+        }
+    }
+
+    fn enqueue(watch: &mut Watch, prompt: Prompt) -> Result<(), String> {
+        if !prompt.images.is_empty()
+            && let ImageReadiness::Rejected(error) = watch.image_readiness()
+        {
+            return Err(error.into());
+        }
+        if !prompt.images.is_empty()
+            && !watch
+                .outbox
+                .iter()
+                .any(|pending| pending.admission.is_none() && !pending.prompt.images.is_empty())
+        {
+            // Explicit submission/recovery starts a new wait, not a polling
+            // loop. Any still-outstanding metadata requests are joined below.
+            watch.image_state_requested = false;
+            watch.image_backend_requested = false;
+            watch.image_catalog_requested = false;
+        }
+        watch.outbox.push(prompt.into());
+        Self::flush(watch);
+        Ok(())
     }
 
     fn compact_watch(watch: &mut Watch, custom_instructions: Option<String>) -> Result<(), String> {
@@ -806,19 +1064,11 @@ impl Live {
         }) {
             return Err("Wait for compaction to finish before sending another prompt.".into());
         }
-        if !prompt.images.is_empty() {
-            self.watches
-                .get(&id)
-                .ok_or("This session is no longer available.")?
-                .require_images()?;
-        }
-        if let Some(watch) = self.watches.get_mut(&id) {
-            watch.outbox.push(prompt.into());
-            Self::flush(watch);
-            Ok(())
-        } else {
-            Err("This session is no longer available.".into())
-        }
+        let watch = self
+            .watches
+            .get_mut(&id)
+            .ok_or("This session is no longer available.")?;
+        Self::enqueue(watch, prompt)
     }
 
     pub fn model_settings(&self, id: SessionId) -> Option<(String, String)> {
@@ -1031,6 +1281,7 @@ impl Live {
     }
 
     /// Cancels one durable submission without touching any other payload.
+    #[cfg(test)]
     pub fn unqueue(&mut self, id: SessionId, index: usize) -> Result<(), String> {
         let Some(watch) = self.watches.get_mut(&id) else {
             return Err("Session is not connected.".into());
@@ -1038,21 +1289,34 @@ impl Live {
         Self::cancel_queued(watch, index)
     }
 
+    /// The UI supplies the key captured from its rendered Session, not an index
+    /// looked up in the possibly newer session at tap time.
+    pub fn unqueue_key(&mut self, id: SessionId, key: &QueueKey) -> Result<(), String> {
+        let Some(watch) = self.watches.get_mut(&id) else {
+            return Err("Session is not connected.".into());
+        };
+        Self::cancel_queue_key(watch, key)
+    }
+
+    // Offline legacy index tests deliberately address the currently visible queue.
+    #[cfg(test)]
     fn cancel_queued(watch: &mut Watch, index: usize) -> Result<(), String> {
-        let queued: Vec<String> = watch
+        let queued: Vec<usize> = watch
             .pi
             .steering
             .iter()
             .chain(&watch.pi.follow_up)
-            .cloned()
+            .enumerate()
+            .filter(|(index, _)| watch.queue_row_visible(*index))
+            .map(|(index, _)| index)
             .collect();
-        if index >= queued.len() {
-            let local = index - queued.len();
-            let mut visible = watch
-                .outbox
-                .iter()
-                .enumerate()
-                .filter(|(_, pending)| !pending.cancelled);
+        let key = if index < queued.len() {
+            let submission = watch.pi.queued_submissions.get(queued[index])
+                .filter(|id| !id.is_empty())
+                .ok_or("This helper cannot remove one queued prompt safely. Update the helper or use Stop to clear all queued work.")?;
+            QueueKey::Durable(submission.clone())
+        } else {
+            let mut visible = watch.visible_outbox();
             if watch.accepted_turn.is_none()
                 && visible
                     .clone()
@@ -1061,32 +1325,73 @@ impl Live {
             {
                 visible.next();
             }
-            let Some((at, _)) = visible.nth(local) else {
+            let Some((_, pending)) = visible.nth(index - queued.len()) else {
                 return Ok(());
             };
-            if watch.outbox[at].submission_id.as_deref() == Some("") {
-                return Err(
-                    "This helper cannot remove one queued prompt safely. Update the helper or use Stop to clear all queued work."
-                        .into(),
-                );
+            QueueKey::Local(pending.prompt.request_id.clone())
+        };
+        Self::cancel_queue_key(watch, &key)
+    }
+
+    fn cancel_queue_key(watch: &mut Watch, key: &QueueKey) -> Result<(), String> {
+        let submission = match key {
+            QueueKey::Durable(submission) => submission.clone(),
+            QueueKey::Local(request_id) => {
+                if let Some(at) = watch
+                    .outbox
+                    .iter()
+                    .position(|pending| pending.prompt.request_id == *request_id)
+                {
+                    if watch.outbox[at].cancelled {
+                        return Ok(());
+                    }
+                    if watch.outbox[at].submission_id.as_deref() == Some("") {
+                        return Err("This helper cannot remove one queued prompt safely. Update the helper or use Stop to clear all queued work.".into());
+                    }
+                    let delivering = watch.outbox[at].admission.is_some()
+                        || watch.sent.values().any(
+                            |sent| matches!(&sent.request, Request::Prompt(id) if id == request_id),
+                        );
+                    if delivering {
+                        watch.outbox[at].cancelled = true;
+                        if let Some(submission) = watch.outbox[at].submission_id.clone() {
+                            watch.cancellations.entry(submission).or_insert(false);
+                        }
+                        Self::flush_cancellations(watch);
+                    } else {
+                        watch.outbox.remove(at);
+                    }
+                    return Ok(());
+                }
+                let Some(submission) = watch.queue_receipts.get(request_id) else {
+                    return Ok(());
+                };
+                submission.clone()
             }
-            let delivering = watch.outbox[at].admission.is_some()
-                || watch.sent.values().any(|sent| {
-                    matches!(&sent.request, Request::Prompt(request_id) if *request_id == watch.outbox[at].prompt.request_id)
-                });
-            if delivering {
-                watch.outbox[at].cancelled = true;
-            } else {
-                watch.outbox.remove(at);
-            }
+        };
+        // Removed or already hidden rows are safe no-ops, including a second tap
+        // on the same retained frame. A key never falls through to the next row.
+        if submission.is_empty()
+            || watch.cancellations.contains_key(&submission)
+            || !watch
+                .pi
+                .queued_submissions
+                .iter()
+                .enumerate()
+                .any(|(index, id)| {
+                    id == &submission && index < watch.pi.steering.len() + watch.pi.follow_up.len()
+                })
+        {
             return Ok(());
         }
-        let submission = watch.pi.queued_submissions.get(index).ok_or("This helper cannot remove one queued prompt safely. Update the helper or use Stop to clear all queued work.")?.clone();
-        Self::configure(
-            watch,
-            json!({"type":"cancel_submission", "submissionId":submission}),
-            Request::Other,
-        )
+        watch.cancellations.insert(submission.clone(), false);
+        for pending in &mut watch.outbox {
+            if pending.submission_id.as_ref() == Some(&submission) {
+                pending.cancelled = true;
+            }
+        }
+        Self::flush_cancellations(watch);
+        Ok(())
     }
 
     pub fn answer(&mut self, id: SessionId, answer: Answer) {
@@ -1099,7 +1404,7 @@ impl Live {
         let Some(input) = watch.input.as_ref().filter(|input| !input.is_closed()) else {
             return;
         };
-        if watch.dialogs.is_empty() {
+        if !watch.current || !watch.ready || watch.dialogs.is_empty() {
             return;
         }
         let request = watch.dialogs.remove(0);
@@ -1168,33 +1473,44 @@ impl Live {
         let Some(watch) = self.watches.get_mut(&id) else {
             return (Vec::new(), None);
         };
-        let mut problem = None;
+        let problem = Self::apply_watch(
+            watch,
+            update,
+            &self.model,
+            &self.thinking,
+            &mut self.models,
+            Instant::now(),
+        )
+        .map(|text| Problem {
+            session: Some(id),
+            text,
+        });
+        (vec![id], problem)
+    }
+
+    fn apply_watch(
+        watch: &mut Watch,
+        update: Update,
+        wanted: &str,
+        thinking: &str,
+        models: &mut Vec<pi_core::protocol::Model>,
+        now: Instant,
+    ) -> Option<String> {
+        if !watch.accepts(&update) {
+            return None;
+        }
         match update {
             Update::Opened(_, input) => watch.input = Some(input),
             Update::Ended(_, reason) => {
-                watch.input = None;
-                watch.ready = false;
-                if watch.ended.is_none() {
-                    log::info!("Session {} closed: {reason}", watch.target.key);
-                    watch.ended = Some(reason);
-                }
+                log::info!("Session {} closed: {reason}", watch.target.key);
+                watch.end_transport(reason, now);
             }
             Update::Record(_, record) => {
-                problem = Self::record(
-                    watch,
-                    &record,
-                    &self.model,
-                    &self.thinking,
-                    &mut self.models,
-                )
-                .map(|text| Problem {
-                    session: Some(id),
-                    text,
-                });
+                return Self::record(watch, &record, wanted, thinking, models);
             }
             Update::Listed(_) | Update::ModelCatalog(_, _) | Update::CommandCatalog(_, _) => {}
         }
-        (vec![id], problem)
+        None
     }
 
     fn record(
@@ -1234,21 +1550,48 @@ impl Live {
         } else {
             None
         };
-        if let Err(error) = watch.pi.apply(record) {
-            log::warn!("Skipping a record Pi's session model refused: {error:#}");
-        }
-        let queued_text: HashSet<&str> = watch
+        let previous_model = watch
             .pi
-            .steering
-            .iter()
-            .chain(&watch.pi.follow_up)
-            .map(String::as_str)
-            .collect();
-        watch.outbox.retain(|pending| {
-            pending.submission_id.as_deref() != Some("")
-                || !queued_text.contains(pending.prompt.message.as_str())
-        });
-        if kind == "remote_snapshot"
+            .state
+            .model
+            .as_ref()
+            .map(|model| (model.provider.clone(), model.id.clone()));
+        let applied = match watch.pi.apply(record) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("Skipping a record Pi's session model refused: {error:#}");
+                false
+            }
+        };
+        if applied
+            && previous_model
+                != watch
+                    .pi
+                    .state
+                    .model
+                    .as_ref()
+                    .map(|model| (model.provider.clone(), model.id.clone()))
+        {
+            watch.image_state_requested = false;
+            watch.image_catalog_requested = false;
+        }
+        if applied && kind == "remote_snapshot" {
+            watch.cached_snapshot = true;
+            watch.retry_failures = 0;
+            watch.cancellations.retain(|id, acknowledged| {
+                !*acknowledged || watch.pi.queued_submissions.contains(id)
+            });
+            // Only an exact durable identity can replace a local row. Helpers
+            // without receipts leave their recoverable placeholder visible.
+            watch.outbox.retain(|pending| {
+                pending.cancelled
+                    || pending
+                        .submission_id
+                        .as_ref()
+                        .is_none_or(|id| !watch.pi.queued_submissions.contains(id))
+            });
+        }
+        if (applied && kind == "remote_snapshot")
             || watch
                 .accepted_turn
                 .as_ref()
@@ -1261,10 +1604,10 @@ impl Live {
             watch.accepted_turn = None;
         }
         Self::fetch_images(watch);
-        if kind == "remote_snapshot" {
+        if applied && kind == "remote_snapshot" {
             Self::fetch_subagent(watch);
         }
-        if kind == "remote_snapshot" && !watch.current {
+        if applied && kind == "remote_snapshot" && !watch.current {
             watch.current = true;
             if watch.pi.state.model.is_none() && watch.target.backend == RemoteBackend::Durable {
                 Self::send(
@@ -1274,7 +1617,6 @@ impl Live {
                 );
             } else {
                 watch.ready = true;
-                Self::flush(watch);
                 // Opening an existing session must populate its prompt controls
                 // without replacing the session's model with the phone's default.
                 Self::send(
@@ -1292,13 +1634,18 @@ impl Live {
             // attachment while retaining the last catalog in the snapshot.
             Self::send(watch, json!({"type":"get_commands"}), Request::Commands);
         }
-        let request = response?;
+        let Some(request) = response else {
+            if applied {
+                Self::flush(watch);
+            }
+            return None;
+        };
         let failed = record["success"] != true;
         let error = record["error"]
             .as_str()
             .unwrap_or("Pi refused it")
             .to_owned();
-        match request {
+        let result = match request {
             Request::Prompt(request_id) => {
                 let Some(index) = watch
                     .outbox
@@ -1309,12 +1656,27 @@ impl Live {
                     // must not turn an already accepted prompt into a failure.
                     return None;
                 };
+                if !failed
+                    && let Some(submission) = record["data"]["submissionId"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                {
+                    watch
+                        .queue_request_ids
+                        .insert(submission.to_owned(), request_id.clone());
+                    watch
+                        .queue_receipts
+                        .insert(request_id, submission.to_owned());
+                }
                 if watch.outbox[index].cancelled {
                     if failed {
                         watch.outbox.remove(index);
                         return None;
                     }
-                    let Some(submission) = record["data"]["submissionId"].as_str() else {
+                    let Some(submission) = record["data"]["submissionId"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                    else {
                         // Keep it visible after acknowledgement rather than let
                         // unsupported hidden work execute. A later queue snapshot
                         // replaces this local placeholder with the remote row.
@@ -1326,6 +1688,10 @@ impl Live {
                         );
                     };
                     watch.outbox[index].submission_id = Some(submission.to_owned());
+                    watch
+                        .cancellations
+                        .entry(submission.to_owned())
+                        .or_insert(false);
                     Self::flush(watch);
                     None
                 } else {
@@ -1352,23 +1718,26 @@ impl Live {
                     }
                 }
             }
-            Request::CancelPrompt(request_id) => {
-                let index = watch
-                    .outbox
-                    .iter()
-                    .position(|pending| pending.prompt.request_id == request_id)?;
+            Request::CancelSubmission(submission) => {
                 if failed {
-                    watch.outbox.remove(index);
-                    // An older helper cannot target a submission after it has
-                    // started. Do not use Stop here: that would also discard
-                    // unrelated queued prompts. Its snapshots will show the
-                    // prompt either in the authoritative queue or transcript.
-                    Some(
-                        "This helper could not cancel the prompt after it started. Update the helper and try again."
-                            .into(),
-                    )
+                    watch.cancellations.remove(&submission);
+                    for pending in &mut watch.outbox {
+                        if pending.submission_id.as_ref() == Some(&submission) {
+                            pending.cancelled = false;
+                        }
+                    }
+                    watch.outbox.retain(|pending| {
+                        pending.submission_id.as_ref() != Some(&submission)
+                            || !watch.pi.queued_submissions.contains(&submission)
+                    });
+                    Some(format!(
+                        "Could not cancel the queued prompt: {error}. Update the helper if it does not support per-prompt cancellation."
+                    ))
                 } else {
-                    watch.outbox.remove(index);
+                    watch.cancellations.insert(submission.clone(), true);
+                    watch
+                        .outbox
+                        .retain(|pending| pending.submission_id.as_ref() != Some(&submission));
                     None
                 }
             }
@@ -1377,6 +1746,21 @@ impl Live {
                 if failed {
                     if initial {
                         Self::hold_failed(watch, &error);
+                    } else {
+                        if watch
+                            .pi
+                            .state
+                            .model
+                            .as_ref()
+                            .is_some_and(|model| model.input.is_empty())
+                            && !watch
+                                .sent
+                                .values()
+                                .any(|sent| matches!(sent.request, Request::SetModel))
+                        {
+                            Self::fail_waiting_images(watch, &error);
+                        }
+                        Self::flush(watch);
                     }
                     return Some(error);
                 }
@@ -1386,9 +1770,31 @@ impl Live {
                     *models = available;
                 }
                 if !initial {
+                    if watch
+                        .pi
+                        .state
+                        .model
+                        .as_ref()
+                        .is_some_and(|model| model.input.is_empty())
+                        && !watch
+                            .sent
+                            .values()
+                            .any(|sent| matches!(sent.request, Request::SetModel))
+                    {
+                        Self::fail_waiting_images(
+                            watch,
+                            "The session's model catalog did not report image capabilities. Refresh models or choose a vision-capable model, then recover your prompt.",
+                        );
+                    }
+                    Self::flush(watch);
                     return None;
                 }
-                let Some(model) = choose_model(models, wanted) else {
+                if !applied {
+                    let error = "The computer sent an unreadable session model catalog.";
+                    Self::hold_failed(watch, error);
+                    return Some(error.into());
+                }
+                let Some(model) = choose_model(&watch.pi.available_models, wanted) else {
                     let text =
                         "No model is set up for durable sessions on the computer.".to_owned();
                     Self::hold_failed(watch, &text);
@@ -1407,7 +1813,15 @@ impl Live {
                 None
             }
             Request::SetModel => {
-                watch.ready = !failed;
+                if !failed && !applied {
+                    watch.ready = false;
+                    let error = "The session did not confirm the selected model. Select a model again, then recover your prompt.";
+                    Self::hold_failed(watch, error);
+                    return Some(error.into());
+                }
+                watch.image_state_requested = false;
+                watch.image_catalog_requested = false;
+                watch.ready = !failed && applied;
                 if failed {
                     Self::hold_failed(watch, &error);
                 }
@@ -1533,11 +1947,43 @@ impl Live {
                 };
                 watch.subagents.insert(conversation, fetched);
                 Self::fetch_images(watch);
+                // Catch up once if progress or a different child arrived while
+                // this request was outstanding. Do not poll on every response.
+                if watch.subagent_refresh_pending {
+                    Self::fetch_subagent(watch);
+                }
                 None
             }
-            Request::Quiet => None,
+            Request::ImageState => {
+                if watch.pi.state.model.is_none() {
+                    Self::fail_waiting_images(
+                        watch,
+                        if failed {
+                            &error
+                        } else {
+                            "The session did not report its selected model. Select a vision-capable model, then recover your prompt."
+                        },
+                    );
+                }
+                failed.then_some(error)
+            }
+            Request::Quiet => {
+                if record["command"] == "get_state" && watch.pi.state.model.is_none() {
+                    Self::fail_waiting_images(
+                        watch,
+                        if failed {
+                            &error
+                        } else {
+                            "The session did not report its selected model. Select a vision-capable model, then recover your prompt."
+                        },
+                    );
+                }
+                None
+            }
             Request::Other => failed.then_some(error),
-        }
+        };
+        Self::flush(watch);
+        result
     }
 
     /// Takes in a listing; returns the sessions it named.
@@ -1608,9 +2054,16 @@ impl Live {
 
     /// Keeps a subagent's messages fresh while its screen is open; `None` stops.
     pub fn follow_subagent(&mut self, id: SessionId, conversation: Option<String>) {
+        if conversation.is_some() {
+            self.watch(id);
+        }
         let Some(watch) = self.watches.get_mut(&id) else {
             return;
         };
+        Self::select_subagent(watch, conversation);
+    }
+
+    fn select_subagent(watch: &mut Watch, conversation: Option<String>) {
         if watch.following == conversation {
             return;
         }
@@ -1621,8 +2074,10 @@ impl Live {
     /// Asks for the followed subagent, unless a request is on the way.
     fn fetch_subagent(watch: &mut Watch) {
         let Some(conversation) = watch.following.clone() else {
+            watch.subagent_refresh_pending = false;
             return;
         };
+        watch.subagent_refresh_pending = true;
         if watch.input.is_none()
             || watch
                 .sent
@@ -1631,11 +2086,13 @@ impl Live {
         {
             return;
         }
-        Self::send(
+        if Self::send(
             watch,
             json!({"type": "get_subagent", "conversationId": conversation}),
             Request::Subagent(conversation),
-        );
+        ) {
+            watch.subagent_refresh_pending = false;
+        }
     }
 
     /// Stops one subagent; the session carries on, and Pi is told.
@@ -1699,19 +2156,9 @@ impl Live {
     /// The session as the phone shows it.
     pub fn session(&self, id: SessionId) -> Option<crate::model::Session> {
         if let Some(watch) = self.watches.get(&id)
-            && (watch.current || !watch.outbox.is_empty() || watch.pi.error.is_some())
+            && let Some(session) = watch.project(id, self.helper.short(&watch.target.cwd))
         {
-            return Some(projection::project(
-                &watch.pi,
-                projection::Facts {
-                    id,
-                    cwd: &watch.target.cwd,
-                    folder: self.helper.short(&watch.target.cwd),
-                    question: watch.dialogs.first().and_then(projection::question),
-                    outbox: &watch.projected_outbox(),
-                    key: &watch.target.key,
-                },
-            ));
+            return Some(session);
         }
         let listed = self.listed.get(&id)?;
         Some(projection::listed(
@@ -1849,6 +2296,277 @@ mod tests {
         record
     }
 
+    fn pipe_update(watch: &mut Watch, update: Update, now: Instant) {
+        assert!(Live::apply_watch(watch, update, "", "", &mut Vec::new(), now).is_none());
+    }
+
+    fn authoritative(watch: &mut Watch, pi: Pi, now: Instant) {
+        pipe_update(
+            watch,
+            Update::Record(
+                watch.generation,
+                json!({"type":"remote_snapshot", "data":pi}),
+            ),
+            now,
+        );
+    }
+
+    #[test]
+    fn healthy_ssh_recovers_a_displayed_finished_parent_with_full_cached_history() {
+        let now = Instant::now();
+        let (mut watch, _) = watch();
+        let mut pi = Pi::new(watch.target.cwd.clone().into());
+        pi.state.model = Some(model("host", "chosen", "Chosen"));
+        pi.messages = vec![
+            json!({"role":"user", "content":"first turn"}),
+            json!({"role":"assistant", "content":[{"type":"text", "text":"first answer"}], "stopReason":"stop"}),
+            json!({"role":"user", "content":"parent with child"}),
+            json!({"role":"assistant", "content":[{"type":"text", "text":"child handed off"}], "stopReason":"stop"}),
+        ];
+        authoritative(&mut watch, pi.clone(), now);
+        let id = SessionId(7);
+        let before = watch.project(id, "pi".into()).unwrap();
+        assert_eq!(before.state, crate::model::State::Done);
+        assert_eq!(before.turns.len(), 2);
+        let target = watch.target.clone();
+        let old = watch.generation;
+        pipe_update(&mut watch, Update::Ended(old, "channel only".into()), now);
+        assert!(!watch.current && !watch.ready);
+        assert_eq!(watch.project(id, "pi".into()).unwrap(), before);
+        assert!(watch.recover(now, true, true).is_none());
+        // The scheduler does not consult busy listings: a retained displayed
+        // finished parent recovers just like any other retained watch.
+        let due = now + Duration::from_secs(1);
+        let (reattach, generation) = watch.recover(due, true, true).unwrap();
+        assert_eq!(reattach, target);
+        assert_eq!(reattach.attach_record(), target.attach_record());
+        assert_ne!(generation, old);
+        assert!(
+            watch
+                .recover(due + Duration::from_secs(60), true, true)
+                .is_none()
+        );
+        assert_eq!(watch.project(id, "pi".into()).unwrap(), before);
+        let (input, commands) = async_channel::unbounded();
+        pipe_update(&mut watch, Update::Opened(generation, input), due);
+        assert!(!watch.current && !watch.ready);
+        assert!(
+            Live::configure(&mut watch, json!({"type":"set_model"}), Request::SetModel).is_err()
+        );
+        assert!(commands.try_recv().is_err());
+        pi.run = pi_core::session::RunState::Running;
+        authoritative(&mut watch, pi.clone(), due);
+        assert_eq!(
+            watch.project(id, "pi".into()).unwrap().state,
+            crate::model::State::Working
+        );
+        pi.run = pi_core::session::RunState::Idle;
+        pi.messages.push(json!({"role":"assistant", "content":[{"type":"text", "text":"child completed; fresh parent"}], "stopReason":"stop"}));
+        authoritative(&mut watch, pi, due);
+        let fresh = watch.project(id, "pi".into()).unwrap();
+        assert_eq!(fresh.id, id);
+        assert_eq!(fresh.state, crate::model::State::Done);
+        assert_eq!(fresh.turns.len(), 2);
+        assert!(
+            fresh.turns[1]
+                .summary
+                .as_ref()
+                .unwrap()
+                .text()
+                .contains("fresh parent")
+        );
+        assert!(watch.current && watch.ready && watch.cached_snapshot);
+        assert!(watch.retry_at.is_none());
+    }
+
+    #[test]
+    fn watch_recovery_backs_off_is_health_gated_and_never_repeats_in_flight() {
+        let mut now = Instant::now();
+        let (mut watch, _) = watch();
+        for failure in 0..9 {
+            let generation = watch.generation;
+            pipe_update(
+                &mut watch,
+                Update::Ended(generation, "attach refused".into()),
+                now,
+            );
+            let due = now + Duration::from_secs(1 << failure.min(5));
+            assert_eq!(watch.retry_at, Some(due));
+            assert!(
+                watch
+                    .recover(due - Duration::from_millis(1), true, true)
+                    .is_none()
+            );
+            assert!(
+                watch.recover(due, false, true).is_none(),
+                "SSH reconnect owns unhealthy connections"
+            );
+            assert!(watch.recover(due, true, false).is_none());
+            let (_, generation) = watch.recover(due, true, true).unwrap();
+            let (input, _) = async_channel::unbounded();
+            pipe_update(&mut watch, Update::Opened(generation, input), due);
+            assert_eq!(
+                watch.retry_failures,
+                failure + 1,
+                "Opened alone is not recovery"
+            );
+            assert!(
+                watch.recover(due, true, true).is_none(),
+                "one dispatch per attempt"
+            );
+            assert!(
+                watch
+                    .recover(due + Duration::from_secs(300), true, true)
+                    .is_none(),
+                "no second in-flight attach even after the cap"
+            );
+            now = due;
+        }
+        let mut pi = Pi::new(watch.target.cwd.clone().into());
+        pi.state.model = Some(model("host", "chosen", "Chosen"));
+        authoritative(&mut watch, pi, now);
+        assert_eq!(
+            watch.retry_failures, 0,
+            "reset backoff only after authoritative success, not Opened"
+        );
+        let generation = watch.generation;
+        pipe_update(
+            &mut watch,
+            Update::Ended(generation, "later drop".into()),
+            now,
+        );
+        assert_eq!(watch.retry_at, Some(now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn recovery_rejects_all_old_pipe_updates_and_recreated_watch_generations() {
+        let now = Instant::now();
+        let (mut watch, _) = watch();
+        let old = watch.generation;
+        pipe_update(&mut watch, Update::Ended(old, "ended".into()), now);
+        let (_, generation) = watch
+            .recover(now + Duration::from_secs(1), true, true)
+            .unwrap();
+        let (input, _) = async_channel::unbounded();
+        pipe_update(&mut watch, Update::Opened(old, input), now);
+        pipe_update(
+            &mut watch,
+            Update::Record(
+                old,
+                json!({"type":"remote_snapshot", "data":Pi::new("/stale".into())}),
+            ),
+            now,
+        );
+        pipe_update(&mut watch, Update::Ended(old, "stale close".into()), now);
+        assert_eq!(watch.generation, generation);
+        assert!(watch.input.is_none());
+        assert!(!watch.cached_snapshot && !watch.current && !watch.ready);
+        assert!(watch.ended.is_none() && watch.retry_at.is_none());
+        let recreated = Watch::new(watch.target.clone());
+        assert_ne!(recreated.generation, old);
+        assert_ne!(recreated.generation, generation);
+    }
+
+    #[test]
+    fn invalid_snapshots_never_grant_cached_availability_or_handshake_readiness() {
+        let now = Instant::now();
+        let (mut watch, commands) = watch();
+        let generation = watch.generation;
+        pipe_update(
+            &mut watch,
+            Update::Record(generation, json!({"type":"remote_snapshot", "data":{}})),
+            now,
+        );
+        assert!(!watch.cached_snapshot && !watch.current && !watch.ready);
+        assert!(watch.project(SessionId(1), "pi".into()).is_none());
+        assert!(commands.try_recv().is_err());
+        let mut pi = Pi::new(watch.target.cwd.clone().into());
+        pi.state.model = Some(model("host", "chosen", "Chosen"));
+        authoritative(&mut watch, pi, now);
+        assert!(watch.cached_snapshot && watch.current && watch.ready);
+        watch.reset_transport();
+        let generation = watch.generation;
+        pipe_update(
+            &mut watch,
+            Update::Record(generation, json!({"type":"remote_snapshot", "data":{}})),
+            now,
+        );
+        assert!(watch.cached_snapshot && !watch.current && !watch.ready);
+    }
+
+    #[test]
+    fn automatic_recovery_preserves_frozen_admission_cancellation_and_child_follow() {
+        let now = Instant::now();
+        let (mut watch, first_pipe) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.run = pi_core::session::RunState::Running;
+        watch.pi.state.model = Some(model("host", "chosen", "Chosen"));
+        watch.outbox.push("immutable cancelled steer".into());
+        Live::flush(&mut watch);
+        let first = first_pipe.try_recv().unwrap();
+        assert_eq!(first["streamingBehavior"], "steer");
+        watch.outbox[0].cancelled = true; // Cancellation waiting for its receipt.
+        watch
+            .cancellations
+            .insert("another-submission".into(), false);
+        watch
+            .queue_receipts
+            .insert("earlier-request".into(), "another-submission".into());
+        watch
+            .queue_request_ids
+            .insert("another-submission".into(), "earlier-request".into());
+        watch.following = Some("child-A".into());
+        let old = watch.generation;
+        pipe_update(&mut watch, Update::Ended(old, "channel ended".into()), now);
+        let (_, generation) = watch
+            .recover(now + Duration::from_secs(1), true, true)
+            .unwrap();
+        assert!(watch.outbox[0].cancelled);
+        assert_eq!(
+            watch.outbox[0].record(watch.outbox[0].admission.unwrap()),
+            admission(first.clone())
+        );
+        assert!(!watch.cancellations["another-submission"]);
+        assert_eq!(
+            watch.queue_receipts["earlier-request"],
+            "another-submission"
+        );
+        assert_eq!(
+            watch.queue_request_ids["another-submission"],
+            "earlier-request"
+        );
+        assert_eq!(watch.following.as_deref(), Some("child-A"));
+        assert!(watch.subagent_refresh_pending);
+        let (input, commands) = async_channel::unbounded();
+        pipe_update(&mut watch, Update::Opened(generation, input), now);
+        Live::flush(&mut watch);
+        assert!(
+            commands.try_recv().is_err(),
+            "cached state cannot admit commands"
+        );
+        let mut pi = watch.pi.clone();
+        pi.run = pi_core::session::RunState::Idle; // Do not refreeze as idle.
+        authoritative(&mut watch, pi, now);
+        let records: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        let retry = records
+            .iter()
+            .find(|record| record["type"] == "prompt")
+            .unwrap();
+        assert_ne!(first["id"], retry["id"]);
+        assert_eq!(admission(first), admission(retry.clone()));
+        assert!(
+            records
+                .iter()
+                .any(|record| record["type"] == "cancel_submission"
+                    && record["submissionId"] == "another-submission")
+        );
+        assert!(records.iter().any(
+            |record| record["type"] == "get_subagent" && record["conversationId"] == "child-A"
+        ));
+        assert!(watch.outbox[0].cancelled);
+    }
+
     #[test]
     fn obsolete_pipes_cannot_overwrite_new_state_or_close_the_replacement_connection() {
         let (mut watch, _) = watch();
@@ -1870,7 +2588,7 @@ mod tests {
     #[test]
     fn reconnect_retries_the_exact_idle_admission_and_ignores_late_collision_errors() {
         let (mut watch, first_pipe) = watch();
-        watch.ready = true;
+        image_ready(&mut watch);
         let prompt = Prompt::new(
             "same text".into(),
             vec![pi_core::protocol::ImageContent::new(
@@ -2064,7 +2782,7 @@ mod tests {
     #[test]
     fn a_genuine_collision_rejection_remains_recoverable_with_images_and_a_new_identity() {
         let (mut watch, sent) = watch();
-        watch.ready = true;
+        image_ready(&mut watch);
         let prompt = Prompt::new(
             "try this".into(),
             vec![pi_core::protocol::ImageContent::new(
@@ -2155,6 +2873,436 @@ mod tests {
         assert_eq!(admission(first), admission(retry));
     }
 
+    fn queue_session(watch: &Watch) -> crate::model::Session {
+        projection::project_queue_keys(
+            &watch.pi,
+            projection::Facts {
+                id: SessionId(1),
+                cwd: &watch.target.cwd,
+                folder: String::new(),
+                question: None,
+                outbox: &watch.projected_outbox(),
+                key: &watch.target.key,
+            },
+            |index| watch.queue_row_visible(index),
+            |index| watch.queue_row_key(index),
+        )
+    }
+
+    fn queue_ui(watch: &Watch) -> Vec<String> {
+        queue_session(watch).queued
+    }
+
+    fn queue_watch() -> (Watch, async_channel::Receiver<Value>) {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.run = pi_core::session::RunState::Running;
+        watch.pi.steering = vec!["duplicate".into()];
+        watch.pi.follow_up = vec!["duplicate".into(), "third".into()];
+        watch.pi.queued_submissions = vec!["41".into(), "42".into(), "43".into()];
+        (watch, sent)
+    }
+
+    fn cancel_reply(watch: &mut Watch, cancel: &Value, success: bool) -> Option<String> {
+        Live::record(
+            watch,
+            &json!({
+                "type":"response", "id":cancel["id"], "command":"cancel_submission",
+                "success":success, "error":"already started", "data":{}
+            }),
+            "",
+            "",
+            &mut Vec::new(),
+        )
+    }
+
+    fn queue_snapshot(watch: &mut Watch, ids: &[&str], texts: &[&str]) {
+        let mut pi = watch.pi.clone();
+        pi.steering.clear();
+        pi.follow_up = texts.iter().map(|text| (*text).to_owned()).collect();
+        pi.queued_submissions = ids.iter().map(|id| (*id).to_owned()).collect();
+        assert!(
+            Live::record(
+                watch,
+                &json!({"type":"remote_snapshot", "data":pi}),
+                "",
+                "",
+                &mut Vec::new()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn queue_key_stale_frame_removed_first_row_is_noop_not_next_duplicate() {
+        let (mut watch, sent) = queue_watch();
+        let rendered = queue_session(&watch);
+        let first = rendered.queued_keys[0].as_ref().unwrap();
+        queue_snapshot(&mut watch, &["42", "43"], &["duplicate", "third"]);
+        Live::cancel_queue_key(&mut watch, first).unwrap();
+        assert_eq!(queue_ui(&watch), ["duplicate", "third"]);
+        assert!(sent.try_recv().is_err());
+        assert!(watch.cancellations.is_empty());
+    }
+
+    #[test]
+    fn queue_key_double_tap_retained_row_never_cancels_next_row() {
+        let (mut watch, sent) = queue_watch();
+        let rendered = queue_session(&watch);
+        let first = rendered.queued_keys[0].as_ref().unwrap();
+        Live::cancel_queue_key(&mut watch, first).unwrap();
+        let cancel = sent.try_recv().unwrap();
+        assert_eq!(cancel["submissionId"], "41");
+        Live::cancel_queue_key(&mut watch, first).unwrap();
+        assert!(sent.try_recv().is_err());
+        assert_eq!(queue_ui(&watch), ["duplicate", "third"]);
+        cancel_reply(&mut watch, &cancel, true);
+        queue_snapshot(&mut watch, &["42", "43"], &["duplicate", "third"]);
+        Live::cancel_queue_key(&mut watch, first).unwrap();
+        assert!(sent.try_recv().is_err());
+        assert_eq!(queue_ui(&watch), ["duplicate", "third"]);
+    }
+
+    #[test]
+    fn queue_key_reordered_ids_cancel_original_exact_duplicate() {
+        let (mut watch, sent) = queue_watch();
+        let rendered = queue_session(&watch);
+        let first = rendered.queued_keys[0].as_ref().unwrap();
+        queue_snapshot(
+            &mut watch,
+            &["42", "43", "41"],
+            &["duplicate", "third", "duplicate"],
+        );
+        Live::cancel_queue_key(&mut watch, first).unwrap();
+        assert_eq!(sent.try_recv().unwrap()["submissionId"], "41");
+        assert_eq!(queue_ui(&watch), ["duplicate", "third"]);
+        assert_eq!(queue_session(&watch).queued_keys, rendered.queued_keys[1..]);
+    }
+
+    #[test]
+    fn queue_key_local_receipt_and_snapshot_preserve_rendered_identity() {
+        let (mut watch, sent) = queue_watch();
+        watch.outbox.push("duplicate".into());
+        let rendered = queue_session(&watch);
+        let local = rendered.queued_keys[3].as_ref().unwrap();
+        assert_eq!(
+            local,
+            &QueueKey::Local(watch.outbox[0].prompt.request_id.clone())
+        );
+        Live::flush(&mut watch);
+        let prompt = sent.try_recv().unwrap();
+        Live::record(
+            &mut watch,
+            &json!({"type":"response", "id":prompt["id"], "command":"prompt",
+                "success":true, "data":{"submissionId":"44"}}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert!(watch.outbox.is_empty());
+        queue_snapshot(
+            &mut watch,
+            &["44", "42", "43", "41"],
+            &["duplicate", "duplicate", "third", "duplicate"],
+        );
+        assert_eq!(queue_session(&watch).queued_keys[0].as_ref(), Some(local));
+        Live::cancel_queue_key(&mut watch, local).unwrap();
+        assert_eq!(sent.try_recv().unwrap()["submissionId"], "44");
+        assert_eq!(queue_ui(&watch), ["duplicate", "third", "duplicate"]);
+        Live::cancel_queue_key(&mut watch, local).unwrap();
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_key_local_tombstone_and_removed_outbox_double_taps_are_noops() {
+        let (mut watch, sent) = queue_watch();
+        watch
+            .outbox
+            .extend(["duplicate".into(), "duplicate".into()]);
+        let rendered = queue_session(&watch);
+        let local = rendered.queued_keys[3].as_ref().unwrap();
+        Live::cancel_queue_key(&mut watch, local).unwrap();
+        Live::cancel_queue_key(&mut watch, local).unwrap();
+        assert_eq!(watch.outbox.len(), 1);
+        assert_eq!(
+            queue_session(&watch).queued_keys[3],
+            rendered.queued_keys[4]
+        );
+        assert!(sent.try_recv().is_err());
+
+        let remaining = rendered.queued_keys[4].as_ref().unwrap();
+        Live::flush(&mut watch);
+        let prompt = sent.try_recv().unwrap();
+        Live::cancel_queue_key(&mut watch, remaining).unwrap();
+        Live::cancel_queue_key(&mut watch, remaining).unwrap();
+        assert!(watch.outbox[0].cancelled);
+        Live::record(
+            &mut watch,
+            &json!({"type":"response", "id":prompt["id"], "command":"prompt",
+                "success":true, "data":{"submissionId":"44"}}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert_eq!(sent.try_recv().unwrap()["submissionId"], "44");
+        Live::cancel_queue_key(&mut watch, remaining).unwrap();
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_cancel_immediately_filters_only_the_exact_duplicate_id() {
+        let (mut watch, sent) = queue_watch();
+        let before = serde_json::to_value(&watch.pi).unwrap();
+        Live::cancel_queued(&mut watch, 1).unwrap();
+        assert_eq!(queue_ui(&watch), ["duplicate", "third"]);
+        assert_eq!(serde_json::to_value(&watch.pi).unwrap(), before);
+        assert!(watch.queue_row_visible(0));
+        assert!(!watch.queue_row_visible(1));
+        let cancel = sent.try_recv().unwrap();
+        assert_eq!(cancel["submissionId"], "42");
+        Live::flush(&mut watch);
+        assert!(
+            sent.try_recv().is_err(),
+            "do not duplicate in-flight cancels"
+        );
+    }
+
+    #[test]
+    fn queue_cancel_rapid_x_uses_next_visible_id_then_local_row() {
+        let (mut watch, sent) = queue_watch();
+        watch.outbox.push("local".into());
+        Live::cancel_queued(&mut watch, 0).unwrap();
+        assert_eq!(sent.try_recv().unwrap()["submissionId"], "41");
+        Live::cancel_queued(&mut watch, 0).unwrap();
+        assert_eq!(sent.try_recv().unwrap()["submissionId"], "42");
+        assert_eq!(queue_ui(&watch), ["third", "local"]);
+        Live::cancel_queued(&mut watch, 1).unwrap();
+        assert!(watch.outbox.is_empty());
+        assert_eq!(queue_ui(&watch), ["third"]);
+        assert!(
+            sent.try_recv().is_err(),
+            "cancelling cannot admit unrelated prompts"
+        );
+    }
+
+    #[test]
+    fn queue_cancel_snapshot_before_ack_cannot_retire_cancel_intent() {
+        let (mut watch, sent) = queue_watch();
+        Live::cancel_queued(&mut watch, 0).unwrap();
+        let cancel = sent.try_recv().unwrap();
+        queue_snapshot(&mut watch, &["42", "43"], &["duplicate", "third"]);
+        assert_eq!(watch.cancellations.get("41"), Some(&false));
+        queue_snapshot(
+            &mut watch,
+            &["41", "42", "43"],
+            &["duplicate", "duplicate", "third"],
+        );
+        assert_eq!(queue_ui(&watch), ["duplicate", "third"]);
+        assert!(cancel_reply(&mut watch, &cancel, true).is_none());
+        queue_snapshot(
+            &mut watch,
+            &["41", "42", "43"],
+            &["duplicate", "duplicate", "third"],
+        );
+        assert_eq!(
+            queue_ui(&watch),
+            ["duplicate", "third"],
+            "no stale flash after ack"
+        );
+        queue_snapshot(&mut watch, &["42", "43"], &["duplicate", "third"]);
+        assert!(watch.cancellations.is_empty());
+        assert_eq!(queue_ui(&watch), ["duplicate", "third"]);
+    }
+
+    #[test]
+    fn queue_cancel_absence_before_ack_still_waits_for_post_ack_absence() {
+        let (mut watch, sent) = queue_watch();
+        Live::cancel_queued(&mut watch, 0).unwrap();
+        let cancel = sent.try_recv().unwrap();
+        queue_snapshot(&mut watch, &["42", "43"], &["duplicate", "third"]);
+        cancel_reply(&mut watch, &cancel, true);
+        assert_eq!(watch.cancellations.get("41"), Some(&true));
+        queue_snapshot(
+            &mut watch,
+            &["41", "42", "43"],
+            &["duplicate", "duplicate", "third"],
+        );
+        assert_eq!(queue_ui(&watch), ["duplicate", "third"]);
+        queue_snapshot(&mut watch, &["42", "43"], &["duplicate", "third"]);
+        assert!(watch.cancellations.is_empty());
+    }
+
+    #[test]
+    fn queue_cancel_reconnect_retries_only_unacknowledged_exact_submission() {
+        let (mut watch, sent) = queue_watch();
+        Live::cancel_queued(&mut watch, 1).unwrap();
+        let first = sent.try_recv().unwrap();
+        watch.reset_transport();
+        let (input, retried) = async_channel::unbounded();
+        watch.input = Some(input);
+        watch.current = true;
+        watch.ready = true;
+        Live::flush(&mut watch);
+        let retry = retried.try_recv().unwrap();
+        assert_eq!(retry["type"], "cancel_submission");
+        assert_eq!(retry["submissionId"], "42");
+        assert_ne!(retry["id"], first["id"]);
+        assert!(retried.try_recv().is_err());
+        assert!(
+            cancel_reply(&mut watch, &first, false).is_none(),
+            "old pipe cannot restore row"
+        );
+        assert_eq!(queue_ui(&watch), ["duplicate", "third"]);
+        cancel_reply(&mut watch, &retry, true);
+        watch.reset_transport();
+        let (input, retried) = async_channel::unbounded();
+        watch.input = Some(input);
+        watch.ready = true;
+        Live::flush(&mut watch);
+        assert!(
+            retried.try_recv().is_err(),
+            "acknowledged cancels must not retry"
+        );
+        assert_eq!(queue_ui(&watch), ["duplicate", "third"]);
+    }
+
+    #[test]
+    fn queue_cancel_failure_restores_authoritative_row_and_reports_error() {
+        let (mut watch, sent) = queue_watch();
+        Live::cancel_queued(&mut watch, 1).unwrap();
+        let cancel = sent.try_recv().unwrap();
+        assert!(
+            cancel_reply(&mut watch, &cancel, false)
+                .unwrap()
+                .contains("already started")
+        );
+        assert_eq!(queue_ui(&watch), ["duplicate", "duplicate", "third"]);
+        Live::flush(&mut watch);
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_cancel_offline_intent_hides_and_retries_when_transport_returns() {
+        let (mut watch, sent) = queue_watch();
+        watch.reset_transport();
+        Live::cancel_queued(&mut watch, 1).unwrap();
+        assert_eq!(queue_ui(&watch), ["duplicate", "third"]);
+        assert!(sent.try_recv().is_err());
+        let (input, retried) = async_channel::unbounded();
+        watch.input = Some(input);
+        watch.ready = true;
+        Live::flush(&mut watch);
+        let cancel = retried.try_recv().unwrap();
+        assert_eq!(cancel["type"], "cancel_submission");
+        assert_eq!(cancel["submissionId"], "42");
+        assert!(retried.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_cancel_local_failure_restores_exact_backend_id_not_duplicate_text() {
+        let (mut watch, sent) = queue_watch();
+        watch.outbox.push("duplicate".into());
+        Live::flush(&mut watch);
+        let prompt = sent.try_recv().unwrap();
+        Live::cancel_queued(&mut watch, 3).unwrap();
+        Live::record(
+            &mut watch,
+            &json!({"type":"response", "id":prompt["id"],
+            "command":"prompt", "success":true, "data":{"submissionId":"44"}}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        let cancel = sent.try_recv().unwrap();
+        queue_snapshot(
+            &mut watch,
+            &["41", "42", "43", "44"],
+            &["duplicate", "duplicate", "third", "duplicate"],
+        );
+        assert!(
+            cancel_reply(&mut watch, &cancel, false)
+                .unwrap()
+                .contains("already started")
+        );
+        assert!(watch.outbox.is_empty());
+        assert_eq!(
+            queue_ui(&watch),
+            ["duplicate", "duplicate", "third", "duplicate"]
+        );
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_cancel_preserves_other_prompts_original_admission_and_payload() {
+        let (mut watch, sent) = queue_watch();
+        watch.outbox.push("unrelated".into());
+        Live::flush(&mut watch);
+        let prompt = sent.try_recv().unwrap();
+        assert_eq!(prompt["streamingBehavior"], "steer");
+        Live::cancel_queued(&mut watch, 1).unwrap();
+        assert_eq!(sent.try_recv().unwrap()["submissionId"], "42");
+        watch.reset_transport();
+        watch.pi.run = pi_core::session::RunState::Idle;
+        let (input, retried) = async_channel::unbounded();
+        watch.input = Some(input);
+        watch.ready = true;
+        Live::flush(&mut watch);
+        let cancel = retried.try_recv().unwrap();
+        assert_eq!(cancel["type"], "cancel_submission");
+        assert_eq!(cancel["submissionId"], "42");
+        assert_eq!(admission(prompt), admission(retried.try_recv().unwrap()));
+        assert!(retried.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_cancel_unsupported_authoritative_identity_stays_visible() {
+        let (mut watch, sent) = queue_watch();
+        watch.pi.queued_submissions.clear();
+        assert!(
+            Live::cancel_queued(&mut watch, 1)
+                .unwrap_err()
+                .contains("cannot remove")
+        );
+        assert_eq!(queue_ui(&watch), ["duplicate", "duplicate", "third"]);
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_cancel_local_receipt_hides_same_id_in_backend_until_cancel_ack_and_absence() {
+        let (mut watch, sent) = queue_watch();
+        watch.outbox.push("duplicate".into());
+        Live::flush(&mut watch);
+        let prompt = sent.try_recv().unwrap();
+        Live::cancel_queued(&mut watch, 3).unwrap();
+        Live::record(
+            &mut watch,
+            &json!({"type":"response", "id":prompt["id"],
+            "command":"prompt", "success":true, "data":{"submissionId":"44"}}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        let cancel = sent.try_recv().unwrap();
+        assert_eq!(cancel["submissionId"], "44");
+        assert_eq!(cancel["requestId"], prompt["requestId"]);
+        queue_snapshot(
+            &mut watch,
+            &["41", "42", "43", "44"],
+            &["duplicate", "duplicate", "third", "duplicate"],
+        );
+        assert_eq!(queue_ui(&watch), ["duplicate", "duplicate", "third"]);
+        cancel_reply(&mut watch, &cancel, true);
+        assert!(watch.outbox.is_empty());
+        assert_eq!(queue_ui(&watch), ["duplicate", "duplicate", "third"]);
+        queue_snapshot(
+            &mut watch,
+            &["41", "42", "43"],
+            &["duplicate", "duplicate", "third"],
+        );
+        assert!(watch.cancellations.is_empty());
+    }
+
     #[test]
     fn removing_one_queued_prompt_hides_it_immediately_and_cancels_after_delivery() {
         let (mut watch, sent) = watch();
@@ -2172,7 +3320,7 @@ mod tests {
         Live::flush(&mut watch);
         let prompt = sent.try_recv().unwrap();
         assert_eq!(prompt["type"], "prompt");
-        Live::cancel_queued(&mut watch, 2).unwrap();
+        Live::cancel_queued(&mut watch, 1).unwrap();
         assert!(watch.outbox[0].cancelled);
         assert!(watch.projected_outbox().is_empty());
 
@@ -2231,7 +3379,8 @@ mod tests {
         let failed = json!({"type":"response","id":cancel["id"],"command":"cancel_submission","success":false,"error":"already started"});
         let notice = Live::record(&mut watch, &failed, "", "", &mut Vec::new()).unwrap();
         assert!(notice.contains("Update the helper"));
-        assert!(watch.outbox.is_empty());
+        assert_eq!(watch.projected_outbox()[0].text, "remove me");
+        assert!(!watch.outbox[0].cancelled);
         assert!(
             sent.try_recv().is_err(),
             "must not send a conversation-wide abort"
@@ -2265,9 +3414,10 @@ mod tests {
             "",
             &mut Vec::new(),
         );
-        assert!(
-            watch.outbox.is_empty(),
-            "the authoritative remote row replaces the local placeholder"
+        assert_eq!(
+            watch.outbox.len(),
+            1,
+            "without a receipt, duplicate text cannot safely identify the local row"
         );
     }
 
@@ -2381,6 +3531,191 @@ mod tests {
         (watch, sent)
     }
 
+    fn image_ready(watch: &mut Watch) {
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.backend =
+            pi_core::session::BackendInfo::Found(json!({"features":["image_prompts"]}));
+        watch.pi.state.model = Some(Model {
+            input: vec!["text".into(), "image".into()],
+            ..model("host", "vision", "Vision")
+        });
+    }
+
+    fn child_response(request: &Value, text: &str) -> Value {
+        json!({"type":"response","id":request["id"],"command":"get_subagent","success":true,
+            "data":{"messages":[{"role":"user","content":text}],"tools":[],"busy":false}})
+    }
+
+    #[test]
+    fn child_progress_during_a_fetch_is_coalesced_into_one_catch_up_read() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        Live::select_subagent(&mut watch, Some("A".into()));
+        let first = sent.try_recv().unwrap();
+        let snapshot =
+            json!({"type":"remote_snapshot","data":serde_json::to_value(&watch.pi).unwrap()});
+        for _ in 0..3 {
+            Live::record(&mut watch, &snapshot, "", "", &mut Vec::new());
+        }
+        assert!(
+            sent.try_recv().is_err(),
+            "only one child read may be in flight"
+        );
+        assert!(watch.subagent_refresh_pending);
+        Live::record(
+            &mut watch,
+            &child_response(&first, "old progress"),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        let catch_up = sent.try_recv().unwrap();
+        assert_eq!(catch_up["conversationId"], "A");
+        assert!(!watch.subagent_refresh_pending);
+        Live::record(
+            &mut watch,
+            &child_response(&catch_up, "latest progress"),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert!(
+            sent.try_recv().is_err(),
+            "responses alone must not start a polling loop"
+        );
+        assert_eq!(
+            watch.subagents["A"].as_ref().unwrap().messages[0]["content"],
+            "latest progress"
+        );
+    }
+
+    #[test]
+    fn switching_children_fetches_the_new_child_as_soon_as_the_old_read_finishes() {
+        let (mut watch, sent) = watch();
+        Live::select_subagent(&mut watch, Some("A".into()));
+        let first = sent.try_recv().unwrap();
+        Live::select_subagent(&mut watch, Some("B".into()));
+        Live::select_subagent(&mut watch, Some("B".into()));
+        assert!(sent.try_recv().is_err());
+        Live::record(
+            &mut watch,
+            &child_response(&first, "A only"),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        let next = sent.try_recv().unwrap();
+        assert_eq!(next["conversationId"], "B");
+        assert!(watch.subagents.contains_key("A"));
+        assert!(!watch.subagents.contains_key("B"));
+        Live::record(
+            &mut watch,
+            &child_response(&next, "B only"),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            watch.subagents["A"].as_ref().unwrap().messages[0]["content"],
+            "A only"
+        );
+        assert_eq!(
+            watch.subagents["B"].as_ref().unwrap().messages[0]["content"],
+            "B only"
+        );
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[test]
+    fn closing_a_child_view_cancels_catch_up_but_not_its_in_flight_receipt() {
+        let (mut watch, sent) = watch();
+        Live::select_subagent(&mut watch, Some("A".into()));
+        let first = sent.try_recv().unwrap();
+        Live::fetch_subagent(&mut watch);
+        assert!(watch.subagent_refresh_pending);
+        Live::select_subagent(&mut watch, None);
+        assert!(!watch.subagent_refresh_pending);
+        Live::record(
+            &mut watch,
+            &child_response(&first, "cached result"),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert!(sent.try_recv().is_err());
+        assert!(watch.subagents["A"].is_ok());
+    }
+
+    #[test]
+    fn a_child_fetch_resumes_on_reconnect_with_a_new_transport_identity() {
+        let (mut watch, sent) = watch();
+        Live::select_subagent(&mut watch, Some("A".into()));
+        let first = sent.try_recv().unwrap();
+        watch.reset_transport();
+        assert!(watch.subagent_refresh_pending);
+        let (input, reconnected) = async_channel::unbounded();
+        watch.input = Some(input);
+        watch.current = true;
+        watch.ready = true;
+        let snapshot =
+            json!({"type":"remote_snapshot","data":serde_json::to_value(&watch.pi).unwrap()});
+        Live::record(&mut watch, &snapshot, "", "", &mut Vec::new());
+        let retry = reconnected.try_recv().unwrap();
+        assert_eq!(retry["conversationId"], "A");
+        assert_ne!(retry["id"], first["id"]);
+        Live::record(
+            &mut watch,
+            &child_response(&first, "obsolete"),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert!(!watch.subagents.contains_key("A"));
+        Live::record(
+            &mut watch,
+            &child_response(&retry, "fresh"),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            watch.subagents["A"].as_ref().unwrap().messages[0]["content"],
+            "fresh"
+        );
+        assert!(reconnected.try_recv().is_err());
+    }
+
+    #[test]
+    fn child_refusals_are_cached_as_errors_and_mismatched_responses_cannot_consume_reads() {
+        let (mut watch, sent) = watch();
+        Live::select_subagent(&mut watch, Some("A".into()));
+        let first = sent.try_recv().unwrap();
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":first["id"],"command":"prompt","success":false}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert_eq!(watch.sent.len(), 1);
+        assert!(watch.subagents.is_empty());
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":first["id"],"command":"get_subagent","success":false,"error":"Timed out reading subagent"}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            watch.subagents["A"].as_ref().unwrap_err(),
+            "Timed out reading subagent"
+        );
+        assert!(watch.sent.is_empty());
+        assert!(sent.try_recv().is_err());
+    }
+
     #[test]
     fn a_new_durable_session_gets_a_model_before_its_prompt() {
         let (mut watch, sent) = watch();
@@ -2486,6 +3821,20 @@ mod tests {
         assert_eq!(
             sent.try_recv().unwrap()["type"],
             "get_available_thinking_levels"
+        );
+        let backend = sent.try_recv().unwrap();
+        assert_eq!(backend["type"], "get_backend_info");
+        assert!(
+            sent.try_recv().is_err(),
+            "backend image authority is still unknown"
+        );
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":backend["id"],"command":"get_backend_info","success":true,
+            "data":{"features":["image_prompts"]}}),
+            "vision",
+            "",
+            &mut models,
         );
         let admission = sent.try_recv().unwrap();
         assert_eq!(admission["requestId"], prompt.request_id);
@@ -2727,6 +4076,402 @@ mod tests {
                 .unwrap_err()
                 .contains("finish connecting")
         );
+    }
+
+    fn image_prompt() -> Prompt {
+        Prompt::new(
+            "full image message, not its label".into(),
+            vec![
+                pi_core::protocol::ImageContent::new("AAECA/8=".into(), "image/png"),
+                pi_core::protocol::ImageContent::new("/wD+AQ==".into(), "image/jpeg"),
+            ],
+        )
+    }
+
+    fn model_ack(watch: &mut Watch, set: &Value, input: &[&str]) {
+        Live::record(
+            watch,
+            &json!({"type":"response","id":set["id"],"command":"set_model","success":true,
+            "data":{"provider":"host","id":"next","input":input}}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+    }
+
+    #[test]
+    fn image_during_pending_selection_is_local_then_admitted_as_steer_with_exact_bytes() {
+        let (mut watch, sent) = watch();
+        image_ready(&mut watch);
+        watch.pi.run = pi_core::session::RunState::Running;
+        Live::configure(
+            &mut watch,
+            json!({"type":"set_model","provider":"host","modelId":"next"}),
+            Request::SetModel,
+        )
+        .unwrap();
+        let set = sent.try_recv().unwrap();
+        let prompt = image_prompt();
+        Live::enqueue(&mut watch, prompt.clone()).unwrap();
+        assert_eq!(watch.outbox[0].prompt, prompt);
+        assert!(watch.outbox[0].admission.is_none());
+        assert_eq!(
+            watch.projected_outbox()[0].key,
+            Some(QueueKey::Local(prompt.request_id.clone()))
+        );
+        assert!(watch.failed.is_empty());
+        assert!(sent.try_recv().is_err());
+        model_ack(&mut watch, &set, &["text", "image"]);
+        assert_eq!(
+            sent.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
+        let admission = sent.try_recv().unwrap();
+        assert_eq!(admission["requestId"], prompt.request_id);
+        assert_eq!(admission["message"], prompt.message);
+        assert_eq!(admission["images"], json!(prompt.images));
+        assert_eq!(admission["streamingBehavior"], "steer");
+        Live::flush(&mut watch);
+        assert!(sent.try_recv().is_err(), "one attempt per active pipe");
+    }
+
+    #[test]
+    fn selected_text_only_after_ack_rejects_waiting_images_recoverably() {
+        let (mut watch, sent) = watch();
+        image_ready(&mut watch);
+        Live::configure(
+            &mut watch,
+            json!({"type":"set_model","provider":"host","modelId":"next"}),
+            Request::SetModel,
+        )
+        .unwrap();
+        let set = sent.try_recv().unwrap();
+        let prompt = image_prompt();
+        Live::enqueue(&mut watch, prompt.clone()).unwrap();
+        model_ack(&mut watch, &set, &["text"]);
+        assert_eq!(
+            sent.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
+        assert!(sent.try_recv().is_err());
+        assert!(watch.outbox.is_empty());
+        assert_eq!(watch.failed[0].prompt, prompt);
+        assert!(watch.failed[0].error.contains("does not accept images"));
+        let recovered = Live::recover_failed(&mut watch, &prompt.request_id).unwrap();
+        assert_eq!(recovered.images, prompt.images);
+        assert_eq!(recovered.message, prompt.message);
+        assert_ne!(recovered.request_id, prompt.request_id);
+    }
+
+    #[test]
+    fn definite_image_rejection_at_enqueue_leaves_the_draft_and_queue_unchanged() {
+        let (mut watch, sent) = watch();
+        image_ready(&mut watch);
+        watch.pi.state.model.as_mut().unwrap().input = vec!["text".into()];
+        assert!(
+            Live::enqueue(&mut watch, image_prompt())
+                .unwrap_err()
+                .contains("does not accept images")
+        );
+        assert!(watch.outbox.is_empty());
+        image_ready(&mut watch);
+        watch.pi.backend = pi_core::session::BackendInfo::Unsupported;
+        assert!(
+            Live::enqueue(&mut watch, image_prompt())
+                .unwrap_err()
+                .contains("older helper")
+        );
+        assert!(watch.failed.is_empty());
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[test]
+    fn delayed_session_catalog_resumes_images_without_rerouting_and_preserves_fifo() {
+        let (mut watch, sent) = watch();
+        image_ready(&mut watch);
+        watch.pi.state.model.as_mut().unwrap().input.clear();
+        let prompt = image_prompt();
+        Live::enqueue(&mut watch, prompt.clone()).unwrap();
+        let catalog = sent.try_recv().unwrap();
+        assert_eq!(catalog["type"], "get_available_models");
+        Live::enqueue(&mut watch, "later text".into()).unwrap();
+        for _ in 0..3 {
+            Live::record(
+                &mut watch,
+                &json!({"type":"agent_start"}),
+                "global-default",
+                "",
+                &mut Vec::new(),
+            );
+        }
+        assert!(
+            sent.try_recv().is_err(),
+            "no polling reads or overtaking text"
+        );
+        let mut global = vec![model("host", "wrong", "Wrong default")];
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":catalog["id"],"command":"get_available_models","success":true,
+            "data":{"models":[{"provider":"host","id":"vision","input":["text","image"]}]}}),
+            "wrong",
+            "",
+            &mut global,
+        );
+        let admission = sent.try_recv().unwrap();
+        assert_eq!(admission["type"], "prompt");
+        assert_eq!(admission["requestId"], prompt.request_id);
+        assert_eq!(admission["images"], json!(prompt.images));
+        assert_eq!(sent.try_recv().unwrap()["message"], "later text");
+        assert_eq!(watch.pi.state.model.as_ref().unwrap().id, "vision");
+        assert!(sent.try_recv().is_err(), "no set_model rerouting");
+    }
+
+    #[test]
+    fn unknown_backend_and_state_get_one_needed_read_then_resume_from_metadata() {
+        let (mut watch, sent) = watch();
+        image_ready(&mut watch);
+        watch.pi.backend = pi_core::session::BackendInfo::Unknown;
+        watch.pi.state.model = None;
+        let prompt = image_prompt();
+        Live::enqueue(&mut watch, prompt.clone()).unwrap();
+        let state = sent.try_recv().unwrap();
+        let backend = sent.try_recv().unwrap();
+        assert_eq!(state["type"], "get_state");
+        assert_eq!(backend["type"], "get_backend_info");
+        for _ in 0..3 {
+            Live::flush(&mut watch);
+        }
+        assert!(sent.try_recv().is_err());
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":state["id"],"command":"get_state","success":true,
+            "data":{"model":{"provider":"host","id":"vision","input":["text","image"]}}}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert!(sent.try_recv().is_err());
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":backend["id"],"command":"get_backend_info","success":true,
+            "data":{"features":["image_prompts"]}}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        let admission = sent.try_recv().unwrap();
+        assert_eq!(admission["requestId"], prompt.request_id);
+        assert_eq!(admission["images"], json!(prompt.images));
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[test]
+    fn reconnect_waiting_image_resumes_from_authoritative_snapshot_not_set_model_ack() {
+        let (mut watch, old_pipe) = watch();
+        image_ready(&mut watch);
+        watch.reset_transport();
+        let prompt = image_prompt();
+        Live::enqueue(&mut watch, prompt.clone()).unwrap();
+        assert!(old_pipe.try_recv().is_err());
+        let (input, sent) = async_channel::unbounded();
+        watch.input = Some(input);
+        let mut snapshot = watch.pi.clone();
+        snapshot.run = pi_core::session::RunState::Running;
+        Live::record(
+            &mut watch,
+            &json!({"type":"remote_snapshot","data":snapshot}),
+            "wrong-default",
+            "",
+            &mut Vec::new(),
+        );
+        assert_eq!(sent.try_recv().unwrap()["type"], "get_available_models");
+        assert_eq!(
+            sent.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
+        assert_eq!(sent.try_recv().unwrap()["type"], "get_commands");
+        let admission = sent.try_recv().unwrap();
+        assert_eq!(admission["requestId"], prompt.request_id);
+        assert_eq!(admission["images"], json!(prompt.images));
+        assert_eq!(admission["streamingBehavior"], "steer");
+        assert_eq!(watch.pi.state.model.as_ref().unwrap().id, "vision");
+    }
+
+    #[test]
+    fn failed_selection_preserves_complete_waiting_image_for_recovery() {
+        let (mut watch, sent) = watch();
+        image_ready(&mut watch);
+        Live::configure(
+            &mut watch,
+            json!({"type":"set_model","provider":"host","modelId":"next"}),
+            Request::SetModel,
+        )
+        .unwrap();
+        let set = sent.try_recv().unwrap();
+        let prompt = image_prompt();
+        Live::enqueue(&mut watch, prompt.clone()).unwrap();
+        assert_eq!(Live::record(&mut watch, &json!({"type":"response","id":set["id"],"command":"set_model","success":false,"error":"Selection failed"}), "", "", &mut Vec::new()).as_deref(), Some("Selection failed"));
+        assert!(watch.outbox.is_empty());
+        assert_eq!(watch.failed[0].prompt, prompt);
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[test]
+    fn waiting_image_cancellation_uses_stable_local_key_without_touching_next_prompt() {
+        let (mut watch, sent) = watch();
+        image_ready(&mut watch);
+        Live::configure(
+            &mut watch,
+            json!({"type":"set_model","provider":"host","modelId":"next"}),
+            Request::SetModel,
+        )
+        .unwrap();
+        let set = sent.try_recv().unwrap();
+        let prompt = image_prompt();
+        Live::enqueue(&mut watch, prompt.clone()).unwrap();
+        Live::enqueue(&mut watch, "later".into()).unwrap();
+        let key = QueueKey::Local(prompt.request_id);
+        Live::cancel_queue_key(&mut watch, &key).unwrap();
+        Live::cancel_queue_key(&mut watch, &key).unwrap();
+        assert_eq!(watch.outbox.len(), 1);
+        model_ack(&mut watch, &set, &["text", "image"]);
+        assert_eq!(
+            sent.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
+        assert_eq!(sent.try_recv().unwrap()["message"], "later");
+        assert!(sent.try_recv().is_err());
+        assert!(watch.failed.is_empty());
+    }
+
+    #[test]
+    fn attempted_image_retry_bypasses_new_capability_check_and_keeps_frozen_admission() {
+        let (mut watch, first_pipe) = watch();
+        image_ready(&mut watch);
+        let prompt = image_prompt();
+        Live::enqueue(&mut watch, prompt.clone()).unwrap();
+        let first = first_pipe.try_recv().unwrap();
+        watch.reset_transport();
+        let (input, sent) = async_channel::unbounded();
+        watch.input = Some(input);
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.run = pi_core::session::RunState::Running;
+        watch.pi.backend = pi_core::session::BackendInfo::Unsupported;
+        Live::configure(
+            &mut watch,
+            json!({"type":"set_model","provider":"host","modelId":"next"}),
+            Request::SetModel,
+        )
+        .unwrap();
+        let set = sent.try_recv().unwrap();
+        Live::flush(&mut watch);
+        assert!(
+            sent.try_recv().is_err(),
+            "unconfirmed selection still blocks retry"
+        );
+        model_ack(&mut watch, &set, &["text"]);
+        assert_eq!(
+            sent.try_recv().unwrap()["type"],
+            "get_available_thinking_levels"
+        );
+        let retry = sent.try_recv().unwrap();
+        assert_ne!(first["id"], retry["id"]);
+        assert_eq!(admission(first), admission(retry));
+        assert!(watch.failed.is_empty());
+        Live::flush(&mut watch);
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[test]
+    fn unavailable_catalog_metadata_fails_images_recoverably_instead_of_polling_forever() {
+        for success in [false, true] {
+            let (mut watch, sent) = watch();
+            image_ready(&mut watch);
+            watch.pi.state.model.as_mut().unwrap().input.clear();
+            let prompt = image_prompt();
+            Live::enqueue(&mut watch, prompt.clone()).unwrap();
+            let catalog = sent.try_recv().unwrap();
+            Live::record(
+                &mut watch,
+                &json!({"type":"response","id":catalog["id"],"command":"get_available_models",
+                "success":success,"error":"Read failed","data":{"models":[]}}),
+                "",
+                "",
+                &mut Vec::new(),
+            );
+            assert_eq!(watch.failed[0].prompt, prompt);
+            assert!(watch.outbox.is_empty());
+            Live::flush(&mut watch);
+            assert!(sent.try_recv().is_err());
+            let recovered = Live::recover_failed(&mut watch, &prompt.request_id).unwrap();
+            Live::enqueue(&mut watch, recovered).unwrap();
+            assert_eq!(
+                sent.try_recv().unwrap()["type"],
+                "get_available_models",
+                "explicit recovery may retry one fresh read"
+            );
+            Live::flush(&mut watch);
+            assert!(sent.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn unsupported_backend_after_metadata_read_preserves_waiting_image_bytes() {
+        let (mut watch, sent) = watch();
+        image_ready(&mut watch);
+        watch.pi.backend = pi_core::session::BackendInfo::Unknown;
+        let prompt = image_prompt();
+        Live::enqueue(&mut watch, prompt.clone()).unwrap();
+        let read = sent.try_recv().unwrap();
+        assert_eq!(read["type"], "get_backend_info");
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":read["id"],"command":"get_backend_info",
+            "success":false,"error":"Unsupported"}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert!(watch.outbox.is_empty());
+        assert_eq!(watch.failed[0].prompt, prompt);
+        assert!(watch.failed[0].error.contains("older helper"));
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[test]
+    fn later_authoritative_snapshot_hydrates_a_waiting_image_without_waiting_for_catalog_ack() {
+        let (mut watch, sent) = watch();
+        image_ready(&mut watch);
+        watch.pi.state.model.as_mut().unwrap().input.clear();
+        let prompt = image_prompt();
+        Live::enqueue(&mut watch, prompt.clone()).unwrap();
+        let catalog = sent.try_recv().unwrap();
+        let mut snapshot = watch.pi.clone();
+        snapshot.state.model.as_mut().unwrap().input = vec!["text".into(), "image".into()];
+        Live::record(
+            &mut watch,
+            &json!({"type":"remote_snapshot","data":snapshot}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        let admission = sent.try_recv().unwrap();
+        assert_eq!(admission["requestId"], prompt.request_id);
+        assert_eq!(admission["images"], json!(prompt.images));
+        Live::record(
+            &mut watch,
+            &json!({"type":"response","id":catalog["id"],"command":"get_available_models",
+            "success":false,"error":"Catalog unavailable"}),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        assert!(
+            watch.failed.is_empty(),
+            "an unrelated catalog failure cannot reject confirmed or attempted images"
+        );
+        assert!(sent.try_recv().is_err());
     }
 
     #[test]

@@ -302,6 +302,7 @@ impl Store {
         session.question = None;
         session.script = None;
         session.queued.clear();
+        session.queued_keys.clear();
         session.activity = "Stopped".into();
         session.finished_at = Some(clock_now());
         for stage in &mut session.turn_mut().stages {
@@ -344,13 +345,20 @@ impl Store {
             return Err("This session is no longer available.".into());
         };
         if session.state.is_running() {
+            // Hand-authored demo rows may lack identities; never rebind a new
+            // prompt's key to one of those older labels.
+            session.queued_keys.resize(session.queued.len(), None);
             session.queued.push(prompt.label());
+            session
+                .queued_keys
+                .push(Some(QueueKey::Local(prompt.request_id)));
             return Ok(());
         }
         demo::begin_turn(session, prompt.message, attachments);
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn unqueue(&mut self, id: SessionId, index: usize) -> Result<(), String> {
         if let Some(live) = &mut self.live {
             live.unqueue(id, index)?;
@@ -361,6 +369,29 @@ impl Store {
             && index < session.queued.len()
         {
             session.queued.remove(index);
+            if index < session.queued_keys.len() {
+                session.queued_keys.remove(index);
+            }
+        }
+        Ok(())
+    }
+
+    /// Cancels only the payload identified in the rendered snapshot.
+    pub fn unqueue_key(&mut self, id: SessionId, key: &QueueKey) -> Result<(), String> {
+        if let Some(live) = &mut self.live {
+            live.unqueue_key(id, key)?;
+            self.reproject(id);
+            return Ok(());
+        }
+        if let Some(session) = self.session_mut(id)
+            && let Some(index) = session
+                .queued_keys
+                .iter()
+                .position(|row| row.as_ref() == Some(key))
+            && index < session.queued.len()
+        {
+            session.queued.remove(index);
+            session.queued_keys.remove(index);
         }
         Ok(())
     }
@@ -371,6 +402,9 @@ impl Store {
             && !session.queued.is_empty()
         {
             let prompt = session.queued.remove(0);
+            if !session.queued_keys.is_empty() {
+                session.queued_keys.remove(0);
+            }
             demo::begin_turn(session, prompt, Vec::new());
         }
     }
@@ -395,5 +429,100 @@ impl Store {
         self.sessions
             .push(demo::new_session(id, project, prompt.message, attachments));
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    use crate::prompt::Prompt;
+
+    fn sample_queue() -> Store {
+        let mut store = Store::sample(Computer::from_address("sample@computer.local"));
+        store.session_mut(SessionId(1)).unwrap().state = State::Working;
+        for request_id in ["sample-first", "sample-second"] {
+            store
+                .send(
+                    SessionId(1),
+                    Prompt {
+                        request_id: request_id.into(),
+                        message: "duplicate".into(),
+                        images: Vec::new(),
+                    },
+                    Vec::new(),
+                )
+                .unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn sample_queue_keys_survive_reordering_and_cancel_exact_duplicate() {
+        let mut store = sample_queue();
+        let key = store.session(SessionId(1)).unwrap().queued_keys[0]
+            .clone()
+            .unwrap();
+        let session = store.session_mut(SessionId(1)).unwrap();
+        session.queued.swap(0, 1);
+        session.queued_keys.swap(0, 1);
+        store.unqueue_key(SessionId(1), &key).unwrap();
+        store.unqueue_key(SessionId(1), &key).unwrap();
+        let session = store.session(SessionId(1)).unwrap();
+        assert_eq!(session.queued, ["duplicate"]);
+        assert_eq!(
+            session.queued_keys,
+            [Some(QueueKey::Local("sample-second".into()))]
+        );
+    }
+
+    #[test]
+    fn sample_queue_started_row_old_key_is_noop_and_stop_clears_keys() {
+        let mut store = sample_queue();
+        let key = store.session(SessionId(1)).unwrap().queued_keys[0]
+            .clone()
+            .unwrap();
+        store.session_mut(SessionId(1)).unwrap().state = State::Done;
+        store.start_queued(SessionId(1));
+        store.unqueue_key(SessionId(1), &key).unwrap();
+        let session = store.session(SessionId(1)).unwrap();
+        assert_eq!(session.queued, ["duplicate"]);
+        assert_eq!(
+            session.queued_keys,
+            [Some(QueueKey::Local("sample-second".into()))]
+        );
+        store.stop(SessionId(1)).unwrap();
+        let session = store.session(SessionId(1)).unwrap();
+        assert!(session.queued.is_empty());
+        assert!(session.queued_keys.is_empty());
+    }
+
+    #[test]
+    fn sample_queue_never_assigns_a_new_prompt_key_to_an_unidentified_demo_row() {
+        let mut store = sample_queue();
+        let session = store.session_mut(SessionId(1)).unwrap();
+        session.queued = vec!["duplicate".into()];
+        session.queued_keys.clear();
+        store
+            .send(
+                SessionId(1),
+                Prompt {
+                    request_id: "sample-new".into(),
+                    message: "duplicate".into(),
+                    images: Vec::new(),
+                },
+                Vec::new(),
+            )
+            .unwrap();
+        let session = store.session(SessionId(1)).unwrap();
+        assert_eq!(
+            session.queued_keys,
+            [None, Some(QueueKey::Local("sample-new".into()))]
+        );
+        store
+            .unqueue_key(SessionId(1), &QueueKey::Local("sample-new".into()))
+            .unwrap();
+        let session = store.session(SessionId(1)).unwrap();
+        assert_eq!(session.queued, ["duplicate"]);
+        assert_eq!(session.queued_keys, [None]);
     }
 }

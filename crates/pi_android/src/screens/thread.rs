@@ -25,8 +25,8 @@ const CHIPS: usize = 3;
 const TAIL: usize = 4;
 /// How many changed files the report card lists before "Show 5 more files".
 const FILES: usize = 3;
-/// Small conversations appear immediately; large first opens get a painted
-/// loading frame before exact full-history measurement starts.
+/// Small conversations appear immediately; large opens and reopens get a
+/// painted loading frame before layout. Reopens retain exact measured heights.
 const LARGE_THREAD_ITEMS: usize = 24;
 const THREAD_LOADING_PAINT: Duration = Duration::from_millis(80);
 
@@ -48,6 +48,29 @@ fn composer_status(session: &Session, compacting: bool) -> &'static str {
         "Needs you"
     } else {
         "Working"
+    }
+}
+
+fn thread_subtitle(session: &Session, computer_name: &str, compacting: bool) -> String {
+    if compacting {
+        return format!("{} · {}", session.project, computer_name);
+    }
+    match session.state {
+        State::NeedsYou | State::Working => format!("{} · {}", session.project, computer_name),
+        State::Done => match super::subagents::at_work(&session.turns) {
+            Some(handoff) => format!(
+                "{} · {}",
+                session.project,
+                crate::projection::at_work(handoff)
+            ),
+            None => format!(
+                "{} · done in {}",
+                session.project,
+                duration_label(session.elapsed)
+            ),
+        },
+        State::Stopped => format!("{} · stopped by you", session.project),
+        State::Failed => format!("{} · {}", session.project, session.status_line()),
     }
 }
 
@@ -195,9 +218,6 @@ fn thread_layout_changes(before: &Session, after: &Session) -> ThreadLayoutChang
 
 impl PhoneApp {
     pub(crate) fn begin_thread_loading(&mut self, id: SessionId) {
-        if self.thread_lists.contains_key(&id) {
-            return;
-        }
         let Some(store) = &self.store else {
             return;
         };
@@ -247,6 +267,13 @@ impl PhoneApp {
         }
         if self.thread_loading_release_scheduled.get(&id) != Some(&generation) {
             self.thread_loading_release_scheduled.insert(id, generation);
+            // Cached reopens need a presented frame, not the cold measurement
+            // grace period. Keep their ListState and scroll position intact.
+            let paint_delay = if self.thread_lists.contains_key(&id) {
+                Duration::ZERO
+            } else {
+                THREAD_LOADING_PAINT
+            };
             // This callback runs on the frame after the loading element was
             // rendered, so at least one loading frame has reached presentation
             // before the exact measure_all pass can begin.
@@ -265,7 +292,7 @@ impl PhoneApp {
                     return;
                 }
                 cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(THREAD_LOADING_PAINT).await;
+                    cx.background_executor().timer(paint_delay).await;
                     let _ = this.update(cx, |this, cx| {
                         let same_load = this.thread_loading.get(&id) == Some(&generation);
                         let release = same_load
@@ -298,6 +325,28 @@ impl PhoneApp {
         }
     }
 
+    fn thread_appbar(
+        &self,
+        id: SessionId,
+        title: String,
+        subtitle: String,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let back = ui::tap("back", "back", colors).on_click(cx.listener(|this, _, window, cx| {
+            this.back(window, cx);
+        }));
+        ui::appbar(back, title, Some(subtitle.into()), colors)
+            .child(ui::tap("details", "info", colors).on_click(
+                cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::Details(id), cx)),
+            ))
+            .child(
+                ui::tap("more", "dots", colors).on_click(
+                    cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
+                ),
+            )
+    }
+
     pub(crate) fn thread_screen(
         &mut self,
         id: SessionId,
@@ -305,6 +354,56 @@ impl PhoneApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = theme(cx);
+        // Present loading before comparing/cloning history or consuming any
+        // geometry signatures. Otherwise a cached reopen loses invalidations
+        // before remeasure_items can apply them after the loader disappears.
+        let loading_header = self
+            .thread_loading
+            .contains_key(&id)
+            .then(|| {
+                let store = self.store.as_ref()?;
+                let session = store.session(id)?;
+                let live = store.live.as_ref();
+                let item_count = session.turns.len()
+                    + usize::from(!session.queued.is_empty())
+                    + live.map_or(0, |live| live.failed_prompts(id).len());
+                let compacting = self.compact_pending(id)
+                    || live.is_some_and(|live| live.is_compacting(id))
+                    || session.activity == "Compacting";
+                Some((
+                    item_count,
+                    session.title.clone(),
+                    thread_subtitle(session, &store.computer.name, compacting),
+                ))
+            })
+            .flatten();
+        if let Some((item_count, title, subtitle)) = loading_header
+            && self.thread_is_loading(id, item_count, window, cx)
+        {
+            return div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(self.thread_appbar(id, title, subtitle, &colors, cx))
+                .child(
+                    div()
+                        .id("thread-loading")
+                        .debug_selector(|| "thread-loading".into())
+                        .relative()
+                        .child(crate::testing::probe("thread-loading"))
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(10.))
+                        .text_size(px(14.))
+                        .text_color(colors.secondary)
+                        .child(ui::working_indicator(&colors))
+                        .child("Loading conversation…"),
+                )
+                .into_any_element();
+        }
         let composer = self.thread_composer(id, window, cx);
         let commands = self.command_catalog_for_session(id, cx);
         composer.update(cx, |composer, _| composer.use_commands(commands));
@@ -380,67 +479,12 @@ impl PhoneApp {
                 "Ask a follow-up…"
             })
         });
-        let subtitle = if compacting {
-            format!("{} · {}", session.project, computer_name)
-        } else {
-            match session.state {
-                State::NeedsYou | State::Working => {
-                    format!("{} · {}", session.project, computer_name)
-                }
-                State::Done => match super::subagents::at_work(&session.turns) {
-                    // Pi answered, and its subagents carry on.
-                    Some(handoff) => format!(
-                        "{} · {}",
-                        session.project,
-                        crate::projection::at_work(handoff)
-                    ),
-                    None => format!(
-                        "{} · done in {}",
-                        session.project,
-                        duration_label(session.elapsed)
-                    ),
-                },
-                State::Stopped => format!("{} · stopped by you", session.project),
-                State::Failed => format!("{} · {}", session.project, session.status_line()),
-            }
-        };
-        let appbar =
-            ui::appbar(back, session.title.clone(), Some(subtitle.into()), &colors)
-                .child(ui::tap("details", "info", &colors).on_click(
-                    cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::Details(id), cx)),
-                ))
-                .child(ui::tap("more", "dots", &colors).on_click(
-                    cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
-                ));
+        let subtitle = thread_subtitle(&session, &computer_name, compacting);
+        let appbar = self.thread_appbar(id, session.title.clone(), subtitle, &colors, cx);
         let turn_count = session.turns.len();
         let failed_count = failed_prompts.len();
         let has_queued = !session.queued.is_empty();
         let item_count = turn_count + failed_count + usize::from(has_queued);
-        if self.thread_is_loading(id, item_count, window, cx) {
-            return div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .child(appbar)
-                .child(
-                    div()
-                        .id("thread-loading")
-                        .debug_selector(|| "thread-loading".into())
-                        .relative()
-                        .child(crate::testing::probe("thread-loading"))
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(10.))
-                        .text_size(px(14.))
-                        .text_color(colors.secondary)
-                        .child(ui::working_indicator(&colors))
-                        .child("Loading conversation…"),
-                )
-                .into_any_element();
-        }
         let list_state = self
             .thread_lists
             .entry(id)
@@ -533,7 +577,7 @@ impl PhoneApp {
                     this.failed_prompt(id, failed_index, failed, &list_colors, cx)
                         .into_any_element()
                 } else {
-                    this.queued_messages(id, &list_session.queued, &list_colors, cx)
+                    this.queued_messages(id, &list_session, &list_colors, cx)
                         .into_any_element()
                 };
                 div()
@@ -749,36 +793,50 @@ impl PhoneApp {
     fn queued_messages(
         &self,
         id: SessionId,
-        queued: &[String],
+        session: &Session,
         colors: &Theme,
         cx: &Context<Self>,
     ) -> Div {
         div()
             .child(ui::label("Queued messages", colors).mb(px(8.)))
             .child(
-                ui::card(colors).children(queued.iter().enumerate().map(|(index, prompt)| {
-                    ui::row(("queued", index), index == 0, colors)
-                        .child(icon("queue", 16., colors.muted))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(px(14.))
-                                .child(prompt.clone()),
-                        )
-                        .child(
-                            ui::tap(("unqueue", index), "x", colors)
-                                .size(px(40.))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(store) = &mut this.store
-                                        && let Err(error) = store.unqueue(id, index)
-                                    {
-                                        this.notify_user(error, cx);
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                })),
+                ui::card(colors).children(session.queued.iter().enumerate().map(
+                    |(index, prompt)| {
+                        // Capture from the same immutable snapshot as the label.
+                        // Never recover a fresh visible index when the callback runs.
+                        let key = session.queued_keys.get(index).cloned().flatten();
+                        ui::row(("queued", index), index == 0, colors)
+                            .child(icon("queue", 16., colors.muted))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(14.))
+                                    .child(prompt.clone()),
+                            )
+                            .child(
+                                ui::tap(("unqueue", index), "x", colors)
+                                    .debug_selector(move || format!("unqueue-{index}"))
+                                    .size(px(40.))
+                                    .when(key.is_none(), |button| button.opacity(0.5))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        window.prevent_default();
+                                        Self::stop_fling(window);
+                                        let Some(key) = &key else {
+                                            this.notify_user("This queued message has no stable cancellation identity. Update the helper to cancel it safely.", cx);
+                                            return;
+                                        };
+                                        if let Some(store) = &mut this.store
+                                            && let Err(error) = store.unqueue_key(id, key)
+                                        {
+                                            this.notify_user(error, cx);
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                    },
+                )),
             )
     }
 
@@ -1933,6 +1991,104 @@ mod tests {
         rc::Rc,
     };
 
+    /// Keep the rendered queue snapshot even as the store changes. This drives
+    /// the real X listener, not a second implementation of index/key dispatch.
+    struct QueuedFrame {
+        app: gpui::Entity<PhoneApp>,
+        snapshot: Session,
+    }
+
+    impl Render for QueuedFrame {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.app.update(cx, |app, cx| {
+                app.queued_messages(self.snapshot.id, &self.snapshot, &theme(cx), cx)
+            })
+        }
+    }
+
+    fn queued_frame(window: &mut Window, cx: &mut Context<QueuedFrame>) -> QueuedFrame {
+        let app = cx.new(|cx| PhoneApp::new(None, window, cx));
+        let snapshot = app.update(cx, |app, _| {
+            app.open_store("sample@computer.local");
+            let store = app.store.as_mut().unwrap();
+            let id = SessionId(1);
+            store
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == id)
+                .unwrap()
+                .state = State::Working;
+            for request_id in ["sample-first", "sample-second"] {
+                store
+                    .send(
+                        id,
+                        crate::prompt::Prompt {
+                            request_id: request_id.into(),
+                            message: "duplicate".into(),
+                            images: Vec::new(),
+                        },
+                        Vec::new(),
+                    )
+                    .unwrap();
+            }
+            store.session(id).unwrap().clone()
+        });
+        QueuedFrame { app, snapshot }
+    }
+
+    #[gpui::test]
+    fn queued_x_retained_frame_removed_first_row_does_not_cancel_next(cx: &mut TestAppContext) {
+        let (frame, cx) = cx.add_window_view(queued_frame);
+        cx.run_until_parked();
+        let first_x = cx.debug_bounds("unqueue-0").unwrap().center();
+        let app = frame.read_with(cx, |frame, _| frame.app.clone());
+        cx.update(|_, cx| {
+            app.update(cx, |app, _| {
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .unqueue(SessionId(1), 0)
+                    .unwrap();
+            })
+        });
+        cx.simulate_click(first_x, gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let session = app.store.as_ref().unwrap().session(SessionId(1)).unwrap();
+            assert_eq!(session.queued, ["duplicate"]);
+            assert_eq!(
+                session.queued_keys,
+                [Some(crate::model::QueueKey::Local("sample-second".into()))]
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn queued_x_retained_frame_double_tap_cancels_only_original(cx: &mut TestAppContext) {
+        let (frame, cx) = cx.add_window_view(queued_frame);
+        cx.run_until_parked();
+        let first_x = cx.debug_bounds("unqueue-0").unwrap().center();
+        cx.simulate_click(first_x, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_click(first_x, gpui::Modifiers::none());
+        cx.run_until_parked();
+        frame.read_with(cx, |frame, cx| {
+            let session = frame
+                .app
+                .read(cx)
+                .store
+                .as_ref()
+                .unwrap()
+                .session(SessionId(1))
+                .unwrap();
+            assert_eq!(session.queued, ["duplicate"]);
+            assert_eq!(
+                session.queued_keys,
+                [Some(crate::model::QueueKey::Local("sample-second".into()))]
+            );
+        });
+    }
+
     struct TallTurns {
         state: gpui::ListState,
     }
@@ -1967,8 +2123,174 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn reopening_a_long_thread_paints_loading_without_discarding_its_cache(
+        cx: &mut TestAppContext,
+    ) {
+        let id = SessionId(1);
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_store("sample@computer.local");
+                let session = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == id)
+                    .unwrap();
+                let turn = session.turns[0].clone();
+                session.turns.resize(LARGE_THREAD_ITEMS, turn);
+                let snapshot = Arc::new(session.clone());
+                let list = new_thread_list_state(LARGE_THREAD_ITEMS);
+                list.scroll_to(gpui::ListOffset {
+                    item_ix: 5,
+                    offset_in_item: px(12.),
+                });
+                app.thread_lists.insert(id, list.clone());
+                app.thread_list_shapes
+                    .insert(id, (LARGE_THREAD_ITEMS, 0, false));
+                app.thread_snapshots.insert(id, snapshot.clone());
+                let old_failed = vec![("Old failure".into(), "Old prompt".into())];
+                app.thread_failed_layouts.insert(id, old_failed.clone());
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == id)
+                    .unwrap()
+                    .turns[0]
+                    .prompt
+                    .push_str("\nNew offscreen content");
+                app.routes = vec![Route::Sessions];
+
+                app.show_session(id, window, cx);
+                let _ = app.thread_screen(id, window, cx);
+                assert!(app.thread_loading.contains_key(&id));
+                assert_eq!(app.thread_failed_layouts[&id], old_failed);
+                assert!(Arc::ptr_eq(&app.thread_snapshots[&id], &snapshot));
+                assert_eq!(app.thread_list_shapes[&id], (LARGE_THREAD_ITEMS, 0, false));
+                let retained = &app.thread_lists[&id];
+                assert_eq!(retained.item_count(), LARGE_THREAD_ITEMS);
+                assert_eq!(
+                    retained.logical_scroll_top().item_ix,
+                    list.logical_scroll_top().item_ix
+                );
+                assert_eq!(
+                    retained.logical_scroll_top().offset_in_item,
+                    list.logical_scroll_top().offset_in_item
+                );
+                // Mutating the original proves that navigation retained the same state.
+                list.scroll_to(gpui::ListOffset {
+                    item_ix: 7,
+                    offset_in_item: px(3.),
+                });
+                assert_eq!(retained.logical_scroll_top().item_ix, 7);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn route_pop_rearms_long_thread_loading_but_sheet_dismissal_does_not(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_store("sample@computer.local");
+                let session = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == id)
+                    .unwrap();
+                let turn = session.turns[0].clone();
+                session.turns.resize(LARGE_THREAD_ITEMS, turn);
+                app.thread_lists
+                    .insert(id, new_thread_list_state(LARGE_THREAD_ITEMS));
+                for away in [
+                    Route::History(id),
+                    Route::Review(id),
+                    Route::Subagents(id),
+                    Route::File,
+                ] {
+                    app.thread_loading.remove(&id);
+                    app.routes = vec![Route::Sessions, Route::Thread(id), away];
+                    assert!(app.back(window, cx));
+                    assert_eq!(app.route(), Route::Thread(id));
+                    let generation = app.thread_loading[&id];
+                    app.open_sheet(Sheet::Details(id), cx);
+                    assert!(app.back(window, cx));
+                    assert_eq!(app.thread_loading[&id], generation);
+                }
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn cached_reopen_waits_for_presentation_but_not_the_cold_paint_delay(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_store("sample@computer.local");
+                app.visible = true;
+                app.routes = vec![Route::Sessions, Route::Thread(id)];
+                let session = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == id)
+                    .unwrap();
+                let turn = session.turns[0].clone();
+                session.turns.resize(LARGE_THREAD_ITEMS, turn);
+                app.thread_lists
+                    .insert(id, new_thread_list_state(LARGE_THREAD_ITEMS));
+                app.thread_list_shapes
+                    .insert(id, (LARGE_THREAD_ITEMS, 0, false));
+                app.thread_loading.insert(id, 1);
+                assert!(app.thread_is_loading(id, LARGE_THREAD_ITEMS, window, cx));
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            app.read_with(cx, |app, _| app.thread_loading.contains_key(&id)),
+            "even a cached reopen must first present loading"
+        );
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        // No clock advance: reopening must not pay the cold-open 80 ms grace period.
+        app.read_with(cx, |app, _| {
+            assert!(!app.thread_loading.contains_key(&id));
+            assert!(!app.thread_loading_release_scheduled.contains_key(&id));
+            assert!(app.thread_lists.contains_key(&id));
+        });
+    }
+
+    #[gpui::test]
+    fn reopening_a_small_cached_thread_stays_immediate(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_store("sample@computer.local");
+                let count = app.store.as_ref().unwrap().session(id).unwrap().turns.len();
+                assert!(count < LARGE_THREAD_ITEMS);
+                app.thread_lists.insert(id, new_thread_list_state(count));
+                app.routes = vec![Route::Sessions];
+                app.show_session(id, window, cx);
+                assert!(!app.thread_loading.contains_key(&id));
+            });
+        });
+    }
+
     #[test]
-    fn only_large_first_loads_get_the_measurement_indicator() {
+    fn only_large_threads_get_the_measurement_indicator() {
         assert!(!large_thread(LARGE_THREAD_ITEMS - 1));
         assert!(large_thread(LARGE_THREAD_ITEMS));
     }

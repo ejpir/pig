@@ -166,6 +166,7 @@ pub(crate) fn new_session(
         check: None,
         question: None,
         queued: Vec::new(),
+        queued_keys: Vec::new(),
         failure: None,
         details: Details {
             context_percent: Some(2),
@@ -462,6 +463,7 @@ fn session(id: u32, title: &str, project: usize, state: State, turn: Turn) -> Se
         check: None,
         question: None,
         queued: Vec::new(),
+        queued_keys: Vec::new(),
         failure: None,
         details: Details {
             context_percent: Some(18),

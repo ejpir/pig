@@ -649,12 +649,17 @@ impl PhoneApp {
             .map(|session| session.title.clone())
             .unwrap_or_default();
         let Some(subagent) = self.picked(id, pick) else {
+            self.follow_subagent(id, None);
             return div()
                 .flex_1()
                 .child(ui::appbar(back, "Subagent", None, &colors))
                 .child(ui::hint("This subagent is no longer in the session.", &colors).px(px(20.)))
                 .into_any_element();
         };
+        // The latest projection may attach/change the picked conversation
+        // after navigation. Keep the displayed transcript and follow target
+        // aligned; following the same child does not start another read.
+        self.follow_subagent(id, subagent.conversation_id.clone());
         let (_, hue) = agent_look(&subagent.agent, &colors);
         let subtitle = match &subagent.model {
             Some(model) => format!(
@@ -727,7 +732,7 @@ impl PhoneApp {
                 .text_size(px(13.))
                 .text_color(colors.muted)
                 .child(ui::working_indicator(&colors))
-                .child("Loading what it did…")
+                .child("Loading subagent conversation…")
                 .into_any_element(),
         };
         // Until its own run shows, what Pi asked it.

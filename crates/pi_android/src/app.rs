@@ -347,8 +347,8 @@ pub struct PhoneApp {
     scrolls: HashMap<Route, ScrollHandle>,
     pub(crate) thread_lists: HashMap<SessionId, gpui::ListState>,
     pub(crate) thread_list_shapes: HashMap<SessionId, (usize, usize, bool)>,
-    /// First-time large threads keep a painted loading frame while exact
-    /// full-history measurement begins.
+    /// Large thread opens and reopens present loading before layout; cached
+    /// reopens retain their exact full-history measurements.
     pub(crate) thread_loading: HashMap<SessionId, u64>,
     pub(crate) thread_loading_release_scheduled: HashMap<SessionId, u64>,
     /// Monotonic within this app instance so detached callbacks from an old
@@ -775,7 +775,6 @@ impl PhoneApp {
         if let Some(store) = &mut self.store {
             store.watch(id);
         }
-        self.begin_thread_loading(id);
         if !self.scrolls.contains_key(&Route::Thread(id)) {
             self.scroll(Route::Thread(id)).scroll_to_bottom();
         }
@@ -801,6 +800,9 @@ impl PhoneApp {
 
     fn entered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_live();
+        if let Route::Thread(id) = self.route() {
+            self.begin_thread_loading(id);
+        }
         self.swiping_session = None;
         self.close_sheet(cx);
         self.searching = false;
@@ -994,6 +996,9 @@ impl PhoneApp {
                 self.follow_subagent(id, None);
             }
             self.show_live();
+            if let Route::Thread(id) = self.route() {
+                self.begin_thread_loading(id);
+            }
             if left == Some(Route::File)
                 && self.file_view.as_ref().is_some_and(|view| view.from_sheet)
             {
@@ -1784,11 +1789,14 @@ impl PhoneApp {
             self.last_tick = now;
             return;
         };
-        if let Some(live) = &store.live {
+        if let Some(live) = &mut store.live {
             let closed = live.connection.is_closed();
             if store.computer.connected == closed {
                 store.computer.connected = !closed;
                 cx.notify();
+            }
+            if !closed && !self.reconnecting {
+                live.poll_recovery(now);
             }
             if self.visible && !self.reconnecting {
                 if closed {

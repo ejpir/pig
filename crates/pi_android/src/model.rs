@@ -7,6 +7,13 @@ use std::{borrow::Cow, time::Duration};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(pub u32);
 
+/// Identity of a queued payload, independent of its text or visible position.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum QueueKey {
+    Durable(String),
+    Local(String),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Computer {
     /// The short name used everywhere: "studio-mac".
@@ -590,6 +597,9 @@ pub struct Session {
     pub question: Option<Question>,
     /// Prompts queued for this session, including steering and follow-ups.
     pub queued: Vec<String>,
+    /// Parallel to `queued`, from this same snapshot. Missing helper identities
+    /// are not guessed from text or indices and cannot be cancelled by the UI.
+    pub queued_keys: Vec<Option<QueueKey>>,
     pub failure: Option<String>,
     pub details: Details,
     /// The sample run's progress; see `demo`.
