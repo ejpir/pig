@@ -2,6 +2,7 @@
 //! the bottom sheets together.
 
 mod connect;
+mod diagnostics;
 mod files;
 pub(crate) use files::language;
 mod history;

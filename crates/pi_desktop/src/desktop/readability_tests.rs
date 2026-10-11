@@ -69,6 +69,85 @@ fn completed_activity_collapses_and_only_prose_has_a_reading_measure(cx: &mut Te
 }
 
 #[gpui::test]
+fn idle_parent_shows_background_subagents_without_disabling_the_composer(cx: &mut TestAppContext) {
+    let (desktop, mut cx) = setup(cx);
+    let session = tab(&desktop, 0, &cx);
+    receive(
+        &session,
+        json!({
+            "type":"response",
+            "id":"snapshot",
+            "command":"get_messages",
+            "success":true,
+            "data":{"messages":[
+                {"role":"user","content":"Delegate the provider audit."},
+                {"role":"assistant","content":[{"type":"toolCall","id":"crew","name":"subagent","arguments":{"tasks":[
+                    {"agent":"scout","task":"Anthropic"},
+                    {"agent":"scout","task":"OpenAI"}
+                ]}}]},
+                {"role":"toolResult","toolCallId":"crew","toolName":"subagent","content":[{"type":"text","text":"Started in the background."}],"details":{
+                    "version":1,"mode":"parallel","background":true,"results":[
+                        {"index":0,"agent":"scout","task":"Anthropic","status":"running"},
+                        {"index":1,"agent":"scout","task":"OpenAI","status":"running"}
+                    ]
+                },"isError":false},
+                {"role":"assistant","content":[{"type":"text","text":"The scouts are working; you can ask me something else meanwhile."}],"stopReason":"stop"}
+            ]}
+        }),
+        &mut cx,
+    );
+    receive(&session, json!({"type":"agent_settled"}), &mut cx);
+    receive(
+        &session,
+        json!({"type":"queue_update","steering":[],"followUp":[]}),
+        &mut cx,
+    );
+    cx.run_until_parked();
+
+    session.controller.read_with(&cx, |controller, _| {
+        assert!(!controller.working(), "the parent run remains idle");
+        assert!(!controller.model().busy());
+    });
+    assert!(cx.debug_bounds("subagent-work-status").is_some());
+    assert!(cx.debug_bounds("stop").is_none());
+
+    set_draft(&session, "Use their findings in a migration note", &mut cx);
+    session
+        .composer
+        .update(&mut cx, |composer, cx| composer.send_prompt(false, cx));
+    assert_eq!(draft(&session, &cx), "", "the idle composer still sends");
+
+    // The durable incremental path sends crew document changes as subagent tool
+    // updates. They must refresh the composer status, not only the transcript row.
+    receive(&session, json!({"type":"agent_settled"}), &mut cx);
+    receive(
+        &session,
+        json!({"type":"queue_update","steering":[],"followUp":[]}),
+        &mut cx,
+    );
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("subagent-work-status").is_some());
+    receive(
+        &session,
+        json!({
+            "type":"tool_execution_update",
+            "toolCallId":"crew",
+            "toolName":"subagent",
+            "partialResult":{
+                "content":[{"type":"text","text":"Started in the background."}],
+                "details":{"version":1,"mode":"parallel","background":true,"results":[
+                    {"index":0,"agent":"scout","task":"Anthropic","status":"done"},
+                    {"index":1,"agent":"scout","task":"OpenAI","status":"done"}
+                ]}
+            }
+        }),
+        &mut cx,
+    );
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("subagent-work-status").is_none());
+}
+
+#[gpui::test]
 fn manual_tool_disclosure_is_not_closed_when_a_run_settles(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
     let session = activity_session(&desktop, &mut cx);

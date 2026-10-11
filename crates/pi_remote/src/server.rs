@@ -451,6 +451,29 @@ fn snapshot(model: &Session, target: &SshTarget) -> Result<Value> {
         json!({"type":"remote_snapshot", "version":PROTOCOL_VERSION, "key":target.key, "data":serde_json::to_value(model)?}),
     )
 }
+fn unsolicited_read_update(
+    internal: bool,
+    bootstrapping: bool,
+    record: &Value,
+    model: &Session,
+    target: &SshTarget,
+) -> Result<Option<Value>> {
+    if !internal || bootstrapping {
+        return Ok(None);
+    }
+    let command = record["command"].as_str();
+    if !matches!(command, Some("get_state" | "get_session_stats")) {
+        return Ok(None);
+    }
+    if target.backend != RemoteBackend::Durable {
+        return snapshot(model, target).map(Some);
+    }
+    match command {
+        Some("get_state") => crate::durable::state_update(model).map(Some),
+        Some("get_session_stats") => crate::durable::stats_update(model).map(Some),
+        _ => unreachable!(),
+    }
+}
 fn compaction_count(model: &Session) -> usize {
     model
         .messages
@@ -776,6 +799,10 @@ fn run(
                         continue;
                     }
                 };
+                if let Some(error) = backend_command_error(target.backend, &command) {
+                    attached.send(failure(original, command.name(), error));
+                    continue;
+                }
                 // Reads use the live projection, including any unfinished assistant block.
                 // A snapshot resets the projection before the correlated read acknowledgement.
                 let local = match &command {
@@ -815,8 +842,10 @@ fn run(
                     history.begin(message);
                 }
                 let sent = if target.backend == RemoteBackend::Durable
-                    && matches!(command, Command::Prompt { .. })
-                {
+                    && matches!(
+                        command,
+                        Command::Prompt { .. } | Command::PromptSubagent { .. }
+                    ) {
                     backend.send_custom(command.name(), record.clone())
                 } else {
                     backend.send(command.clone())
@@ -841,114 +870,137 @@ fn run(
                 }
             }
             Event::Backend(TransportEvent::Record(mut record)) => {
-                let was_busy = model.busy();
+                let mut batch_was_busy = model.busy();
+                let previous_compactions = compaction_count(&model);
                 let durable_state =
                     target.backend == RemoteBackend::Durable && record["type"] == "durable_state";
-                let previous_compactions = compaction_count(&model);
-                if target.backend == RemoteBackend::Durable {
-                    if durable_state {
-                        model = crate::durable::project(&record, &model, target)?;
-                        record = snapshot(&model, target)?;
-                    } else if record["type"] == "response" && record["success"] == true {
+                let durable_events =
+                    target.backend == RemoteBackend::Durable && record["type"] == "durable_events";
+                let durable_metadata = target.backend == RemoteBackend::Durable
+                    && record["type"] == "durable_metadata";
+                let durable_subagents = target.backend == RemoteBackend::Durable
+                    && record["type"] == "durable_subagents";
+                let durable_incremental = durable_events || durable_metadata || durable_subagents;
+                let durable_projection = durable_state || durable_incremental;
+                let records = if durable_state {
+                    model = crate::durable::project(&record, &model, target)?;
+                    vec![snapshot(&model, target)?]
+                } else if durable_events {
+                    crate::durable::events(&record, &model, target)?
+                } else if durable_metadata {
+                    crate::durable::metadata(&record, &model, target)?
+                } else if durable_subagents {
+                    crate::durable::subagents(&record, &model, target)?
+                } else {
+                    if target.backend == RemoteBackend::Durable
+                        && record["type"] == "response"
+                        && record["success"] == true
+                        && record["command"] == "get_state"
+                    {
                         // The committed projection owns state. Session stats are different:
                         // the durable runner measures current context on demand, which is
                         // not a lifetime counter in the committed usage document.
-                        if record["command"] == "get_state" {
-                            record["data"] = serde_json::to_value(&model.state)?;
+                        record["data"] = serde_json::to_value(&model.state)?;
+                    }
+                    vec![record]
+                };
+                for mut record in records {
+                    let was_busy = model.busy();
+                    let id = record["id"].as_str().unwrap_or("").to_owned();
+                    let was_bootstrap = bootstrap.remove(&id);
+                    if was_bootstrap && record["success"] == false {
+                        bail!("Pi bootstrap failed: {}", record["error"]);
+                    }
+                    // Never replace the live partial with a later Pi history refresh.
+                    model.apply(&record)?;
+                    batch_was_busy |= model.busy();
+                    if !durable_projection && was_busy && !model.busy() {
+                        history.finish();
+                    }
+                    if record["type"] == "extension_ui_request"
+                        && !id.is_empty()
+                        && matches!(
+                            record["method"].as_str(),
+                            Some("confirm" | "select" | "input" | "editor")
+                        )
+                    {
+                        dialogs.insert(id.clone(), record.clone());
+                    }
+                    if record["type"] == "extension_ui_cancel" {
+                        dialogs.remove(&id);
+                    }
+                    if record["type"] == "response"
+                        && let Some(request) = requests.get(&id)
+                    {
+                        record["id"] = json!(request.original);
+                    }
+                    if record["type"] == "response" {
+                        let internal = !was_bootstrap && !requests.contains_key(&id);
+                        if let Some(update) = unsolicited_read_update(
+                            internal,
+                            !bootstrap.is_empty(),
+                            &record,
+                            &model,
+                            target,
+                        )? {
+                            clients.retain(|_, attached| attached.send(update.clone()));
+                        }
+                        let failed_prompt = record["success"] == false
+                            && requests
+                                .get(&id)
+                                .is_some_and(|request| request.command == "prompt");
+                        if failed_prompt && !model.busy() {
+                            history.cancel();
+                        }
+                        if let Some(request) = requests.remove(&id)
+                            && let Some(attached) = clients.get(&request.connection)
+                        {
+                            attached.send(record.clone());
+                        }
+                        if matches!(
+                            record["command"].as_str(),
+                            Some(
+                                "set_model"
+                                    | "set_thinking_level"
+                                    | "cycle_model"
+                                    | "cycle_thinking_level"
+                                    | "set_session_name"
+                                    | "set_auto_compaction"
+                                    | "reload"
+                            )
+                        ) {
+                            let _ = backend.send(Command::GetState);
+                        }
+                    } else if bootstrap.is_empty() {
+                        clients.retain(|_, attached| attached.send(record.clone()));
+                    }
+                    if was_bootstrap && bootstrap.is_empty() {
+                        let update = snapshot(&model, target)?;
+                        for attached in clients.values() {
+                            attached.send(update.clone());
+                            for dialog in dialogs.values() {
+                                attached.send(dialog.clone());
+                            }
                         }
                     }
+                    if !durable_incremental && record["type"] == "agent_start" {
+                        let _ = backend.send(Command::GetState);
+                    }
+                    if !durable_incremental && record["type"] == "agent_settled" {
+                        let _ = backend.send(Command::GetState);
+                        let _ = backend.send(Command::GetSessionStats);
+                    }
                 }
-                let id = record["id"].as_str().unwrap_or("").to_owned();
-                let was_bootstrap = bootstrap.remove(&id);
-                if was_bootstrap && record["success"] == false {
-                    bail!("Pi bootstrap failed: {}", record["error"]);
-                }
-                // Never replace the live partial with a later Pi history refresh.
-                model.apply(&record)?;
-                if was_busy && !model.busy() {
+                if durable_projection && batch_was_busy && !model.busy() {
                     history.finish();
                 }
                 let listed = path.with_extension("summary.json");
                 if let Err(error) = crate::sessions::record(&listed, &model, target, &mut summary) {
                     eprintln!("Could not update the session summary: {error}");
                 }
-                if record["type"] == "extension_ui_request"
-                    && !id.is_empty()
-                    && matches!(
-                        record["method"].as_str(),
-                        Some("confirm" | "select" | "input" | "editor")
-                    )
-                {
-                    dialogs.insert(id.clone(), record.clone());
-                }
-                if record["type"] == "extension_ui_cancel" {
-                    dialogs.remove(&id);
-                }
-                if record["type"] == "response"
-                    && let Some(request) = requests.get(&id)
-                {
-                    record["id"] = json!(request.original);
-                }
-                if record["type"] == "response" {
-                    let internal = !was_bootstrap && !requests.contains_key(&id);
-                    if internal
-                        && bootstrap.is_empty()
-                        && matches!(
-                            record["command"].as_str(),
-                            Some("get_state" | "get_session_stats")
-                        )
-                    {
-                        let update = snapshot(&model, target)?;
-                        clients.retain(|_, attached| attached.send(update.clone()));
-                    }
-                    let failed_prompt = record["success"] == false
-                        && requests
-                            .get(&id)
-                            .is_some_and(|request| request.command == "prompt");
-                    if failed_prompt && !model.busy() {
-                        history.cancel();
-                    }
-                    if let Some(request) = requests.remove(&id)
-                        && let Some(attached) = clients.get(&request.connection)
-                    {
-                        attached.send(record.clone());
-                    }
-                    if matches!(
-                        record["command"].as_str(),
-                        Some(
-                            "set_model"
-                                | "set_thinking_level"
-                                | "cycle_model"
-                                | "cycle_thinking_level"
-                                | "set_session_name"
-                                | "set_auto_compaction"
-                                | "reload"
-                        )
-                    ) {
-                        let _ = backend.send(Command::GetState);
-                    }
-                } else if bootstrap.is_empty() {
-                    clients.retain(|_, attached| attached.send(record.clone()));
-                }
-                if was_bootstrap && bootstrap.is_empty() {
-                    let update = snapshot(&model, target)?;
-                    for attached in clients.values() {
-                        attached.send(update.clone());
-                        for dialog in dialogs.values() {
-                            attached.send(dialog.clone());
-                        }
-                    }
-                }
-                if record["type"] == "agent_start" {
-                    let _ = backend.send(Command::GetState);
-                }
-                if record["type"] == "agent_settled" {
-                    let _ = backend.send(Command::GetState);
-                    let _ = backend.send(Command::GetSessionStats);
-                }
-                if durable_state
+                if (durable_state || durable_events)
                     && bootstrap.is_empty()
-                    && durable_stats_need_refresh(was_busy, &model, previous_compactions)
+                    && durable_stats_need_refresh(batch_was_busy, &model, previous_compactions)
                 {
                     let _ = backend.send(Command::GetSessionStats);
                 }
@@ -995,9 +1047,33 @@ fn run(
     Ok(())
 }
 
+fn backend_command_error(backend: RemoteBackend, command: &Command) -> Option<&'static str> {
+    (backend != RemoteBackend::Durable && matches!(command, Command::PromptSubagent { .. }))
+        .then_some("Direct subagent input requires a durable session")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn direct_child_input_is_rejected_before_reaching_a_non_durable_backend() {
+        let command = Command::PromptSubagent {
+            conversation_id: "child-1".into(),
+            message: "change course".into(),
+            request_id: "request-1".into(),
+            streaming_behavior: pi_core::protocol::StreamingBehavior::Steer,
+            expected_run_id: Some("run-7".into()),
+        };
+        assert_eq!(
+            backend_command_error(RemoteBackend::Pi, &command),
+            Some("Direct subagent input requires a durable session")
+        );
+        assert_eq!(
+            backend_command_error(RemoteBackend::Durable, &command),
+            None
+        );
+    }
+
     #[test]
     fn snapshot_preserves_live_message_and_tool_state() {
         let target = SshTarget::new("dev".into(), "/work".into()).unwrap();
@@ -1018,6 +1094,40 @@ mod tests {
             1,
             "reconnection replaces instead of appending"
         );
+    }
+    #[test]
+    fn durable_unsolicited_reads_become_events_but_correlated_responses_stay_responses() {
+        let mut target = SshTarget::new("dev".into(), "/work".into()).unwrap();
+        target.backend = RemoteBackend::Durable;
+        let mut model = Session::new(target.identity());
+        model.apply(&json!({"type":"agent_start"})).unwrap();
+        model.stats.tokens.input = 7;
+        let state = json!({"type":"response","id":"backend-1","command":"get_state","success":true,"data":{}});
+        assert!(
+            unsolicited_read_update(false, false, &state, &model, &target)
+                .unwrap()
+                .is_none(),
+            "a phone-owned response remains correlated instead of being broadcast"
+        );
+        assert_eq!(state["type"], "response");
+        assert_eq!(state["id"], "backend-1");
+
+        let update = unsolicited_read_update(true, false, &state, &model, &target)
+            .unwrap()
+            .unwrap();
+        assert_eq!(update["type"], "state_update");
+        assert!(update.get("id").is_none());
+        let stats = unsolicited_read_update(
+            true,
+            false,
+            &json!({"type":"response","command":"get_session_stats"}),
+            &model,
+            &target,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(stats["type"], "stats_update");
+        assert_eq!(stats["stats"]["tokens"]["input"], 7);
     }
     #[test]
     fn durable_stats_refresh_when_a_turn_settles_or_compaction_appears() {

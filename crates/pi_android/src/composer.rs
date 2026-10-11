@@ -110,12 +110,16 @@ pub struct Composer {
     /// A session's actual model, instead of the default for new sessions.
     model_label: Option<String>,
     thinking_label: Option<String>,
-    /// A strip sits on the composer's top edge (Working and Stop).
+    /// A status strip shares the composer's top edge.
     joined: bool,
     /// Whether the composer exposes the `/` button.
     command_button: bool,
     /// Existing sessions add app-owned action commands to Pi's catalog.
     session_commands: bool,
+    /// A child-conversation composer exposes only text and Send.
+    message_only: bool,
+    /// The exact child payload remains visible but cannot be sent twice in flight.
+    sending: bool,
     /// The draft's least height: taller for a new task.
     draft_height: f32,
     imports: usize,
@@ -148,6 +152,8 @@ impl Composer {
             joined: false,
             command_button: false,
             session_commands: false,
+            message_only: false,
+            sending: false,
             draft_height: 24.,
             imports: 0,
             import_generation: 0,
@@ -210,6 +216,25 @@ impl Composer {
     pub fn set_session_commands(&mut self, compact: bool) {
         self.command_button = true;
         self.session_commands = compact;
+    }
+
+    /// Direct child input deliberately has no parent model, command or attachment controls.
+    pub fn set_message_only(&mut self) {
+        self.message_only = true;
+        self.command_button = false;
+        self.session_commands = false;
+        self.files = Some(Vec::new());
+        self.commands = Some(Vec::new());
+    }
+
+    pub fn set_sending(&mut self, sending: bool) {
+        self.sending = sending;
+    }
+
+    pub fn clear_if_text(&mut self, sent: &str, cx: &mut Context<Self>) {
+        if self.area.read(cx).text().trim() == sent.trim() {
+            self.clear(cx);
+        }
     }
 
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -314,7 +339,9 @@ impl Composer {
     }
 
     pub fn can_send(&self, cx: &App) -> bool {
-        self.imports == 0 && (!self.area.read(cx).is_empty() || !self.attachments.is_empty())
+        !self.sending
+            && self.imports == 0
+            && (!self.area.read(cx).is_empty() || !self.attachments.is_empty())
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -338,6 +365,9 @@ impl Composer {
 
     /// What the `@` or `/` being typed could become.
     fn suggestions(&self, cx: &App) -> Option<(SharedString, Vec<Suggestion>)> {
+        if self.message_only {
+            return None;
+        }
         let area = self.area.read(cx);
         if let Some((range, word)) = area.token_before_caret('@') {
             let word = word.to_lowercase();
@@ -734,15 +764,20 @@ impl Render for Composer {
                     .ml(px(-12.))
                     .flex()
                     .items_center()
-                    .child(clip)
-                    .when(self.command_button && self.has_commands(), |row| {
-                        row.child(ui::tap("command", "slash", &colors).w(px(40.)).on_click(
-                            cx.listener(|this, _, window, cx| this.start_command(window, cx)),
-                        ))
+                    .when(!self.message_only, |row| {
+                        row.child(clip)
+                            .when(self.command_button && self.has_commands(), |row| {
+                                row.child(ui::tap("command", "slash", &colors).w(px(40.)).on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.start_command(window, cx)
+                                    }),
+                                ))
+                            })
+                            .child(model)
+                            .child(thinking)
                     })
-                    .child(model)
-                    .child(thinking)
                     .child(div().flex_1())
+                    .when(self.sending, |row| row.child(ui::hint("Sending…", &colors)))
                     .when(self.imports > 0, |row| {
                         row.child(ui::hint("Preparing…", &colors))
                     })

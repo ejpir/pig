@@ -1,6 +1,24 @@
 //! One honest run-state surface, reused with the composer in Thread and Changes.
 use super::*;
 
+fn active_background_subagents(model: &pi_core::session::Session) -> usize {
+    model
+        .tools
+        .iter()
+        .filter_map(pi_core::subagent::Handoff::of)
+        .filter(|handoff| handoff.background)
+        .flat_map(|handoff| handoff.subagents)
+        .filter(|subagent| !subagent.status.finished())
+        .count()
+}
+
+fn agents_at_work(count: usize) -> String {
+    format!(
+        "{count} {} at work",
+        if count == 1 { "agent" } else { "agents" }
+    )
+}
+
 impl ComposerView {
     pub(super) fn work_status(&self, cx: &Context<Self>, theme: Theme) -> AnyElement {
         let controller = self.controller.read(cx);
@@ -11,6 +29,8 @@ impl ComposerView {
             .rev()
             .find(|m| m["role"] == "assistant");
         let failed_tools = super::super::session::latest_failed_tools(model).len();
+        let active_subagents = active_background_subagents(model);
+        let subagent_detail = (active_subagents > 0).then(|| agents_at_work(active_subagents));
         if self.contextual_issue && failed_tools > 0 {
             return div()
                 .debug_selector(|| "contextual-work-status".into())
@@ -97,6 +117,8 @@ impl ComposerView {
                 false,
                 true,
             )
+        } else if let Some(detail) = subagent_detail.as_deref() {
+            ("Subagents working", detail, true, false)
         } else if last_reply.is_some() && model.messages.last().is_none_or(|m| m["role"] != "user")
         {
             (
@@ -113,6 +135,7 @@ impl ComposerView {
                 false,
             )
         };
+        let subagents_working = title == "Subagents working";
         let detail = controller
             .remote_target()
             .map(|target| format!("SSH · {} · {detail}", target.host))
@@ -153,6 +176,9 @@ impl ComposerView {
                     .min_w_0()
                     .truncate()
                     .text_color(theme.muted)
+                    .when(subagents_working, |detail| {
+                        detail.debug_selector(|| "subagent-work-status".into())
+                    })
                     .child(detail),
             )
             .when(
@@ -183,5 +209,71 @@ impl ComposerView {
                 },
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool(id: &str, details: serde_json::Value) -> pi_core::session::Tool {
+        pi_core::session::Tool {
+            id: id.into(),
+            name: pi_core::subagent::TOOL.into(),
+            args: serde_json::Value::Null,
+            output: String::new(),
+            diff: None,
+            finished: true,
+            is_error: false,
+            images: Vec::new(),
+            details,
+        }
+    }
+
+    #[test]
+    fn composer_counts_all_unfinished_durable_background_subagents() {
+        let mut model = pi_core::session::Session::new(".".into());
+        model.tools = vec![
+            tool(
+                "one",
+                serde_json::json!({
+                    "version": 1,
+                    "mode": "parallel",
+                    "background": true,
+                    "results": [
+                        {"agent":"scout","task":"one","status":"running"},
+                        {"agent":"scout","task":"two","status":"done"}
+                    ]
+                }),
+            ),
+            tool(
+                "two",
+                serde_json::json!({
+                    "version": 1,
+                    "mode": "parallel",
+                    "background": true,
+                    "results": [
+                        {"agent":"planner","task":"three","status":"waiting"},
+                        {"agent":"worker","task":"four","status":"running"},
+                        {"agent":"worker","task":"five","status":"failed"}
+                    ]
+                }),
+            ),
+            tool(
+                "foreground",
+                serde_json::json!({
+                    "version": 1,
+                    "mode": "single",
+                    "background": false,
+                    "results": [
+                        {"agent":"reviewer","task":"six","status":"running"}
+                    ]
+                }),
+            ),
+        ];
+
+        assert_eq!(active_background_subagents(&model), 3);
+        assert_eq!(agents_at_work(1), "1 agent at work");
+        assert_eq!(agents_at_work(3), "3 agents at work");
     }
 }

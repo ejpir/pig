@@ -117,6 +117,9 @@ impl PhoneApp {
                     .and_then(|session| session.turns.get(turn))
                     .and_then(|turn| turn.images.get(n))
                     .cloned();
+                if let Some(image) = &image {
+                    self.demand_tool_image(id, image);
+                }
                 let shown = image.as_ref().map(|image| self.tool_image(id, image));
                 div().pb(px(8.)).child(match shown {
                     Some(Ok(Some(shown))) => self
@@ -1534,6 +1537,7 @@ impl PhoneApp {
         let snapshots = details.snapshots;
         let runs_open = self.expanded.contains("details-run");
         let tools_open = self.expanded.contains("details-tools");
+        let transport = super::diagnostics::transport_diagnostics(self, id);
         let subagents = crate::model::subagent_details_summary(&session.turns);
         let history = div()
             .pb(px(16.))
@@ -1737,6 +1741,20 @@ impl PhoneApp {
                         ui::chip(("tool", index), None, tool.clone(), colors).font_family(MONO)
                     }),
                 ))
+            })
+            .when_some(transport, |body, entries| {
+                body.child(
+                    row(
+                        "details-transport",
+                        "code",
+                        "Transport diagnostics",
+                        super::diagnostics::transport_summary(entries),
+                        None,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_transport_diagnostics(id, window, cx);
+                    })),
+                )
             })
             .child(
                 row(

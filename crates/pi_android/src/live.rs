@@ -19,9 +19,17 @@ use pi_core::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
+};
+
+mod transport_diagnostics;
+
+use self::transport_diagnostics::TransportDiagnostics;
+pub(crate) use self::transport_diagnostics::{
+    TRANSPORT_DIAGNOSTIC_MAX_BYTES, TRANSPORT_DIAGNOSTIC_MAX_ENTRIES, TransportDiagnostic,
+    TransportDirection,
 };
 
 // Never reuse a pipe identity, even if a released watch is recreated.
@@ -57,10 +65,15 @@ enum Request {
     InitialThinkingLevels(String),
     Stop,
     Compact,
-    /// A tool's image, by its id in the durable session.
-    Image(String),
+    /// A tool image explicitly demanded by a visible card.
+    Image(ImageRequest),
     /// A subagent's messages, by its conversation's id.
     Subagent(String),
+    /// Direct input to one exact child conversation and, for steering, run.
+    SubagentPrompt {
+        conversation: String,
+        request_id: String,
+    },
     /// Its failure doesn't matter: a model without thinking levels refuses one.
     Quiet,
     Other,
@@ -70,6 +83,17 @@ struct SentRequest {
     command: String,
     request: Request,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ImageRequest {
+    id: String,
+    conversation: Option<String>,
+}
+
+/// Large tool-image responses are deliberately serialized in a small window.
+/// Visibility can expose several cards in one frame, but must never recreate
+/// the old lifetime-history network burst.
+const MAX_IMAGE_REQUESTS_IN_FLIGHT: usize = 2;
 
 #[derive(Clone, Copy)]
 struct Admission {
@@ -95,6 +119,37 @@ struct PendingPrompt {
 struct AcceptedTurn {
     text: String,
     user_turns_before: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SubagentInputTarget {
+    Steer { run_id: String },
+    FollowUp,
+}
+
+struct PendingSubagentInput {
+    request_id: String,
+    message: String,
+    target: SubagentInputTarget,
+}
+
+impl PendingSubagentInput {
+    fn record(&self, conversation: &str) -> Value {
+        let mut record = json!({
+            "type":"prompt_subagent",
+            "conversationId":conversation,
+            "message":self.message,
+            "requestId":self.request_id,
+            "streamingBehavior":match &self.target {
+                SubagentInputTarget::Steer { .. } => "steer",
+                SubagentInputTarget::FollowUp => "followUp",
+            },
+        });
+        if let SubagentInputTarget::Steer { run_id } = &self.target {
+            record["expectedRunId"] = json!(run_id);
+        }
+        record
+    }
 }
 
 impl PendingPrompt {
@@ -185,9 +240,11 @@ struct Watch {
     sent: HashMap<String, SentRequest>,
     /// Pi's open questions, oldest first.
     dialogs: Vec<Value>,
-    /// Tool images fetched from the computer, by id: absent until asked for,
-    /// `None` while on the way.
+    /// Tool images fetched from the computer, by id: absent until a visible
+    /// card asks for one, `None` while queued or on the way.
     images: HashMap<String, Option<Result<ToolImageBytes, String>>>,
+    /// Visible image demands waiting behind the bounded in-flight window.
+    image_queue: VecDeque<ImageRequest>,
     /// The subagent on screen, by its conversation's id: fetched again as
     /// its parent reports progress, one request at a time.
     following: Option<String>,
@@ -195,6 +252,18 @@ struct Watch {
     subagent_refresh_pending: bool,
     /// Subagents fetched from the computer: absent until asked for.
     subagents: HashMap<String, Result<pi_core::session::Session, String>>,
+    /// Exact live run identity from the same child read; `None` means idle.
+    subagent_runs: HashMap<String, Option<String>>,
+    /// Finished child conversations the backend explicitly allows resuming.
+    resumable_subagents: HashSet<String>,
+    /// Direct child inputs survive pipe replacement with frozen target semantics.
+    subagent_outbox: HashMap<String, PendingSubagentInput>,
+    /// Successfully admitted text, consumed by that child's independent composer.
+    accepted_subagent_inputs: HashMap<String, String>,
+    /// A running followed child is refreshed on this bounded polling cadence.
+    subagent_refresh_at: Option<Instant>,
+    /// Local-only, sanitized and bounded descriptions of this session pipe.
+    diagnostics: TransportDiagnostics,
     ended: Option<String>,
     /// When the phone began watching, in seconds since 1970.
     since: u64,
@@ -220,10 +289,14 @@ fn user_turns(pi: &Pi) -> usize {
         .count()
 }
 
-fn seconds_now() -> u64 {
+fn milliseconds_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+fn seconds_now() -> u64 {
+    milliseconds_now() / 1_000
 }
 
 impl Watch {
@@ -312,6 +385,8 @@ impl Watch {
             && self.cancellations.is_empty()
             && self.failed.is_empty()
             && self.sent.is_empty()
+            && self.image_queue.is_empty()
+            && self.subagent_outbox.is_empty()
             && self.dialogs.is_empty()
             && !self.pi.tools.iter().any(|tool| {
                 pi_core::subagent::Handoff::of(tool).is_some_and(|handoff| {
@@ -347,9 +422,16 @@ impl Watch {
             sent: HashMap::new(),
             dialogs: Vec::new(),
             images: HashMap::new(),
+            image_queue: VecDeque::new(),
             following: None,
             subagent_refresh_pending: false,
             subagents: HashMap::new(),
+            subagent_runs: HashMap::new(),
+            resumable_subagents: HashSet::new(),
+            subagent_outbox: HashMap::new(),
+            accepted_subagent_inputs: HashMap::new(),
+            subagent_refresh_at: None,
+            diagnostics: TransportDiagnostics::default(),
             ended: None,
             since: seconds_now(),
         }
@@ -370,10 +452,29 @@ impl Watch {
         self.pi.commands_loaded = false;
         // Requests on the old pipe cannot be acknowledged by the new pipe.
         // Prompts remain in the outbox with their stable admission identities.
+        // Requeue only image demands that were actually in flight; unlike the
+        // old full-history scan, reconnect never invents new image work.
+        let retrying_images: Vec<_> = self
+            .sent
+            .values()
+            .filter_map(|sent| match &sent.request {
+                Request::Image(request) => Some(request.clone()),
+                _ => None,
+            })
+            .collect();
         self.sent.clear();
+        for request in retrying_images.into_iter().rev() {
+            if self.images.get(&request.id).is_some_and(Option::is_none)
+                && !self
+                    .image_queue
+                    .iter()
+                    .any(|queued| queued.id == request.id)
+            {
+                self.image_queue.push_front(request);
+            }
+        }
         self.subagent_refresh_pending = self.following.is_some();
-        // Images asked for on the old pipe are asked for again.
-        self.images.retain(|_, image| image.is_some());
+        self.subagent_refresh_at = None;
     }
 
     fn end_transport(&mut self, reason: String, now: Instant) {
@@ -802,9 +903,11 @@ impl Live {
         };
         let id = crate::prompt::request_id();
         record["id"] = json!(id);
+        let diagnostic = TransportDiagnostic::from_record(TransportDirection::Outbound, &record);
         if let Some(input) = &watch.input
             && input.try_send(record).is_ok()
         {
+            watch.diagnostics.push(diagnostic);
             watch.sent.insert(id, SentRequest { command, request });
             true
         } else {
@@ -841,7 +944,73 @@ impl Live {
         }
     }
 
+    fn flush_image_requests(watch: &mut Watch) {
+        if watch.input.as_ref().is_none_or(|input| input.is_closed()) {
+            return;
+        }
+        let mut in_flight = watch
+            .sent
+            .values()
+            .filter(|sent| matches!(&sent.request, Request::Image(_)))
+            .count();
+        while in_flight < MAX_IMAGE_REQUESTS_IN_FLIGHT {
+            let Some(request) = watch.image_queue.front().cloned() else {
+                break;
+            };
+            let mut record = json!({"type": "get_image", "imageId": request.id.clone()});
+            if let Some(conversation) = &request.conversation {
+                record["conversationId"] = conversation.clone().into();
+            }
+            if !Self::send(watch, record, Request::Image(request)) {
+                break;
+            }
+            watch.image_queue.pop_front();
+            in_flight += 1;
+        }
+    }
+
+    fn flush_subagent_inputs(watch: &mut Watch) {
+        if !watch.current
+            || watch.input.as_ref().is_none_or(|input| input.is_closed())
+            || !Self::supports_subagent_input_watch(watch)
+        {
+            return;
+        }
+        let pending: Vec<_> = watch
+            .subagent_outbox
+            .iter()
+            .filter(|(_, pending)| {
+                !watch.sent.values().any(|sent| {
+                    matches!(
+                        &sent.request,
+                        Request::SubagentPrompt { request_id, .. }
+                            if request_id == &pending.request_id
+                    )
+                })
+            })
+            .map(|(conversation, pending)| {
+                (
+                    conversation.clone(),
+                    pending.request_id.clone(),
+                    pending.record(conversation),
+                )
+            })
+            .collect();
+        for (conversation, request_id, record) in pending {
+            Self::send(
+                watch,
+                record,
+                Request::SubagentPrompt {
+                    conversation,
+                    request_id,
+                },
+            );
+        }
+    }
+
     fn flush(watch: &mut Watch) {
+        Self::flush_image_requests(watch);
+        Self::flush_subagent_inputs(watch);
         if !watch.ready
             || watch.input.is_none()
             || watch.sent.values().any(|sent| {
@@ -1127,6 +1296,21 @@ impl Live {
             .then_some(watch.pi.commands.as_slice())
     }
 
+    fn supports_subagent_input_watch(watch: &Watch) -> bool {
+        if watch.target.backend != RemoteBackend::Durable {
+            return false;
+        }
+        let pi_core::session::BackendInfo::Found(info) = &watch.pi.backend else {
+            return false;
+        };
+        info["commands"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().any(|command| command == "prompt_subagent"))
+            && info["features"]
+                .as_array()
+                .is_some_and(|features| features.iter().any(|feature| feature == "subagent_input"))
+    }
+
     pub fn supports_compact(&self, id: SessionId) -> bool {
         let Some(watch) = self.watches.get(&id) else {
             return false;
@@ -1174,6 +1358,15 @@ impl Live {
         self.watches
             .get(&id)
             .map_or(&[], |watch| watch.failed.as_slice())
+    }
+
+    pub(crate) fn transport_diagnostics(
+        &self,
+        id: SessionId,
+    ) -> Option<&VecDeque<TransportDiagnostic>> {
+        self.watches
+            .get(&id)
+            .map(|watch| &watch.diagnostics.entries)
     }
 
     pub fn recover_prompt(&mut self, id: SessionId, request_id: &str) -> Option<Prompt> {
@@ -1408,7 +1601,11 @@ impl Live {
             return;
         }
         let request = watch.dialogs.remove(0);
-        let _ = input.try_send(projection::answer(&request, answer));
+        let record = projection::answer(&request, answer);
+        let diagnostic = TransportDiagnostic::from_record(TransportDirection::Outbound, &record);
+        if input.try_send(record).is_ok() {
+            watch.diagnostics.push(diagnostic);
+        }
     }
 
     /// Applies an update; returns the session it changed and any problem.
@@ -1500,12 +1697,21 @@ impl Live {
             return None;
         }
         match update {
-            Update::Opened(_, input) => watch.input = Some(input),
+            Update::Opened(_, input) => {
+                watch
+                    .diagnostics
+                    .record(TransportDirection::Outbound, &watch.target.attach_record());
+                watch.input = Some(input);
+                Self::flush_image_requests(watch);
+            }
             Update::Ended(_, reason) => {
                 log::info!("Session {} closed: {reason}", watch.target.key);
                 watch.end_transport(reason, now);
             }
             Update::Record(_, record) => {
+                watch
+                    .diagnostics
+                    .record(TransportDirection::Inbound, &record);
                 return Self::record(watch, &record, wanted, thinking, models);
             }
             Update::Listed(_) | Update::ModelCatalog(_, _) | Update::CommandCatalog(_, _) => {}
@@ -1603,7 +1809,6 @@ impl Live {
             // still clear this hint. A correlated daemon read is not a barrier.
             watch.accepted_turn = None;
         }
-        Self::fetch_images(watch);
         if applied && kind == "remote_snapshot" {
             Self::fetch_subagent(watch);
         }
@@ -1918,7 +2123,7 @@ impl Live {
                 }
                 failed.then_some(error)
             }
-            Request::Image(id) => {
+            Request::Image(request) => {
                 use base64::Engine as _;
                 let image = &record["data"]["image"];
                 let fetched = if failed {
@@ -1935,24 +2140,70 @@ impl Live {
                         })
                         .ok_or_else(|| "The computer sent an unreadable image".to_owned())
                 };
-                watch.images.insert(id, Some(fetched));
+                watch.images.insert(request.id, Some(fetched));
                 None
             }
             Request::Subagent(conversation) => {
+                let identity_matches =
+                    record["data"]["conversationId"].as_str() == Some(conversation.as_str());
                 let fetched = if failed {
                     Err(error)
+                } else if !identity_matches {
+                    Err("The computer returned a different subagent conversation.".into())
                 } else {
                     pi_core::subagent::session(&record["data"], watch.target.cwd.clone().into())
                         .map_err(|error| error.to_string())
                 };
-                watch.subagents.insert(conversation, fetched);
-                Self::fetch_images(watch);
+                let busy = fetched.as_ref().is_ok_and(pi_core::session::Session::busy);
+                let run_id = record["data"]["runId"].as_str().map(str::to_owned);
+                if busy && run_id.is_none() {
+                    watch.subagents.insert(
+                        conversation.clone(),
+                        Err("The computer did not identify the subagent's active run.".into()),
+                    );
+                    watch.subagent_runs.remove(&conversation);
+                    watch.resumable_subagents.remove(&conversation);
+                } else {
+                    watch.subagents.insert(conversation.clone(), fetched);
+                    watch.subagent_runs.insert(conversation.clone(), run_id);
+                    if record["data"]["resumable"] == true {
+                        watch.resumable_subagents.insert(conversation.clone());
+                    } else {
+                        watch.resumable_subagents.remove(&conversation);
+                    }
+                }
                 // Catch up once if progress or a different child arrived while
-                // this request was outstanding. Do not poll on every response.
+                // this request was outstanding; otherwise poll a running child
+                // at a bounded cadence, including direct follow-up runs that no
+                // longer update the parent's hand-off document.
                 if watch.subagent_refresh_pending {
                     Self::fetch_subagent(watch);
+                } else {
+                    watch.subagent_refresh_at =
+                        busy.then(|| Instant::now() + Duration::from_secs(1));
                 }
                 None
+            }
+            Request::SubagentPrompt {
+                conversation,
+                request_id,
+            } => {
+                let pending = watch.subagent_outbox.get(&conversation)?;
+                if pending.request_id != request_id {
+                    return None;
+                }
+                let pending = watch.subagent_outbox.remove(&conversation).unwrap();
+                if failed {
+                    Some(error)
+                } else {
+                    watch
+                        .accepted_subagent_inputs
+                        .insert(conversation.clone(), pending.message);
+                    if watch.following.as_deref() == Some(&conversation) {
+                        Self::fetch_subagent(watch);
+                    }
+                    None
+                }
             }
             Request::ImageState => {
                 if watch.pi.state.model.is_none() {
@@ -2038,9 +2289,46 @@ impl Live {
         !idle.is_empty()
     }
 
-    /// A tool image fetched from the computer: `None` while on the way.
+    /// A tool image fetched from the computer: `None` while queued or on the way.
     pub fn image(&self, id: SessionId, key: &str) -> Option<&Result<ToolImageBytes, String>> {
         self.watches.get(&id)?.images.get(key)?.as_ref()
+    }
+
+    /// Whether a visible card has already admitted this image to the bounded
+    /// hydration queue. This distinguishes absence from an in-flight `None`.
+    pub(crate) fn image_requested(&self, id: SessionId, key: &str) -> bool {
+        self.watches
+            .get(&id)
+            .is_some_and(|watch| watch.images.contains_key(key))
+    }
+
+    /// Admit one visible tool image. Duplicate transcript records and repeated
+    /// renders share the content-derived image ID, so they never add another
+    /// queue entry or transport request.
+    pub(crate) fn request_image(
+        &mut self,
+        id: SessionId,
+        key: &str,
+        conversation: Option<&str>,
+    ) -> bool {
+        let Some(watch) = self.watches.get_mut(&id) else {
+            return false;
+        };
+        Self::request_image_watch(watch, key, conversation)
+    }
+
+    fn request_image_watch(watch: &mut Watch, key: &str, conversation: Option<&str>) -> bool {
+        if watch.images.contains_key(key) {
+            return false;
+        }
+        let request = ImageRequest {
+            id: key.to_owned(),
+            conversation: conversation.map(str::to_owned),
+        };
+        watch.images.insert(request.id.clone(), None);
+        watch.image_queue.push_back(request);
+        Self::flush_image_requests(watch);
+        true
     }
 
     /// A subagent's own session, once fetched: see [`Self::follow_subagent`].
@@ -2050,6 +2338,101 @@ impl Live {
         conversation: &str,
     ) -> Option<&Result<pi_core::session::Session, String>> {
         self.watches.get(&id)?.subagents.get(conversation)
+    }
+
+    fn subagent_input_target_watch(
+        watch: &Watch,
+        conversation: &str,
+    ) -> Result<SubagentInputTarget, String> {
+        if watch.following.as_deref() != Some(conversation) {
+            return Err("Open this subagent again before sending it a message.".into());
+        }
+        if !Self::supports_subagent_input_watch(watch) {
+            return Err("This durable session does not support direct subagent input. Update the computer helper and durable runner.".into());
+        }
+        let session = watch
+            .subagents
+            .get(conversation)
+            .ok_or("Wait for this subagent conversation to finish loading.")?
+            .as_ref()
+            .map_err(Clone::clone)?;
+        if session.busy() {
+            let run_id = watch
+                .subagent_runs
+                .get(conversation)
+                .and_then(Clone::clone)
+                .ok_or("Refresh this subagent before steering its active run.")?;
+            Ok(SubagentInputTarget::Steer { run_id })
+        } else if watch.resumable_subagents.contains(conversation) {
+            Ok(SubagentInputTarget::FollowUp)
+        } else {
+            Err("This subagent conversation cannot be resumed yet.".into())
+        }
+    }
+
+    /// Exact semantics currently safe for input to this fetched child.
+    pub(crate) fn subagent_input_target(
+        &self,
+        id: SessionId,
+        conversation: &str,
+    ) -> Result<SubagentInputTarget, String> {
+        let watch = self
+            .watches
+            .get(&id)
+            .ok_or("Reconnect to the computer before messaging this subagent.")?;
+        Self::subagent_input_target_watch(watch, conversation)
+    }
+
+    pub(crate) fn subagent_input_pending(&self, id: SessionId, conversation: &str) -> bool {
+        self.watches
+            .get(&id)
+            .is_some_and(|watch| watch.subagent_outbox.contains_key(conversation))
+    }
+
+    pub(crate) fn take_accepted_subagent_input(
+        &mut self,
+        id: SessionId,
+        conversation: &str,
+    ) -> Option<String> {
+        self.watches
+            .get_mut(&id)?
+            .accepted_subagent_inputs
+            .remove(conversation)
+    }
+
+    /// Queue text for one exact fetched child. Its target mode and active run
+    /// identity are frozen before the first send and retained across reconnects.
+    pub(crate) fn prompt_subagent(
+        &mut self,
+        id: SessionId,
+        conversation: &str,
+        message: String,
+    ) -> Result<(), String> {
+        self.helper
+            .require_attach("messaging a subagent")
+            .map_err(|error| error.to_string())?;
+        let message = message.trim().to_owned();
+        if message.is_empty() {
+            return Err("Type a message for this subagent first.".into());
+        }
+        let target = self.subagent_input_target(id, conversation)?;
+        let watch = self
+            .watches
+            .get_mut(&id)
+            .ok_or("This session is no longer available.")?;
+        if watch.subagent_outbox.contains_key(conversation) {
+            return Err("Wait for the previous subagent message to be accepted.".into());
+        }
+        watch.subagent_outbox.insert(
+            conversation.to_owned(),
+            PendingSubagentInput {
+                request_id: crate::prompt::request_id(),
+                message,
+                target,
+            },
+        );
+        Self::flush_subagent_inputs(watch);
+        Ok(())
     }
 
     /// Keeps a subagent's messages fresh while its screen is open; `None` stops.
@@ -2068,6 +2451,7 @@ impl Live {
             return;
         }
         watch.following = conversation;
+        watch.subagent_refresh_at = None;
         Self::fetch_subagent(watch);
     }
 
@@ -2092,6 +2476,17 @@ impl Live {
             Request::Subagent(conversation),
         ) {
             watch.subagent_refresh_pending = false;
+            watch.subagent_refresh_at = None;
+        }
+    }
+
+    /// Poll the selected running child without depending on parent updates.
+    pub(crate) fn poll_subagents(&mut self, now: Instant) {
+        for watch in self.watches.values_mut() {
+            if watch.subagent_refresh_at.is_some_and(|due| now >= due) {
+                watch.subagent_refresh_at = None;
+                Self::fetch_subagent(watch);
+            }
         }
     }
 
@@ -2110,47 +2505,6 @@ impl Live {
             Request::Other,
         );
         Ok(())
-    }
-
-    /// Asks once for each image a tool returned that the stream left out.
-    fn fetch_images(watch: &mut Watch) {
-        if watch.input.is_none() {
-            return;
-        }
-        // The session's own, and those of the subagent whose screen is open.
-        let followed = watch.following.as_ref().and_then(|conversation| {
-            Some((
-                conversation,
-                watch.subagents.get(conversation)?.as_ref().ok()?,
-            ))
-        });
-        let wanted: Vec<(String, Option<String>)> = watch
-            .pi
-            .tools
-            .iter()
-            .map(|tool| (tool, None))
-            .chain(followed.into_iter().flat_map(|(conversation, pi)| {
-                pi.tools.iter().map(move |tool| (tool, Some(conversation)))
-            }))
-            .flat_map(|(tool, conversation)| {
-                tool.images.iter().map(move |block| (block, conversation))
-            })
-            .filter_map(|(block, conversation)| {
-                Some((block["imageId"].as_str()?.to_owned(), conversation.cloned()))
-            })
-            .filter(|(id, _)| !watch.images.contains_key(id))
-            .collect();
-        for (id, conversation) in wanted {
-            if watch.images.contains_key(&id) {
-                continue;
-            }
-            watch.images.insert(id.clone(), None);
-            let mut request = json!({"type": "get_image", "imageId": id});
-            if let Some(conversation) = conversation {
-                request["conversationId"] = conversation.into();
-            }
-            Self::send(watch, request, Request::Image(id));
-        }
     }
 
     /// The session as the phone shows it.
@@ -2294,6 +2648,93 @@ mod tests {
     fn admission(mut record: Value) -> Value {
         record.as_object_mut().unwrap().remove("id");
         record
+    }
+
+    #[test]
+    fn transport_diagnostics_are_bounded_by_count_and_retained_bytes() {
+        let mut diagnostics = TransportDiagnostics::default();
+        for index in 0..256 {
+            diagnostics.record(
+                TransportDirection::Inbound,
+                &json!({"type":"unknown-record","id":format!("record-{index}")}),
+            );
+        }
+        assert_eq!(diagnostics.entries.len(), TRANSPORT_DIAGNOSTIC_MAX_ENTRIES);
+        assert!(diagnostics.entries.iter().all(|entry| entry.has_id));
+        assert!(
+            diagnostics.entries.iter().all(|entry| !entry
+                .preview
+                .as_deref()
+                .unwrap()
+                .contains("record-"))
+        );
+
+        for _ in 0..TRANSPORT_DIAGNOSTIC_MAX_ENTRIES {
+            diagnostics.push(TransportDiagnostic {
+                at_millis: 0,
+                direction: TransportDirection::Inbound,
+                record_type: "response".into(),
+                command: Some("get_state".into()),
+                has_id: false,
+                byte_size: 0,
+                preview: Some("x".repeat(1_024)),
+            });
+        }
+        assert!(diagnostics.entries.len() <= TRANSPORT_DIAGNOSTIC_MAX_ENTRIES);
+        assert!(diagnostics.retained_bytes <= TRANSPORT_DIAGNOSTIC_MAX_BYTES);
+        assert!(
+            diagnostics.entries.len() < TRANSPORT_DIAGNOSTIC_MAX_ENTRIES,
+            "the byte budget should evict before the count budget"
+        );
+    }
+
+    #[test]
+    fn live_pipe_records_both_successful_sends_and_inbound_records() {
+        let (mut watch, sent) = watch();
+        assert!(Live::send(
+            &mut watch,
+            json!({"type":"get_state"}),
+            Request::Quiet
+        ));
+        let outbound = sent.try_recv().unwrap();
+        let outbound_id = outbound["id"].as_str().unwrap();
+        assert_eq!(watch.diagnostics.entries.len(), 1);
+        assert_eq!(
+            watch.diagnostics.entries[0].direction,
+            TransportDirection::Outbound
+        );
+        assert_eq!(watch.diagnostics.entries[0].record_type, "get_state");
+        assert!(watch.diagnostics.entries[0].has_id);
+        assert!(
+            !watch.diagnostics.entries[0]
+                .preview
+                .as_deref()
+                .unwrap()
+                .contains(outbound_id)
+        );
+
+        let generation = watch.generation;
+        pipe_update(
+            &mut watch,
+            Update::Record(
+                generation,
+                json!({"type":"transport_probe","id":"server-record-1","data":{"messages":["not retained"]}}),
+            ),
+            Instant::now(),
+        );
+        assert_eq!(watch.diagnostics.entries.len(), 2);
+        assert_eq!(
+            watch.diagnostics.entries[1].direction,
+            TransportDirection::Inbound
+        );
+        assert!(watch.diagnostics.entries[1].has_id);
+        assert!(
+            !watch.diagnostics.entries[1]
+                .preview
+                .as_deref()
+                .unwrap()
+                .contains("not retained")
+        );
     }
 
     fn pipe_update(watch: &mut Watch, update: Update, now: Instant) {
@@ -3542,9 +3983,313 @@ mod tests {
         });
     }
 
+    fn image_tool(index: usize, ids: &[String]) -> pi_core::session::Tool {
+        pi_core::session::Tool {
+            id: format!("tool-{index}"),
+            name: "read".into(),
+            args: json!({"path":format!("/tmp/{index}.png")}),
+            output: String::new(),
+            diff: None,
+            finished: true,
+            is_error: false,
+            images: ids
+                .iter()
+                .map(|id| json!({"type":"image","data":"","imageId":id,"mimeType":"image/png"}))
+                .collect(),
+            details: Value::Null,
+        }
+    }
+
+    fn image_response(request: &Value, data: &str) -> Value {
+        json!({
+            "type":"response", "id":request["id"], "command":"get_image", "success":true,
+            "data":{"image":{"type":"image","data":data,"mimeType":"image/png"}}
+        })
+    }
+
+    #[test]
+    fn large_old_histories_do_not_fetch_images_until_one_is_demanded() {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        let ids: Vec<String> = (0..160).map(|index| format!("{index:064x}")).collect();
+        let mut snapshot = watch.pi.clone();
+        snapshot.tools = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| image_tool(index, std::slice::from_ref(id)))
+            .collect();
+        assert!(
+            Live::record(
+                &mut watch,
+                &json!({"type":"remote_snapshot","data":snapshot}),
+                "",
+                "",
+                &mut Vec::new(),
+            )
+            .is_none()
+        );
+        assert!(
+            sent.try_recv().is_err(),
+            "a snapshot with lifetime-history images must not start hydration"
+        );
+        assert!(watch.images.is_empty());
+
+        let visible = &ids[117];
+        assert!(Live::request_image_watch(&mut watch, visible, None));
+        let request = sent.try_recv().unwrap();
+        assert_eq!(request["type"], "get_image");
+        assert_eq!(request["imageId"], visible.as_str());
+        assert!(
+            sent.try_recv().is_err(),
+            "only the demanded image is fetched"
+        );
+        assert_eq!(watch.images.len(), 1);
+    }
+
+    #[test]
+    fn visible_image_hydration_is_bounded_and_advances_one_response_at_a_time() {
+        let (mut watch, sent) = watch();
+        let ids: Vec<String> = (0..7).map(|index| format!("{index:064x}")).collect();
+        for id in &ids {
+            assert!(Live::request_image_watch(&mut watch, id, None));
+        }
+        let initial: Vec<_> = std::iter::from_fn(|| sent.try_recv().ok()).collect();
+        assert_eq!(initial.len(), MAX_IMAGE_REQUESTS_IN_FLIGHT);
+        assert_eq!(watch.image_queue.len(), ids.len() - initial.len());
+
+        assert!(
+            Live::record(
+                &mut watch,
+                &image_response(&initial[0], "aGVsbG8="),
+                "",
+                "",
+                &mut Vec::new(),
+            )
+            .is_none()
+        );
+        assert_eq!(
+            watch.images[initial[0]["imageId"].as_str().unwrap()]
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .bytes
+                .as_slice(),
+            b"hello"
+        );
+        let next = sent.try_recv().unwrap();
+        assert_eq!(next["type"], "get_image");
+        assert!(sent.try_recv().is_err());
+        assert_eq!(
+            watch
+                .sent
+                .values()
+                .filter(|sent| matches!(&sent.request, Request::Image(_)))
+                .count(),
+            MAX_IMAGE_REQUESTS_IN_FLIGHT
+        );
+    }
+
+    #[test]
+    fn duplicate_image_records_and_failed_responses_never_retry_flood() {
+        let (mut watch, sent) = watch();
+        let id = "a".repeat(64);
+        watch.pi.tools = vec![
+            image_tool(0, std::slice::from_ref(&id)),
+            image_tool(1, &[id.clone(), id.clone()]),
+        ];
+        assert!(Live::request_image_watch(&mut watch, &id, None));
+        assert!(!Live::request_image_watch(&mut watch, &id, None));
+        let request = sent.try_recv().unwrap();
+        assert!(sent.try_recv().is_err());
+
+        assert_eq!(
+            Live::record(
+                &mut watch,
+                &json!({"type":"response","id":request["id"],"command":"get_image",
+                    "success":false,"error":"gone"}),
+                "",
+                "",
+                &mut Vec::new(),
+            ),
+            None
+        );
+        assert!(
+            watch.images[&id]
+                .as_ref()
+                .is_some_and(|result| result.as_ref().err().is_some_and(|error| error == "gone"))
+        );
+        assert!(!Live::request_image_watch(&mut watch, &id, None));
+        assert!(sent.try_recv().is_err());
+        watch.reset_transport();
+        let (input, retried) = async_channel::unbounded();
+        watch.input = Some(input);
+        Live::flush_image_requests(&mut watch);
+        assert!(retried.try_recv().is_err(), "terminal failures stay cached");
+    }
+
+    #[test]
+    fn reconnect_requeues_only_demanded_in_flight_images_and_keeps_completed_bytes() {
+        let (mut watch, first_pipe) = watch();
+        let ids: Vec<String> = (10..13).map(|index| format!("{index:064x}")).collect();
+        for id in &ids {
+            assert!(Live::request_image_watch(&mut watch, id, Some("child-7")));
+        }
+        let first: Vec<_> = std::iter::from_fn(|| first_pipe.try_recv().ok()).collect();
+        assert_eq!(first.len(), MAX_IMAGE_REQUESTS_IN_FLIGHT);
+        assert!(
+            first
+                .iter()
+                .all(|request| request["conversationId"] == "child-7")
+        );
+
+        Live::record(
+            &mut watch,
+            &image_response(&first[0], "ZG9uZQ=="),
+            "",
+            "",
+            &mut Vec::new(),
+        );
+        let third = first_pipe.try_recv().unwrap();
+        assert_eq!(third["imageId"], ids[2]);
+        let completed = first[0]["imageId"].as_str().unwrap().to_owned();
+
+        watch.reset_transport();
+        assert!(watch.images[&completed].as_ref().unwrap().is_ok());
+        let (input, retry_pipe) = async_channel::unbounded();
+        watch.input = Some(input);
+        Live::flush_image_requests(&mut watch);
+        let retried: Vec<_> = std::iter::from_fn(|| retry_pipe.try_recv().ok()).collect();
+        assert_eq!(retried.len(), 2);
+        assert!(
+            retried
+                .iter()
+                .all(|request| request["conversationId"] == "child-7")
+        );
+        assert!(
+            retried
+                .iter()
+                .all(|request| request["imageId"] != completed)
+        );
+    }
+
     fn child_response(request: &Value, text: &str) -> Value {
         json!({"type":"response","id":request["id"],"command":"get_subagent","success":true,
-            "data":{"messages":[{"role":"user","content":text}],"tools":[],"busy":false}})
+            "data":{"conversationId":request["conversationId"],"messages":[{"role":"user","content":text}],
+                "tools":[],"busy":false,"runId":null,"resumable":true}})
+    }
+
+    fn direct_input_watch(running: bool) -> (Watch, async_channel::Receiver<Value>) {
+        let (mut watch, sent) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.following = Some("A".into());
+        watch.pi.backend = pi_core::session::BackendInfo::Found(json!({
+            "commands":["get_subagent","prompt_subagent"],
+            "features":["subagents","subagent_input"]
+        }));
+        let mut child = Pi::new("/Users/nick/repos/pi".into());
+        if running {
+            child.apply(&json!({"type":"agent_start"})).unwrap();
+            watch.subagent_runs.insert("A".into(), Some("run-7".into()));
+        } else {
+            watch.subagent_runs.insert("A".into(), None);
+            watch.resumable_subagents.insert("A".into());
+        }
+        watch.subagents.insert("A".into(), Ok(child));
+        (watch, sent)
+    }
+
+    #[test]
+    fn direct_child_input_freezes_the_exact_run_and_retries_without_touching_parent_state() {
+        let (mut watch, first_pipe) = direct_input_watch(true);
+        assert_eq!(
+            Live::subagent_input_target_watch(&watch, "A").unwrap(),
+            SubagentInputTarget::Steer {
+                run_id: "run-7".into()
+            }
+        );
+        watch.subagent_outbox.insert(
+            "A".into(),
+            PendingSubagentInput {
+                request_id: "child-request".into(),
+                message: "change course".into(),
+                target: SubagentInputTarget::Steer {
+                    run_id: "run-7".into(),
+                },
+            },
+        );
+        Live::flush_subagent_inputs(&mut watch);
+        let first = first_pipe.try_recv().unwrap();
+        assert_eq!(first["type"], "prompt_subagent");
+        assert_eq!(first["conversationId"], "A");
+        assert_eq!(first["streamingBehavior"], "steer");
+        assert_eq!(first["expectedRunId"], "run-7");
+        assert_eq!(first["requestId"], "child-request");
+        assert!(
+            watch.outbox.is_empty(),
+            "the parent prompt queue stays independent"
+        );
+        assert!(!watch.pi.busy(), "child input never changes the parent run");
+
+        watch.reset_transport();
+        let (input, retry_pipe) = async_channel::unbounded();
+        watch.input = Some(input);
+        watch.current = true;
+        Live::flush_subagent_inputs(&mut watch);
+        let retry = retry_pipe.try_recv().unwrap();
+        assert_ne!(retry["id"], first["id"]);
+        assert_eq!(retry["requestId"], first["requestId"]);
+        assert_eq!(retry["expectedRunId"], first["expectedRunId"]);
+
+        assert!(Live::record(
+            &mut watch,
+            &json!({"type":"response","id":retry["id"],"command":"prompt_subagent","success":true,
+                "data":{"disposition":"queued","submissionId":"91"}}),
+            "",
+            "",
+            &mut Vec::new(),
+        )
+        .is_none());
+        assert!(watch.subagent_outbox.is_empty());
+        assert_eq!(
+            watch.accepted_subagent_inputs.get("A").map(String::as_str),
+            Some("change course")
+        );
+        assert_eq!(retry_pipe.try_recv().unwrap()["type"], "get_subagent");
+        assert!(!watch.pi.busy());
+    }
+
+    #[test]
+    fn finished_child_input_is_follow_up_only_when_the_backend_explicitly_supports_it() {
+        let (mut watch, sent) = direct_input_watch(false);
+        assert_eq!(
+            Live::subagent_input_target_watch(&watch, "A").unwrap(),
+            SubagentInputTarget::FollowUp
+        );
+        watch.subagent_outbox.insert(
+            "A".into(),
+            PendingSubagentInput {
+                request_id: "follow-up".into(),
+                message: "check one more thing".into(),
+                target: SubagentInputTarget::FollowUp,
+            },
+        );
+        Live::flush_subagent_inputs(&mut watch);
+        let request = sent.try_recv().unwrap();
+        assert_eq!(request["conversationId"], "A");
+        assert_eq!(request["streamingBehavior"], "followUp");
+        assert!(request.get("expectedRunId").is_none());
+
+        watch.pi.backend = pi_core::session::BackendInfo::Found(json!({
+            "commands":["get_subagent"],"features":["subagents"]
+        }));
+        assert!(
+            Live::subagent_input_target_watch(&watch, "A")
+                .unwrap_err()
+                .contains("does not support")
+        );
     }
 
     #[test]

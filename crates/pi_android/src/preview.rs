@@ -5,6 +5,7 @@
 use crate::{
     app::{PhoneApp, Resume, Route, Sheet, Target},
     composer::Attachment,
+    live::{TransportDiagnostic, TransportDirection},
     model::{
         Answer, Flow, LineKind, SessionId, StageKind, StageStatus, State, Summary, ToolActivity,
         Turn,
@@ -13,7 +14,7 @@ use crate::{
 };
 use base64::Engine as _;
 use gpui::{Context, Window};
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 
 const ADDRESS: &str = "nick@studio-mac.local";
 const QWEN: SessionId = SessionId(1);
@@ -40,6 +41,7 @@ pub const SCREENS: &[&str] = &[
     "typing",
     "notice",
     "details",
+    "transport-diagnostics",
     "evening",
     "settings",
     "model",
@@ -117,6 +119,7 @@ impl PhoneApp {
         self.expanded_calls.clear();
         self.searching = false;
         self.preview_models.clear();
+        self.preview_transport_diagnostics.clear();
         self.expanded.clear();
         self.notice = None;
         self.update_prefs(cx, |prefs| {
@@ -609,10 +612,16 @@ impl PhoneApp {
                     cx,
                 );
             }
-            "details" => {
+            "details" | "transport-diagnostics" => {
                 finish(self);
+                self.preview_transport_diagnostics
+                    .insert(QWEN, transport_preview_records());
                 self.show_session(QWEN, window, cx);
-                self.open_sheet(Sheet::Details(QWEN), cx);
+                if name == "details" {
+                    self.open_sheet(Sheet::Details(QWEN), cx);
+                } else {
+                    self.push(Route::Diagnostics(QWEN), window, cx);
+                }
             }
             "history" => {
                 finish(self);
@@ -734,6 +743,81 @@ impl PhoneApp {
             }
         }
     }
+}
+
+fn transport_preview_records() -> VecDeque<TransportDiagnostic> {
+    let omitted = [
+        "text",
+        "tool_io",
+        "image_data",
+        "errors",
+        "raw_paths",
+        "credentials",
+        "headers",
+        "ids",
+        "free_scalars",
+    ];
+    VecDeque::from([
+        TransportDiagnostic {
+            at_millis: 1_735_732_801_120,
+            direction: TransportDirection::Outbound,
+            record_type: "remote_attach".into(),
+            command: None,
+            has_id: false,
+            byte_size: 184,
+            preview: Some(
+                serde_json::json!({
+                    "kind":"remote_attach",
+                    "wire_bytes":184,
+                    "version":2,
+                    "summary":{"target":{"shape":"object","fields":4}},
+                    "omitted":omitted,
+                })
+                .to_string(),
+            ),
+        },
+        TransportDiagnostic {
+            at_millis: 1_735_732_802_340,
+            direction: TransportDirection::Inbound,
+            record_type: "message_update".into(),
+            command: None,
+            has_id: false,
+            byte_size: 346,
+            preview: Some(
+                serde_json::json!({
+                    "kind":"message_update",
+                    "wire_bytes":346,
+                    "summary":{"event_kind":"toolcall_delta","content_index":2,"delta_bytes":128,"path_shape":"arguments/field/[]/field"},
+                    "omitted":omitted,
+                })
+                .to_string(),
+            ),
+        },
+        TransportDiagnostic {
+            at_millis: 1_735_732_803_560,
+            direction: TransportDirection::Inbound,
+            record_type: "remote_snapshot".into(),
+            command: None,
+            has_id: false,
+            byte_size: 8_412,
+            preview: Some(
+                serde_json::json!({
+                    "kind":"remote_snapshot",
+                    "wire_bytes":8412,
+                    "version":2,
+                    "summary":{
+                        "run":"running",
+                        "state":{"phase":"streaming","active_tools":1},
+                        "messages":{"count":6,"roles":{"user":2,"assistant":3,"tool_result":1},"observed_blocks":9,"block_kinds":{"text":5,"thinking":1,"tool_call":2,"image":1}},
+                        "tools":{"count":2,"states":{"finished":1,"running":1},"kinds":{"read":1,"bash":1}},
+                        "queues":{"steering":1,"follow_up":0,"queued_submissions":1}
+                    },
+                    "omitted":omitted,
+                })
+                .to_string(),
+            ),
+        },
+    ])
 }
 
 /// The sample both apps' tests draw (`pi_markdown::sample`), as a session
@@ -1047,6 +1131,7 @@ mod tests {
                         "review" => Route::Review(QWEN),
                         "html-page" => Route::Thread(crate::model::SessionId(7)),
                         "history" => Route::History(QWEN),
+                        "transport-diagnostics" => Route::Diagnostics(QWEN),
                         "subagents-directory"
                         | "subagents-directory-done"
                         | "subagents-directory-stopped"
@@ -1095,6 +1180,154 @@ mod tests {
         cx.simulate_click(header.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         assert_eq!(rows(cx), 0);
+    }
+
+    /// An idle crew status opens its parent directory without consuming the draft.
+    #[gpui::test]
+    fn idle_parent_subagent_status_pushes_the_directory_and_keeps_input_available(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("subagents", window, cx)));
+        cx.run_until_parked();
+
+        let composer = app.read_with(cx, |app, _| app.threads[&QWEN].clone());
+        cx.update(|window, cx| {
+            composer.update(cx, |composer, cx| {
+                composer.set_text("Ask another question", cx);
+                composer.focus(window, cx);
+            })
+        });
+        cx.run_until_parked();
+
+        app.read_with(cx, |app, cx| {
+            let session = app.store.as_ref().unwrap().session(QWEN).unwrap();
+            assert_eq!(session.state, crate::model::State::Done);
+            assert_eq!(session.turns.len(), 1);
+            assert!(composer.read(cx).can_send(cx));
+        });
+        let focused = cx.update(|window, cx| {
+            composer
+                .read(cx)
+                .area
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        });
+        assert!(focused, "the joined status must not disable draft focus");
+        assert!(cx.debug_bounds("composer-stop").is_none());
+        let status = cx
+            .debug_bounds("subagents-working")
+            .expect("idle background work shows a directory target");
+        let chevron = cx.debug_bounds("subagents-working-chevron").unwrap();
+        assert!(status.size.height >= gpui::px(48.));
+        assert!(chevron.right() <= status.right());
+
+        cx.simulate_click(status.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, cx| {
+            assert_eq!(
+                app.routes,
+                [Route::Sessions, Route::Thread(QWEN), Route::Subagents(QWEN)]
+            );
+            let session = app.store.as_ref().unwrap().session(QWEN).unwrap();
+            assert_eq!(session.state, crate::model::State::Done);
+            assert_eq!(session.turns.len(), 1, "the status tap must not submit");
+            let composer = composer.read(cx);
+            assert_eq!(composer.area.read(cx).text(), "Ask another question");
+            assert!(
+                composer.can_send(cx),
+                "navigation must not disable the draft"
+            );
+        });
+
+        cx.update(|window, cx| app.update(cx, |app, cx| assert!(app.back(window, cx))));
+        cx.run_until_parked();
+        let draft = cx.debug_bounds("composer-draft").unwrap();
+        cx.simulate_click(draft.center(), gpui::Modifiers::none());
+        cx.simulate_input("!");
+        cx.run_until_parked();
+        composer.read_with(cx, |composer, cx| {
+            let edited = composer.area.read(cx).text();
+            assert_eq!(
+                edited.chars().count(),
+                "Ask another question".chars().count() + 1
+            );
+            assert_eq!(edited.replace('!', ""), "Ask another question");
+            assert!(composer.can_send(cx));
+        });
+    }
+
+    /// A running parent keeps Stop separate while the crew status opens the same directory.
+    #[gpui::test]
+    fn running_parent_subagent_status_does_not_submit_or_stop(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(640.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("subagents", window, cx)));
+        cx.run_until_parked();
+
+        let composer = app.read_with(cx, |app, _| app.threads[&QWEN].clone());
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == QWEN)
+                    .unwrap()
+                    .state = crate::model::State::Working;
+                composer.update(cx, |composer, cx| {
+                    composer.set_text("Keep this draft", cx);
+                    composer.focus(window, cx);
+                });
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        let status = cx
+            .debug_bounds("subagents-working")
+            .expect("running background work shows a directory target");
+        let stop = cx
+            .debug_bounds("composer-stop")
+            .expect("the parent Stop action remains visible");
+        assert!(status.size.height >= gpui::px(48.));
+        assert!(
+            status.right() <= stop.left(),
+            "status and Stop must not overlap"
+        );
+        assert!(cx.debug_bounds("subagents-working-chevron").is_some());
+
+        cx.simulate_click(status.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, cx| {
+            assert_eq!(
+                app.routes,
+                [Route::Sessions, Route::Thread(QWEN), Route::Subagents(QWEN)]
+            );
+            let session = app.store.as_ref().unwrap().session(QWEN).unwrap();
+            assert_eq!(session.state, crate::model::State::Working);
+            assert!(session.queued.is_empty(), "the status tap must not submit");
+            let composer = composer.read(cx);
+            assert_eq!(composer.area.read(cx).text(), "Keep this draft");
+            assert!(
+                composer.can_send(cx),
+                "navigation must not disable steering"
+            );
+        });
+
+        cx.update(|window, cx| app.update(cx, |app, cx| assert!(app.back(window, cx))));
+        cx.run_until_parked();
+        let stop = cx.debug_bounds("composer-stop").unwrap();
+        cx.simulate_click(stop.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, cx| {
+            let session = app.store.as_ref().unwrap().session(QWEN).unwrap();
+            assert_eq!(session.state, crate::model::State::Stopped);
+            assert_eq!(composer.read(cx).area.read(cx).text(), "Keep this draft");
+        });
     }
 
     /// Work handed to subagents shows as a card whose rows open each one.
@@ -1239,6 +1472,150 @@ mod tests {
         });
         cx.run_until_parked();
         app.read_with(cx, |app, _| assert_eq!(app.route(), Route::Subagents(QWEN)));
+    }
+
+    /// Details stays compact and opens diagnostics at its newest record with an independent scroll.
+    #[gpui::test]
+    fn details_opens_transport_diagnostics_as_its_own_screen(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(640.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("details", window, cx)));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.sheet_scroll
+                    .set_offset(gpui::point(gpui::px(0.), gpui::px(-10_000.)));
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("transport-diagnostic-0").is_none(),
+            "records must not render inline in Details"
+        );
+        let row = cx
+            .debug_bounds("details-transport")
+            .expect("Details shows the diagnostics row");
+        let summary = cx.debug_bounds("details-transport-value").unwrap();
+        let chevron = cx.debug_bounds("details-transport-chevron").unwrap();
+        assert!(
+            summary.left() >= row.left()
+                && summary.right() <= chevron.left()
+                && chevron.right() <= row.right(),
+            "diagnostics summary stays readable: row={row:?} summary={summary:?} chevron={chevron:?}"
+        );
+        cx.simulate_click(row.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.route(), Route::Diagnostics(QWEN));
+            assert!(app.sheet.is_none());
+        });
+        cx.update(|_, cx| {
+            app.update(cx, |app, _| {
+                assert_eq!(
+                    app.scroll(Route::Diagnostics(QWEN)).offset().y,
+                    gpui::px(0.),
+                    "the diagnostics route must not inherit Details' scroll"
+                );
+            })
+        });
+        assert!(cx.debug_bounds("transport-diagnostics-screen").is_some());
+        assert!(cx.debug_bounds("transport-diagnostic-0").is_some());
+    }
+
+    /// Bounded metadata remains inside a narrow phone and new records appear at the top.
+    #[gpui::test]
+    fn transport_diagnostics_are_readable_and_refresh_newest_first(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(640.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("transport-diagnostics", window, cx)
+            })
+        });
+        cx.run_until_parked();
+
+        let card = cx.debug_bounds("transport-diagnostic-0").unwrap();
+        for selector in [
+            "transport-diagnostic-header-0",
+            "transport-diagnostic-fields-0",
+            "transport-diagnostic-preview-0",
+        ] {
+            let part = cx.debug_bounds(selector).unwrap();
+            assert!(
+                part.left() >= card.left() && part.right() <= card.right(),
+                "{selector} overflows its card: part={part:?} card={card:?}"
+            );
+        }
+        assert!(
+            card.left() >= gpui::px(0.) && card.right() <= gpui::px(320.),
+            "the newest record stays inside the viewport: {card:?}"
+        );
+        let second = cx.debug_bounds("transport-diagnostic-1").unwrap();
+        assert!(card.top() < second.top(), "newest record is first");
+
+        let before = card.top();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.preview_transport_diagnostics
+                    .get_mut(&QWEN)
+                    .unwrap()
+                    .push_back(TransportDiagnostic {
+                        at_millis: 1_735_732_804_780,
+                        direction: TransportDirection::Inbound,
+                        record_type: "agent_start".into(),
+                        command: None,
+                        has_id: false,
+                        byte_size: 31,
+                        preview: Some(
+                            "{\"kind\":\"agent_start\",\"wire_bytes\":31,\"omitted\":[\"text\",\"tool_io\",\"ids\"]}"
+                                .into(),
+                        ),
+                    });
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("transport-diagnostic-3").is_some(),
+            "a live record rerenders the mounted screen"
+        );
+        assert_eq!(
+            cx.debug_bounds("transport-diagnostic-0").unwrap().top(),
+            before,
+            "a reader already at the top sees the new newest record immediately"
+        );
+    }
+
+    #[gpui::test]
+    fn transport_diagnostics_handles_a_missing_session(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("transport-diagnostics", window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .retain(|session| session.id != QWEN);
+                app.preview_transport_diagnostics.remove(&QWEN);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("transport-diagnostics-missing-session")
+                .is_some()
+        );
+        assert!(cx.debug_bounds("transport-diagnostics-empty").is_some());
     }
 
     #[gpui::test]
@@ -1839,6 +2216,50 @@ mod tests {
             image.bottom() <= scroll.bounds().bottom() + gpui::px(1.),
             "the image bottom must be reachable: image={image:?}, scroll={:?}",
             scroll.bounds()
+        );
+    }
+
+    #[gpui::test]
+    fn full_history_measurement_hydrates_only_visible_tool_images(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(640.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("tool-image", window, cx);
+                let session = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == QWEN)
+                    .unwrap();
+                let template = session.turns.last().unwrap().images[0].clone();
+                session.turns = (0..40)
+                    .map(|index| {
+                        let mut turn = Turn::new(format!("Old turn {index}"), "09:41");
+                        let mut image = template.clone();
+                        image.key = format!("history-image-{index}");
+                        turn.images.push(image);
+                        turn
+                    })
+                    .collect();
+                session.state = State::Done;
+            })
+        });
+        cx.run_until_parked();
+
+        app.read_with(cx, |app, _| {
+            assert!(app.tool_image_demands.contains("history-image-39"));
+            assert!(app.tool_images.borrow().contains_key("history-image-39"));
+            assert!(app.tool_image_demands.len() < 40);
+            assert!(app.tool_images.borrow().len() < 40);
+        });
+        assert!(cx.debug_bounds("tool-image-39-0").is_some());
+        assert!(
+            cx.debug_bounds("tool-image-0-0").is_none(),
+            "off-screen history may be measured, but must not be painted or hydrated"
         );
     }
 

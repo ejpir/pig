@@ -210,6 +210,31 @@ impl Session {
                 *self = snapshot;
             }
             "response" => self.response(record)?,
+            "state_update" => {
+                let run = self.run;
+                let is_streaming = self.state.is_streaming;
+                let is_compacting = self.state.is_compacting;
+                self.state = serde_json::from_value(record["state"].clone())
+                    .context("invalid state update")?;
+                if run != RunState::Idle {
+                    self.run = run;
+                    self.state.is_streaming = is_streaming;
+                    self.state.is_compacting = is_compacting;
+                } else {
+                    self.run = if self.state.is_compacting {
+                        RunState::Compacting
+                    } else if self.state.is_streaming {
+                        RunState::Running
+                    } else {
+                        RunState::Idle
+                    };
+                }
+                self.hydrate_model();
+            }
+            "stats_update" => {
+                self.stats = serde_json::from_value(record["stats"].clone())
+                    .context("invalid stats update")?
+            }
             "bash_execution_update" => {
                 if let Some(shell) = &mut self.shell
                     && record["id"].as_str() == Some(&shell.id)
@@ -230,15 +255,23 @@ impl Session {
             }
             "agent_start" => {
                 self.run = RunState::Running;
+                self.state.is_streaming = true;
+                self.state.is_compacting = false;
                 self.error = None;
                 self.turn_metrics = None;
             }
             "agent_settled" => {
                 self.run = RunState::Idle;
+                self.state.is_streaming = false;
+                self.state.is_compacting = false;
                 self.streaming_message = None;
             }
-            "compaction_start" => self.run = RunState::Compacting,
+            "compaction_start" => {
+                self.run = RunState::Compacting;
+                self.state.is_compacting = true;
+            }
             "compaction_end" => {
+                self.state.is_compacting = false;
                 if record["result"].is_object() {
                     // Pre-compaction counts are no longer valid; wait for RPC stats.
                     self.stats.context_usage = None;
@@ -306,6 +339,10 @@ impl Session {
             "queue_update" => {
                 self.steering = serde_json::from_value(record["steering"].clone())?;
                 self.follow_up = serde_json::from_value(record["followUp"].clone())?;
+                if record["queuedSubmissions"].is_array() {
+                    self.queued_submissions =
+                        serde_json::from_value(record["queuedSubmissions"].clone())?;
+                }
             }
             "session_info_changed" => {
                 self.state.session_name = record["name"].as_str().map(str::to_owned)
@@ -408,10 +445,17 @@ impl Session {
             };
             return Ok(());
         }
-        // The desktop's own records, which it keeps and handles itself.
+        // The desktop's own records, which it keeps and handles itself. Child
+        // conversation controls must never mutate the parent session model.
         if matches!(
             record["command"].as_str(),
-            Some("get_custom_entries" | "append_custom_entry")
+            Some(
+                "get_custom_entries"
+                    | "append_custom_entry"
+                    | "get_subagent"
+                    | "stop_subagent"
+                    | "prompt_subagent"
+            )
         ) {
             return Ok(());
         }
@@ -422,16 +466,28 @@ impl Session {
         let data = &record["data"];
         match record["command"].as_str().unwrap_or("") {
             "get_state" => {
-                // pi's state has no tools; `get_active_tools` reports them.
+                // pi's state has no tools; `get_active_tools` reports them. A read
+                // requested before a newer run event must not demote that event's
+                // transient state when its response finally arrives.
                 let active_tools = self.state.active_tools.take();
+                let run = self.run;
+                let is_streaming = self.state.is_streaming;
+                let is_compacting = self.state.is_compacting;
                 self.state =
                     serde_json::from_value(data.clone()).context("invalid get_state response")?;
                 self.state.active_tools = active_tools;
-                if self.state.is_streaming {
-                    self.run = RunState::Running;
-                }
-                if self.state.is_compacting {
-                    self.run = RunState::Compacting;
+                if run != RunState::Idle {
+                    self.run = run;
+                    self.state.is_streaming = is_streaming;
+                    self.state.is_compacting = is_compacting;
+                } else {
+                    self.run = if self.state.is_compacting {
+                        RunState::Compacting
+                    } else if self.state.is_streaming {
+                        RunState::Running
+                    } else {
+                        RunState::Idle
+                    };
                 }
             }
             "get_active_tools" => {
@@ -557,8 +613,10 @@ impl Session {
                 .cloned()
                 .collect();
             tool.diff = result["details"]["diff"].as_str().map(str::to_owned);
-            if tool.name == crate::subagent::TOOL && !result["details"].is_null() {
-                tool.details = result["details"].clone();
+            if tool.name == crate::subagent::TOOL
+                && let Some(details) = result.as_object().and_then(|result| result.get("details"))
+            {
+                tool.details = details.clone();
             }
             tool.finished = finished;
             tool.is_error = is_error;
@@ -612,6 +670,12 @@ impl Session {
         let Some(message) = self.messages.get_mut(index) else {
             return;
         };
+        if event["type"] == "message" {
+            if event["message"].is_object() {
+                *message = event["message"].clone();
+            }
+            return;
+        }
         let Some(block_index) = event["contentIndex"]
             .as_u64()
             .and_then(|n| usize::try_from(n).ok())
@@ -631,8 +695,15 @@ impl Session {
         let block = &mut blocks[block_index];
         let kind = event["type"].as_str().unwrap_or("");
         match kind {
+            "block" => {
+                if event["block"].is_object() {
+                    *block = event["block"].clone();
+                }
+            }
             "text_start" | "thinking_start" => {
-                *block = if kind == "text_start" {
+                *block = if event["block"].is_object() {
+                    event["block"].clone()
+                } else if kind == "text_start" {
                     json!({"type":"text","text":""})
                 } else {
                     json!({"type":"thinking","thinking":""})
@@ -652,7 +723,21 @@ impl Session {
                 *block = json!({"type":field, field:value});
             }
             "toolcall_start" => {
-                *block = json!({"type":"toolCall","id":event["id"],"name":event["toolName"],"arguments":{}})
+                *block = if event["block"].is_object() {
+                    event["block"].clone()
+                } else {
+                    json!({"type":"toolCall","id":event["id"],"name":event["toolName"],"arguments":{}})
+                }
+            }
+            "toolcall_delta" if block["type"] == "toolCall" => {
+                let Some(path) = event["path"].as_array() else {
+                    return;
+                };
+                append_json_path(
+                    &mut block["arguments"],
+                    path,
+                    event["delta"].as_str().unwrap_or(""),
+                );
             }
             "toolcall_end" => *block = event["toolCall"].clone(),
             _ => {}
@@ -673,6 +758,43 @@ impl Session {
         paths.dedup();
         paths
     }
+}
+
+/// Apply one durable JSON append operation inside a tool call's arguments.
+/// Paths only address existing values; malformed or stale deltas are ignored.
+fn append_json_path(value: &mut Value, path: &[Value], delta: &str) {
+    let mut target = value;
+    for segment in path {
+        match segment {
+            Value::String(key) => {
+                let Some(next) = target
+                    .as_object_mut()
+                    .and_then(|object| object.get_mut(key))
+                else {
+                    return;
+                };
+                target = next;
+            }
+            Value::Number(index) => {
+                let Some(index) = index.as_u64().and_then(|index| usize::try_from(index).ok())
+                else {
+                    return;
+                };
+                let Some(next) = target.as_array_mut().and_then(|array| array.get_mut(index))
+                else {
+                    return;
+                };
+                target = next;
+            }
+            _ => return,
+        }
+    }
+    let Some(current) = target.as_str() else {
+        return;
+    };
+    let mut updated = current.to_owned();
+    updated.push_str(delta);
+    *target = Value::String(updated);
 }
 
 /// Recognize the info-only notification emitted by the TPS extension without

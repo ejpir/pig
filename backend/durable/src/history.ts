@@ -23,9 +23,13 @@ export class History {
   async entries(view: ConversationView): Promise<EntryRecord[]> {
     const head = view.entries[0]?.head !== undefined ? Number(view.entries[0].id) : undefined;
     if (head !== undefined && !this.#read.has(head)) {
+      // Keep the reconstructed lifetime transcript at this view's exact tail. A
+      // watch can have newer committed entries by the time this storage scan
+      // runs; including them would duplicate their later incremental events.
+      const tail = view.entries.reduce((latest, entry) => Math.max(latest, Number(entry.id)), 0);
       let cursor: unknown;
       do {
-        const page = await this.conversation.entries({}, PAGE, cursor as never, this.context);
+        const page = await this.conversation.entries(tail > 0 ? { maxEntryId: tail } : {}, PAGE, cursor as never, this.context);
         for (const entry of page.items) if (!this.#known.has(Number(entry.id))) this.#known.set(Number(entry.id), entry);
         cursor = page.next;
       } while (cursor !== undefined);
@@ -39,7 +43,7 @@ export class History {
 }
 
 /** A compaction reads as stock Pi's `compactionSummary`, not as something the user said. */
-function shown(entry: EntryRecord): EntryRecord {
+export function shown(entry: EntryRecord): EntryRecord {
   if (entry.kind !== "pi.compaction") return entry;
   const message = entry.model?.[0] as { content?: { type: string; text?: string }[] | string; timestamp?: number } | undefined;
   const text = typeof message?.content === "string" ? message.content

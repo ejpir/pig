@@ -8,7 +8,7 @@
 use crate::{
     alerts::{self, Link},
     composer::{Attachment, Composer, ComposerEvent, compact_instructions},
-    live::{Live, Update},
+    live::{Live, TransportDiagnostic, Update},
     model::{Answer, Computer, SessionId, StageKind, State},
     motion::SwipeMotion,
     prefs::{Prefs, SavedCommand},
@@ -48,9 +48,10 @@ pub enum Route {
     Thread(SessionId),
     Review(SessionId),
     History(SessionId),
+    Diagnostics(SessionId),
     /// Every subagent across all of a session's turns and hand-offs.
     Subagents(SessionId),
-    /// One subagent of a session, read-only.
+    /// One subagent of a session, with exact-target input when durable APIs support it.
     Subagent(SessionId, Pick),
     Settings,
 }
@@ -271,6 +272,8 @@ pub struct PhoneApp {
     /// phone's own for each (session, conversation), and how it is now.
     pub(crate) subagent_ids: HashMap<(SessionId, String), SessionId>,
     pub(crate) subagent_sessions: HashMap<SessionId, crate::model::Session>,
+    /// Drafts belong to exact child conversations, never to the parent composer.
+    pub(crate) subagent_composers: HashMap<(SessionId, String), Entity<Composer>>,
     /// Questions put off with Later: the composer shows instead of the card.
     pub(crate) questions_later: HashSet<SessionId>,
     /// Report cards showing every changed file, not just the first few.
@@ -321,6 +324,8 @@ pub struct PhoneApp {
     pub(crate) model_search: Entity<TextArea>,
     /// Only populated by the isolated preview harness.
     pub(crate) preview_models: Vec<pi_core::protocol::Model>,
+    /// Sanitized records used only by the isolated preview harness.
+    pub(crate) preview_transport_diagnostics: HashMap<SessionId, VecDeque<TransportDiagnostic>>,
     pub(crate) searching: bool,
     pub(crate) start: Entity<Composer>,
     pub(crate) start_visible_height: Option<gpui::Pixels>,
@@ -329,6 +334,10 @@ pub struct PhoneApp {
     pub(crate) file_view: Option<FileView>,
     /// Tool images decoded once, by key.
     pub(crate) tool_images: std::cell::RefCell<HashMap<String, crate::screens::ShownImage>>,
+    /// Image keys whose cards have actually intersected a viewport. Keeping
+    /// this separate from layout prevents full-history measurement from
+    /// decoding legacy inline images or starting remote hydration.
+    pub(crate) tool_image_demands: HashSet<String>,
     /// Page posters asked for, so each is drawn once.
     pub(crate) posters_drawing: std::cell::RefCell<std::collections::HashSet<PathBuf>>,
     /// Invalidates file replies when another file opens.
@@ -533,6 +542,7 @@ impl PhoneApp {
             expanded_calls: HashSet::new(),
             subagent_ids: HashMap::new(),
             subagent_sessions: HashMap::new(),
+            subagent_composers: HashMap::new(),
             questions_later: HashSet::new(),
             all_files: HashSet::new(),
             folded_handoffs: HashSet::new(),
@@ -564,6 +574,7 @@ impl PhoneApp {
             search,
             model_search,
             preview_models: Vec::new(),
+            preview_transport_diagnostics: HashMap::new(),
             searching: false,
             start,
             start_visible_height: None,
@@ -571,6 +582,7 @@ impl PhoneApp {
             project_browser: ProjectBrowser::default(),
             file_view: None,
             tool_images: Default::default(),
+            tool_image_demands: Default::default(),
             posters_drawing: Default::default(),
             file_generation: 0,
             project_files_generation: 0,
@@ -751,7 +763,8 @@ impl PhoneApp {
         let sends = self.prefs(cx).return_sends;
         let composers = [self.start.clone(), self.review.clone()]
             .into_iter()
-            .chain(self.threads.values().cloned());
+            .chain(self.threads.values().cloned())
+            .chain(self.subagent_composers.values().cloned());
         for composer in composers {
             let area = composer.read(cx).area.clone();
             area.update(cx, |area, _| area.enter_sends = sends);
@@ -789,6 +802,7 @@ impl PhoneApp {
             Route::Thread(id)
             | Route::Review(id)
             | Route::History(id)
+            | Route::Diagnostics(id)
             | Route::Subagents(id)
             | Route::Subagent(id, _) => Some(id),
             _ => None,
@@ -811,6 +825,7 @@ impl PhoneApp {
         if let Route::Thread(id)
         | Route::Review(id)
         | Route::History(id)
+        | Route::Diagnostics(id)
         | Route::Subagents(id)
         | Route::Subagent(id, _) = self.route()
         {
@@ -1056,6 +1071,7 @@ impl PhoneApp {
         self.threads.clear();
         self.pending_compacts.clear();
         self.sample_models.clear();
+        self.preview_transport_diagnostics.clear();
         self.jj_histories.clear();
         self.restoring_history = None;
         self.enabling_jj = None;
@@ -1633,6 +1649,7 @@ impl PhoneApp {
             Route::Thread(id)
             | Route::Review(id)
             | Route::History(id)
+            | Route::Diagnostics(id)
             | Route::Subagents(id)
             | Route::Subagent(id, _) => Some(id),
             _ => None,
@@ -1797,6 +1814,7 @@ impl PhoneApp {
             }
             if !closed && !self.reconnecting {
                 live.poll_recovery(now);
+                live.poll_subagents(now);
             }
             if self.visible && !self.reconnecting {
                 if closed {
@@ -1836,7 +1854,7 @@ impl PhoneApp {
 
     fn viewing(&self, id: SessionId) -> bool {
         self.visible
-            && matches!(self.route(), Route::Thread(shown) | Route::Review(shown) | Route::History(shown) | Route::Subagents(shown) | Route::Subagent(shown, _) if shown == id)
+            && matches!(self.route(), Route::Thread(shown) | Route::Review(shown) | Route::History(shown) | Route::Diagnostics(shown) | Route::Subagents(shown) | Route::Subagent(shown, _) if shown == id)
     }
 
     fn alert(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -1928,6 +1946,7 @@ impl PhoneApp {
             && let Route::Thread(id)
             | Route::Review(id)
             | Route::History(id)
+            | Route::Diagnostics(id)
             | Route::Subagents(id)
             | Route::Subagent(id, _) = self.route()
         {
@@ -2047,6 +2066,7 @@ impl PhoneApp {
                 Route::Thread(id)
                 | Route::Review(id)
                 | Route::History(id)
+                | Route::Diagnostics(id)
                 | Route::Subagents(id)
                 | Route::Subagent(id, _) => self.store.as_ref().and_then(|s| s.session(id)),
                 _ => None,
@@ -2226,6 +2246,9 @@ impl PhoneApp {
         self.deleting_session = None;
         self.swiping_session = None;
         self.threads.remove(&id);
+        self.subagent_composers
+            .retain(|(session, _), _| *session != id);
+        self.subagent_ids.retain(|(session, _), _| *session != id);
         self.pending_compacts.remove(&id);
         self.sample_models.remove(&id);
         self.jj_histories.remove(&id);
@@ -2252,8 +2275,10 @@ impl PhoneApp {
         self.thread_list_offsets.remove(&id);
         self.scrolls.remove(&Route::Review(id));
         self.scrolls.remove(&Route::History(id));
+        self.scrolls.remove(&Route::Diagnostics(id));
         self.scrolls.remove(&Route::Subagents(id));
-        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) | Route::History(session) | Route::Subagents(session) | Route::Subagent(session, _) if *session == id));
+        self.preview_transport_diagnostics.remove(&id);
+        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) | Route::History(session) | Route::Diagnostics(session) | Route::Subagents(session) | Route::Subagent(session, _) if *session == id));
         if self.sheet == Some(Sheet::Delete(id)) {
             self.close_sheet(cx);
         }
@@ -2295,6 +2320,18 @@ impl PhoneApp {
     ) {
         self.push(Route::History(id), window, cx);
         self.load_jj_history(id, cx);
+    }
+
+    pub(crate) fn open_transport_diagnostics(
+        &mut self,
+        id: SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scroll(Route::Diagnostics(id))
+            .set_offset(gpui::Point::default());
+        self.close_sheet(cx);
+        self.push(Route::Diagnostics(id), window, cx);
     }
 
     pub(crate) fn load_jj_history(&mut self, id: SessionId, cx: &mut Context<Self>) {
@@ -2494,6 +2531,81 @@ impl PhoneApp {
             .ok();
         })
         .detach();
+    }
+
+    pub(crate) fn subagent_composer(
+        &mut self,
+        id: SessionId,
+        conversation: &str,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<Composer> {
+        let key = (id, conversation.to_owned());
+        if let Some(composer) = self.subagent_composers.get(&key) {
+            return composer.clone();
+        }
+        let composer = cx.new(|cx| {
+            let mut composer = Composer::new(placeholder, cx);
+            composer.set_message_only();
+            composer
+        });
+        let sends = self.prefs(cx).return_sends;
+        composer
+            .read(cx)
+            .area
+            .clone()
+            .update(cx, |area, _| area.enter_sends = sends);
+        let conversation = conversation.to_owned();
+        self.subscriptions.push(cx.subscribe_in(
+            &composer,
+            window,
+            move |this, _, event, window, cx| {
+                this.subagent_composer_event(id, &conversation, event, window, cx)
+            },
+        ));
+        self.subagent_composers.insert(key, composer.clone());
+        composer
+    }
+
+    fn subagent_composer_event(
+        &mut self,
+        id: SessionId,
+        conversation: &str,
+        event: &ComposerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ComposerEvent::Send { text, attachments } => {
+                if !attachments.is_empty() {
+                    self.notify_user("Direct subagent input supports text only.", cx);
+                    return;
+                }
+                let sent = self
+                    .store
+                    .as_mut()
+                    .and_then(|store| store.live.as_mut())
+                    .ok_or_else(|| {
+                        "Direct subagent input requires a live durable session.".to_owned()
+                    })
+                    .and_then(|live| live.prompt_subagent(id, conversation, text.clone()));
+                match sent {
+                    Ok(()) => {
+                        window.dismiss_virtual_keyboard();
+                        cx.notify();
+                    }
+                    Err(error) => self.notify_user(error, cx),
+                }
+            }
+            ComposerEvent::Attach
+            | ComposerEvent::ChooseModel
+            | ComposerEvent::ChooseThinking
+            | ComposerEvent::PreviewImage(_) => self.notify_user(
+                "This composer sends text only to the selected subagent.",
+                cx,
+            ),
+        }
     }
 
     pub(crate) fn thread_composer(
@@ -3016,6 +3128,7 @@ impl Render for PhoneApp {
             Route::Thread(id) => self.thread_screen(id, window, cx),
             Route::Review(id) => self.review_screen(id, window, cx),
             Route::History(id) => self.history_screen(id, window, cx),
+            Route::Diagnostics(id) => self.diagnostics_screen(id, window, cx),
             Route::Subagents(id) => self.subagents_screen(id, window, cx),
             Route::Subagent(id, pick) => self.subagent_screen(id, pick, window, cx),
             Route::Settings => self.settings_screen(window, cx).into_any_element(),
@@ -3298,7 +3411,7 @@ impl PhoneApp {
 mod tests {
     use super::{PhoneApp, RenderStats, sheet_scrim_opacity};
     use crate::{live::Update, model::SessionId};
-    use gpui::TestAppContext;
+    use gpui::{AppContext, TestAppContext};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -3361,6 +3474,30 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
                 assert_eq!(reasons, ["first", "second"]);
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn child_conversations_keep_independent_drafts(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let parent = cx.new(|cx| crate::composer::Composer::new("Parent…", cx));
+                parent.update(cx, |composer, cx| composer.set_text("parent draft", cx));
+                app.threads.insert(SessionId(7), parent.clone());
+                let first = app.subagent_composer(SessionId(7), "child-a", "Steer…", window, cx);
+                first.update(cx, |composer, cx| composer.set_text("draft for A", cx));
+                let second =
+                    app.subagent_composer(SessionId(7), "child-b", "Follow up…", window, cx);
+                second.update(cx, |composer, cx| composer.set_text("draft for B", cx));
+                let first_again =
+                    app.subagent_composer(SessionId(7), "child-a", "Steer…", window, cx);
+
+                assert_eq!(first_again.read(cx).area.read(cx).text(), "draft for A");
+                assert_eq!(second.read(cx).area.read(cx).text(), "draft for B");
+                assert_eq!(parent.read(cx).area.read(cx).text(), "parent draft");
+                assert_eq!(app.subagent_composers.len(), 2);
             })
         });
     }

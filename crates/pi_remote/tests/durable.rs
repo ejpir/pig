@@ -2,6 +2,7 @@
 #![cfg(unix)]
 use pi_core::{
     protocol::read_record,
+    session::Session,
     ssh::{RemoteBackend, SshTarget},
 };
 use serde_json::{Value, json};
@@ -74,12 +75,28 @@ struct Bridge {
 struct RecordInbox {
     received: mpsc::Receiver<Value>,
     pending: RefCell<Vec<Value>>,
+    model: RefCell<Session>,
+    has_snapshot: RefCell<bool>,
 }
 impl RecordInbox {
     fn new(received: mpsc::Receiver<Value>) -> Self {
         Self {
             received,
             pending: RefCell::new(Vec::new()),
+            model: RefCell::new(Session::default()),
+            has_snapshot: RefCell::new(false),
+        }
+    }
+
+    fn projected_snapshot(&self) -> Option<Value> {
+        (*self.has_snapshot.borrow()).then(|| {
+            json!({"type":"remote_snapshot","data":serde_json::to_value(&*self.model.borrow()).unwrap()})
+        })
+    }
+
+    fn observe(&self, record: &Value) {
+        if self.model.borrow_mut().apply(record).is_ok() && record["type"] == "remote_snapshot" {
+            *self.has_snapshot.borrow_mut() = true;
         }
     }
 
@@ -89,14 +106,22 @@ impl RecordInbox {
         if let Some(index) = found {
             return self.pending.borrow_mut().remove(index);
         }
+        if let Some(snapshot) = self.projected_snapshot().filter(&condition) {
+            return snapshot;
+        }
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let record = self
                 .received
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .expect("Timed out or durable bridge closed");
+            self.observe(&record);
             if condition(&record) {
                 return record;
+            }
+            if let Some(snapshot) = self.projected_snapshot().filter(&condition) {
+                self.pending.borrow_mut().push(record);
+                return snapshot;
             }
             self.pending.borrow_mut().push(record);
         }
@@ -194,6 +219,34 @@ impl Drop for Bridge {
     }
 }
 struct Cleanup(PathBuf, String);
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn a_live_turn_is_incremental_after_the_initial_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = durable_target(directory.path());
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+    bridge.send(json!({"type":"prompt","id":"work","message":"hello","requestId":"incremental"}));
+    assert_eq!(bridge.response("work")["success"], true);
+    let settled = bridge.until(|record| {
+        record["type"] == "remote_snapshot"
+            && record["data"]["run"] == "Idle"
+            && said(record, "Finished: hello")
+    });
+    assert!(said(&settled, "Finished: hello"));
+    bridge.until(|record| record["type"] == "stats_update");
+    assert!(
+        bridge
+            .records
+            .pending
+            .borrow()
+            .iter()
+            .all(|record| record["type"] != "remote_snapshot"),
+        "A live durable turn must not retransmit the full session"
+    );
+}
 
 #[test]
 #[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
@@ -826,11 +879,57 @@ fn subagents_answer_side_by_side_and_show_their_own_messages() {
         messages.last().unwrap()["content"][0]["text"],
         "found alpha"
     );
+    assert_eq!(reply["data"]["conversationId"], child);
     assert_eq!(reply["data"]["busy"], false);
+    assert!(reply["data"]["runId"].is_null());
+    assert_eq!(reply["data"]["resumable"], true);
+
+    // A finished durable child accepts a direct follow-up without admitting it
+    // to the parent conversation.
+    bridge.send(
+        json!({"type":"prompt_subagent","id":"follow","conversationId":child,
+        "message":"find gamma","requestId":"follow-child","streamingBehavior":"followUp"}),
+    );
+    let follow = bridge.response("follow");
+    assert_eq!(follow["success"], true, "{follow}");
+    assert_eq!(follow["data"]["disposition"], "started");
+    let mut followed = None;
+    for attempt in 0..20 {
+        let id = format!("child-after-{attempt}");
+        bridge.send(json!({"type":"get_subagent","id":id,"conversationId":child}));
+        let reply = bridge.response(&id);
+        if reply["data"]["busy"] == false {
+            followed = Some(reply);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let followed = followed.expect("child follow-up settles");
+    assert_eq!(
+        followed["data"]["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["content"][0]["text"],
+        "found gamma"
+    );
+    assert!(
+        !followed["data"]["messages"]
+            .to_string()
+            .contains("Delegated:"),
+        "the parent transcript was not targeted"
+    );
+
     // Only this session's subagents: not its own conversation, nor a made-up one.
     for other in ["0", "999"] {
         bridge.send(json!({"type":"get_subagent","id":other,"conversationId":other}));
         assert_eq!(bridge.response(other)["success"], false);
+        let id = format!("prompt-{other}");
+        bridge.send(
+            json!({"type":"prompt_subagent","id":id,"conversationId":other,
+            "message":"must not route","requestId":id,"streamingBehavior":"followUp"}),
+        );
+        assert_eq!(bridge.response(&id)["success"], false);
     }
     bridge.send(json!({"type":"remote_shutdown","id":"shutdown"}));
     assert_eq!(bridge.response("shutdown")["success"], true);

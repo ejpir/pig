@@ -13,12 +13,14 @@
  * Progress is a document of the session, one short summary per subagent and
  * never a transcript, since every change is sent to the apps.
  */
+import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
 import { Type, type Message } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
 import {
-  configure, defineDoc, defineExtension, defineTask, defineTool,
-  type ConversationId, type ConversationView, type Extension, type Harness, type TaskId, type TaskRuntime, type Tx,
+  configure, ConversationBusy, defineDoc, defineExtension, defineTask, defineTool, InboxDoc, LiveDoc,
+  type Conversation, type ConversationId, type ConversationView, type Extension, type Harness, type TaskId,
+  type TaskRuntime, type Tx,
 } from "@earendil-works/pi-durable";
 import type { AgentDefinition, Resources } from "./commands.ts";
 
@@ -77,6 +79,131 @@ export const Calls = defineDoc<{ calls: Record<string, SubagentDetails> }>({
   initial: () => ({ calls: {} }),
 });
 
+/** Request hashes make reconnect retries idempotent without letting one ID change payload or target. */
+const DirectReceipts = defineDoc<{ hashes: Record<string, string> }>({
+  kind: "app.subagent-direct-receipts", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  initial: () => ({ hashes: {} }),
+});
+
+export type DirectSubagentInput = {
+  message: string;
+  requestId: string;
+  mode: "steer" | "followUp";
+  expectedRunId?: string;
+};
+
+export type DirectSubagentReceipt = {
+  disposition: "started" | "queued" | "handled";
+  submissionId: string;
+  requestId: string;
+  mode: DirectSubagentInput["mode"];
+  duplicate: boolean;
+};
+
+const terminal = (status: SubagentStatus) => status === "done" || status === "failed" || status === "stopped";
+
+/** Locate one exact durable child from the parent's committed subagent calls. */
+export function subagentResult(calls: { calls: Record<string, SubagentDetails> }, conversationId: string): SubagentResult | undefined {
+  return Object.values(calls.calls).flatMap((call) => call.results)
+    .find((result) => result.conversationId === conversationId);
+}
+
+/**
+ * Admit direct input to one child without ever falling through to its parent.
+ * A steer is inserted in the same commit that compares the exact live run ID.
+ * An idle follow-up uses reject-on-busy submission after proving that the
+ * original crew is terminal and the child has no queued work.
+ */
+export async function submitSubagentInput(
+  conversation: Conversation,
+  result: SubagentResult,
+  input: DirectSubagentInput,
+  context: Context,
+): Promise<DirectSubagentReceipt> {
+  if (!input.message.trim()) throw new Error("Subagent input must not be empty");
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(input.requestId)) throw new Error("Invalid persistent requestId");
+  if (input.mode === "steer" && !input.expectedRunId) throw new Error("Steering requires an exact child run ID");
+  if (input.mode === "followUp" && input.expectedRunId !== undefined) throw new Error("A follow-up must target an idle child");
+
+  const hash = createHash("sha256")
+    .update(JSON.stringify([input.message, input.mode, input.expectedRunId ?? null]))
+    .digest("hex");
+  const prepared = await conversation.commit(async (tx) => {
+    const existing = await tx.submissionByRequest(conversation.id, input.requestId);
+    const receipts = (await tx.doc(DirectReceipts, conversation.id)).hashes;
+    const previous = Object.hasOwn(receipts, input.requestId) ? receipts[input.requestId] : undefined;
+    if (previous && previous !== hash) throw new Error("requestId already belongs to different subagent input");
+    if (existing !== undefined) {
+      if (previous === undefined) throw new Error("requestId already belongs to another submission");
+      if (existing.type !== "input") throw new Error("requestId already belongs to a different submission type");
+      return { existing };
+    }
+
+    const live = await tx.doc(LiveDoc, conversation.id);
+    const inbox = await tx.doc(InboxDoc, conversation.id);
+    if (input.mode === "steer") {
+      if (live.run === undefined || String(live.run.taskId) !== input.expectedRunId) {
+        throw new Error("The selected subagent run has ended or changed; refresh before sending");
+      }
+    } else {
+      if (!terminal(result.status)) throw new Error("This subagent has not finished its delegated task yet");
+      if (live.run !== undefined || inbox.items.length > 0) {
+        throw new Error("The subagent started other work; refresh before sending a follow-up");
+      }
+    }
+    if (!previous && Object.keys(receipts).length >= 10_000) {
+      throw new Error("Durable prototype reached its 10,000-subagent-input receipt limit");
+    }
+    if (["__proto__", "constructor", "prototype"].includes(input.requestId)) throw new Error("Reserved requestId");
+    receipts[input.requestId] = hash;
+
+    if (input.mode === "followUp") return {};
+    const submission = await tx.createSubmission({
+      conversationId: conversation.id, requestId: input.requestId, type: "input", status: "queued",
+    });
+    inbox.items.push({ id: submission.id, mode: "steer", content: input.message });
+    return { created: submission };
+  }, context);
+
+  if ("existing" in prepared && prepared.existing !== undefined) {
+    const status = prepared.existing.status;
+    return {
+      disposition: status === "queued" ? "queued" : "handled",
+      submissionId: String(prepared.existing.id), requestId: input.requestId,
+      mode: input.mode, duplicate: true,
+    };
+  }
+  if ("created" in prepared && prepared.created !== undefined) {
+    return {
+      disposition: "queued", submissionId: String(prepared.created.id), requestId: input.requestId,
+      mode: input.mode, duplicate: false,
+    };
+  }
+
+  // `reject` is deliberate: if the idle observation became stale, never queue
+  // this text behind or steer it into somebody else's later child run.
+  let submission;
+  try {
+    submission = await conversation.submit({
+      type: "input", content: input.message, requestId: input.requestId, whenBusy: "reject",
+    }, context);
+  } catch (error) {
+    if (error instanceof ConversationBusy) {
+      throw new Error("The subagent started other work; refresh before sending a follow-up");
+    }
+    throw error;
+  }
+  const status = await submission.status(context);
+  if (status.status === "queued") {
+    await submission.abort(context);
+    throw new Error("The subagent started other work; refresh before sending a follow-up");
+  }
+  return {
+    disposition: "started", submissionId: String(submission.id), requestId: input.requestId,
+    mode: input.mode, duplicate: false,
+  };
+}
+
 /** The marker of the message that brings a crew's answers back to Pi. */
 export const REPORT = "subagent_report";
 
@@ -110,7 +237,13 @@ const Parameters = Type.Object({
 
 type Item = { agent: string; task: string; instructions?: string; tools?: string[]; cwd?: string };
 
-type CrewInput = { callId: string; mode: SubagentDetails["mode"]; items: (Item & { definition: Definition })[] };
+type CrewInput = {
+  callId: string;
+  mode: SubagentDetails["mode"];
+  items: (Item & { definition: Definition })[];
+  /** First input of the run that made the tool call: stable across that run's turns. */
+  runInput?: number;
+};
 type CrewState = { phase: "run" } | { phase: "report"; text: string };
 
 /** What a subagent is: a listed agent, one the call defines, or both. */
@@ -150,11 +283,35 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
         const text = await new CrewRun(runtime, context, harness(), models, extension, crew.input).execute();
         await runtime.commit(() => ({ status: "running", checkpoint: { phase: "report", text } }), context);
       },
-      // Comes after Pi's current answer, or starts a turn when Pi is idle; the
-      // request ID keeps a restart from reporting twice.
+      // Admission and the run-identity check share one Session-line commit, so
+      // the delegating run cannot end and be replaced between checking and
+      // queueing. The public submit API has no targeted-run option.
       report: async (crew, runtime, context) => {
+        const requestId = `subagent-report-${crew.id}`;
+        let finished = false;
+        await runtime.commit(async (tx) => {
+          if (await tx.submissionByRequest(runtime.conversationId, requestId)) {
+            finished = true;
+            return { status: "terminal", outcome: { status: "completed", result: null } };
+          }
+          const live = await tx.doc(LiveDoc, runtime.conversationId);
+          if (live.run === undefined) return undefined;
+          const mode = crew.input.runInput !== undefined && Number(live.run.inputs[0]) === crew.input.runInput
+            ? "steer" as const
+            : "followUp" as const;
+          const inbox = await tx.doc(InboxDoc, runtime.conversationId);
+          const submission = await tx.createSubmission({
+            conversationId: runtime.conversationId, requestId, type: "input", status: "queued",
+          });
+          inbox.items.push({ id: submission.id, mode, content: crew.state.checkpoint.text });
+          finished = true;
+          return { status: "terminal", outcome: { status: "completed", result: null } };
+        }, context);
+        if (finished) return;
+        // Idle at the atomic check: start a dedicated report turn, or safely
+        // queue behind a user run that began before submit gets the Session line.
         const pi = (await runtime.conversation(runtime.conversationId, context))!;
-        await pi.submit({ type: "input", content: crew.state.checkpoint.text, whenBusy: "followUp", requestId: `subagent-report-${crew.id}` }, context);
+        await pi.submit({ type: "input", content: crew.state.checkpoint.text, whenBusy: "followUp", requestId }, context);
         await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
       },
     },
@@ -207,7 +364,11 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
           const calls = (await tx.doc(Calls, api.conversationId)).calls;
           if (Object.hasOwn(calls, api.callId)) return;
           calls[api.callId] = JSON.parse(JSON.stringify(details));
-          const input: CrewInput = JSON.parse(JSON.stringify({ callId: api.callId, mode, items: items.map((item) => ({ ...item, definition: definition(item, agents) })) }));
+          const runInput = (await tx.doc(LiveDoc, api.conversationId)).run?.inputs[0];
+          const input: CrewInput = JSON.parse(JSON.stringify({
+            callId: api.callId, mode, items: items.map((item) => ({ ...item, definition: definition(item, agents) })),
+            ...(runInput === undefined ? {} : { runInput: Number(runInput) }),
+          }));
           await tx.createTask(Crew, input, { ownership: { kind: "conversation" }, background: true });
         }, context);
         const who = [...new Set(items.map((item) => item.agent))].join(", ");

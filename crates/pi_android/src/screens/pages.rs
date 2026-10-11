@@ -7,7 +7,10 @@ use crate::{
     theme::{Theme, theme},
     ui::{self, Button, icon},
 };
-use gpui::{Context, Div, ElementId, FontWeight, ObjectFit, div, img, prelude::*, px, rgb, rgba};
+use gpui::{
+    AnyElement, Bounds, Context, Div, ElementId, FontWeight, ObjectFit, Pixels, canvas, div, img,
+    prelude::*, px, rgb, rgba,
+};
 use pi_markdown::Page;
 use std::{
     collections::BTreeMap,
@@ -17,6 +20,10 @@ use std::{
 
 /// The poster's height: the card shows the top of the page at 412 by 232.
 const POSTER: f32 = 232.;
+
+fn image_intersects_viewport(bounds: Bounds<Pixels>, viewport: Bounds<Pixels>) -> bool {
+    !bounds.intersect(&viewport).is_empty()
+}
 
 impl PhoneApp {
     pub(crate) fn page_cards(
@@ -206,11 +213,16 @@ impl PhoneApp {
                 // Reserve one stable media slot before remote bytes arrive. A
                 // historical image resolving above the viewport must not move
                 // the conversation underneath the reader's finger.
+                let shown = self.tool_image(id, image);
+                let hydration = matches!(&shown, Ok(None))
+                    .then(|| self.image_hydration_probe(id, image, cx))
+                    .flatten();
                 let picture = div()
                     .id(ElementId::Name(
                         format!("tool-image-picture-{index}-{n}").into(),
                     ))
                     .debug_selector(move || format!("tool-image-picture-{index}-{n}"))
+                    .relative()
                     .w_full()
                     .h(px(220.))
                     .flex()
@@ -219,7 +231,7 @@ impl PhoneApp {
                     .overflow_hidden()
                     .bg(colors.panel)
                     .rounded_t(px(15.))
-                    .child(match self.tool_image(id, image) {
+                    .child(match shown {
                         Ok(Some(shown)) => img(shown.image)
                             .size_full()
                             .rounded_t(px(15.))
@@ -237,7 +249,8 @@ impl PhoneApp {
                             .p(px(16.))
                             .child(ui::hint(error, colors).text_color(colors.coral))
                             .into_any_element(),
-                    });
+                    })
+                    .children(hydration);
                 ui::card(colors)
                     .id(ElementId::Name(format!("tool-image-{index}-{n}").into()))
                     .relative()
@@ -272,7 +285,80 @@ impl PhoneApp {
         })
     }
 
-    /// A tool image ready to draw, `None` while it comes from the computer.
+    fn tool_image_origin(&self, id: SessionId) -> (SessionId, Option<String>) {
+        self.subagent_ids
+            .iter()
+            .find_map(|((session, conversation), own)| {
+                (*own == id).then(|| (*session, Some(conversation.clone())))
+            })
+            .unwrap_or((id, None))
+    }
+
+    fn tool_image_requested(&self, id: SessionId, key: &str) -> bool {
+        let (id, _) = self.tool_image_origin(id);
+        self.store
+            .as_ref()
+            .and_then(|store| store.live.as_ref())
+            .is_some_and(|live| live.image_requested(id, key))
+    }
+
+    /// Marks one actually visible card as wanted and admits its remote bytes to
+    /// Live's bounded queue. Returns whether this changed hydration state.
+    pub(crate) fn demand_tool_image(&mut self, id: SessionId, image: &ToolImage) -> bool {
+        let demanded = self.tool_image_demands.insert(image.key.clone());
+        if image.inline.is_some() {
+            return demanded;
+        }
+        let (id, conversation) = self.tool_image_origin(id);
+        let requested = self
+            .store
+            .as_mut()
+            .and_then(|store| store.live.as_mut())
+            .is_some_and(|live| live.request_image(id, &image.key, conversation.as_deref()));
+        demanded || requested
+    }
+
+    /// A transparent overlay is prepainted only for list rows GPUI will paint;
+    /// its own bounds check narrows that to the card portion inside the current
+    /// scroll viewport, even for a very tall turn with many old images.
+    fn image_hydration_probe(
+        &self,
+        id: SessionId,
+        image: &ToolImage,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let needs_demand = !self.tool_image_demands.contains(&image.key);
+        let needs_request = image.inline.is_none() && !self.tool_image_requested(id, &image.key);
+        if !needs_demand && !needs_request {
+            return None;
+        }
+        let app = cx.entity().downgrade();
+        let image = image.clone();
+        Some(
+            canvas(
+                move |bounds, window, cx| {
+                    if !image_intersects_viewport(bounds, window.content_mask().bounds) {
+                        return;
+                    }
+                    window.defer(cx, move |_, cx| {
+                        app.update(cx, |this, cx| {
+                            if this.demand_tool_image(id, &image) {
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
+            .into_any_element(),
+        )
+    }
+
+    /// A tool image ready to draw, `None` until its card has been visible and,
+    /// for remote images, while its bytes are queued or in flight.
     pub(crate) fn tool_image(
         &self,
         id: SessionId,
@@ -281,16 +367,15 @@ impl PhoneApp {
         if let Some(shown) = self.tool_images.borrow().get(&image.key) {
             return Ok(Some(shown.clone()));
         }
+        if !self.tool_image_demands.contains(&image.key) {
+            return Ok(None);
+        }
         let decoded = match &image.inline {
             Some(data) => pi_markdown::decode_base64(&image.mime, data),
             None => {
                 let live = self.store.as_ref().and_then(|store| store.live.as_ref());
-                // A subagent's images come through its session's connection.
-                let id = self
-                    .subagent_ids
-                    .iter()
-                    .find(|(_, own)| **own == id)
-                    .map_or(id, |((session, _), _)| *session);
+                // A subagent's images come through its parent session's pipe.
+                let (id, _) = self.tool_image_origin(id);
                 match live.and_then(|live| live.image(id, &image.key)) {
                     None => return Ok(None),
                     Some(Err(error)) => return Err(error.clone()),
@@ -584,6 +669,35 @@ pub(crate) type ShownImage = pi_markdown::Decoded;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_image_bounds_intersecting_the_scroll_viewport_are_hydrated() {
+        let viewport = Bounds::new(
+            gpui::point(px(0.), px(100.)),
+            gpui::size(px(320.), px(500.)),
+        );
+        assert!(image_intersects_viewport(
+            Bounds::new(
+                gpui::point(px(20.), px(120.)),
+                gpui::size(px(280.), px(220.))
+            ),
+            viewport,
+        ));
+        assert!(!image_intersects_viewport(
+            Bounds::new(
+                gpui::point(px(20.), px(-140.)),
+                gpui::size(px(280.), px(220.))
+            ),
+            viewport,
+        ));
+        assert!(!image_intersects_viewport(
+            Bounds::new(
+                gpui::point(px(20.), px(600.)),
+                gpui::size(px(280.), px(220.))
+            ),
+            viewport,
+        ));
+    }
 
     #[test]
     fn a_page_opens_with_the_pages_its_links_reach() {

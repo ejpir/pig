@@ -1,7 +1,7 @@
 //! Work Pi handed to subagents (design/android/subagents): a card in the
 //! turn, one row per subagent with what it is doing, its time and cost; and a
-//! subagent's own screen, opened from its row. Only Pi talks to a subagent, so
-//! that screen is read-only, with Stop.
+//! subagent's own screen, opened from its row. Durable children can be steered
+//! or resumed directly when the backend advertises exact-target input support.
 
 use super::scroll_area;
 use crate::{
@@ -121,6 +121,26 @@ fn first_line(text: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_owned()
+}
+
+fn direct_input_copy(
+    agent: &str,
+    task: &str,
+    target: &crate::live::SubagentInputTarget,
+) -> (String, &'static str, String) {
+    let label = format!("To {agent} subagent · {}", first_line(task));
+    match target {
+        crate::live::SubagentInputTarget::Steer { .. } => (
+            label,
+            "Steers the exact run shown above",
+            format!("Steer this {agent}…"),
+        ),
+        crate::live::SubagentInputTarget::FollowUp => (
+            label,
+            "Starts a new turn in this finished child conversation",
+            format!("Follow up with this {agent}…"),
+        ),
+    }
 }
 
 /// What a subagent's row says under its task.
@@ -253,6 +273,17 @@ pub(crate) fn waiting_on(turn: &Turn) -> Option<&Handoff> {
 /// Subagents still at work anywhere in a session: they carry on after Pi's turn ends.
 pub(crate) fn at_work(turns: &[Turn]) -> Option<&Handoff> {
     turns.iter().rev().find_map(waiting_on)
+}
+
+/// Every unfinished subagent in a durable background hand-off, across the session.
+pub(crate) fn background_at_work(turns: &[Turn]) -> usize {
+    turns
+        .iter()
+        .flat_map(|turn| &turn.handoffs)
+        .filter(|handoff| handoff.background)
+        .flat_map(|handoff| &handoff.subagents)
+        .filter(|subagent| !subagent.status.finished())
+        .count()
 }
 
 impl PhoneApp {
@@ -629,7 +660,7 @@ impl PhoneApp {
             .cloned()
     }
 
-    /// One subagent: what Pi asked it, and its own run, read-only.
+    /// One subagent: what Pi asked it, its own run, and exact-target durable input.
     pub(crate) fn subagent_screen(
         &mut self,
         id: SessionId,
@@ -637,7 +668,6 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let _ = window;
         let colors = theme(cx);
         let back = ui::tap("back", "back", &colors).on_click(cx.listener(|this, _, window, cx| {
             this.back(window, cx);
@@ -759,13 +789,36 @@ impl PhoneApp {
                     .child(asked),
             );
         let scroll = self.scroll(Route::Subagent(id, pick));
-        let running = subagent.status == Status::Running;
-        let label = match subagent.status {
-            Status::Waiting => "Waiting its turn",
-            Status::Running => "Working",
-            Status::Done => "Done",
-            Status::Failed => "Failed",
-            Status::Stopped => "Stopped",
+        let child_running = fetched
+            .as_ref()
+            .is_some_and(|fetched| fetched.as_ref().is_ok_and(pi_core::session::Session::busy));
+        let conversation = subagent.conversation_id.clone();
+        let (input_target, input_pending) =
+            conversation
+                .as_deref()
+                .map_or((None, false), |conversation| {
+                    let Some(live) = self.store.as_ref().and_then(|store| store.live.as_ref())
+                    else {
+                        return (None, false);
+                    };
+                    (
+                        Some(live.subagent_input_target(id, conversation)),
+                        live.subagent_input_pending(id, conversation),
+                    )
+                });
+        let running = child_running || subagent.status == Status::Running || input_pending;
+        let label = if child_running {
+            "Working"
+        } else if input_pending {
+            "Sending"
+        } else {
+            match subagent.status {
+                Status::Waiting => "Waiting its turn",
+                Status::Running => "Working",
+                Status::Done => "Done",
+                Status::Failed => "Failed",
+                Status::Stopped => "Stopped",
+            }
         };
         let spent = [
             subagent
@@ -777,7 +830,6 @@ impl PhoneApp {
         .flatten()
         .collect::<Vec<_>>()
         .join(" · ");
-        let conversation = subagent.conversation_id.clone();
         let strip = div()
             .min_h(px(48.))
             .pl(px(16.))
@@ -818,38 +870,94 @@ impl PhoneApp {
                     .text_color(colors.muted)
                     .child(spent),
             )
-            .when_some(conversation.filter(|_| running), |strip, conversation| {
-                strip.child(
+            .when_some(
+                conversation
+                    .clone()
+                    .filter(|_| child_running || subagent.status == Status::Running),
+                |strip, conversation| {
+                    strip.child(
+                        div()
+                            .id("stop-subagent")
+                            .debug_selector(|| "stop-subagent".into())
+                            .relative()
+                            .child(crate::testing::probe("stop-subagent"))
+                            .h(px(40.))
+                            .px(px(12.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .rounded(px(20.))
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.coral)
+                            .active(|style| style.bg(colors.selected))
+                            .child(icon("stop", 14., colors.coral))
+                            .child(format!("Stop this {}", subagent.agent))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let stopped = this
+                                    .store
+                                    .as_mut()
+                                    .and_then(|store| store.live.as_mut())
+                                    .map(|live| live.stop_subagent(id, &conversation));
+                                if let Some(Err(error)) = stopped {
+                                    this.notify_user(error, cx);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                },
+            );
+        let direct = match (conversation.as_deref(), input_target) {
+            (Some(conversation), Some(Ok(target))) => {
+                let (target_label, action, placeholder) =
+                    direct_input_copy(&subagent.agent, &subagent.task, &target);
+                let accepted_input = self
+                    .store
+                    .as_mut()
+                    .and_then(|store| store.live.as_mut())
+                    .and_then(|live| live.take_accepted_subagent_input(id, conversation));
+                let composer = self.subagent_composer(id, conversation, &placeholder, window, cx);
+                composer.update(cx, |composer, cx| {
+                    composer.set_sending(input_pending);
+                    if let Some(accepted) = accepted_input.as_deref() {
+                        composer.clear_if_text(accepted, cx);
+                    }
+                });
+                Some(
                     div()
-                        .id("stop-subagent")
-                        .debug_selector(|| "stop-subagent".into())
-                        .relative()
-                        .child(crate::testing::probe("stop-subagent"))
-                        .h(px(40.))
-                        .px(px(12.))
                         .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .rounded(px(20.))
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors.coral)
-                        .active(|style| style.bg(colors.selected))
-                        .child(icon("stop", 14., colors.coral))
-                        .child(format!("Stop this {}", subagent.agent))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let stopped = this
-                                .store
-                                .as_mut()
-                                .and_then(|store| store.live.as_mut())
-                                .map(|live| live.stop_subagent(id, &conversation));
-                            if let Some(Err(error)) = stopped {
-                                this.notify_user(error, cx);
-                            }
-                            cx.notify();
-                        })),
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .px(px(20.))
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors.secondary)
+                                .child(target_label),
+                        )
+                        .child(
+                            div()
+                                .px(px(20.))
+                                .text_size(px(12.))
+                                .text_color(colors.muted)
+                                .child(action),
+                        )
+                        .child(composer)
+                        .into_any_element(),
                 )
-            });
+            }
+            (_, Some(Err(error))) => Some(
+                div()
+                    .px(px(20.))
+                    .text_size(px(12.5))
+                    .line_height(px(18.))
+                    .text_color(colors.muted)
+                    .child(error)
+                    .into_any_element(),
+            ),
+            _ => None,
+        };
         div()
             .flex_1()
             .min_h_0()
@@ -881,16 +989,19 @@ impl PhoneApp {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(
-                        div()
-                            .px(px(8.))
-                            .text_size(px(12.5))
-                            .line_height(px(18.))
-                            .text_color(colors.muted)
-                            .child(format!(
-                                "Only Pi talks to a subagent. Its answer goes back to {parent} when it finishes."
-                            )),
-                    )
+                    .children(direct)
+                    .when(conversation.is_none(), |dock| {
+                        dock.child(
+                            div()
+                                .px(px(8.))
+                                .text_size(px(12.5))
+                                .line_height(px(18.))
+                                .text_color(colors.muted)
+                                .child(format!(
+                                    "This subagent has no durable conversation to message. Its answer goes back to {parent}."
+                                )),
+                        )
+                    })
                     .child(strip),
             )
             .into_any_element()
@@ -911,6 +1022,29 @@ mod tests {
             subagent.status = *status;
         }
         handoff
+    }
+
+    #[test]
+    fn direct_input_copy_names_the_child_and_exact_lifecycle_action() {
+        let steer = direct_input_copy(
+            "scout",
+            "Inspect routing\nwithout changing files",
+            &crate::live::SubagentInputTarget::Steer {
+                run_id: "run-7".into(),
+            },
+        );
+        assert_eq!(steer.0, "To scout subagent · Inspect routing");
+        assert_eq!(steer.1, "Steers the exact run shown above");
+        assert_eq!(steer.2, "Steer this scout…");
+
+        let follow = direct_input_copy(
+            "reviewer",
+            "Review the patch",
+            &crate::live::SubagentInputTarget::FollowUp,
+        );
+        assert_eq!(follow.0, "To reviewer subagent · Review the patch");
+        assert!(follow.1.contains("finished child conversation"));
+        assert_eq!(follow.2, "Follow up with this reviewer…");
     }
 
     #[test]

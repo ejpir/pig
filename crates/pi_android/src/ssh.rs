@@ -350,6 +350,11 @@ impl Connection {
                     }
                 }
                 let _ = writer.eof().await;
+                // Dropping the pipe's last input sender means the caller is done
+                // with the whole command, not merely half-closing its stdin.
+                // Without CLOSE, a superseded watch can keep draining already
+                // queued snapshots until the remote process notices EOF.
+                let _ = writer.close().await;
             });
             tokio::spawn(async move {
                 let (mut pending, mut stderr, mut status) = (Vec::new(), Vec::new(), None);
@@ -421,6 +426,160 @@ pub fn quote(text: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use russh::{Channel, ChannelId, server};
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct ClosingServer {
+        closed: async_channel::Sender<()>,
+    }
+
+    impl server::Server for ClosingServer {
+        type Handler = Self;
+
+        fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self {
+            self.clone()
+        }
+    }
+
+    impl server::Handler for ClosingServer {
+        type Error = anyhow::Error;
+
+        async fn auth_publickey(
+            &mut self,
+            _: &str,
+            _: &russh::keys::ssh_key::PublicKey,
+        ) -> Result<server::Auth> {
+            Ok(server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _: Channel<server::Msg>,
+            reply: server::ChannelOpenHandle,
+            _: &mut server::Session,
+        ) -> Result<()> {
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: ChannelId,
+            command: &[u8],
+            session: &mut server::Session,
+        ) -> Result<()> {
+            session.channel_success(channel)?;
+            if command == b"stream" {
+                let handle = session.handle();
+                tokio::spawn(async move {
+                    while handle
+                        .data(channel, b"{\"type\":\"tick\"}\n".as_slice())
+                        .await
+                        .is_ok()
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                });
+            } else {
+                session.data(channel, b"done\n".as_slice())?;
+                session.exit_status_request(channel, 0)?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            }
+            Ok(())
+        }
+
+        async fn channel_close(&mut self, _: ChannelId, _: &mut server::Session) -> Result<()> {
+            let _ = self.closed.try_send(());
+            Ok(())
+        }
+    }
+
+    fn closing_server() -> (
+        Address,
+        async_channel::Receiver<()>,
+        async_channel::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (address_out, address_in) = std::sync::mpsc::channel();
+        let (closed_out, closed) = async_channel::bounded(1);
+        let (shutdown, shutdown_in) = async_channel::bounded::<()>(1);
+        let thread = std::thread::spawn(move || {
+            use russh::server::Server as _;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                    .await
+                    .unwrap();
+                let port = listener.local_addr().unwrap().port();
+                address_out.send(port).unwrap();
+                let config = Arc::new(server::Config {
+                    auth_rejection_time: Duration::ZERO,
+                    auth_rejection_time_initial: Some(Duration::ZERO),
+                    keys: vec![PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap()],
+                    ..Default::default()
+                });
+                let mut server = ClosingServer { closed: closed_out };
+                let running = server.run_on_socket(config, &listener);
+                let handle = running.handle();
+                tokio::spawn(async move {
+                    let _ = shutdown_in.recv().await;
+                    handle.shutdown("test complete".into());
+                });
+                running.await.unwrap();
+            });
+        });
+        (
+            Address {
+                user: "test".into(),
+                host: "127.0.0.1".into(),
+                port: address_in.recv().unwrap(),
+            },
+            closed,
+            shutdown,
+            thread,
+        )
+    }
+
+    #[test]
+    fn dropping_a_pipe_closes_its_channel_but_keeps_the_connection() {
+        let (address, closed, shutdown, server) = closing_server();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let identity = Identity {
+                key: Arc::new(PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap()),
+            };
+            let connection = Connection::open(address, identity, None).await.unwrap();
+            let pipe = connection.pipe("stream".into()).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), pipe.records.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()["type"],
+                "tick"
+            );
+            drop(pipe);
+            tokio::time::timeout(Duration::from_secs(2), closed.recv())
+                .await
+                .expect("dropping the pipe must close its SSH channel")
+                .unwrap();
+
+            let output = connection.run("once".into()).await.unwrap();
+            assert_eq!(output.status, Some(0));
+            assert_eq!(output.stdout, "done\n");
+            assert!(!connection.is_closed());
+            drop(connection);
+        });
+        shutdown.send_blocking(()).unwrap();
+        server.join().unwrap();
+    }
 
     #[test]
     fn addresses_need_a_user_and_take_a_port() {

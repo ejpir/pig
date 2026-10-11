@@ -54,6 +54,26 @@ fn commands_use_exact_pi_wire_names_and_preserve_text() {
         json!([{"type":"image","data":"iVBORw0K","mimeType":"image/png"}])
     );
     assert_eq!(
+        Command::PromptSubagent {
+            conversation_id: "42".into(),
+            message: "change course".into(),
+            request_id: "child-request".into(),
+            streaming_behavior: StreamingBehavior::Steer,
+            expected_run_id: Some("run-7".into()),
+        }
+        .record("child")
+        .unwrap(),
+        json!({
+            "id":"child",
+            "type":"prompt_subagent",
+            "conversationId":"42",
+            "message":"change course",
+            "requestId":"child-request",
+            "streamingBehavior":"steer",
+            "expectedRunId":"run-7"
+        })
+    );
+    assert_eq!(
         Command::GetSessionStats.record("1").unwrap()["type"],
         "get_session_stats"
     );
@@ -72,6 +92,20 @@ fn commands_use_exact_pi_wire_names_and_preserve_text() {
             .unwrap()["streamingBehavior"],
         "followUp"
     );
+}
+
+#[test]
+fn child_control_responses_never_change_the_parent_session() {
+    let mut session = Session::default();
+    session.apply(&json!({"type":"agent_start"})).unwrap();
+    session
+        .apply(&json!({
+            "type":"response","id":"child","command":"prompt_subagent",
+            "success":false,"error":"The selected child run has ended"
+        }))
+        .unwrap();
+    assert!(session.busy());
+    assert_eq!(session.error, None);
 }
 
 #[test]
@@ -120,6 +154,32 @@ fn streaming_uses_block_indices_and_authoritative_final_message() {
 }
 
 #[test]
+fn durable_tool_call_deltas_append_at_nested_argument_paths() {
+    let mut session = Session::default();
+    session
+        .apply(
+            &json!({"type":"message_start","message":{"role":"assistant","content":[{
+                "type":"toolCall","id":"search","name":"grep","arguments":{
+                    "query":"hello","options":{"filters":["foo"]}
+                }
+            }]}}),
+        )
+        .unwrap();
+    for event in [
+        json!({"type":"toolcall_delta","contentIndex":0,"path":["query"],"delta":" world"}),
+        json!({"type":"toolcall_delta","contentIndex":0,"path":["options","filters",0],"delta":"bar"}),
+    ] {
+        session
+            .apply(&json!({"type":"message_update","assistantMessageEvent":event}))
+            .unwrap();
+    }
+    assert_eq!(
+        session.messages[0]["content"][0]["arguments"],
+        json!({"query":"hello world","options":{"filters":["foobar"]}})
+    );
+}
+
+#[test]
 fn only_settled_ends_a_run_not_agent_end_or_acknowledgement() {
     let mut session = Session::default();
     session.apply(&json!({"type":"agent_start"})).unwrap();
@@ -140,6 +200,44 @@ fn only_settled_ends_a_run_not_agent_end_or_acknowledgement() {
 }
 
 #[test]
+fn a_late_state_read_does_not_demote_a_newer_running_event() {
+    let mut session = Session::default();
+    session.apply(&json!({"type":"agent_start"})).unwrap();
+    session
+        .apply(
+            &json!({"type":"response","command":"get_state","success":true,"data":{
+                "isStreaming":false,"isCompacting":false
+            }}),
+        )
+        .unwrap();
+    assert_eq!(session.run, RunState::Running);
+    assert!(session.state.is_streaming);
+    assert!(!session.state.is_compacting);
+}
+
+#[test]
+fn state_and_stats_updates_do_not_need_response_correlation() {
+    let mut session = Session::default();
+    session
+        .apply(&json!({"type":"state_update","state":{
+            "sessionName":"Committed","thinkingLevel":"high","isStreaming":true,
+            "autoCompactionEnabled":true
+        }}))
+        .unwrap();
+    session
+        .apply(&json!({"type":"stats_update","stats":{
+            "tokens":{"input":12,"output":3,"cacheRead":4,"cacheWrite":1},
+            "cost":0.25,"totalMessages":7
+        }}))
+        .unwrap();
+    assert_eq!(session.state.session_name.as_deref(), Some("Committed"));
+    assert_eq!(session.state.thinking_level, "high");
+    assert_eq!(session.run, RunState::Running);
+    assert_eq!(session.stats.tokens.input, 12);
+    assert_eq!(session.stats.total_messages, 7);
+}
+
+#[test]
 fn tool_results_replace_partial_output_and_only_successful_writes_are_changes() {
     let mut session = Session::default();
     session.apply(&json!({"type":"tool_execution_start","toolCallId":"a","toolName":"edit","args":{"path":"src/a.rs"}})).unwrap();
@@ -151,6 +249,12 @@ fn tool_results_replace_partial_output_and_only_successful_writes_are_changes() 
     assert_eq!(session.changed_files(), ["src/a.rs"]);
     session.apply(&json!({"type":"tool_execution_end","toolCallId":"a","result":{"content":[]},"isError":true})).unwrap();
     assert!(session.changed_files().is_empty());
+
+    session.apply(&json!({"type":"tool_execution_start","toolCallId":"s","toolName":"subagent","args":{}})).unwrap();
+    session.apply(&json!({"type":"tool_execution_update","toolCallId":"s","partialResult":{"content":[],"details":{"results":[{"status":"running"}]}}})).unwrap();
+    assert!(session.tools[1].details.is_object());
+    session.apply(&json!({"type":"tool_execution_update","toolCallId":"s","partialResult":{"content":[],"details":null}})).unwrap();
+    assert!(session.tools[1].details.is_null());
 }
 
 #[test]

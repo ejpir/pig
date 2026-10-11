@@ -8,8 +8,9 @@ import type { Message, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
 import {
   CompactionEntry, GenerationTask, Harness, InboxDoc, LiveDoc, UserEntry, createRegistry, defineDoc,
-  defineExtension, section, type Conversation, type ConversationId, type ConversationView,
-  type EntryDraft, type Extension, type SubmissionId, type UsageState,
+  defineExtension, section, watchEvents, type AgentEvent, type Conversation, type ConversationId,
+  type ConversationView, type EntryDraft, type Extension, type SnapshotEvent, type SubmissionId,
+  type UsageState, type WatchEnd,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -19,8 +20,8 @@ import { authProviders, publicModel } from "./catalog.ts";
 import { findImage, imageReferences, promptContent } from "./images.ts";
 import { expandPromptCommand, noResources, promptCommands, type Resources } from "./commands.ts";
 import { imageRead } from "./read.ts";
-import { History } from "./history.ts";
-import { Calls, subagentExtension, transcript } from "./subagents.ts";
+import { History, shown } from "./history.ts";
+import { Calls, subagentExtension, subagentResult, submitSubagentInput, transcript } from "./subagents.ts";
 
 const context = BACKGROUND_CONTEXT;
 export const MAX_RECORD = 64 * 1024 * 1024;
@@ -40,12 +41,12 @@ const commands = [
   "set_model", "set_thinking_level", "set_session_name", "set_auto_compaction",
   "compact", "get_image",
   "cancel_submission",
-  "get_subagent", "stop_subagent",
+  "get_subagent", "stop_subagent", "prompt_subagent",
 ];
 const info = {
-  backend: "pi-durable", version: "1", piVersion: "1.0.2", protocolVersion: 1,
+  backend: "pi-durable", version: "1", piVersion: "1.1.0", protocolVersion: 2,
   bunVersion: Bun.version, workerPid: process.pid, commands,
-  features: ["durable_execution", "committed_snapshots", "request_deduplication", "remote_pi_credentials", "builtin_providers", "image_prompts", "image_references", "prompt_templates", "skills", "subagents", "manual_compaction"],
+  features: ["durable_execution", "committed_snapshots", "incremental_events", "request_deduplication", "remote_pi_credentials", "builtin_providers", "image_prompts", "image_references", "prompt_templates", "skills", "subagents", "subagent_input", "manual_compaction"],
   experimental: true,
   limitations: ["Login on the SSH host; no interactive durable login flow yet", "No stock Pi extensions, Pi packages or session-tree migration"],
 };
@@ -69,6 +70,15 @@ export async function* records(input: AsyncIterable<Buffer>): AsyncGenerator<Rec
     if (pending.length >= MAX_RECORD) throw new Error("Durable request exceeds 64 MiB");
   }
   if (pending.length) throw new Error("Unterminated durable request");
+}
+
+/** A live runner cannot continue once its sole exact event stream has ended. */
+export async function eventStreamFailure(closed: Promise<WatchEnd>): Promise<never> {
+  const end = await closed;
+  if (end.reason === "listener_error") {
+    throw new Error(`Durable event stream listener failed: ${end.error.message}`, { cause: end.error });
+  }
+  throw new Error(`Durable event stream closed unexpectedly: ${end.reason}`);
 }
 
 function string(record: Record<string, unknown>, key: string): string {
@@ -312,33 +322,85 @@ export async function run(
   const calls = await harness.documentState(Calls, root.id, context);
   if (!calls) throw new Error("Durable subagent calls were not committed");
   autoCompaction = metadata.value.autoCompaction;
-  const watch = await root.watch(context);
-  // One output line at a time, with backpressure. The durable watch itself bounds pending frames.
+  const events = await watchEvents(harness, root.id, context);
+  // One output line at a time, with backpressure. The durable event watch itself
+  // bounds pending frames and replaces an overflow with one resync snapshot.
+  let failOutput!: (error: unknown) => void;
+  const outputFailure = new Promise<never>((_, reject) => { failOutput = reject; });
+  // A delivery can fail in a Chord subscription before the command loop installs
+  // its race; keep that brief interval from becoming an unhandled rejection.
+  void outputFailure.catch(() => {});
   let output = Promise.resolve();
   const send = (record: unknown): Promise<void> => {
-    const line = JSON.stringify(record) + "\n";
-    if (Buffer.byteLength(line) > MAX_RECORD) throw new Error("Durable response exceeds 64 MiB");
+    let line: string;
+    try {
+      line = JSON.stringify(record) + "\n";
+      if (Buffer.byteLength(line) > MAX_RECORD) throw new Error("Durable response exceeds 64 MiB");
+    } catch (error) {
+      failOutput(error);
+      return Promise.reject(error);
+    }
     const next = output.then(async () => {
       if (!process.stdout.write(line)) await once(process.stdout, "drain");
     });
+    void next.catch(failOutput);
     output = next;
     return next;
   };
-  // The whole transcript, past any compaction; one snapshot at a time, in order.
   const history = new History(root, context);
-  let snapshots = Promise.resolve();
-  const snapshot = (value: ConversationView): Promise<void> => {
-    const next = snapshots.then(async () => {
-      const entries = await history.entries(value);
-      await send({ type: "durable_state", key,
-        data: imageReferences({ ...value, entries, docs: { ...value.docs, "app.desktop": metadata.value, "app.subagent-calls": calls.value ?? { calls: {} } } }), backend: info });
-    });
-    snapshots = next.catch(() => {});
-    return next;
+  const inboxAt = (snapshot: SnapshotEvent): unknown[] => {
+    const current = (state.value.docs["pi.inbox"] as { items?: { id: number }[] } | undefined)?.items ?? [];
+    const wanted = new Set(snapshot.inbox.map((item) => Number(item.id)));
+    return current.filter((item) => wanted.has(Number(item.id)));
   };
-  await snapshot(watch.value);
-  watch.start(async (value) => { await snapshot(value); });
-  const unsubscribe = calls.subscribe(() => { snapshot(watch.value).catch((error) => console.error("Durable report:", error)); });
+  const viewAt = (snapshot: SnapshotEvent): ConversationView => ({
+    conversation: state.value.conversation,
+    entries: snapshot.entries,
+    docs: {
+      "pi.live": {
+        ...(snapshot.run === undefined ? {} : { run: snapshot.run }),
+        ...(snapshot.generation === undefined ? {} : { generation: snapshot.generation }),
+        tools: snapshot.tools,
+        compactions: snapshot.compactions,
+      },
+      "pi.inbox": { items: inboxAt(snapshot) },
+      "pi.agent": snapshot.agent,
+      "pi.usage": snapshot.usage,
+    },
+  }) as unknown as ConversationView;
+  // Full lifetime history crosses the pipe only at attachment or when the
+  // bounded event stream explicitly requests a resynchronization.
+  const snapshot = async (value: SnapshotEvent): Promise<void> => {
+    const view = viewAt(value);
+    const entries = await history.entries(view);
+    await send({ type: "durable_state", key,
+      data: imageReferences({ ...view, entries, docs: { ...view.docs, "app.desktop": metadata.value, "app.subagent-calls": calls.value ?? { calls: {} } } }), backend: info });
+  };
+  const wireEvent = (event: AgentEvent): unknown => {
+    if (event.type === "message_end" || event.type === "entry_appended") {
+      return { ...event, entry: shown(event.entry) };
+    }
+    if (event.type === "inbox_update") {
+      const wanted = new Set(event.items.map((item) => Number(item.id)));
+      const inbox = (state.value.docs["pi.inbox"] as { items?: { id: number }[] } | undefined)?.items ?? [];
+      return { ...event, inbox: inbox.filter((item) => wanted.has(Number(item.id))) };
+    }
+    return event;
+  };
+  await snapshot(events.snapshot);
+  events.start(async (batch) => {
+    const resync = batch.find((event): event is SnapshotEvent => event.type === "snapshot");
+    if (resync !== undefined) await snapshot(resync);
+    else await send({ type: "durable_events", key, events: imageReferences(batch.map(wireEvent)), backend: info });
+  });
+  const eventFailure = eventStreamFailure(events.closed);
+  void eventFailure.catch(() => {});
+  const unsubscribeMetadata = metadata.subscribe(() => {
+    send({ type: "durable_metadata", key, data: metadata.value }).catch((error) => console.error("Durable report:", error));
+  });
+  const unsubscribeCalls = calls.subscribe(() => {
+    send({ type: "durable_subagents", key, data: calls.value ?? { calls: {} } }).catch((error) => console.error("Durable report:", error));
+  });
   // Missing definitions, corrupt/newer storage and startup errors must fail closed, not select stock Pi.
   harness.resume();
 
@@ -348,14 +410,18 @@ export async function run(
   };
   /** One of this session's subagents: a conversation a call of its own created. */
   const subagent = async (record: Record<string, unknown>) => {
-    const id = Number(string(record, "conversationId"));
-    const conversation = Number.isSafeInteger(id) ? await harness.conversation(id as unknown as ConversationId, context) : undefined;
+    const conversationId = string(record, "conversationId");
+    const id = Number(conversationId);
+    const result = subagentResult(calls.value ?? { calls: {} }, conversationId);
+    const conversation = Number.isSafeInteger(id) && result
+      ? await harness.conversation(id as unknown as ConversationId, context)
+      : undefined;
     const view = conversation && await conversation.viewState(context);
     if (!conversation || !view || view.value.conversation.owner?.conversationId !== root.id) {
       view?.dispose();
       throw new Error("This subagent is not part of this session");
     }
-    return { conversation, view };
+    return { conversation, view, result: result! };
   };
   const respond = async (record: Record<string, unknown>): Promise<unknown> => {
     const value = state.value;
@@ -382,13 +448,15 @@ export async function run(
       }
       case "get_subagent": {
         // Its transcript only when asked for: the parent's snapshots carry a summary.
-        const { conversation, view } = await subagent(record);
+        const { conversation, view, result } = await subagent(record);
         try {
           const entries = await new History(conversation, context).entries(view.value);
-          const live = view.value.docs["pi.live"] as { run?: unknown; tools?: { callId: string; name: string; status: string; output?: string }[] } | undefined;
+          const live = view.value.docs["pi.live"] as { run?: { taskId: unknown }; tools?: { callId: string; name: string; status: string; output?: string }[] } | undefined;
           return imageReferences({
             conversationId: string(record, "conversationId"),
             busy: !!live?.run,
+            runId: live?.run === undefined ? null : String(live.run.taskId),
+            resumable: result.status === "done" || result.status === "failed" || result.status === "stopped",
             messages: transcript({ ...view.value, entries }),
             tools: (live?.tools ?? []).filter((slot) => slot.status !== "done")
               .map((slot) => ({ callId: slot.callId, name: slot.name, output: slot.output ?? "" })),
@@ -403,6 +471,16 @@ export async function run(
         view.dispose();
         await conversation.abort(context);
         return {};
+      }
+      case "prompt_subagent": {
+        const { conversation, view, result } = await subagent(record);
+        view.dispose();
+        const requestId = string(record, "requestId");
+        const message = string(record, "message");
+        const mode = string(record, "streamingBehavior");
+        if (mode !== "steer" && mode !== "followUp") throw new Error("Invalid streamingBehavior");
+        const expectedRunId = record.expectedRunId === undefined ? undefined : string(record, "expectedRunId");
+        return submitSubagentInput(conversation, result, { message, requestId, mode, expectedRunId }, context);
       }
       case "get_session_stats": {
         const current = await root.context(context);
@@ -439,14 +517,12 @@ export async function run(
         if (typeof record.enabled !== "boolean") throw new Error("enabled must be a boolean");
         await root.commit(async (tx) => { (await tx.doc(Metadata, root.id)).autoCompaction = record.enabled as boolean; }, context);
         autoCompaction = record.enabled;
-        await snapshot(state.value);
         return {};
       }
       case "set_session_name": {
         if (record.sessionPath !== undefined) throw new Error("Cannot rename another durable session");
         const name = string(record, "name");
         await root.commit(async (tx) => { (await tx.doc(Metadata, root.id)).name = name; }, context);
-        await snapshot(state.value);
         return {};
       }
       case "compact": {
@@ -562,7 +638,7 @@ export async function run(
     }
   };
   let compacting: Promise<void> | undefined;
-  try {
+  const commandsLoop = async () => {
     for await (const record of records(process.stdin)) {
       if (typeof record.id !== "string" || !record.id.length || record.id.length > 256) throw new Error("Missing request correlation ID");
       if (record.type === "compact") {
@@ -584,11 +660,19 @@ export async function run(
       }
       await answer(record);
     }
+  };
+  try {
+    // Listener rejection terminates watchEvents by contract. Chord document
+    // subscribers isolate failures, so the shared output failure signal covers
+    // their callbacks too. Either condition is fatal: staying attached without
+    // incremental delivery would present a stale running session indefinitely.
+    await Promise.race([commandsLoop(), eventFailure, outputFailure]);
   } finally {
     await compacting?.catch(() => {});
     // Owner-pipe EOF stops this process, NOT the durable run. close preserves pending checkpoints.
-    await watch.stop();
-    unsubscribe();
+    await events.stop();
+    unsubscribeCalls();
+    unsubscribeMetadata();
     calls.dispose();
     state.dispose();
     metadata.dispose();

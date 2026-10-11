@@ -2087,7 +2087,13 @@ impl SessionController {
                     }
                     "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
                         content = Some(ContentChange::Tool(text(&record, "toolCallId")));
-                        if record["type"] != "tool_execution_update" {
+                        // Ordinary output deltas repaint only their transcript row. Durable
+                        // subagent progress lives in tool details and also drives the shared
+                        // composer status while the parent run is idle.
+                        if record["type"] != "tool_execution_update"
+                            || record["toolName"] == pi_core::subagent::TOOL
+                                && record["partialResult"]["details"].is_object()
+                        {
                             changes |= Changes::METADATA;
                         }
                     }

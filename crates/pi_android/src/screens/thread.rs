@@ -51,6 +51,27 @@ fn composer_status(session: &Session, compacting: bool) -> &'static str {
     }
 }
 
+fn active_background_subagents(session: &Session) -> usize {
+    super::subagents::background_at_work(&session.turns)
+}
+
+/// A durable crew can outlive Pi's turn. It gets a status strip without making
+/// the parent run busy, so the composer stays available for another prompt.
+fn idle_subagents(session: &Session) -> usize {
+    if session.state == State::Done {
+        active_background_subagents(session)
+    } else {
+        0
+    }
+}
+
+fn agents_at_work(count: usize) -> String {
+    format!(
+        "{count} {} at work",
+        if count == 1 { "agent" } else { "agents" }
+    )
+}
+
 fn thread_subtitle(session: &Session, computer_name: &str, compacting: bool) -> String {
     if compacting {
         return format!("{} · {}", session.project, computer_name);
@@ -467,7 +488,11 @@ impl PhoneApp {
             && session.question.is_some()
             && !self.questions_later.contains(&id);
         let working = running && !asking;
-        composer.update(cx, |composer, _| composer.set_joined(working));
+        let active_subagents = active_background_subagents(&session);
+        let idle_subagents = idle_subagents(&session);
+        composer.update(cx, |composer, _| {
+            composer.set_joined(working || idle_subagents > 0)
+        });
         let pages = session.turn().is_some_and(|turn| !turn.pages.is_empty());
         let area = composer.read(cx).area.clone();
         area.update(cx, |area, _| {
@@ -610,7 +635,17 @@ impl PhoneApp {
                         .flex()
                         .flex_col()
                         .when(running, |dock| {
-                            dock.child(working_strip(&session, stopping, compacting, &colors, cx))
+                            dock.child(working_strip(
+                                &session,
+                                stopping,
+                                compacting,
+                                active_subagents,
+                                &colors,
+                                cx,
+                            ))
+                        })
+                        .when(idle_subagents > 0, |dock| {
+                            dock.child(subagent_working_strip(id, idle_subagents, &colors, cx))
                         })
                         .child(composer),
                 )
@@ -1869,11 +1904,74 @@ fn reply(turn: &Turn, latest: bool, colors: &Theme) -> Option<Div> {
     })
 }
 
+/// The active crew status is the only part of a joined running strip that opens
+/// the directory; Stop remains an independent sibling action.
+fn subagent_working_link(
+    id: SessionId,
+    count: usize,
+    colors: &Theme,
+    cx: &Context<PhoneApp>,
+) -> gpui::Stateful<Div> {
+    let label = agents_at_work(count);
+    div()
+        .id("subagents-working")
+        .relative()
+        .child(crate::testing::probe("subagents-working"))
+        .debug_selector(|| "subagents-working".into())
+        .min_h(px(48.))
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(12.))
+        .active(|style| style.bg(colors.selected))
+        .aria_label(format!("Show {label}"))
+        .child(ui::ring_dot(colors.read))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(14.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(label),
+        )
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .debug_selector(|| "subagents-working-chevron".into())
+                .child(crate::testing::probe("subagents-working-chevron"))
+                .child(icon("chev_r", 16., colors.faint)),
+        )
+        .on_click(
+            cx.listener(move |this, _, window, cx| this.push(Route::Subagents(id), window, cx)),
+        )
+}
+
+/// Background work that does not make the parent run busy, on the composer's top edge.
+fn subagent_working_strip(
+    id: SessionId,
+    count: usize,
+    colors: &Theme,
+    cx: &Context<PhoneApp>,
+) -> impl IntoElement {
+    subagent_working_link(id, count, colors, cx)
+        .mx(px(12.))
+        .mb(px(-1.))
+        .px(px(16.))
+        .bg(colors.panel)
+        .border_1()
+        .border_b_0()
+        .border_color(colors.line_strong)
+        .rounded_t(px(24.))
+}
+
 /// Working, the time and Stop, on the composer's top edge.
 fn working_strip(
     session: &Session,
     stopping: bool,
     compacting: bool,
+    active_subagents: usize,
     colors: &Theme,
     cx: &Context<PhoneApp>,
 ) -> Div {
@@ -1907,11 +2005,10 @@ fn working_strip(
         .when(!stopping, |button| {
             button.on_click(cx.listener(move |this, _, _, cx| this.stop(id, cx)))
         });
-    div()
+    let strip = div()
         .mx(px(12.))
         .mb(px(-1.))
         .min_h(px(48.))
-        .pl(px(16.))
         .pr(px(8.))
         .flex()
         .items_center()
@@ -1920,7 +2017,20 @@ fn working_strip(
         .border_1()
         .border_b_0()
         .border_color(colors.line_strong)
-        .rounded_t(px(24.))
+        .rounded_t(px(24.));
+    if active_subagents > 0 && !waiting && !compacting {
+        return strip
+            .pl(px(8.))
+            .child(
+                subagent_working_link(id, active_subagents, colors, cx)
+                    .flex_1()
+                    .px(px(8.))
+                    .rounded(px(20.)),
+            )
+            .child(stop);
+    }
+    strip
+        .pl(px(16.))
         .map(|strip| match (waiting || compacting, &stage) {
             // The run line folded to four segments, and the stage it is in.
             (false, Some((turn, kind))) => {
@@ -2456,6 +2566,57 @@ mod tests {
         assert!(!thread_running(&session, false));
         assert!(thread_running(&session, true));
         assert_eq!(composer_status(&session, true), "Compacting");
+    }
+
+    #[test]
+    fn idle_composer_counts_every_unfinished_background_subagent() {
+        let mut session = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+        session.state = State::Done;
+        session.turn_mut().handoffs.push(
+            pi_core::subagent::Handoff::from_details(&serde_json::json!({
+                "version": 1,
+                "mode": "parallel",
+                "background": true,
+                "results": [
+                    {"agent":"scout","task":"one","status":"running"},
+                    {"agent":"scout","task":"two","status":"done"}
+                ]
+            }))
+            .unwrap(),
+        );
+        let mut later = Turn::new("Continue", "10:00");
+        later.handoffs.push(
+            pi_core::subagent::Handoff::from_details(&serde_json::json!({
+                "version": 1,
+                "mode": "parallel",
+                "background": true,
+                "results": [
+                    {"agent":"planner","task":"three","status":"waiting"},
+                    {"agent":"worker","task":"four","status":"running"},
+                    {"agent":"worker","task":"five","status":"stopped"}
+                ]
+            }))
+            .unwrap(),
+        );
+        later.handoffs.push(
+            pi_core::subagent::Handoff::from_details(&serde_json::json!({
+                "version": 1,
+                "mode": "single",
+                "background": false,
+                "results": [{"agent":"reviewer","task":"six","status":"running"}]
+            }))
+            .unwrap(),
+        );
+        session.turns.push(later);
+
+        assert_eq!(active_background_subagents(&session), 3);
+        assert_eq!(idle_subagents(&session), 3);
+        assert_eq!(agents_at_work(1), "1 agent at work");
+        assert_eq!(agents_at_work(3), "3 agents at work");
+
+        session.state = State::Working;
+        assert_eq!(active_background_subagents(&session), 3);
+        assert_eq!(idle_subagents(&session), 0);
     }
 
     #[test]

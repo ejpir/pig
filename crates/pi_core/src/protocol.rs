@@ -46,6 +46,23 @@ pub enum Command {
         #[serde(rename = "conversationId")]
         conversation_id: String,
     },
+    /// Sends text to one exact durable subagent conversation. Steering names
+    /// the run observed by the client so a stale request cannot hit a later run.
+    PromptSubagent {
+        #[serde(rename = "conversationId")]
+        conversation_id: String,
+        message: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "streamingBehavior")]
+        streaming_behavior: StreamingBehavior,
+        #[serde(
+            rename = "expectedRunId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        expected_run_id: Option<String>,
+    },
     /// Cancels exactly one queued durable submission, retaining other payloads.
     CancelSubmission {
         #[serde(rename = "submissionId")]
@@ -242,6 +259,7 @@ impl Command {
             | Self::GetImage { .. }
             | Self::GetSubagent { .. }
             | Self::StopSubagent { .. }
+            | Self::PromptSubagent { .. }
             | Self::CancelSubmission { .. }
             | Self::GetEntries
             | Self::Fork { cwd: None, .. }
@@ -292,6 +310,7 @@ impl Command {
             Self::GetImage { .. } => "get_image",
             Self::GetSubagent { .. } => "get_subagent",
             Self::StopSubagent { .. } => "stop_subagent",
+            Self::PromptSubagent { .. } => "prompt_subagent",
             Self::CancelSubmission { .. } => "cancel_submission",
             Self::GetEntries => "get_entries",
             Self::GetSettings => "get_settings",
