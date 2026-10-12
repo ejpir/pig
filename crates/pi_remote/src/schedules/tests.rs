@@ -659,6 +659,25 @@ fn future_database_is_rejected_without_schema_changes() {
 }
 #[test]
 #[cfg(unix)]
+fn registry_accepts_parent_directory_aliases_but_not_a_linked_registry() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().unwrap();
+    let actual = temp.path().join("actual");
+    std::fs::create_dir(&actual).unwrap();
+    let alias = temp.path().join("alias");
+    symlink(&actual, &alias).unwrap();
+    // macOS's /var -> /private/var is a normal parent-directory alias.
+    let root = alias.join("registry");
+    let store = Store::open(&root).unwrap();
+    assert!(store.list().unwrap().is_empty());
+    assert!(actual.join("registry/schedules.sqlite3").is_file());
+    drop(store);
+    symlink(actual.join("registry"), temp.path().join("linked-registry")).unwrap();
+    assert!(Store::open(&temp.path().join("linked-registry")).is_err());
+}
+
+#[test]
+#[cfg(unix)]
 fn private_registry_and_lock_files_never_follow_symlinks() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     let temp = tempfile::tempdir().unwrap();

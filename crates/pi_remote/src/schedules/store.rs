@@ -42,6 +42,13 @@ pub struct Store {
 impl Store {
     pub fn open(root: &Path) -> Result<Self> {
         super::service::private_dir(root)?;
+        // SQLite NOFOLLOW also rejects symlinked ancestors. Resolve normal
+        // Unix aliases (e.g. macOS /var -> /private/var) only after validating
+        // the registry directory itself; the database still uses NOFOLLOW.
+        #[cfg(unix)]
+        let root = root
+            .canonicalize()
+            .context("Resolve scheduler registry directory")?;
         let path = root.join("schedules.sqlite3");
         // Never open/close this inode outside SQLite: POSIX fcntl locks are
         // process-scoped and closing ANY descriptor could release another
