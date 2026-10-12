@@ -459,6 +459,17 @@ impl Session {
         ) {
             return Ok(());
         }
+        // Tree summarization is not an agent run and emits no agent_settled.
+        // Settle its retry on the response, including failure/cancellation, but
+        // preserve active generation and standalone manual compaction (whose
+        // summarization retries also enter Retrying without is_streaming).
+        if record["command"] == "navigate_tree"
+            && self.run == RunState::Retrying
+            && !self.state.is_streaming
+            && !self.state.is_compacting
+        {
+            self.run = RunState::Idle;
+        }
         if record["success"] == false {
             self.error = Some(text(record, "error"));
             return Ok(());
@@ -500,6 +511,12 @@ impl Session {
                 self.history = Some(std::sync::Arc::new(crate::history::History::parse(data)?))
             }
             "get_settings" => self.settings = Some(data.clone()),
+            "set_compaction_threshold" => {
+                self.stats.compaction = Some(
+                    serde_json::from_value(data["compaction"].clone())
+                        .context("invalid compaction policy")?,
+                );
+            }
             "get_session_stats" => {
                 self.stats =
                     serde_json::from_value(data.clone()).context("invalid session stats")?

@@ -20,8 +20,15 @@ const MODELS: [(&str, &str); 4] = [
     ("Haiku 4.5", "Anthropic · the fastest"),
 ];
 
-/// Where Pi compacts the context, as a share of the window.
-const COMPACTS_AT: f32 = 0.8;
+fn compaction_label(enabled: bool, percent: Option<f64>) -> String {
+    if !enabled {
+        "auto-compaction off".into()
+    } else if let Some(percent) = percent {
+        format!("auto-compacts above {percent:.1}%")
+    } else {
+        "auto-compaction on".into()
+    }
+}
 
 const THINKING: [&str; 6] = ["Off", "Minimal", "Low", "Medium", "High", "Max"];
 
@@ -496,13 +503,22 @@ impl PhoneApp {
                 ),
             )
             .child(div().mt(px(8.)).mx(px(-20.)).h(px(1.)).bg(colors.line))
+            .when(self.store.is_some(), |menu| {
+                menu.child(
+                    link("open-schedules", "calendar", "Schedules")
+                        .debug_selector(|| "open-schedules".into())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_schedules(window, cx);
+                        })),
+                )
+            })
             .child(
-                link("sample-sessions", "spark", "Try the sample sessions").on_click(cx.listener(
-                    |this, _, window, cx| {
+                link("sample-sessions", "spark", "Try the sample sessions")
+                    .when(self.store.is_some(), |row| row.border_t_1())
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.close_sheet(cx);
                         this.open_sample(window, cx);
-                    },
-                )),
+                    })),
             )
             .child(
                 link("open-settings", "settings", "Settings")
@@ -753,6 +769,7 @@ impl PhoneApp {
                 body.child(
                     ui::card(colors)
                         .id(("activity-live-diff", stage.diff.len()))
+                        .debug_selector(|| "activity-live-diff".into())
                         .relative()
                         .child(crate::testing::probe(format!(
                             "activity-live-diff-{}",
@@ -782,12 +799,7 @@ impl PhoneApp {
                                 .text_color(colors.muted)
                                 .child(path.clone())
                         }))
-                        .children(
-                            stage
-                                .diff
-                                .iter()
-                                .map(|line| ui::diff_line(line, false, colors)),
-                        ),
+                        .children(ui::diff_lines(&stage.diff, colors)),
                 )
             })
             .children(
@@ -924,21 +936,26 @@ impl PhoneApp {
                                 })),
                         ),
                 )
-                .child(if wrap {
-                    ui::mono(displayed_output.clone(), 12.)
-                        .line_height(relative(1.5))
-                        .into_any_element()
-                } else {
+                .child(
                     div()
-                        .id(("output-lines", index))
-                        .overflow_x_scroll()
-                        .child(
+                        .relative()
+                        .child(if wrap {
                             ui::mono(displayed_output.clone(), 12.)
                                 .line_height(relative(1.5))
-                                .whitespace_nowrap(),
-                        )
-                        .into_any_element()
-                })
+                                .into_any_element()
+                        } else {
+                            div()
+                                .id(("output-lines", index))
+                                .overflow_x_scroll()
+                                .child(
+                                    ui::mono(displayed_output.clone(), 12.)
+                                        .line_height(relative(1.5))
+                                        .whitespace_nowrap(),
+                                )
+                                .into_any_element()
+                        })
+                        .child(self.copyable(displayed_output.clone(), cx)),
+                )
             })
             .when(tool.output.is_empty(), |card| {
                 card.child(ui::hint(
@@ -980,7 +997,8 @@ impl PhoneApp {
             _ => tool.target.clone(),
         };
         let next = super::stream::next_call(turn, kind, tool_index);
-        let output = tool.output.clone();
+        let header_output = tool.output.clone();
+        let diff_is_preview = tool.diff_is_preview;
         let asked = format!("{command}\n\n{displayed}");
         let asked_name = format!("{} output", super::stream::target(tool));
         div()
@@ -1006,6 +1024,45 @@ impl PhoneApp {
                     .mt(px(8.)),
                 )
             })
+            .when(!tool.diff.is_empty(), |body| {
+                body.child(
+                    div()
+                        .id("call-diff")
+                        .debug_selector(|| "call-diff".into())
+                        .child(crate::testing::probe("call-diff"))
+                        .mt(px(16.))
+                        .py(px(8.))
+                        .rounded(px(12.))
+                        .border_1()
+                        .border_color(colors.line)
+                        .overflow_hidden()
+                        .child(
+                            ui::label(
+                                if tool.diff_is_preview {
+                                    "Requested changes"
+                                } else {
+                                    "Changes"
+                                },
+                                colors,
+                            )
+                            .debug_selector(move || {
+                                if diff_is_preview {
+                                    "call-diff-requested"
+                                } else {
+                                    "call-diff-applied"
+                                }
+                                .into()
+                            })
+                            .px(px(12.))
+                            .mb(px(8.)),
+                        )
+                        .children(ui::diff_lines(&tool.diff, colors).enumerate().map(
+                            |(index, row)| {
+                                row.debug_selector(move || format!("call-diff-line-{index}"))
+                            },
+                        )),
+                )
+            })
             .child(
                 div()
                     .mt(px(20.))
@@ -1014,12 +1071,28 @@ impl PhoneApp {
                     .items_center()
                     .gap(px(8.))
                     .child(ui::label("Output", colors).flex_1())
-                    .child(self.wrap_toggle("wrap-call-output", cx)),
+                    .child(self.wrap_toggle("wrap-call-output", cx))
+                    .child(
+                        ui::tap("copy-call-output", "copy", colors)
+                            .aria_label("Copy output")
+                            .debug_selector(|| "copy-call-output".into())
+                            .when(header_output.is_empty(), |button| button.opacity(0.5))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !header_output.is_empty() {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        header_output.clone(),
+                                    ));
+                                    this.notify_user("Copied output", cx);
+                                }
+                            })),
+                    ),
             )
             .child(
                 div()
                     .id("call-output")
                     .debug_selector(|| "call-output".into())
+                    .relative()
+                    .child(crate::testing::probe("call-output"))
                     .p(px(12.))
                     .rounded(px(12.))
                     .border_1()
@@ -1048,6 +1121,9 @@ impl PhoneApp {
                                     .child(super::stream::output_text(line, colors))
                             }))
                         }
+                    })
+                    .when(!displayed.trim().is_empty(), |output| {
+                        output.child(self.copyable(displayed.clone(), cx))
                     }),
             )
             .children(next.map(|(next_kind, next_index, next_tool)| {
@@ -1094,29 +1170,8 @@ impl PhoneApp {
             .child(
                 div()
                     .mt(px(16.))
-                    .flex()
-                    .gap(px(8.))
-                    .child(
-                        ui::button(
-                            "copy-call-output",
-                            Button::Plain,
-                            Some("copy"),
-                            "Copy output",
-                            false,
-                            colors,
-                        )
-                        .flex_1()
-                        .debug_selector(|| "copy-call-output".into())
-                        .when(output.is_empty(), |button| button.opacity(0.5))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !output.is_empty() {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    output.clone(),
-                                ));
-                                this.notify_user("Copied output", cx);
-                            }
-                        })),
-                    )
+                    .w_full()
+                    .min_w_0()
                     // Synthetic subagent sessions are read-only and have no visible composer.
                     .when(
                         self.store
@@ -1132,7 +1187,8 @@ impl PhoneApp {
                                     false,
                                     colors,
                                 )
-                                .flex_1()
+                                .w_full()
+                                .min_w_0()
                                 .bg(colors.tint(colors.accent))
                                 .border_color(gpui::transparent_black())
                                 .text_color(colors.accent)
@@ -1598,6 +1654,40 @@ impl PhoneApp {
                 )
         };
         let used = details.context_percent.unwrap_or(0).min(100) as f32 / 100.;
+        let live = self.store.as_ref().and_then(|store| store.live.as_ref());
+        let adjustable = live.is_some_and(|live| live.supports_compaction_threshold(id))
+            && details.auto_compaction_enabled
+            && details.compaction_percent.is_some();
+        let slider = adjustable.then(|| {
+            let live = live.unwrap();
+            let pending = live.compaction_threshold_pending(id);
+            let max = live.compaction_threshold_max(id).unwrap_or(95.);
+            let app = cx.entity().downgrade();
+            crate::threshold_slider::ContextSlider {
+                id,
+                percent: pending.unwrap_or(details.compaction_percent.unwrap()),
+                max,
+                used: details.context_percent.map(|used| used.min(100) as u8),
+                enabled: live.session_current(id) && pending.is_none() && max >= 10.,
+                pending: pending.is_some(),
+                colors: *colors,
+                on_commit: std::rc::Rc::new(move |percent, _, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        // A released gesture must still belong to this sheet/session.
+                        if this.sheet != Some(Sheet::Details(id)) {
+                            return;
+                        }
+                        if let Some(live) =
+                            this.store.as_mut().and_then(|store| store.live.as_mut())
+                            && let Err(error) = live.set_compaction_threshold(id, percent)
+                        {
+                            this.notify_user(error, cx);
+                        }
+                        cx.notify();
+                    });
+                }),
+            }
+        });
         div()
             .pb(px(8.))
             .children(run)
@@ -1659,50 +1749,71 @@ impl PhoneApp {
                             )
                             .child(meta(details.context_tokens.clone())),
                     )
-                    .child(
-                        div()
-                            .relative()
-                            .mt(px(12.))
-                            .h(px(8.))
-                            .rounded(px(4.))
-                            .bg(colors.raised)
+                    .children(slider)
+                    .when(!adjustable, |section| {
+                        section
                             .child(
                                 div()
-                                    .absolute()
-                                    .left_0()
-                                    .top_0()
-                                    .bottom_0()
-                                    .w(relative(used))
+                                    .relative()
+                                    .mt(px(12.))
+                                    .h(px(8.))
                                     .rounded(px(4.))
-                                    .bg(colors.accent),
+                                    .bg(colors.raised)
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .top_0()
+                                            .bottom_0()
+                                            .w(relative(used))
+                                            .rounded(px(4.))
+                                            .bg(colors.accent),
+                                    )
+                                    .children(
+                                        details
+                                            .compaction_percent
+                                            .filter(|_| details.auto_compaction_enabled)
+                                            .map(|percent| {
+                                                div()
+                                                    .absolute()
+                                                    .left(relative(
+                                                        (percent / 100.).clamp(0., 1.) as f32
+                                                    ))
+                                                    .top(px(-4.))
+                                                    .bottom(px(-4.))
+                                                    .w(px(2.))
+                                                    .rounded(px(1.))
+                                                    .bg(colors.line_strong)
+                                            }),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .absolute()
-                                    .left(relative(COMPACTS_AT))
-                                    .top(px(-4.))
-                                    .bottom(px(-4.))
-                                    .w(px(2.))
-                                    .rounded(px(1.))
-                                    .bg(colors.line_strong),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt(px(8.))
-                            .flex()
-                            .child(
-                                meta(details.context_percent.map_or_else(
-                                    || "Usage not reported".into(),
-                                    |percent| format!("{percent}% used"),
-                                ))
-                                .flex_1(),
+                                    .mt(px(8.))
+                                    .flex()
+                                    .child(
+                                        meta(details.context_percent.map_or_else(
+                                            || "Usage not reported".into(),
+                                            |percent| format!("{percent}% used"),
+                                        ))
+                                        .flex_1(),
+                                    )
+                                    .child(
+                                        meta(compaction_label(
+                                            details.auto_compaction_enabled,
+                                            details.compaction_percent,
+                                        ))
+                                        .debug_selector(|| "details-compaction-policy".into()),
+                                    ),
                             )
-                            .child(meta(format!(
-                                "compacts at {}%",
-                                (COMPACTS_AT * 100.) as u32
-                            ))),
-                    ),
+                    })
+                    .when(details.background_compacting, |section| {
+                        section.child(
+                            meta("Compacting in background…".into())
+                                .debug_selector(|| "details-background-compaction".into())
+                                .mt(px(8.)),
+                        )
+                    }),
             )
             .child(
                 row(
@@ -1820,19 +1931,26 @@ impl PhoneApp {
             .collect();
         let count = offered.len();
         let selected_identity = self
-            .store
+            .schedules
+            .draft
             .as_ref()
-            .and_then(|store| store.live.as_ref())
-            .and_then(|live| self.model_session().and_then(|id| live.current_model(id)))
-            .map(|model| (model.provider.clone(), model.id.clone()))
+            .filter(|_| self.route() == Route::ScheduleEdit)
+            .map(|draft| (draft.provider.clone(), draft.model_id.clone()))
             .or_else(|| {
-                self.model_session()
-                    .is_none()
-                    .then(|| {
-                        let prefs = self.prefs(cx);
-                        prefs.model_provider.clone().zip(prefs.model_id.clone())
+                self.store
+                    .as_ref()
+                    .and_then(|store| store.live.as_ref())
+                    .and_then(|live| self.model_session().and_then(|id| live.current_model(id)))
+                    .map(|model| (model.provider.clone(), model.id.clone()))
+                    .or_else(|| {
+                        self.model_session()
+                            .is_none()
+                            .then(|| {
+                                let prefs = self.prefs(cx);
+                                prefs.model_provider.clone().zip(prefs.model_id.clone())
+                            })
+                            .flatten()
                     })
-                    .flatten()
             });
         let models = offered
             .into_iter()
@@ -1867,7 +1985,9 @@ impl PhoneApp {
                     .flex_none()
                     .child(self.sheet_title("Choose model", colors, cx))
                     .child(ui::hint(
-                        if self.model_session().is_some() {
+                        if self.route() == Route::ScheduleEdit {
+                            "For future occurrences of this schedule."
+                        } else if self.model_session().is_some() {
                             "For prompts in this session."
                         } else {
                             "Default for new sessions."
@@ -1968,6 +2088,59 @@ impl PhoneApp {
             .child(ui::hint("Higher effort can use more tokens and take longer. Available levels depend on the model.", colors).mt(px(12.)))
     }
 
+    fn swarm_toggle_row(
+        &self,
+        id: SessionId,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        let store = self.store.as_ref();
+        let live = store.and_then(|store| store.live.as_ref());
+        let sample = store.is_some_and(|store| store.is_sample());
+        let on = if sample {
+            self.session(id)
+                .map(|session| session.details.swarm_enabled.unwrap_or(true))
+        } else {
+            live.and_then(|live| live.swarm_enabled(id))
+        };
+        let pending = live.is_some_and(|live| live.swarm_toggle_pending(id));
+        let connected = sample || live.is_some_and(|live| live.session_current(id));
+        let available = on.is_some() && connected && !pending;
+        ui::row("swarm-toggle", true, colors)
+            .debug_selector(|| "swarm-toggle".into())
+            .child(icon("fork", 20., colors.muted))
+            .child(div().flex_1().min_w_0()
+                .child(div().text_size(px(15.)).child("Swarm"))
+                .child(ui::hint(if pending {
+                    "Waiting for the computer…"
+                } else if on.is_none() {
+                    "This session needs an updated computer helper."
+                } else if !connected {
+                    "Reconnect to change this session's Swarm setting."
+                } else {
+                    "Allow peer messaging for new subagent crews. Existing crews continue."
+                }, colors).mt(px(4.))))
+            .child(match on {
+                Some(on) => super::switch(on, colors).when(!available, |switch| switch.opacity(0.5)).into_any_element(),
+                None => ui::hint("Unavailable", colors).into_any_element(),
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !available { return; }
+                let Some(store) = this.store.as_mut() else { return; };
+                let enabled = !on.unwrap();
+                if let Some(live) = store.live.as_mut() {
+                    if let Err(error) = live.set_swarm_enabled(id, enabled) {
+                        this.notify_user(error, cx);
+                    }
+                } else if store.is_sample()
+                    && let Some(session) = store.sessions.iter_mut().find(|session| session.id == id)
+                {
+                    session.details.swarm_enabled = Some(enabled);
+                }
+                cx.notify();
+            }))
+    }
+
     fn more_sheet(&self, id: SessionId, colors: &Theme, cx: &Context<Self>) -> Div {
         let Some(session) = self.session(id) else {
             return div();
@@ -2036,26 +2209,35 @@ impl PhoneApp {
             colors.coral,
             Box::new(move |this, _, cx| this.open_sheet(Sheet::Delete(id), cx)),
         ));
-        div().pb(px(8.)).child(
-            ui::card(colors)
-                .mt(px(8.))
-                .children(rows.into_iter().enumerate().map(
-                    |(index, (glyph, text, color, action))| {
-                        ui::row(("action", index), index == 0, colors)
-                            .child(icon(glyph, 20., color))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(15.))
-                                    .when(glyph == "stop", |text| text.text_color(colors.coral))
-                                    .child(text),
-                            )
-                            .on_click(
-                                cx.listener(move |this, _, window, cx| action(this, window, cx)),
-                            )
-                    },
-                )),
-        )
+        div()
+            .pb(px(8.))
+            .child(
+                ui::card(colors)
+                    .mt(px(8.))
+                    .child(self.swarm_toggle_row(id, colors, cx)),
+            )
+            .child(
+                ui::card(colors)
+                    .mt(px(8.))
+                    .children(rows.into_iter().enumerate().map(
+                        |(index, (glyph, text, color, action))| {
+                            ui::row(("action", index), index == 0, colors)
+                                .child(icon(glyph, 20., color))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(15.))
+                                        .when(glyph == "stop", |text| text.text_color(colors.coral))
+                                        .child(text),
+                                )
+                                .on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        action(this, window, cx)
+                                    }),
+                                )
+                        },
+                    )),
+            )
     }
 
     fn models_sheet(&self, colors: &Theme, _: &Context<Self>) -> Div {
@@ -2153,8 +2335,286 @@ fn shorten(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{activity_stage, shorten};
+    use super::{activity_stage, compaction_label, shorten};
     use crate::model::{Stage, StageKind, StageStatus, Turn};
+
+    #[gpui::test]
+    fn the_session_swarm_toggle_does_not_change_existing_crews(cx: &mut gpui::TestAppContext) {
+        use crate::{
+            app::{PhoneApp, Sheet},
+            model::SessionId,
+        };
+        use gpui::{px, size};
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        for width in [320., 412.] {
+            cx.simulate_resize(size(px(width), px(640.)));
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.preview("subagents", window, cx);
+                    app.open_sheet(Sheet::More(SessionId(1)), cx);
+                    app.sheet_motion.finish();
+                })
+            });
+            cx.run_until_parked();
+            let before = app.read_with(cx, |app, _| app.store.as_ref().unwrap().sessions.clone());
+            for enabled in [false, true] {
+                let toggle = cx.debug_bounds("swarm-toggle").unwrap();
+                assert!(toggle.left() >= px(0.) && toggle.right() <= px(width));
+                cx.simulate_click(toggle.center(), gpui::Modifiers::none());
+                cx.run_until_parked();
+                app.read_with(cx, |app, _| {
+                    let mut expected = before.clone();
+                    expected
+                        .iter_mut()
+                        .find(|session| session.id == SessionId(1))
+                        .unwrap()
+                        .details
+                        .swarm_enabled = Some(enabled);
+                    assert_eq!(app.store.as_ref().unwrap().sessions, expected);
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn diff_numbers_keep_card_padding_and_a_shared_code_column(cx: &mut gpui::TestAppContext) {
+        use crate::{app::PhoneApp, model::SessionId};
+        use gpui::{px, size};
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        for width in [320., 412.] {
+            cx.simulate_resize(size(px(width), px(915.)));
+            for (fixture, card) in [
+                ("diff-spacing", "activity-live-diff"),
+                ("call-diff-spacing", "call-diff"),
+            ] {
+                // Cross digit boundaries, including the largest supported number.
+                for start in [998, 99_998, u32::MAX - 4] {
+                    cx.update(|window, cx| {
+                        app.update(cx, |app, cx| {
+                            app.preview(fixture, window, cx);
+                            let stage = app
+                                .store
+                                .as_mut()
+                                .unwrap()
+                                .sessions
+                                .iter_mut()
+                                .find(|session| session.id == SessionId(1))
+                                .unwrap()
+                                .turns[0]
+                                .stage_mut(StageKind::Change);
+                            for (index, line) in stage.diff.iter_mut().enumerate() {
+                                line.number = if index == 0 { 0 } else { start + index as u32 };
+                            }
+                            stage.tools[0].diff = stage.diff.clone();
+                            app.sheet_motion.finish();
+                            cx.notify();
+                        })
+                    });
+                    cx.run_until_parked();
+                    let card = cx.debug_bounds(card).unwrap();
+                    let mut code_left = None;
+                    for number in [0, start + 1, start + 2, start + 3, start + 4] {
+                        let digits = cx
+                            .debug_bounds(format!("diff-number-{number}").leak())
+                            .unwrap();
+                        let code = cx
+                            .debug_bounds(format!("diff-code-{number}").leak())
+                            .unwrap();
+                        assert!(
+                            digits.left() >= card.left() + px(12.),
+                            "{fixture}: {number} touches the border"
+                        );
+                        assert!(
+                            digits.size.height <= px(20.),
+                            "line numbers must never wrap"
+                        );
+                        assert!(
+                            code.left() - digits.right() >= px(10.),
+                            "keep the gap before code"
+                        );
+                        assert!(
+                            code.right() <= card.right(),
+                            "wrapped code stays inside the card"
+                        );
+                        if let Some(left) = code_left {
+                            assert_eq!(code.left(), left, "all code rows must align");
+                        }
+                        code_left = Some(code.left());
+                    }
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn an_open_call_shows_its_full_diff_and_updates_without_reopening(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            app::{PhoneApp, Sheet},
+            model::{DiffLine, LineKind, SessionId},
+        };
+        use gpui::{px, size};
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(size(px(384.), px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("done", window, cx);
+                let session = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == SessionId(1))
+                    .unwrap();
+                let tool = &mut session.turns[0].stage_mut(StageKind::Change).tools[0];
+                tool.diff = (0..24)
+                    .map(|n| DiffLine::new(LineKind::Added, 0, &format!("new_{n}();")))
+                    .collect();
+                tool.diff_is_preview = true;
+                tool.finished = false;
+                // A different call owns the stage summary; never show that here.
+                session.turns[0].stage_mut(StageKind::Change).diff.clear();
+                app.open_sheet(Sheet::Call(SessionId(1), 0, StageKind::Change, 0), cx);
+                app.sheet_motion.finish();
+            });
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("call-diff").is_some());
+        assert!(cx.debug_bounds("call-diff-requested").is_some());
+        assert!(
+            cx.debug_bounds("call-diff-line-23").is_some(),
+            "do not truncate to eight lines"
+        );
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let session = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == SessionId(1))
+                    .unwrap();
+                let tool = &mut session.turns[0].stage_mut(StageKind::Change).tools[0];
+                tool.diff = vec![DiffLine::new(LineKind::Added, 42, "applied();")];
+                tool.diff_is_preview = false;
+                tool.finished = true;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("call-diff-applied").is_some());
+        assert!(cx.debug_bounds("call-diff-requested").is_none());
+        assert!(cx.debug_bounds("call-diff-line-0").is_some());
+        assert!(cx.debug_bounds("call-diff-line-23").is_none());
+    }
+
+    #[gpui::test]
+    fn long_call_output_can_be_copied_from_the_top_or_selected_by_holding(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::{
+            app::{PhoneApp, Sheet},
+            model::SessionId,
+        };
+        use gpui::{InputEvent, point, px, size};
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(size(px(384.), px(854.)));
+        let output = "test passed — café 中文\n".repeat(120);
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("call", window, cx);
+                let session = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == SessionId(1))
+                    .unwrap();
+                session.turns[0].stage_mut(StageKind::Verify).tools[0].output = output.clone();
+                app.sheet_motion.finish();
+            });
+        });
+        cx.run_until_parked();
+        let button = cx
+            .debug_bounds("copy-call-output")
+            .expect("copy beside the output heading");
+        assert!(button.top() > px(0.) && button.bottom() < px(854.));
+        cx.simulate_click(button.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some(output.as_str())
+        );
+        let output_bounds = cx.debug_bounds("call-output").unwrap();
+        let position = output_bounds.origin + point(px(40.), px(30.));
+        for phase in [gpui::TouchPhase::Started, gpui::TouchPhase::Ended] {
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    gpui::TouchEvent {
+                        id: gpui::TouchId(95),
+                        position,
+                        phase,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            if phase == gpui::TouchPhase::Started {
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(501));
+                cx.run_until_parked();
+            }
+        }
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.sheet, Some(Sheet::SelectText));
+            assert_eq!(app.selectable.read(cx).text(), output);
+        });
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.sheet_motion.finish();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("text-menu").is_some(),
+            "the first selection must show Copy without an extra tap"
+        );
+    }
+
+    #[gpui::test]
+    fn ask_about_call_fits_the_footer_on_narrow_screens(cx: &mut gpui::TestAppContext) {
+        use crate::app::PhoneApp;
+        use gpui::{point, px, size};
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        for (width, height) in [(320., 640.), (384., 854.), (640., 360.)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.preview("call", window, cx);
+                    app.sheet_motion.finish();
+                    app.sheet_scroll.set_offset(point(px(0.), px(-100_000.)));
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            let ask = cx.debug_bounds("ask-about-call").unwrap();
+            assert!(ask.left() >= px(0.) && ask.right() <= px(width));
+            assert!(ask.top() >= px(0.) && ask.bottom() <= px(height));
+            assert!(
+                ask.size.width > px(width - 60.),
+                "Ask gets the full footer width"
+            );
+        }
+    }
 
     #[test]
     fn an_open_activity_stays_with_its_stage_when_stages_reorder() {
@@ -2175,6 +2635,19 @@ mod tests {
             activity_stage(&turn, StageKind::Change).unwrap().what,
             "Changing"
         );
+    }
+
+    #[test]
+    fn compaction_labels_never_invent_an_unreported_threshold() {
+        assert_eq!(
+            compaction_label(true, Some(81.9294)),
+            "auto-compacts above 81.9%"
+        );
+        assert_eq!(
+            compaction_label(false, Some(81.9294)),
+            "auto-compaction off"
+        );
+        assert_eq!(compaction_label(true, None), "auto-compaction on");
     }
 
     #[test]

@@ -31,6 +31,43 @@ fn invalid_and_unterminated_records_are_errors() {
 }
 
 #[test]
+fn compaction_threshold_command_and_confirmed_policy_use_the_wire_contract() {
+    assert!(serde_json::from_value::<Command>(json!({"type":"set_compaction_threshold"})).is_err());
+    assert_eq!(
+        serde_json::from_value::<Command>(
+            json!({"type":"set_compaction_threshold","percent":null})
+        )
+        .unwrap(),
+        Command::SetCompactionThreshold { percent: None }
+    );
+    let command = Command::SetCompactionThreshold { percent: Some(70.) };
+    assert_eq!(command.name(), "set_compaction_threshold");
+    assert_eq!(command.route(), pi_core::protocol::Route::Pi);
+    assert_eq!(
+        command.record("setting").unwrap(),
+        json!({"type":"set_compaction_threshold","id":"setting","percent":70.})
+    );
+    assert_eq!(
+        Command::SetCompactionThreshold { percent: None }
+            .record("reset")
+            .unwrap(),
+        json!({"type":"set_compaction_threshold","id":"reset","percent":null})
+    );
+    let mut session = Session::default();
+    session.apply(&json!({"type":"response","command":"set_compaction_threshold","success":true,
+        "data":{"percent":70.,"compaction":{"enabled":true,"reserveTokens":16384,"backgroundTokens":43616}}})).unwrap();
+    assert_eq!(
+        session.stats.compaction.as_ref().unwrap().background_tokens,
+        43616
+    );
+    session.apply(&json!({"type":"response","command":"set_compaction_threshold","success":false,"error":"not committed"})).unwrap();
+    assert_eq!(
+        session.stats.compaction.as_ref().unwrap().background_tokens,
+        43616
+    );
+}
+
+#[test]
 fn commands_use_exact_pi_wire_names_and_preserve_text() {
     assert_eq!(
         Command::Prompt {
@@ -196,6 +233,105 @@ fn only_settled_ends_a_run_not_agent_end_or_acknowledgement() {
             !session.busy(),
             "a late acknowledgement must not restart a settled run"
         );
+    }
+}
+
+#[test]
+fn navigation_response_settles_tree_summary_retries_on_success_cancellation_and_failure() {
+    for response in [
+        json!({"type":"response","command":"navigate_tree","success":true,"data":{}}),
+        json!({"type":"response","command":"navigate_tree","success":true,"data":{"cancelled":true}}),
+        json!({"type":"response","command":"navigate_tree","success":false,"error":"Summary failed"}),
+    ] {
+        let mut session = Session::default();
+        let scheduled = json!({"type":"summarization_retry_scheduled","attempt":1});
+        for event in [
+            scheduled.clone(),
+            json!({"type":"summarization_retry_attempt_start","source":"branchSummary"}),
+            json!({"type":"summarization_retry_finished"}),
+        ] {
+            session.apply(&event).unwrap();
+        }
+        assert_eq!(session.run, RunState::Retrying);
+        assert!(session.busy());
+        session.apply(&response).unwrap();
+        assert_eq!(session.run, RunState::Idle, "{response}");
+        assert!(!session.busy());
+        assert!(!session.state.is_compacting);
+        assert_eq!(session.retries, vec![scheduled]);
+        assert_eq!(
+            session.error.as_deref(),
+            if response["success"] == false {
+                Some("Summary failed")
+            } else {
+                None
+            }
+        );
+        session.apply(&json!({"type":"response","command":"get_state","success":true,"data":{"isStreaming":false,"isCompacting":false}})).unwrap();
+        assert_eq!(session.run, RunState::Idle);
+    }
+}
+
+#[test]
+fn navigation_completion_does_not_demote_a_newer_agent_run() {
+    let mut session = Session::default();
+    session
+        .apply(&json!({"type":"summarization_retry_scheduled","source":"branchSummary"}))
+        .unwrap();
+    session.apply(&json!({"type":"agent_start"})).unwrap();
+    session.apply(&json!({"type":"compaction_start"})).unwrap();
+    session
+        .apply(&json!({"type":"summarization_retry_finished","source":"compaction"}))
+        .unwrap();
+    session
+        .apply(&json!({"type":"response","command":"navigate_tree","success":true,"data":{}}))
+        .unwrap();
+    assert_eq!(session.run, RunState::Compacting);
+    assert!(session.state.is_streaming);
+    assert!(session.state.is_compacting);
+    assert!(session.busy());
+    session
+        .apply(&json!({"type":"compaction_end","result":{}}))
+        .unwrap();
+    session.apply(&json!({"type":"agent_settled"})).unwrap();
+    assert_eq!(session.run, RunState::Idle);
+}
+
+#[test]
+fn navigation_responses_do_not_settle_standalone_manual_compaction_or_its_retry() {
+    for retrying in [false, true] {
+        for success in [false, true] {
+            let mut session = Session::default();
+            session
+                .apply(&json!({"type":"compaction_start","reason":"manual"}))
+                .unwrap();
+            if retrying {
+                session
+                    .apply(&json!({"type":"summarization_retry_scheduled","attempt":1}))
+                    .unwrap();
+                session
+                    .apply(
+                        &json!({"type":"summarization_retry_attempt_start","source":"compaction"}),
+                    )
+                    .unwrap();
+                session
+                    .apply(&json!({"type":"summarization_retry_finished"}))
+                    .unwrap();
+            }
+            let expected = if retrying {
+                RunState::Retrying
+            } else {
+                RunState::Compacting
+            };
+            session.apply(&json!({"type":"response","command":"navigate_tree","success":success,"error":"Wait for compaction to finish","data":{}})).unwrap();
+            assert_eq!(session.run, expected);
+            assert!(!session.state.is_streaming);
+            assert!(session.state.is_compacting);
+            assert!(session.busy());
+            session.apply(&json!({"type":"response","command":"get_state","success":true,"data":{"isStreaming":false,"isCompacting":false}})).unwrap();
+            assert_eq!(session.run, expected);
+            assert!(session.state.is_compacting);
+        }
     }
 }
 

@@ -16,8 +16,8 @@ use std::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct Forked {
     pub cwd: PathBuf,
-    /// `None` for a fork with no reply yet, which pi saves only once it has one:
-    /// the desktop starts a new session in `cwd` with the draft.
+    /// `None` when the retained prefix is empty or setup-only, so Pi hasn't
+    /// persisted it. The desktop starts a new session in `cwd` with the draft.
     pub saved: Option<SavedSession>,
     /// The forked user message, to edit and send again.
     pub draft: String,
@@ -287,16 +287,26 @@ pub async fn fork(
         });
     }
     let state: SessionState = serde_json::from_value(request(&client, Command::GetState).await?)?;
+    forked_session(cwd, &path, &expected_id, draft, state)
+}
+
+fn forked_session(
+    cwd: PathBuf,
+    original_path: &str,
+    original_id: &str,
+    draft: String,
+    state: SessionState,
+) -> Result<Forked> {
     let id = state.session_id.context("Fork returned no session ID")?;
     let new_path = state
         .session_file
         .context("Fork returned no session path")?;
-    if id == expected_id || new_path == path {
+    if id == original_id || new_path == original_path {
         bail!("Pi did not create a distinct fork");
     }
     Ok(Forked {
         cwd: cwd.clone(),
-        saved: Some(SavedSession {
+        saved: Path::new(&new_path).is_file().then(|| SavedSession {
             id,
             path: new_path,
             cwd: cwd.to_string_lossy().into_owned(),
@@ -311,6 +321,73 @@ pub async fn fork(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_forks_are_saved_only_when_pi_persisted_the_retained_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fork.jsonl");
+        let state = SessionState {
+            session_id: Some("fork-id".into()),
+            session_file: Some(path.to_string_lossy().into_owned()),
+            session_name: Some("Fork name".into()),
+            ..Default::default()
+        };
+        let fork = || {
+            forked_session(
+                dir.path().into(),
+                "original.jsonl",
+                "original-id",
+                "First prompt".into(),
+                state.clone(),
+            )
+            .unwrap()
+        };
+        let setup_only = fork();
+        assert_eq!(setup_only.cwd, dir.path());
+        assert_eq!(setup_only.draft, "First prompt");
+        assert!(setup_only.saved.is_none());
+        assert!(
+            !path.exists(),
+            "The host must not force Pi's session persistence"
+        );
+
+        std::fs::write(&path, "persisted by Pi").unwrap();
+        let persisted = fork().saved.unwrap();
+        assert_eq!(persisted.id, "fork-id");
+        assert_eq!(persisted.path, path.to_string_lossy());
+        assert_eq!(persisted.cwd, dir.path().to_string_lossy());
+        assert_eq!(persisted.name.as_deref(), Some("Fork name"));
+        assert_eq!(persisted.first_message, "First prompt");
+    }
+
+    #[test]
+    fn ordinary_forks_require_distinct_identity_even_without_a_saved_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_path = dir
+            .path()
+            .join("original.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let fork_path = dir.path().join("fork.jsonl").to_string_lossy().into_owned();
+        for (id, path) in [
+            ("original-id", fork_path),
+            ("fork-id", original_path.clone()),
+        ] {
+            let error = forked_session(
+                dir.path().into(),
+                &original_path,
+                "original-id",
+                "Draft".into(),
+                SessionState {
+                    session_id: Some(id.into()),
+                    session_file: Some(path),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("distinct fork"));
+        }
+    }
 
     #[test]
     fn only_saved_session_files_pass_the_check_before_deletion() {

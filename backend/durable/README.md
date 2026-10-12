@@ -123,6 +123,52 @@ Each subagent starts as a copy of the session's agent, with its instructions, th
 
 Progress is the session document `app.subagent-calls`, by call ID: per subagent its task, state, latest step, time, cost, model and the start of its answer, at most once a second. The snapshots carry it, and the apps show it on the call. A transcript never rides along: `get_subagent` returns one subagent's messages, and `stop_subagent` stops one while the others carry on. Both accept only the session's own subagents.
 
+### Peer communication (opt-in swarm)
+
+A parallel call can opt into a **read-only swarm** with `swarm: true`. Ordinary subagent calls and chains keep their existing behavior. This first implementation uses 2–8 peers, so every peer can run without waiting behind the crew’s eight-worker limit.
+
+```json
+{
+  "swarm": true,
+  "tasks": [
+    { "agent": "client-scout", "task": "Find v1 clients; share constraints with the protocol scout.", "tools": ["read"] },
+    { "agent": "protocol-scout", "task": "Inspect the cursor contract; ask the client scout about compatibility.", "tools": ["read"] }
+  ]
+}
+```
+
+Each child gets a stable address (`peer-1`, `peer-2`, …), its own ID, and a roster of peer IDs, names and delegated tasks. **The model selects a recipient from that roster**, using the peer’s responsibility; it never addresses a display name or guesses a conversation ID. Repeated agent names are allowed because the IDs remain distinct.
+
+Child-only tools:
+
+- `swarm_members`: look up this crew’s authorized roster.
+- `swarm_send`: send a bounded `finding`, `question` or correlated `reply` to an exact peer ID, with a persistent request ID. The broker binds the sender to the executing child and refuses foreign, invalid or ended recipients.
+- `swarm_receive`: explicitly retrieve a bounded mailbox batch. Retrieval is replay/deduplication-aware within the original active delegation; later child follow-ups cannot replay that crew’s tools or receipts. A message cannot silently create a new child turn or spill into another session.
+
+The broker and mailboxes live in the crew’s durable state on the computer. Agents retain separate conversations. Only addressed, agent-originated messages enter their peer tool results; there is no shared transcript, network port or Android-to-agent socket. Committed progress includes a bounded roster and recent exchange projection under `app.subagent-calls`, so the existing SSH stream can show it without shipping all mailboxes.
+
+**Queued** means accepted by the broker, **Received** means explicitly retrieved by the recipient’s tool, and **Cancelled** means undelivered work was closed. Received does not mean understood, agreed with, answered or successfully executed. A reply references the exact question; finishing or stopping an assignment closes its incoming mailbox and cancels its unanswered outgoing questions. Already-published findings and replies remain retrievable by active recipients, even after their author finishes. Closing the crew cancels all remaining queued mail. Messages do not restart terminal peers. Recovery reuses durable identities and existing receipts; it does not repeat interrupted unsafe commands.
+
+Mailboxes are bounded: 4,096 UTF-8 bytes per message, 256 messages per crew, 64 sends per peer, 8 sends per 10 seconds, and 32 queued messages per recipient. Retrieval returns up to 16 messages (8 by default); each peer has at most 256 persistent read receipts, including empty reads. `requestId` retries must retain identical arguments. UI projections retain the most recent 32 message events with 500-character previews.
+
+For now peers have **only `read`**. Explicit or preset policies granting `write`, `edit` or `bash` are rejected for swarms; the parent remains the writer. Merely removing `write` while retaining a shell would not prevent writes. Read access still has the existing host/project trust boundary; this is not an OS sandbox or protection against exposing data the peer is already allowed to read.
+
+No automatic dependency scheduler, blocking peer waits, shared mutable artifacts, parallel editing worktrees or user-question escalation is provided by this slice. Ask peers to receive at useful tool boundaries and report unfinished dependencies rather than poll forever. Provider/model execution is not an exactly-once side-effect guarantee.
+
+The runner advertises `swarm_messaging` and the `set_swarm_enabled` command. The latter accepts a strict boolean `enabled`, persists the conversation-owned permission before acknowledging, and reports it through `get_settings.effective.subagents.swarmEnabled` and `app.desktop.swarmEnabled`. Missing settings in older sessions default to enabled. Disabling blocks new explicit `swarm:true` admissions in the admission transaction; it never silently downgrades them, blocks ordinary delegation, or changes admitted crews, replay, or mailbox access. The model also receives the current policy in its prompt.
+
+Rebuild/install the durable runner and helper, then use a fresh session; reconnecting an old daemon does not upgrade it. Android renders these exchanges inside the existing handoff card using the current app components, with last-observed labels while disconnected.
+
+## Context and compaction
+
+Automatic compaction uses durable's effective token policy, not a fixed percentage. With defaults it starts in the background above `contextWindow - 16384 - 32768` tokens and blocks the next request above `contextWindow - 16384`. Checks occur before model requests and require a safe history cut; crossing the mark on a final answer does not start idle work immediately. For a 272k window the boundaries are about 81.9% and 94%.
+
+Android's Details context marker is draggable with an updated helper. It previews locally and saves this session's background-start percentage on release, without changing the 16,384-token safety reserve or retained history. The slider ranges from 10% up to the model's safe limit (at most 95%); low thresholds still require a safe cut and enough older history. `set_compaction_threshold {percent: number}` persists intent in the conversation metadata; `percent: null` restores the original token defaults. The percentage is resolved against each generation's actual model window (including different-model subagents), clamped to the earlier blocking limit if necessary. Changing it does not enable disabled auto-compaction. Disconnected/pending controls are inert, and older helpers retain the read-only context bar.
+
+Stats use only assistant usage newer than the latest context boundary; immediately after a summary they estimate the active summary and retained messages instead. Stats carry `contextHeadId` so a delayed pre-summary read cannot restore the removed prefix's usage. The helper refreshes counts after answers, summary placement, model changes and manual compaction. Android shows the reported policy and separate background activity without disabling the chat; an older backend with no policy reports only whether auto-compaction is on.
+
+Rebuild the APK and durable-enabled helper/runner to use this behavior. Reconnecting an existing daemon does not replace its running binaries; let active work finish before explicitly restarting its owner, or use a fresh session.
+
 ## Headless use from a phone
 
 The standalone `pi-desktop-durable` is an internal JSONL worker, **not a network or browser server**. It needs `--state`, `--cwd`, `--key` and the Rust owner's inherited writer lock. Do not bypass that lock by setting internal ownership variables yourself.
@@ -135,8 +181,9 @@ Enable SSH, add the phone's public key to the account's `~/.ssh/authorized_keys`
 
 - Text prompts, coding tools, subagents, streaming committed-state snapshots, steering/follow-ups, stop/clear queue, naming, model/thinking controls and reconnection.
 - SQLite WAL uses `synchronous=FULL`; snapshots are not recovery checkpoints. Storage is `~/.pi/desktop/durable/<key>/`, not the binary cache. `PI_DESKTOP_REMOTE_STATE_DIR` redirects test endpoints/storage.
+- Provider streams are projected to public assistant messages before persistence. Tool-call parsing buffers (`partialJson`, `partialArgs`, `customInput`, `streamIndex`), provider block indexes, and Bedrock's binary `redactedChunks` thinking buffers are omitted without mutating the provider, so they cannot force repeated full-block updates or non-JSON partials. Public metadata/signatures and tool arguments are preserved. The existing durable partial-commit throttle and nested argument deltas remain authoritative; structural changes still use full-block fallback, and reconnect starts from a committed snapshot.
 - A detached daemon owns a Rust storage owner, which holds an OS writer lock inherited by the runner. A surviving orphan cannot silently admit a second writer. Owner-pipe EOF closes the harness without withdrawing its pending work. Old process descendants share the daemon-owned process group.
-- After worker/daemon/host failure, **explicit reconnect** opens the same storage and calls `resume()`. No unattended boot service or automatic daemon-restart loop yet.
+- After worker/daemon/host failure, **explicit reconnect** opens the same storage and calls `resume()`. Ad-hoc sessions have no automatic daemon-restart loop. The separate, opt-in [host scheduler](../../crates/pi_remote/README.schedules.md) reopens its own unresolved scheduled occurrences; it is not a service for every session.
 - Unsafe interrupted tools return an interrupted error, not an automatic replay. The model may choose subsequent actions; no task-success or exactly-once external-side-effect guarantee.
 - Prompt `requestId` is separate from transport correlation IDs. Admission is acknowledged after commit. `get_submission` resolves an uncertain admission; explicit same-key/same-payload retry deduplicates, a payload collision fails. There is no automatic retry or persistent desktop outbox yet. Receipt retention is bounded at 10,000 prompts without silent key eviction.
 - Stock host-side API-key/OAuth credentials, built-in providers, global model configuration, prompt templates, skills and manual compaction are integrated (see below). No interactive durable login, stock extension host, Pi packages, session-tree/fork migration or Windows durable ownership yet. Unsupported commands fail instead of starting stock Pi or local services.

@@ -10,8 +10,10 @@
 use gpui::{Pixels, Point, TouchEvent, TouchId, TouchPhase, point, px};
 use std::cell::RefCell;
 
+type ReleasePredicate = Box<dyn Fn(Point<Pixels>) -> bool>;
+
 thread_local! {
-    static SETTLED: RefCell<Option<Box<dyn Fn() -> bool>>> = RefCell::new(None);
+    static RELEASE: RefCell<Option<ReleasePredicate>> = RefCell::new(None);
 }
 
 /// GPUI treats a touch during a fling as catching it, never as a tap, even
@@ -19,11 +21,22 @@ thread_local! {
 /// already at its end. `settled` tells whether the app's scrolling has visibly
 /// stopped; a touch then lets go of any fling first, so it can still tap.
 pub fn release_settled_flings(settled: impl Fn() -> bool + 'static) {
-    SETTLED.with(|slot| *slot.borrow_mut() = Some(Box::new(settled)));
+    release_flings_before_touch(move |_| settled());
 }
 
-fn settled() -> bool {
-    SETTLED.with(|slot| slot.borrow().as_ref().is_some_and(|settled| settled()))
+/// Decide at primary touch-down whether to cancel momentum before recognizing
+/// the real contact. Apps can preserve catch-only touches inside a moving
+/// viewport while allowing taps on controls outside it.
+pub fn release_flings_before_touch(release: impl Fn(Point<Pixels>) -> bool + 'static) {
+    RELEASE.with(|slot| *slot.borrow_mut() = Some(Box::new(release)));
+}
+
+fn release_at(position: Point<Pixels>) -> bool {
+    RELEASE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|release| release(position))
+    })
 }
 
 /// One pointer of a motion event, already in logical pixels.
@@ -82,14 +95,14 @@ impl Touches {
             Action::Down => {
                 // A new gesture: anything still down was lost without an up.
                 self.cancel_all(&mut events);
-                if settled() {
-                    // A touch off screen catches the fling, and its cancel
-                    // lets go; the real touch that follows can tap.
-                    let away = point(px(-10_000.), px(-10_000.));
-                    events.push(event(TouchId(u64::MAX), TouchPhase::Started, away, None));
-                    events.push(event(TouchId(u64::MAX), TouchPhase::Cancelled, away, None));
-                }
                 if let Some(contact) = current.first() {
+                    if release_at(contact.position) {
+                        // A touch off screen catches the fling, and its cancel
+                        // lets go; the real touch still obeys tap/drag/hold rules.
+                        let away = point(px(-10_000.), px(-10_000.));
+                        events.push(event(TouchId(u64::MAX), TouchPhase::Started, away, None));
+                        events.push(event(TouchId(u64::MAX), TouchPhase::Cancelled, away, None));
+                    }
                     self.start(contact, &mut events);
                 }
             }
@@ -392,6 +405,10 @@ mod gesture_tests {
                         .min_h_0()
                         .overflow_y_scroll()
                         .track_scroll(&self.handle)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.taps += 1;
+                            cx.notify();
+                        }))
                         .children((0..200).map(|row| div().h(px(52.)).child(format!("Row {row}")))),
                 )
         }
@@ -441,8 +458,8 @@ mod gesture_tests {
             .unwrap();
     }
 
-    /// Flings the list, then taps the button above it.
-    fn fling_then_tap(cx: &mut TestAppContext) -> usize {
+    /// Flings the list, then starts a new contact inside or outside it.
+    fn fling_then_touch(cx: &mut TestAppContext, y: f32, drag: bool) -> usize {
         let handle = ScrollHandle::new();
         let window = cx.add_window({
             let handle = handle.clone();
@@ -469,22 +486,47 @@ mod gesture_tests {
             send(touches.translate(Action::Move, &[], &finger(100., y)), cx);
         }
         send(touches.translate(Action::Up, &[], &finger(100., 360.)), cx);
-        send(touches.translate(Action::Down, &[], &finger(100., 20.)), cx);
-        send(touches.translate(Action::Up, &[], &finger(100., 20.)), cx);
+        send(touches.translate(Action::Down, &[], &finger(100., y)), cx);
+        let end = if drag { y + 100. } else { y };
+        if drag {
+            send(touches.translate(Action::Move, &[], &finger(100., end)), cx);
+        }
+        send(touches.translate(Action::Up, &[], &finger(100., end)), cx);
         cx.run_until_parked();
         window.update(cx, |list, _, _| list.taps).unwrap()
     }
 
     #[gpui::test]
-    fn a_touch_on_a_moving_fling_only_catches_it(cx: &mut TestAppContext) {
+    fn without_viewport_information_moving_flings_remain_catch_only(cx: &mut TestAppContext) {
         release_settled_flings(|| false);
-        assert_eq!(fling_then_tap(cx), 0);
+        assert_eq!(fling_then_touch(cx, 20., false), 0);
+    }
+
+    #[gpui::test]
+    fn moving_flings_allow_outside_taps_but_not_inside_taps_or_drags(cx: &mut TestAppContext) {
+        release_flings_before_touch(|position| position.y < px(56.));
+        assert_eq!(
+            fling_then_touch(cx, 20., false),
+            1,
+            "outside control gets its first tap"
+        );
+        assert_eq!(
+            fling_then_touch(cx, 200., false),
+            0,
+            "inside only catches momentum"
+        );
+        assert_eq!(
+            fling_then_touch(cx, 20., true),
+            0,
+            "the real contact must still obey drag slop"
+        );
+        release_settled_flings(|| false);
     }
 
     #[gpui::test]
     fn a_touch_once_scrolling_has_settled_taps(cx: &mut TestAppContext) {
         release_settled_flings(|| true);
-        assert_eq!(fling_then_tap(cx), 1);
+        assert_eq!(fling_then_touch(cx, 20., false), 1);
         release_settled_flings(|| false);
     }
 }

@@ -1,6 +1,6 @@
 # Validation
 
-Validation is performed on Linux aarch64 using isolated projects and configuration. Local component tests and native Xvfb checks do not establish successful hosted releases, macOS/Windows behavior or live provider operation.
+Recorded validation includes Linux aarch64, Linux x86_64 and an Android x86_64 emulator, using isolated projects and configuration. Local component tests and native UI checks do not establish successful hosted releases, macOS/Windows behavior or live provider operation.
 
 ## Recorded local coverage
 
@@ -27,7 +27,7 @@ export CARGO_INCREMENTAL=0
 
 # Format only this repository, not the sibling Zed checkout.
 cargo fmt -p pi_core -p pi_editor -p pi_jj -p pi_lsp_bridge \
-  -p pi_settings -p pi_terminal -p pi-desktop -- --check
+  -p pi_settings -p pi_terminal -p pi-desktop -p pi_remote -p pi_android -- --check
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
 
@@ -83,6 +83,52 @@ Run additional scripts with the same Xvfb invocation:
 Capture scripts isolate HOME, XDG directories, agent configuration and project files. Scripts with real pi use `PI_DESKTOP_TEST_PI`, or fetch Pi's release binary into `artifacts/pi`, and log both stdio and the desktop channel through `scripts/pi-proxy.mjs`. Scripts with fake peers answer the channel through `fixtures/desktop_channel.py`. Historical tools are displayed, not replayed. The shell probe executes a harmless local fixture command; the diagnostic probe sends a prompt to a fake backend that rejects model execution. The process-scrollbar probe starts no Pi subprocesses. Pixel/OCR comparisons check specific geometry and content, not complete pixel equality or hardware frame rate.
 
 Logs, screenshots and protocol proofs are local, ignored outputs under `artifacts/`. Diagnostics apply best-effort redaction only; review them before sharing.
+
+## Android scheduling checks (2026-10-11)
+
+The approved [schedule study](../design/android/schedules/index.html) is implemented
+in native GPUI Android screens with a separate host-owned scheduler. See
+[host setup and execution policy](../crates/pi_remote/README.schedules.md) and the
+[native verification instructions](../crates/pi_android/scripts/SCHEDULER_VERIFICATION.md).
+
+Recorded local evidence is ignored under `artifacts/schedules-integration/` and
+`artifacts/schedules-native-20261011T144203Z/`. Android `ui-test` tests passed
+(**279 passed, two existing SSH/pairing tests ignored**); the Python harness
+safety suite passed all **14** tests. Warnings-denied workspace and Android
+`ui-test` Clippy passed. The x86_64 UI-test APK and production arm64 APK built;
+only the x86_64 UI-test APK was installed and exercised.
+
+Native verification used **one** API-35 emulator (`emulator-5554` / `pi_api35`),
+not two emulators: 720×1280 at 320 dpi and 1080×2400 at 420 dpi. Both runs passed
+create/edit/preview/consent, pause/resume, confirmed Run now/delete, distinct
+admission/history outcomes, linked-session Back navigation, offline/setup/
+unsupported guards, and light/dark rendering. Screenshots were visually
+inspected. Preferences remained byte-for-byte identical and physical display
+settings were restored. These inert sample flows prove UI behavior, **not**
+real SSH/provider scheduling. No real credentials, jobs or service installation
+were used.
+
+Reproduce the additional checks:
+
+```sh
+cargo test --locked -p pi_core -p pi_remote
+cargo test --locked -p pi_android --features ui-test
+cargo clippy --locked -p pi_android --features ui-test --all-targets --no-deps -- -D warnings
+python3 -m unittest discover -s crates/pi_android/scripts -p 'test_schedules_tooling.py' -v
+# Explicitly built faux-only fixture; never substitute the production runner.
+PI_DESKTOP_TEST_DURABLE_RUNNER="$PWD/artifacts/durable/pi-desktop-durable-fixture" \
+  cargo test --locked -p pi_remote --test durable --test schedules -- --ignored
+```
+
+The default workspace run encountered an unchanged terminal test assumption:
+`/bin/sh` is Bash 5.3 here and enables bracketed paste, while
+`multi_line_text_is_not_typed_without_bracketed_paste` assumes it is disabled.
+All **712** workspace tests passed (24 gated tests ignored) with an isolated
+temporary `INPUTRC` containing `set enable-bracketed-paste off`; neither shell
+configuration nor terminal source was changed. Both run logs are retained.
+Actual systemd/launchd installation, macOS scheduling and live-provider runs
+remain unverified; synthetic manager tests and faux runtime tests are not
+substitutes for those checks.
 
 ## CI and publication
 

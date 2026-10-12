@@ -25,7 +25,9 @@ const work = (name: string, replay: "safe" | "unsafe", release = "release") => d
     return { content: [{ type: "text" as const, text: "work complete" }] };
   },
 });
-faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
+let publishSwarm!: () => void;
+const swarmPublished = new Promise<void>((resolve) => { publishSwarm = resolve; });
+faux.setResponses(Array.from({ length: 100 }, () => async (transcript) => {
   const lastUser = transcript.messages.findLastIndex((message) => message.role === "user");
   const message = transcript.messages[lastUser];
   const text = message?.role === "user" ? message.content : "";
@@ -41,11 +43,15 @@ faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
   }
   const after = transcript.messages.slice(lastUser + 1);
   // Hands work to scouts: two tasks side by side, or one that runs the crash-test tool.
-  if (text === "delegate" || text === "delegate unsafe" || text === "delegate custom") {
+  if (text === "delegate" || text === "delegate unsafe" || text === "delegate custom" || text === "delegate swarm") {
+    const tools = transcript.messages.flatMap((message) => message.role === "system" ? message.toolsAdded ?? [] : []);
+    if (tools.some((tool) => tool.name.startsWith("swarm_"))) throw new Error("Parent must not receive peer tools");
     const result = after.find((message) => message.role === "toolResult");
     if (!result) {
       // "delegate custom" names agents no file defines, as a model splitting work up would.
-      const args: Record<string, JsonValue> = text === "delegate"
+      const args: Record<string, JsonValue> = text === "delegate swarm"
+        ? { tasks: [{ agent: "scout", task: "swarm sender" }, { agent: "scout", task: "swarm recipient" }], swarm: true }
+        : text === "delegate"
         ? { tasks: [{ agent: "scout", task: "find alpha" }, { agent: "scout", task: "find beta" }] }
         : text === "delegate custom"
           ? { tasks: [
@@ -57,7 +63,38 @@ faux.setResponses(Array.from({ length: 100 }, () => (transcript) => {
     const said = result.role === "toolResult" ? result.content.map((block) => block.type === "text" ? block.text : "").join("") : "";
     return fauxAssistantMessage(`Delegated: ${said}`);
   }
-  if (typeof text === "string" && text.startsWith("find ")) return fauxAssistantMessage(`found ${text.slice(5)}`);
+  if (typeof text === "string" && text.startsWith("find ")) {
+    const tools = transcript.messages.flatMap((message) => message.role === "system" ? message.toolsAdded ?? [] : []);
+    if (tools.some((tool) => tool.name.startsWith("swarm_"))) throw new Error("Ordinary children must not receive peer tools");
+    return fauxAssistantMessage(`found ${text.slice(5)}`);
+  }
+  if (text === "swarm sender" || text === "swarm recipient") {
+    const tools = transcript.messages.flatMap((message) => message.role === "system" ? message.toolsAdded ?? [] : []);
+    if (tools.map((tool) => tool.name).sort().join(",") !== "read,swarm_members,swarm_receive,swarm_send") {
+      throw new Error("Swarm child must have only read and peer tools");
+    }
+    const result = (id: string) => {
+      const message = after.find((entry) => entry.role === "toolResult" && entry.toolCallId === id);
+      if (message?.role !== "toolResult") return undefined;
+      if (message.isError) throw new Error(`Peer tool failed: ${JSON.stringify(message.content)}`);
+      return JSON.parse(message.content.map((block) => block.type === "text" ? block.text : "").join(""));
+    };
+    const roster = result("roster");
+    if (!roster) return fauxAssistantMessage(fauxToolCall("swarm_members", {}, { id: "roster" }), { stopReason: "toolUse" });
+    if (roster.self !== (text === "swarm sender" ? "peer-1" : "peer-2")) throw new Error("Wrong child-bound identity");
+    if (text === "swarm sender") {
+      if (!result("send")) return fauxAssistantMessage(fauxToolCall("swarm_send", {
+        to: "peer-2", kind: "finding", text: "SQLite keeps committed receipts", requestId: "finding",
+      }, { id: "send" }), { stopReason: "toolUse" });
+      publishSwarm();
+      return fauxAssistantMessage("swarm sent");
+    }
+    await swarmPublished;
+    const read = result("receive");
+    if (!read) return fauxAssistantMessage(fauxToolCall("swarm_receive", { requestId: "read" }, { id: "receive" }), { stopReason: "toolUse" });
+    if (read.messages[0]?.from !== "peer-1" || read.messages[0]?.status !== "received") throw new Error("Finding was not explicitly retrieved");
+    return fauxAssistantMessage(`swarm received: ${read.messages[0].text}`);
+  }
   // The subagents' answers, once they all finished.
   if (typeof text === "string" && text.startsWith("<subagent_report")) {
     return fauxAssistantMessage(`Heard back: ${text.split("\n").slice(3, -1).join(" ").trim()}`);

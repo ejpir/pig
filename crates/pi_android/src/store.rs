@@ -53,6 +53,8 @@ pub struct Store {
     pub(crate) live: Option<Live>,
     /// When each live session last moved, for the list's order.
     recency: HashMap<SessionId, u64>,
+    /// Phone receipt time of accepted session data; never advanced by repaint or disconnect.
+    pub(crate) observed_at: HashMap<SessionId, u64>,
     /// The sample's subagents, by conversation: a live computer sends its own.
     pub(crate) sample_subagents: HashMap<String, pi_core::session::Session>,
 }
@@ -75,6 +77,7 @@ impl Store {
             next_id: 8,
             live: None,
             recency: HashMap::new(),
+            observed_at: HashMap::new(),
             sample_subagents: HashMap::new(),
         }
     }
@@ -89,6 +92,7 @@ impl Store {
             next_id: 1,
             live: Some(live),
             recency: HashMap::new(),
+            observed_at: HashMap::new(),
             sample_subagents: HashMap::new(),
         };
         store.refresh_projects();
@@ -109,6 +113,7 @@ impl Store {
         }
         self.sessions.retain(|session| session.id != id);
         self.recency.remove(&id);
+        self.observed_at.remove(&id);
     }
 
     fn session_mut(&mut self, id: SessionId) -> Option<&mut Session> {
@@ -188,6 +193,9 @@ impl Store {
                 events.push(Event::Problem(problem.session, problem.text));
             }
             for id in ids {
+                if let Some(at) = live.observed_at(id) {
+                    self.observed_at.insert(id, at);
+                }
                 if !changed.contains(&id) {
                     changed.push(id);
                 }
@@ -454,6 +462,25 @@ mod queue_tests {
                 .unwrap();
         }
         store
+    }
+
+    #[test]
+    fn observation_time_does_not_advance_on_ticks_reads_disconnect_or_sample_records() {
+        let mut store = sample_queue();
+        store.observed_at.insert(SessionId(1), 123);
+        store.observed_at.insert(SessionId(2), 456);
+        store.tick(Duration::from_secs(1));
+        store.session(SessionId(1));
+        store.computer.connected = false;
+        store.apply(vec![(
+            Some(SessionId(1)),
+            Update::Record(1, serde_json::json!({"type":"remote_snapshot", "data":{}})),
+        )]);
+        assert_eq!(store.observed_at[&SessionId(1)], 123);
+        assert_eq!(store.observed_at[&SessionId(2)], 456);
+        store.remove(SessionId(1));
+        assert!(!store.observed_at.contains_key(&SessionId(1)));
+        assert_eq!(store.observed_at[&SessionId(2)], 456);
     }
 
     #[test]

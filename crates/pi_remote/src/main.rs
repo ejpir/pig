@@ -8,6 +8,7 @@ mod executable;
 mod files;
 mod history;
 mod pairing;
+mod schedules;
 mod server;
 mod sessions;
 use anyhow::{Context, Result, bail};
@@ -48,7 +49,7 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
         ),
         Some("--capabilities") => println!(
             "{}",
-            serde_json::json!({"pi":true,"durable":cfg!(unix),"durableExperimental":true,"watchers":true,"sessions":true,"directories":true,"commands":true,"jjHistory":true,"deleteSessions":cfg!(unix),"imagePrompts":cfg!(feature = "bundled-durable")})
+            serde_json::json!({"pi":true,"durable":cfg!(unix),"schedules":cfg!(any(target_os = "linux", target_os = "macos")),"durableExperimental":true,"watchers":true,"sessions":true,"directories":true,"commands":true,"jjHistory":true,"deleteSessions":cfg!(unix),"imagePrompts":cfg!(feature = "bundled-durable")})
         ),
         Some("activate") => {
             anyhow::ensure!(
@@ -129,6 +130,20 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
             directories::print(&path, show_hidden)?;
         }
         Some("files") if args.next().as_deref() == Some("--stdio") => files::serve()?,
+        Some("schedules") => {
+            anyhow::ensure!(
+                args.next().as_deref() == Some("--stdio") && args.next().is_none(),
+                "Usage: schedules --stdio"
+            );
+            schedules::serve()?;
+        }
+        Some("scheduler") => {
+            anyhow::ensure!(
+                !gateway,
+                "Scheduler lifecycle is local-only; the phone cannot install or start a service"
+            );
+            schedules::command(args.collect())?;
+        }
         Some("jj-history") if args.next().as_deref() == Some("--path") => {
             let path = args.next().context("jj-history needs a path")?;
             anyhow::ensure!(args.next().is_none(), "Unexpected jj-history argument");
@@ -154,7 +169,7 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
             server::daemon(target)?;
         }
         _ => bail!(
-            "Usage: pi-desktop-remote activate | pair [OPTIONS] | connect --stdio | files --stdio | sessions | models | commands | directories --path PATH [--show-hidden] | jj-history --path PATH | jj-enable --path PATH | jj-restore --path PATH --operation ID | pi [ARGS] | --version | --licenses"
+            "Usage: pi-desktop-remote activate | pair [OPTIONS] | connect --stdio | files --stdio | schedules --stdio | scheduler start/stop/status/install --confirm | sessions | models | commands | directories --path PATH [--show-hidden] | jj-history --path PATH | jj-enable --path PATH | jj-restore --path PATH --operation ID | pi [ARGS] | --version | --licenses"
         ),
     }
     Ok(())

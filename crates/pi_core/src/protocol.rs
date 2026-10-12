@@ -107,6 +107,14 @@ pub enum Command {
     SetAutoCompaction {
         enabled: bool,
     },
+    /// Per-session background compaction trigger; `None` restores the default.
+    SetCompactionThreshold {
+        #[serde(deserialize_with = "required_nullable_percent")]
+        percent: Option<f64>,
+    },
+    SetSwarmEnabled {
+        enabled: bool,
+    },
     GetSessionStats,
     ListSessions {
         scope: String,
@@ -191,6 +199,14 @@ pub enum Command {
     Reload,
 }
 
+// `Option` normally treats an absent field as null. Resetting a persisted setting
+// must require an explicit null; a malformed/missing percentage must fail closed.
+fn required_nullable_percent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<f64>, D::Error> {
+    Option::<f64>::deserialize(deserializer)
+}
+
 /// An image sent with a prompt; pi resizes it for the model if its settings say so.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ImageContent {
@@ -264,6 +280,8 @@ impl Command {
             | Self::GetEntries
             | Self::Fork { cwd: None, .. }
             | Self::SetAutoCompaction { .. }
+            | Self::SetCompactionThreshold { .. }
+            | Self::SetSwarmEnabled { .. }
             | Self::GetSessionStats
             | Self::Prompt { .. }
             | Self::ClearQueue
@@ -318,6 +336,8 @@ impl Command {
             Self::SetLabel { .. } => "set_label",
             Self::Fork { .. } => "fork",
             Self::SetAutoCompaction { .. } => "set_auto_compaction",
+            Self::SetCompactionThreshold { .. } => "set_compaction_threshold",
+            Self::SetSwarmEnabled { .. } => "set_swarm_enabled",
             Self::GetSessionStats => "get_session_stats",
             Self::ListSessions { .. } => "list_sessions",
             Self::Prompt { .. } => "prompt",
@@ -396,13 +416,28 @@ pub struct SessionState {
     pub is_streaming: bool,
     #[serde(default)]
     pub is_compacting: bool,
+    /// Durable compactions can run beside generation without blocking the chat.
+    #[serde(default)]
+    pub compactions: Vec<CompactionActivity>,
+    /// Latest durable context boundary; used to reject pre-compaction stats.
+    pub context_head_id: Option<u64>,
     pub is_bash_running: Option<bool>,
     #[serde(default)]
     pub auto_compaction_enabled: bool,
+    /// Host-owned permission for new swarm crews. None means unsupported/unreported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_enabled: Option<bool>,
     /// pi's current loadout from `get_active_tools`, not tools inferred from
     /// conversation history. Missing means not reported yet; `[]` means none active.
     #[serde(default)]
     pub active_tools: Option<Vec<ActiveTool>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionActivity {
+    pub task_id: u64,
+    pub blocking: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -519,6 +554,9 @@ pub struct SessionStats {
     pub tokens: Tokens,
     pub cost: Option<f64>,
     pub context_usage: Option<ContextUsage>,
+    /// Effective token policy, when exposed by the backend. Never assume 80%.
+    pub compaction: Option<CompactionPolicy>,
+    pub context_head_id: Option<u64>,
     #[serde(default)]
     pub total_messages: u64,
 }
@@ -531,6 +569,15 @@ pub struct Tokens {
     pub cache_read: u64,
     #[serde(default)]
     pub cache_write: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionPolicy {
+    pub enabled: bool,
+    pub reserve_tokens: u64,
+    #[serde(default)]
+    pub background_tokens: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

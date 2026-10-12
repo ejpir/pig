@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en" data-theme="moonstone">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Schedules · Pi for Android</title>
+<style>
+:root {
+  --page:#ece7e1; --canvas:#faf9f7; --panel:#f0ede8; --raised:#e4ded8;
+  --line:#ddd7d0; --line-strong:#cbc3bb; --selected:#e3dfd9; --composer:#fff;
+  --text:#252f3d; --secondary:#3e4753; --muted:#665f59; --faint:#8a837c;
+  --accent:#4b607c; --on-accent:#fff; --green:#2e7950; --amber:#8b631f; --coral:#a44835;
+  --read:#2f7fa8; --edit:#b0661a; --scrim:rgba(37,47,61,.38);
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"CommitMonoV143","SFMono-Regular",Consolas,monospace;
+}
+[data-theme="evening"], .evening {
+  --page:#0d1116; --canvas:#161d27; --panel:#1a212b; --raised:#252f3d;
+  --line:#363d46; --line-strong:#424954; --selected:#2d3239; --composer:#202731;
+  --text:#ebe7e4; --secondary:#d5d8db; --muted:#9ca2aa; --faint:#7d848d;
+  --accent:#8caecb; --on-accent:#111820; --green:#80bf95; --amber:#e5bd73; --coral:#efa08c;
+  --read:#5fa9d0; --edit:#e3a35c; --scrim:rgba(0,0,0,.52);
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--page); color:var(--text); font:15px/1.5 var(--sans); -webkit-font-smoothing:antialiased; }
+button,input,select,textarea { font:inherit; }
+button { cursor:pointer; }
+button:disabled { cursor:default; opacity:.5; }
+button,a,input,select,textarea { -webkit-tap-highlight-color:transparent; }
+:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+a { color:var(--accent); }
+button { color:inherit; }
+[hidden] { display:none !important; }
+svg { width:20px; height:20px; flex:none; vertical-align:middle; }
+.shell { max-width:1300px; margin:auto; padding:36px 28px 56px; }
+.masthead { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:40px; }
+.brand { display:flex; align-items:center; gap:10px; color:var(--text); text-decoration:none; font-weight:600; }
+.pi-mark { display:grid; place-items:center; width:32px; height:32px; border:1px solid var(--line-strong); border-radius:10px; font:italic 24px Georgia,serif; }
+.masthead .meta { letter-spacing:.08em; text-transform:uppercase; font-size:11px; }
+.hero { display:grid; grid-template-columns:1fr 300px; gap:44px; align-items:end; margin-bottom:32px; }
+.eyebrow { color:var(--muted); font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; }
+h1 { margin:12px 0 16px; font:italic 400 clamp(38px,4.7vw,62px)/1.08 Georgia,"DejaVu Serif",serif; letter-spacing:-.035em; }
+.lede { max-width:690px; color:var(--secondary); font-size:17px; line-height:1.65; margin:0; }
+.hero-note { border-left:1px solid var(--line-strong); padding:4px 0 4px 20px; }
+.hero-note b { display:block; margin:0 0 6px; font-size:14px; }
+.hero-note p { color:var(--muted); font-size:13px; margin:0; }
+.toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 0; border-top:1px solid var(--line-strong); border-bottom:1px solid var(--line-strong); margin-bottom:28px; flex-wrap:wrap; }
+.switcher { display:flex; gap:4px; padding:4px; background:var(--panel); border:1px solid var(--line); border-radius:24px; }
+.switcher button { border:0; min-height:40px; padding:0 18px; background:transparent; border-radius:20px; color:var(--muted); font-size:13px; font-weight:600; }
+.switcher button[aria-pressed="true"] { color:var(--text); background:var(--composer); box-shadow:0 1px 3px #0000000a; }
+.toolbar-right { display:flex; gap:16px; align-items:center; }
+.prototype { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:7px; }
+.prototype svg { width:15px; height:15px; }
+.gallery { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:32px 24px; }
+figure { margin:0; min-width:0; }
+.figure-head { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+.figure-head .num { color:var(--muted); font:12px var(--mono); }
+.figure-head h2 { margin:0; font-size:15px; font-weight:600; }
+figcaption { padding:14px 2px 0; font-size:13px; color:var(--muted); line-height:1.6; }
+figcaption p { margin:0 0 6px; }
+.text-link { min-height:40px; display:inline-flex; align-items:center; gap:6px; background:none; border:0; padding:0; color:var(--accent); font-size:13px; font-weight:600; }
+.text-link svg { width:15px; height:15px; }
+.phone { position:relative; height:850px; width:100%; display:flex; flex-direction:column; background:var(--canvas); color:var(--text); border:1px solid var(--line-strong); border-radius:28px; overflow:hidden; box-shadow:0 8px 24px #252f3d08; font-size:15px; line-height:1.4; }
+.phone-ui { display:flex; flex-direction:column; flex:1; min-height:0; }
+.status { height:32px; padding:0 22px; display:flex; align-items:center; gap:6px; font-size:12px; font-weight:600; flex:none; }
+.status svg { width:15px; height:15px; }
+.spacer { flex:1; }
+.topbar { display:flex; align-items:center; gap:6px; padding:0 8px; height:64px; flex:none; }
+.topbar .title { flex:1; min-width:0; }
+.topbar b { font-size:18px; line-height:24px; font-weight:600; display:block; }
+.topbar .sub { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; margin-top:2px; }
+.icon-btn { width:48px; height:48px; padding:0; border:0; background:none; display:grid; place-items:center; flex:none; border-radius:24px; color:var(--secondary); }
+.icon-btn:hover { background:var(--panel); }
+.host-tile { background:var(--panel); border-radius:12px; width:40px; height:40px; display:grid; place-items:center; margin:0 6px; }
+.dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--green); flex:none; }
+.dot.unknown { background:var(--muted); }
+.screen-scroll { flex:1; min-height:0; overflow-y:auto; padding:8px 20px 16px; scrollbar-width:thin; scrollbar-color:var(--line-strong) transparent; overscroll-behavior:contain; }
+.screen-scroll::-webkit-scrollbar { width:3px; }
+.screen-scroll::-webkit-scrollbar-thumb { background:var(--line-strong); border-radius:2px; }
+.tabs { display:flex; border-bottom:1px solid var(--line); margin:0 -20px 24px; padding:0 20px; }
+.tabs button { height:48px; width:50%; border:0; border-bottom:2px solid transparent; background:none; color:var(--muted); font-size:14px; font-weight:600; }
+.tabs .active { color:var(--accent); border-bottom-color:var(--accent); }
+.phone h2 { margin:0 0 6px; font:italic 400 28px/1.15 Georgia,"DejaVu Serif",serif; letter-spacing:-.02em; }
+.phone h3 { font-size:17px; margin:0 0 5px; font-weight:600; }
+.phone p { margin:0; }
+.meta { font-size:12px; line-height:1.45; color:var(--muted); }
+.secondary { color:var(--secondary); }
+.section-label { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:22px 0 10px; font-size:12px; font-weight:600; color:var(--muted); }
+.section-label .text-link { min-height:24px; font-size:12px; }
+.next-card { background:var(--composer); border:1px solid var(--line); border-radius:16px; padding:16px; margin-top:20px; position:relative; overflow:hidden; }
+.next-card::before { content:""; position:absolute; left:0; top:18px; bottom:18px; width:3px; background:var(--accent); border-radius:0 3px 3px 0; }
+.next-card .time { display:flex; align-items:baseline; gap:8px; margin:8px 0 10px; }
+.next-card .time b { font:400 34px/1.1 var(--sans); letter-spacing:-.04em; font-variant-numeric:tabular-nums; }
+.next-card .time span { color:var(--muted); font-size:12px; }
+.kicker { display:flex; gap:7px; align-items:center; color:var(--accent); font-size:12px; font-weight:600; }
+.kicker svg { width:15px; height:15px; }
+.job-row { display:flex; align-items:center; gap:12px; width:100%; text-align:left; padding:16px 0; min-height:90px; border:0; border-bottom:1px solid var(--line); background:none; }
+.job-row:last-child { border-bottom:0; }
+.tile { width:38px; height:38px; border-radius:12px; background:var(--panel); color:var(--accent); display:grid; place-items:center; flex:none; }
+.tile.quiet { color:var(--muted); }
+.job-text { flex:1; min-width:0; }
+.job-text b { display:block; font-size:14px; font-weight:600; margin-bottom:4px; }
+.job-text .meta { display:block; }
+.job-row > svg { width:16px; height:16px; color:var(--faint); }
+.badge { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:600; padding:4px 9px; border-radius:12px; color:var(--green); background:color-mix(in srgb,var(--green) 10%,transparent); white-space:nowrap; }
+.badge.neutral { color:var(--muted); background:var(--panel); }
+.badge.amber { color:var(--amber); background:color-mix(in srgb,var(--amber) 12%,transparent); }
+.badge.coral { color:var(--coral); background:color-mix(in srgb,var(--coral) 10%,transparent); }
+.badge svg { width:12px; height:12px; }
+.host-note { display:flex; gap:10px; align-items:flex-start; margin:22px 0 0; padding:14px; border:1px dashed var(--line-strong); border-radius:12px; color:var(--muted); font-size:12px; line-height:1.55; }
+.host-note svg { width:16px; height:16px; margin-top:1px; }
+.dock { padding:12px 16px 8px; border-top:1px solid var(--line); background:var(--canvas); flex:none; }
+.dock .meta { text-align:center; margin-bottom:10px; font-size:11px; }
+.btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; height:48px; padding:0 18px; border:1px solid var(--line-strong); border-radius:24px; background:var(--composer); color:var(--text); font-size:14px; font-weight:600; white-space:nowrap; }
+.btn.primary { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
+.btn.tonal { background:var(--panel); border-color:transparent; color:var(--accent); }
+.btn.danger { color:var(--coral); }
+.btn.wide { width:100%; }
+.button-row { display:flex; gap:10px; }
+.button-row .btn { flex:1; min-width:0; }
+.gesture { flex:none; height:22px; display:grid; place-items:center; }
+.gesture::after { content:""; width:108px; height:4px; background:var(--text); opacity:.45; border-radius:4px; }
+.form-stack { display:flex; flex-direction:column; gap:14px; }
+.field { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.field > span { color:var(--muted); font-size:12px; font-weight:600; }
+.field input,.field select,.field textarea { color:var(--text); background:var(--composer); border:1px solid var(--line-strong); border-radius:10px; padding:11px 12px; width:100%; min-height:46px; font-size:14px; }
+.field select { padding-right:6px; }
+.field textarea { height:106px; min-height:106px; resize:vertical; line-height:1.55; }
+.field input[type="time"] { color-scheme:light; font-variant-numeric:tabular-nums; }
+[data-theme="evening"] .field input[type="time"] { color-scheme:dark; }
+.fields-two { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.form-heading { font-size:11px; font-weight:600; letter-spacing:.1em; color:var(--muted); margin:5px 0 0; }
+.frequency { display:flex; border:1px solid var(--line-strong); padding:3px; border-radius:12px; background:var(--panel); gap:3px; }
+.frequency button { min-height:40px; flex:1; border:0; border-radius:8px; background:transparent; font-size:13px; color:var(--muted); }
+.frequency button.selected { background:var(--composer); color:var(--text); font-weight:600; }
+.days { display:flex; gap:6px; }
+.days span { flex:1; display:grid; place-items:center; height:28px; background:var(--panel); color:var(--faint); font-size:11px; border-radius:8px; }
+.days .on { background:var(--selected); color:var(--accent); font-weight:600; }
+.preview-well { padding:12px 14px; background:var(--panel); border-radius:12px; }
+.preview-well .row { margin-top:6px; font-size:12px; display:flex; justify-content:space-between; gap:12px; }
+.preview-well .row:first-of-type { color:var(--text); }
+.preview-well .row:not(:first-of-type) { color:var(--muted); }
+.cron { font-family:var(--mono) !important; font-size:13px !important; }
+.form-error { color:var(--coral); font-size:12px; margin-top:6px; }
+details { border-top:1px solid var(--line); }
+summary { min-height:48px; cursor:pointer; font-size:13px; font-weight:600; display:flex; align-items:center; justify-content:space-between; color:var(--secondary); list-style:none; }
+summary::-webkit-details-marker { display:none; }
+summary svg { width:16px; height:16px; transition:transform .15s; }
+details[open] summary svg { transform:rotate(180deg); }
+.advanced { display:flex; flex-direction:column; gap:12px; padding-bottom:14px; }
+.detail-title { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:4px 0 14px; }
+.detail-title .tile { width:48px; height:48px; border-radius:14px; }
+.detail-title .tile svg { width:24px; height:24px; }
+.detail-name { margin:0 0 6px !important; font:600 24px/1.2 var(--sans) !important; }
+.enable-row { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:18px 0; padding:12px 14px; border:1px solid var(--line); border-radius:12px; background:var(--composer); }
+.enable-row b { display:block; font-size:14px; }
+.toggle { position:relative; border:0; padding:8px; width:56px; height:48px; border-radius:12px; background:transparent; display:flex; align-items:center; flex:none; }
+.toggle::before { content:""; position:absolute; left:4px; top:10px; width:48px; height:28px; border-radius:20px; background:var(--raised); }
+.toggle .knob { position:relative; width:20px; height:20px; border-radius:50%; background:var(--muted); }
+.toggle[aria-checked="true"] { justify-content:flex-end; }
+.toggle[aria-checked="true"]::before { background:var(--accent); }
+.toggle[aria-checked="true"] .knob { background:var(--on-accent); }
+.prompt { background:var(--panel); padding:14px; border-radius:12px; font-size:14px; line-height:1.6; color:var(--secondary); white-space:pre-wrap; overflow-wrap:anywhere; }
+.facts { padding:4px 0; }
+.fact { display:flex; align-items:flex-start; gap:12px; padding:10px 0; font-size:12px; }
+.fact > span { width:86px; color:var(--muted); flex:none; }
+.fact > b { font-weight:500; color:var(--secondary); overflow-wrap:anywhere; }
+.fact code { font:11px var(--mono); }
+.run-row { width:100%; border:0; border-bottom:1px solid var(--line); padding:12px 0; background:none; display:flex; gap:12px; text-align:left; align-items:center; min-height:66px; }
+.run-row:last-child { border-bottom:0; }
+.run-icon { width:28px; height:28px; display:grid; place-items:center; border-radius:50%; background:color-mix(in srgb,var(--green) 10%,transparent); color:var(--green); flex:none; }
+.run-icon.amber { color:var(--amber); background:color-mix(in srgb,var(--amber) 10%,transparent); }
+.run-icon.quiet { color:var(--muted); background:var(--panel); }
+.run-icon svg { width:15px; height:15px; }
+.run-copy { flex:1; }
+.run-copy b { display:block; font-size:13px; font-weight:600; }
+.run-row > svg { width:15px; height:15px; color:var(--faint); }
+.run-time { color:var(--muted); font-size:11px; white-space:nowrap; }
+.result-meta { display:flex; align-items:center; justify-content:space-between; margin:8px 0 18px; }
+.scheduled-source { display:flex; align-items:center; gap:8px; background:var(--panel); border-radius:10px; padding:10px 12px; color:var(--muted); font-size:12px; margin:0 0 18px; }
+.scheduled-source svg { width:15px; height:15px; }
+.rail { display:flex; align-items:center; gap:4px; margin:18px 0 8px; }
+.rail span { height:4px; border-radius:3px; flex:1; background:var(--read); }
+.rail span:nth-child(2) { background:var(--edit); flex:.25; }
+.rail span:nth-child(3) { background:var(--green); flex:1.6; }
+.rail span:nth-child(4) { background:var(--accent); flex:.45; }
+.rail-key { font-size:11px; color:var(--muted); display:flex; justify-content:space-between; margin-bottom:22px; }
+.answer-title { font:italic 400 25px/1.25 Georgia,serif; margin:0 0 14px; }
+.answer { font-size:14px; line-height:1.7; color:var(--secondary); }
+.answer p + p { margin-top:14px; }
+.finding { display:flex; gap:10px; padding:12px 0; border-bottom:1px solid var(--line); }
+.finding .index { width:24px; height:24px; font-size:11px; display:grid; place-items:center; background:var(--panel); border-radius:8px; color:var(--muted); flex:none; margin-top:3px; }
+.finding b { display:block; font-size:13px; margin-bottom:4px; }
+.finding code { font:11px var(--mono); color:var(--accent); }
+.finding p { font-size:12px; line-height:1.6; color:var(--muted); margin-top:5px; }
+.result-foot { display:flex; justify-content:space-between; margin:18px 0; gap:8px; font-size:12px; color:var(--muted); }
+.check-note { display:flex; gap:8px; font-size:12px; line-height:1.5; color:var(--muted); padding:12px; border:1px solid var(--line); border-radius:12px; }
+.check-note svg { width:16px; height:16px; color:var(--green); flex:none; }
+.offline-hero { padding:28px 0 14px; }
+.offline-hero .tile { width:56px; height:56px; border-radius:16px; color:var(--amber); margin-bottom:20px; }
+.offline-hero .tile svg { width:28px; height:28px; }
+.offline-hero h2 { font-size:29px; max-width:250px; margin-bottom:12px; }
+.offline-hero p { font-size:14px; color:var(--muted); line-height:1.65; }
+.connection-note { border:1px solid var(--line); padding:14px; border-radius:12px; margin:14px 0 24px; }
+.connection-note b { font-size:13px; display:block; margin-bottom:5px; }
+.cached { opacity:.65; }
+.shade { position:absolute; inset:0; z-index:3; display:flex; align-items:flex-end; background:var(--scrim); }
+.sheet { width:100%; background:var(--canvas); border-radius:24px 24px 0 0; padding:10px 20px 12px; max-height:90%; overflow-y:auto; box-shadow:0 -8px 32px #00000020; }
+.sheet .handle { width:32px; height:4px; background:var(--line-strong); border-radius:3px; margin:2px auto 18px; }
+.sheet-head { display:flex; align-items:center; gap:8px; margin-bottom:14px; }
+.sheet-head h3 { flex:1; margin:0; font-size:22px; }
+.sheet-head .icon-btn { width:48px; height:48px; }
+.sheet p { font-size:14px; line-height:1.65; color:var(--secondary); }
+.sheet .preview-well { margin:16px 0; }
+.sheet .warning { margin:16px 0; padding:12px; border-radius:12px; color:var(--amber); background:color-mix(in srgb,var(--amber) 9%,transparent); font-size:12px; line-height:1.6; }
+.consent { display:flex; align-items:flex-start; gap:10px; font-size:13px; color:var(--secondary); margin:16px 0 20px; line-height:1.5; }
+.consent input { width:18px; height:18px; accent-color:var(--accent); margin:2px 0 0; flex:none; }
+.demo { display:grid; grid-template-columns:minmax(320px,412px) 1fr; gap:64px; align-items:start; max-width:1030px; margin:auto; }
+.demo .phone { height:870px; }
+.demo-notes { padding-top:16px; }
+.demo-notes h2 { font:italic 400 32px/1.2 Georgia,serif; margin:16px 0; }
+.demo-notes p { color:var(--muted); line-height:1.75; max-width:480px; }
+.route-label { font-size:12px; font-weight:600; color:var(--muted); display:block; margin-bottom:8px; }
+.route-select { width:100%; max-width:350px; min-height:48px; background:var(--canvas); color:var(--text); border:1px solid var(--line-strong); border-radius:12px; padding:10px 12px; }
+.steps { list-style:none; counter-reset:steps; padding:0; margin:28px 0; }
+.steps li { counter-increment:steps; display:flex; gap:12px; margin:16px 0; color:var(--secondary); font-size:14px; line-height:1.6; }
+.steps li::before { content:counter(steps,decimal-leading-zero); font:11px var(--mono); color:var(--muted); padding-top:4px; }
+.demo-note { border-top:1px solid var(--line-strong); padding-top:20px; }
+.design-notes { display:grid; grid-template-columns:repeat(3,1fr); gap:32px; border-top:1px solid var(--line-strong); margin-top:44px; padding-top:28px; }
+.design-notes h3 { font-size:14px; margin:0 0 8px; }
+.design-notes p { margin:0; color:var(--muted); font-size:13px; line-height:1.7; }
+footer { display:flex; justify-content:space-between; gap:20px; margin-top:36px; color:var(--muted); font-size:12px; }
+.toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); max-width:min(92vw,500px); padding:14px 20px; background:var(--text); color:var(--canvas); border-radius:16px; box-shadow:0 4px 24px #00000020; font-size:13px; z-index:10; }
+body[data-view="single"] .shell { padding:0; max-width:412px; }
+body[data-view="single"] .masthead,body[data-view="single"] .hero,body[data-view="single"] .toolbar,body[data-view="single"] .gallery,body[data-view="single"] .demo-notes,body[data-view="single"] .design-notes,body[data-view="single"] footer { display:none; }
+body[data-view="single"] .demo { display:block; }
+body[data-view="single"] .phone { height:915px; border:0; border-radius:0; box-shadow:none; }
+@media(max-width:1050px) { .gallery { grid-template-columns:repeat(2,minmax(0,1fr)); } .hero { grid-template-columns:1fr 240px; gap:28px; } .demo { gap:32px; } }
+@media(max-width:690px) {
+  .shell { padding:24px 16px 36px; } .masthead { margin-bottom:28px; } .masthead .meta { font-size:10px; }
+  .hero { grid-template-columns:1fr; gap:20px; } .hero-note { max-width:420px; } h1 { font-size:43px; } .lede { font-size:15px; }
+  .toolbar-right { width:100%; justify-content:space-between; } .switcher button { padding:0 14px; }
+  .gallery { grid-template-columns:1fr; gap:28px; max-width:412px; margin:auto; } .phone { height:860px; }
+  .demo { grid-template-columns:1fr; gap:24px; max-width:412px; } .demo-notes { order:-1; padding:0; } .demo-notes .steps,.demo-notes h2,.demo-notes p { display:none; }
+  .route-select { max-width:none; } .demo .phone { height:860px; } .design-notes { grid-template-columns:1fr; gap:24px; } footer { flex-direction:column; gap:8px; }
+}
+@media(prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none !important; scroll-behavior:auto !important; } }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="masthead">
+    <a class="brand" href="../index.html"><span class="pi-mark">π</span><span>Pi for Android</span></a>
+    <span class="meta">Design study · Schedules</span>
+  </header>
+  <section class="hero">
+    <div><div class="eyebrow">Your work, on a rhythm</div><h1>Let Pi take<br>the next shift.</h1><p class="lede">A morning review. An evening test run. A weekly sweep.<br>Set it up on your phone; Pi runs it on your computer.</p></div>
+    <aside class="hero-note"><b>The computer keeps the clock.</b><p>Your phone can be away. The host must be awake, with its scheduler running. Every occurrence gets its own durable session.</p></aside>
+  </section>
+  <nav class="toolbar" aria-label="Design preview controls">
+    <div class="switcher"><button type="button" data-view="gallery" aria-pressed="true">All six screens</button><button type="button" data-view="demo" aria-pressed="false">Try the flow ↗</button></div>
+    <div class="toolbar-right"><span class="prototype" id="prototype-label"></span><div class="switcher" aria-label="Appearance"><button type="button" data-theme="moonstone" aria-pressed="true">Moonstone</button><button type="button" data-theme="evening" aria-pressed="false">Evening</button></div></div>
+  </nav>
+  <section class="gallery" id="gallery" aria-label="Six Android screen designs"></section>
+  <section class="demo" id="demo" hidden aria-label="Interactive design preview">
+    <div id="demo-phone"></div>
+    <aside class="demo-notes">
+      <label class="route-label" for="route">Jump to a screen</label>
+      <select class="route-select" id="route"><option value="list">Schedules on the computer</option><option value="new">Create a schedule</option><option value="detail">Schedule details</option><option value="history">Run history</option><option value="result">A completed run</option><option value="admitted">A just-accepted run</option><option value="offline">Computer unreachable</option><option value="setup">Scheduler not set up</option></select>
+      <h2>A little less remembering.</h2>
+      <p>Keep the schedule separate from its runs. Edit the recurring instruction once; open any occurrence as a normal Pi session.</p>
+      <ol class="steps"><li>Open Morning review. Pause and resume its future runs.</li><li>Try Run now. An explicit confirmation comes before a new session.</li><li>Create a schedule. Change the time or use a numeric, five-field cron expression.</li><li>Review the next runs, then explicitly allow unattended execution.</li><li>Check the offline and setup screens. Cached information is never presented as live state.</li></ol>
+      <p class="demo-note">This file is a local prototype. Buttons only change sample data; nothing connects to a computer, executes a prompt or installs a service.</p>
+    </aside>
+  </section>
+  <section class="design-notes" aria-label="Design decisions">
+    <article><h3>Schedules aren’t sessions.</h3><p>A schedule describes repeatable work. Each occurrence opens a fresh session, with its prompt and settings saved. Pausing the schedule does not stop a run already in progress.</p></article>
+    <article><h3>Quiet, predictable defaults.</h3><p>No overlapping runs. Skip missed times rather than build a backlog. Keep the timezone explicit, with calendar previews before enabling. Recovery never blindly repeats interrupted unsafe commands.</p></article>
+    <article><h3>Honest when the phone is away.</h3><p>The host owns timing and history. A lost phone connection doesn’t stop the host. An unreachable computer has unknown status—not a promise that its scheduler is still working.</p></article>
+  </section>
+  <footer><span>Concept only · Moonstone / Evening · 48 px touch targets · native-paintable surfaces</span><span>Sample clock: Mon 12 Oct 2026, 08:42 CEST · <a href="README.md">Design notes</a></span></footer>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<script>
+'use strict';
+const paths = {
+  clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  calendar:'<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 11h18m-13 4h2m4 0h2"/>',
+  computer:'<rect x="3" y="3" width="18" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/>',
+  plus:'<path d="M12 5v14M5 12h14"/>',
+  chevron:'<path d="m9 5 7 7-7 7"/>',
+  down:'<path d="m6 9 6 6 6-6"/>',
+  back:'<path d="m14 5-7 7 7 7"/>',
+  arrow:'<path d="M7 17 17 7M7 7h10v10"/>',
+  check:'<path d="m5 12 4 4 10-10"/>',
+  pause:'<path d="M9 5v14M15 5v14"/>',
+  play:'<path d="m8 4 12 8-12 8Z"/>',
+  info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.1"/>',
+  close:'<path d="m6 6 12 12M6 18 18 6"/>',
+  wifi:'<path d="M3 8a15 15 0 0 1 18 0M6 12a10 10 0 0 1 12 0m-9 4a5 5 0 0 1 6 0m-3 4h.01"/>',
+  battery:'<rect x="2" y="6" width="17" height="12" rx="2"/><path d="M22 10v4M5 9h11v6H5Z"/>',
+  signal:'<path d="M4 19v-3m5 3v-7m5 7V8m5 11V4"/>',
+  offline:'<path d="m3 3 18 18M3 8a15 15 0 0 1 4-2m5-1a15 15 0 0 1 9 3M6 12a10 10 0 0 1 5-2m5 1 2 1m-9 4a5 5 0 0 1 6 0m-3 4h.01"/>',
+  refresh:'<path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/>',
+  shield:'<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/>',
+  code:'<path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-14-2 16"/>',
+  warning:'<path d="m12 3 10 18H2Z"/><path d="M12 9v5m0 3v.1"/>',
+  skip:'<path d="m5 5 10 7-10 7Z"/><path d="M19 5v14"/>',
+  file:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6m-12 5h8m-8 4h5"/>'
+};
+function icon(name) { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.clock}</svg>`; }
+function esc(value) { return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+const SAMPLE_NOW = new Date('2026-10-12T06:42:00Z');
+const jobs = [
+  {id:'review',name:'Morning review',project:'pig',model:'Claude Sonnet 4.5',prompt:'Review yesterday’s changes. Summarize risks and missing tests. Don’t edit files.',cron:'0 9 * * 1-5',zone:'Europe/Stockholm',cadence:'Weekdays',time:'09:00',enabled:true,missed:'skip',timeout:'30'},
+  {id:'checks',name:'Evening checks',project:'pig',model:'Claude Sonnet 4.5',prompt:'Run the test suite and summarize failures. Don’t change files.',cron:'30 18 * * *',zone:'Europe/Stockholm',cadence:'Every day',time:'18:30',enabled:true,missed:'skip',timeout:'30'},
+  {id:'tidy',name:'Weekly tidy-up',project:'website',model:'Claude Sonnet 4.5',prompt:'Find stale documentation and suggest a small cleanup plan.',cron:'0 10 * * 1',zone:'Europe/Stockholm',cadence:'Mondays',time:'10:00',enabled:false,missed:'skip',timeout:'30'}
+];
+const initialDraft = () => ({name:'Dependency check',project:'pig',model:'Claude Sonnet 4.5',prompt:'Check for outdated dependencies and known vulnerabilities. Summarize what needs attention. Don’t change files.',frequency:'weekdays',time:'09:00',zone:'Europe/Stockholm',cron:'0 9 * * 1-5',missed:'skip',timeout:'30'});
+const state = {route:'list',selected:'review',draft:initialDraft(),editing:false,confirm:null,connected:true,service:true};
+const cronCache = new Map();
+function compileCron(expression) {
+  const fields = expression.trim().split(/\s+/);
+  if (fields.length !== 5) throw new Error('Use five fields: minute hour day month weekday.');
+  const limits = [[0,59],[0,23],[1,31],[1,12],[0,7]];
+  const sets = fields.map((field,index) => {
+    const [min,max] = limits[index], set = new Set();
+    for (const term of field.split(',')) {
+      if (!/^(\*|\d+(-\d+)?)(\/\d+)?$/.test(term)) throw new Error('Use numbers, *, ranges, lists and /steps.');
+      const [range,stepText] = term.split('/'), step = stepText === undefined ? 1 : Number(stepText);
+      if (step < 1 || step > max-min+1) throw new Error('A cron step is outside its field range.');
+      let start, end;
+      if (range === '*') { start=min; end=max; }
+      else if (range.includes('-')) { [start,end]=range.split('-').map(Number); }
+      else { start=Number(range); end=stepText === undefined ? start : max; }
+      if (start<min || end>max || start>end) throw new Error(`Field ${index+1} must be between ${min} and ${max}.`);
+      for (let value=start;value<=end;value+=step) set.add(index===4 && value===7 ? 0 : value);
+    }
+    return set;
+  });
+  return {sets,dayWildcard:fields[2]==='*',weekWildcard:fields[4]==='*'};
+}
+function occurrences(cron,zone) {
+  const key = cron+'|'+zone;
+  if (cronCache.has(key)) return cronCache.get(key);
+  const parsed=compileCron(cron), results=[], seen=new Set();
+  const fmt=new Intl.DateTimeFormat('en-GB',{timeZone:zone,year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+  for (let stamp=SAMPLE_NOW.getTime()+60000, end=SAMPLE_NOW.getTime()+14*86400000;stamp<=end && results.length<3;stamp+=60000) {
+    const values={};
+    for (const p of fmt.formatToParts(stamp)) if (p.type!=='literal') values[p.type]=Number(p.value);
+    const weekday=new Date(Date.UTC(values.year,values.month-1,values.day)).getUTCDay();
+    const [minutes,hours,days,months,weeks]=parsed.sets;
+    const dayMatch=days.has(values.day), weekMatch=weeks.has(weekday);
+    const calendarMatch=parsed.dayWildcard ? weekMatch : parsed.weekWildcard ? dayMatch : dayMatch || weekMatch;
+    if (minutes.has(values.minute) && hours.has(values.hour) && months.has(values.month) && calendarMatch) {
+      const localKey=[values.year,values.month,values.day,values.hour,values.minute].join('-');
+      if (!seen.has(localKey)) { results.push(new Date(stamp)); seen.add(localKey); }
+    }
+  }
+  cronCache.set(key,results);
+  return results;
+}
+function localDate(date,zone) { return new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).format(date); }
+function when(date,zone) {
+  const day=localDate(date,zone)===localDate(SAMPLE_NOW,zone) ? 'Today' : new Intl.DateTimeFormat('en-GB',{timeZone:zone,weekday:'short',day:'numeric',month:'short'}).format(date);
+  const time=new Intl.DateTimeFormat('en-GB',{timeZone:zone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(date);
+  return {day,time};
+}
+function draftCron(d=state.draft) { const [hour,minute]=d.time.split(':').map(Number); return d.frequency==='cron' ? d.cron : `${minute} ${hour} * * ${d.frequency==='weekdays' ? '1-5' : '*'}`; }
+function preview(cron,zone) {
+  try {
+    const dates=occurrences(cron,zone);
+    return `<div class="kicker">${icon('calendar')} Next runs <span class="spacer"></span><span class="meta">${esc(zone.split('/').pop().replaceAll('_',' '))}</span></div>${dates.length ? dates.map(date=>{ const p=when(date,zone); return `<div class="row"><span>${esc(p.day)}</span><b>${p.time}</b></div>`; }).join('') : '<p class="meta" style="margin-top:8px">No occurrence in the next 14 days.</p>'}`;
+  } catch(error) { return `<div class="form-error" role="alert">${esc(error.message)}</div>`; }
+}
+function activeJob() { return jobs.find(j=>j.id===state.selected) || jobs[0]; }
+function cadence(job) { return job.cadence==='Custom cron' ? 'Custom cron' : job.cadence+' at '+job.time; }
+function button(label,action,kind='') { return `<button class="btn ${kind}" type="button" data-action="${action}">${label}</button>`; }
+function topbar(title,sub,home=false) {
+  return `<div class="status"><span>08:42</span><span class="spacer"></span>${icon('signal')}${icon('wifi')}${icon('battery')}</div><header class="topbar">${home ? `<span class="host-tile">${icon('computer')}</span>` : `<button class="icon-btn" data-action="back" type="button" aria-label="Back">${icon('back')}</button>`}<div class="title"><b>${esc(title)}</b><span class="sub">${home ? `<span class="dot ${sub.includes('unreachable') ? 'unknown' : ''}"></span>` : ''}${esc(sub)}</span></div>${home ? `<button class="icon-btn" data-action="connection" type="button" aria-label="Computer connection details">${icon('down')}</button>` : ''}</header>`;
+}
+function row(job) {
+  return `<button class="job-row" type="button" data-action="select-job" data-id="${esc(job.id)}"><span class="tile ${!job.enabled ? 'quiet' : ''}">${icon(job.enabled ? 'clock':'pause')}</span><span class="job-text"><b>${esc(job.name)}</b><span class="meta">${esc(job.project)} · ${esc(cadence(job))}</span></span><span class="badge ${job.enabled ? '' : 'neutral'}">${job.enabled ? 'On':'Paused'}</span>${icon('chevron')}</button>`;
+}
+function listScreen() {
+  const next=jobs.filter(j=>j.enabled).map(j=>({job:j,date:occurrences(j.cron,j.zone)[0]})).filter(x=>x.date).sort((a,b)=>a.date-b.date)[0];
+  const nextPart=next ? when(next.date,next.job.zone) : null;
+  return {
+    top:topbar('Studio Mac','Online · scheduler running',true),
+    content:`<div class="tabs"><button type="button" data-action="sessions">Sessions</button><button type="button" class="active" aria-current="page">Schedules</button></div><h2>Make room for later.</h2><p class="meta">Small jobs, on your computer’s clock.</p>${next ? `<div class="next-card"><div class="kicker">${icon('clock')} NEXT UP <span class="spacer"></span><span class="meta">${esc(nextPart.day)}</span></div><div class="time"><b>${nextPart.time}</b><span>${next.date-SAMPLE_NOW<3600000 ? `in ${Math.round((next.date-SAMPLE_NOW)/60000)} min` : esc(next.job.zone.split('/').pop())}</span></div><h3>${esc(next.job.name)}</h3><p class="meta">${esc(next.job.project)} · a fresh session</p></div>` : '<div class="next-card"><h3>Nothing scheduled.</h3><p class="meta">Resume a job or add a new schedule.</p></div>'}<div class="section-label"><span>YOUR SCHEDULES</span><span>${jobs.filter(j=>j.enabled).length} active · ${jobs.filter(j=>!j.enabled).length} paused</span></div>${jobs.map(row).join('')}<div class="host-note">${icon('computer')}<span>Runs on Studio Mac, even when your phone is away. The computer needs to be awake.</span></div>`,
+    dock:button(`${icon('plus')} New schedule`,'new','primary wide')
+  };
+}
+function options(values,selected) { return values.map(([value,label])=>`<option value="${esc(value)}" ${value===selected ? 'selected':''}>${esc(label)}</option>`).join(''); }
+function newScreen() {
+  const d=state.draft;
+  return {
+    top:topbar(state.editing ? 'Edit schedule' : 'New schedule','Studio Mac · a fresh session each run'),
+    content:`<form id="schedule-form" class="form-stack"><label class="field"><span>Name</span><input name="name" value="${esc(d.name)}" required maxlength="70" autocomplete="off"></label><div class="fields-two"><label class="field"><span>Project</span><select name="project">${options([['pig','pig'],['website','website']],d.project)}</select></label><label class="field"><span>Model</span><select name="model">${options([['Claude Sonnet 4.5','Sonnet 4.5'],['GPT-5','GPT-5']],d.model)}</select></label></div><label class="field"><span>Prompt or /template</span><textarea name="prompt" required maxlength="4000">${esc(d.prompt)}</textarea></label><div class="form-heading">WHEN</div><div class="frequency" aria-label="Repeat frequency"><button type="button" data-action="frequency" data-frequency="daily" class="${d.frequency==='daily' ? 'selected':''}" aria-pressed="${d.frequency==='daily'}">Every day</button><button type="button" data-action="frequency" data-frequency="weekdays" class="${d.frequency==='weekdays' ? 'selected':''}" aria-pressed="${d.frequency==='weekdays'}">Weekdays</button><button type="button" data-action="frequency" data-frequency="cron" class="${d.frequency==='cron' ? 'selected':''}" aria-pressed="${d.frequency==='cron'}">Cron</button></div>${d.frequency==='cron' ? `<label class="field"><span>Five-field cron expression</span><input class="cron" name="cron" value="${esc(d.cron)}" required spellcheck="false" aria-describedby="cron-help"><small class="meta" id="cron-help">Minute · hour · day · month · weekday</small></label>` : `<div class="days" aria-label="${d.frequency==='daily' ? 'Every day':'Monday to Friday'}">${['M','T','W','T','F','S','S'].map((day,index)=>`<span class="${d.frequency==='daily' || index<5 ? 'on':''}">${day}</span>`).join('')}</div>`}<div class="fields-two">${d.frequency!=='cron' ? `<label class="field"><span>Time</span><input type="time" name="time" value="${esc(d.time)}" required></label>` : ''}<label class="field" ${d.frequency==='cron' ? 'style="grid-column:1 / -1"':''}><span>Timezone</span><select name="zone">${options([['Europe/Stockholm','Stockholm'],['UTC','UTC'],['America/New_York','New York']],d.zone)}</select></label></div><div class="preview-well" data-preview>${preview(draftCron(),d.zone)}</div><details><summary>Advanced options ${icon('down')}</summary><div class="advanced"><label class="field"><span>If the computer misses a run</span><select name="missed">${options([['skip','Skip missed runs'],['once','Run once when back']],d.missed)}</select></label><label class="field"><span>Request Stop after</span><select name="timeout">${options([['15','15 minutes'],['30','30 minutes'],['60','1 hour']],d.timeout)}</select></label><p class="meta">Skip if the previous occurrence is still running. A fresh session every time; no shared chat context. Stop is best-effort, not a sandbox.</p></div></details><p class="meta">${icon('shield')} No overlapping runs · missed times skipped by default</p></form>`,
+    dock:`<p class="meta">Nothing runs until you explicitly ${state.editing ? 'save changes' : 'enable it'}.</p><button class="btn primary wide" type="submit" form="schedule-form">${state.editing ? 'Review changes':'Review schedule'} ${icon('chevron')}</button>`
+  };
+}
+function historyRows(limit=5) {
+  const rows=[
+    ['check','', 'Today · 09:00','Completed · 2 findings','2m 13s','result'],
+    ['check','', 'Fri 9 Oct · 09:00','Completed · nothing flagged','1m 48s','result-clean'],
+    ['warning','amber','Thu 8 Oct · 09:00','Interrupted · inspect command','42s','interrupted'],
+    ['skip','quiet','Wed 7 Oct · 09:00','Skipped · previous run active','—','skipped'],
+    ['offline','quiet','Tue 6 Oct · 09:00','Missed · computer was asleep','—','missed']
+  ];
+  return rows.slice(0,limit).map(([i,c,date,label,time,action])=>`<button class="run-row" type="button" data-action="${action}"><span class="run-icon ${c}">${icon(i)}</span><span class="run-copy"><b>${date}</b><span class="meta">${label}</span></span><span class="run-time">${time}</span>${icon('chevron')}</button>`).join('');
+}
+function detailScreen() {
+  const j=activeJob();
+  return {
+    top:topbar('Schedule','Studio Mac · '+j.project),
+    content:`<div class="detail-title"><span class="tile">${icon('clock')}</span><span class="spacer"></span><span class="badge ${j.enabled ? '' : 'neutral'}">${j.enabled ? 'Enabled':'Paused'}</span><button class="toggle" type="button" role="switch" aria-checked="${j.enabled}" aria-label="Enable ${esc(j.name)}" data-action="toggle"><span class="knob"></span></button></div><h2 class="detail-name">${esc(j.name)}</h2><p class="meta" style="margin-bottom:18px">${esc(cadence(j))} · ${esc(j.zone.split('/').pop())}</p>${j.enabled ? `<div class="preview-well">${preview(j.cron,j.zone)}</div>` : '<div class="preview-well"><p class="meta">No future runs while paused. Run now is still available.</p></div>'}<div class="section-label">INSTRUCTION</div><div class="prompt">${esc(j.prompt)}</div><div class="facts"><div class="fact"><span>Project</span><b>${esc(j.project)} <span class="meta">· on Studio Mac</span></b></div><div class="fact"><span>Model</span><b>${esc(j.model)}</b></div><div class="fact"><span>Policy</span><b>Fresh session · no overlap<br>${j.missed==='once' ? 'One catch-up run':'Skip missed times'} · Stop after ${esc(j.timeout)}m</b></div><div class="fact"><span>Cron</span><b><code>${esc(j.cron)}</code></b></div></div><div class="section-label"><span>RECENT RUNS</span><button type="button" class="text-link" data-action="history">All runs ${icon('chevron')}</button></div>${j.id==='review' ? historyRows(3) : '<p class="meta">No recorded runs yet.</p>'}<button class="text-link" type="button" data-action="delete-schedule" style="color:var(--coral);margin-top:14px;min-height:48px">Delete schedule</button>`,
+    dock:`<div class="button-row">${button('Edit','edit')}${button(`${icon('play')} Run now`,'run-now','primary')}</div>`
+  };
+}
+function resultScreen(clean=false) {
+  return {
+    top:topbar(clean ? 'Friday’s morning review':'Today’s morning review','pig · Studio Mac'),
+    content:`<div class="result-meta"><span class="badge">${icon('check')} Completed</span><span class="meta">${clean ? 'Fri 9 Oct':'Today'} · 09:00</span></div><div class="scheduled-source">${icon('clock')} Scheduled by ${esc(activeJob().name)}</div><div class="prompt" style="font-size:13px">Review yesterday’s changes. Summarize risks and missing tests. Don’t edit files.</div><div class="rail"><span></span><span></span><span></span><span></span></div><div class="rail-key"><span>Read</span><span>No edits</span><span>Check</span><span>Hand off</span></div><div class="answer-title">${clean ? 'Nothing new to flag.':'Two things worth a look.'}</div><div class="answer"><p>${clean ? 'I reviewed the changes and ran the targeted checks. I did not find a new issue in this sample run.':'I reviewed the latest changes and checked the affected tests. The targeted checks passed, but two paths could use a closer look.'}</p></div>${clean ? '' : `<div class="finding"><span class="index">01</span><div><b>Reconnect timing needs a regression test.</b><code>src/remote.rs:214</code><p>The retry path has no check for a connection dropping just after admission.</p></div></div><div class="finding"><span class="index">02</span><div><b>The new empty state misses long paths.</b><code>src/screens/home.rs:88</code><p>A narrow phone could clip the project name. Add a layout test with a long folder name.</p></div></div>`}<div class="result-foot"><span>${clean ? '1m 48s':'2m 13s'} · $0.08</span><span>No files changed</span></div><div class="check-note">${icon('check')}<span>Targeted checks passed.<br>Completed means Pi finished—not that every finding is resolved.</span></div><p class="meta" style="margin-top:16px">Prompt, findings, file paths and usage are illustrative sample data.</p>`,
+    dock:`<p class="meta">This occurrence is a normal, durable session.</p>${button(`${icon('clock')} Back to schedule`,'detail','wide')}`
+  };
+}
+function offlineScreen() {
+  return {
+    top:topbar('Studio Mac','Computer unreachable',true),
+    content:`<div class="tabs"><button type="button" data-action="sessions">Sessions</button><button class="active" type="button">Schedules</button></div><div class="offline-hero"><span class="tile">${icon('offline')}</span><h2>The computer<br>is out of reach.</h2><p>Your phone lost contact. The scheduler may still be running on Studio Mac; we can’t confirm its state.</p></div><div class="connection-note"><b>Last checked at 08:35</b><p class="meta">If the computer is asleep, future times are missed. The default is to skip them when it wakes.</p></div><div class="section-label"><span>LAST KNOWN SCHEDULES</span><span>Cached</span></div><div class="cached">${jobs.slice(0,2).map(j=>`<div class="job-row"><span class="tile">${icon('clock')}</span><span class="job-text"><b>${esc(j.name)}</b><span class="meta">${esc(j.cadence)} at ${esc(j.time)}</span></span><span class="badge neutral">Unknown</span></div>`).join('')}</div><div class="host-note">${icon('info')}<span>Reconnect before changing schedules or starting a run. We won’t queue a hidden retry from your phone.</span></div>`,
+    dock:button(`${icon('refresh')} Try again`,'retry','primary wide')
+  };
+}
+function historyScreen() {
+  const j=activeJob();
+  return {top:topbar('Run history',j.name+' · Studio Mac'),content:`<h2>Every occurrence,<br>accounted for.</h2><p class="meta" style="margin:12px 0 20px">Completed runs, interrupted work and times skipped. Open a run to see its own session.</p>${j.id==='review' ? historyRows() : '<div class="next-card"><h3>No runs yet.</h3><p class="meta">Occurrences will appear here after admission.</p></div>'}<div class="host-note">${icon('info')}<span>“Completed” means the agent settled. It does not guarantee task success. Missed and skipped times never create a session.</span></div>`,dock:button('Back to schedule','detail','wide')};
+}
+function setupScreen() {
+  return {top:topbar('Schedules','Studio Mac · setup required'),content:`<div class="offline-hero"><span class="tile">${icon('calendar')}</span><h2>Give the computer<br>a clock of its own.</h2><p>Durable sessions are available, but the host scheduler hasn’t been installed. Keeping the phone open is not a substitute.</p></div><div class="next-card"><h3>One-time host setup</h3><p class="meta" style="margin-top:8px">A user service starts the scheduler after login and restarts it if it stops. Your computer still needs to be awake.</p><div class="fact"><span>macOS</span><b>launchd user service</b></div><div class="fact"><span>Linux</span><b>systemd user service</b></div></div><div class="host-note">${icon('shield')}<span>Setup is explicit and happens on the computer. This prototype does not install anything or provide a runnable setup command.</span></div>`,dock:button('Preview a configured computer','setup-preview','primary wide')};
+}
+function interruptedScreen(kind='interrupted') {
+  const skipped=kind==='skipped', missed=kind==='missed';
+  const title=skipped ? 'Skipped occurrence' : missed ? 'Missed occurrence' : 'Interrupted run';
+  return {top:topbar(title,activeJob().name+' · Studio Mac'),content:`<div class="offline-hero"><span class="tile">${icon(skipped ? 'skip':missed ? 'offline':'warning')}</span><h2>${skipped ? 'One run at a time.' : missed ? 'The host was asleep.' : 'Check what the command did.'}</h2><p>${skipped ? 'The previous occurrence was still active. This occurrence was recorded as skipped; no prompt was submitted.' : missed ? 'The scheduled time passed while the host was asleep. Its skip-missed-runs policy did not submit a catch-up prompt.' : 'The host stopped during a shell command. Recovery reported the interrupted command rather than blindly repeating it.'}</p></div>${!skipped && !missed ? '<div class="prompt cron">npm test -- --runInBand</div><div class="host-note">'+icon('warning')+'<span>Inspect the command’s effects before deciding what to do next. A retry is a new, explicit action—not automatic recovery.</span></div>' : ''}`,dock:button('Back to run history','history','wide')};
+}
+function admittedScreen() {
+  const j=activeJob();
+  return {top:topbar('Run accepted',j.name+' · Studio Mac'),content:`<div class="offline-hero"><span class="tile" style="color:var(--accent)">${icon('play')}</span><h2>Accepted isn’t<br>finished.</h2><p>On a real host, this acknowledgement means your exact instruction has been saved. Pi’s session then runs independently of your phone.</p></div><div class="prompt">${esc(j.prompt)}</div><div class="facts"><div class="fact"><span>Project</span><b>${esc(j.project)}</b></div><div class="fact"><span>Model</span><b>${esc(j.model)}</b></div><div class="fact"><span>Context</span><b>A fresh session</b></div></div><div class="host-note">${icon('info')}<span>Preview only: no prompt was submitted. A real run would have a session link and committed progress here; completion is tracked separately.</span></div>`,dock:button('Back to schedule','detail','wide')};
+}
+function getScreen(route) {
+  if (!jobs.length && ['detail','history','result','result-clean','admitted','interrupted','skipped','missed'].includes(route)) return listScreen();
+  if (route==='new') return newScreen();
+  if (route==='detail') return detailScreen();
+  if (route==='history') return historyScreen();
+  if (route==='admitted') return admittedScreen();
+  if (route==='result' || route==='result-clean') return resultScreen(route==='result-clean');
+  if (route==='offline') return offlineScreen();
+  if (route==='setup') return setupScreen();
+  if (['interrupted','skipped','missed'].includes(route)) return interruptedScreen(route);
+  return listScreen();
+}
+function sheet() {
+  if (!state.confirm) return '';
+  const saving=state.confirm==='save', deleting=state.confirm==='delete', j=activeJob();
+  const d=state.draft;
+  const title=saving ? state.editing ? 'Save these changes?' : 'Enable this schedule?' : deleting ? 'Delete this schedule?' : 'Run it now?';
+  return `<div class="shade" data-action="dismiss-backdrop"><section class="sheet" role="dialog" aria-modal="true" aria-labelledby="confirm-title"><div class="handle"></div><div class="sheet-head"><h3 id="confirm-title">${title}</h3><button class="icon-btn" type="button" data-action="cancel" aria-label="Cancel">${icon('close')}</button></div><p>${saving ? `<b>${esc(d.name)}</b> will run on Studio Mac, in <b>${esc(d.project)}</b>. Each occurrence starts a fresh session.` : deleting ? 'Future occurrences will stop. Existing sessions and project files are kept.' : `This starts a fresh session for <b>${esc(j.name)}</b> on Studio Mac. It doesn’t change the next scheduled time.`}</p>${saving ? `<div class="preview-well">${preview(draftCron(),d.zone)}</div>` : ''}${deleting ? '' : '<div class="warning">Pi can run commands and modify files as your host account. “Don’t edit files” is an instruction, not a security boundary.</div>'}${saving ? '<label class="consent"><input type="checkbox" id="consent"><span>I trust this project and allow this prompt to run unattended on Studio Mac.</span></label>' : ''}<div class="button-row">${button('Cancel','cancel')}<button class="btn ${deleting ? 'danger':'primary'}" type="button" data-action="${saving ? 'save':deleting ? 'delete':'confirm-run'}" ${saving ? 'disabled':''}>${saving ? state.editing ? 'Save changes':'Enable schedule' : deleting ? 'Delete schedule':'Run now'}</button></div><div class="gesture"></div></section></div>`;
+}
+function phone(route,dark=false,interactive=false) {
+  const s=getScreen(route);
+  // Storyboard forms are inert illustrations, not competing form owners.
+  const illustration=html=>html.replace(/\s(?:id|form|aria-describedby)="[^"]*"/g,'');
+  const content=interactive ? s.content : illustration(s.content);
+  const dock=interactive ? s.dock : illustration(s.dock);
+  return `<div class="phone ${dark ? 'evening':''}" ${interactive ? 'id="interactive-phone" role="region" aria-label="Interactive Android preview"' : 'inert role="img" aria-label="'+esc(route)+' screen mockup"'}><div class="phone-ui" ${interactive && state.confirm ? 'inert':''}>${s.top}<main class="screen-scroll">${content}</main><div class="dock">${dock}</div><div class="gesture"></div></div>${interactive ? sheet():''}</div>`;
+}
+const galleryScreens=[
+  ['list','The host’s schedule','One computer, two destinations: Sessions and Schedules. The next occurrence is clear; the scheduler’s home is explicit.'],
+  ['new','A new rhythm','A prompt, a project, a time. Cron stays optional, while upcoming dates and the timezone stay visible.'],
+  ['detail','One recurring instruction','Pause future runs, change the instruction or run it now. Occurrences live underneath, not in the same chat.'],
+  ['result','The morning hand-off','A scheduled occurrence is a normal session. Completed, verified and findings needing review remain separate ideas.'],
+  ['offline','Out of reach, not “off”','Keep the computer remembered. Cached schedules have unknown status; changes wait for a connection.'],
+  ['list','After hours','The same hierarchy in Evening. No extra dashboard, no bright chart, no work happening on the phone.']
+];
+function renderGallery() {
+  const selected=state.selected; state.selected='review';
+  document.getElementById('gallery').innerHTML=galleryScreens.map(([route,title,note],i)=>`<figure><div class="figure-head"><span class="num">0${i+1}</span><h2>${title}</h2></div>${phone(route,i===5)}<figcaption><p>${note}</p><button class="text-link" type="button" data-open="${route}" ${i===5 ? 'data-evening="true"':''}>Explore screen ${icon('arrow')}</button></figcaption></figure>`).join('');
+  state.selected=selected;
+}
+function renderDemo(focus) {
+  document.getElementById('demo-phone').innerHTML=phone(state.route,false,true);
+  const select=document.getElementById('route');
+  if ([...select.options].some(o=>o.value===state.route)) select.value=state.route;
+  if (state.confirm) document.querySelector('#demo-phone .sheet [data-action="cancel"]').focus({preventScroll:true});
+  else if (focus) document.querySelector('#demo-phone '+focus)?.focus({preventScroll:true});
+}
+function showDemo(route=state.route,dark=false) {
+  state.route=route; state.confirm=null;
+  document.getElementById('gallery').hidden=true;
+  document.getElementById('demo').hidden=false;
+  document.querySelectorAll('[data-view]').forEach(b=>{if(b.tagName==='BUTTON') b.setAttribute('aria-pressed',String(b.dataset.view==='demo'));});
+  if (dark) setTheme('evening');
+  renderDemo();
+}
+function setTheme(theme) {
+  document.documentElement.dataset.theme=theme;
+  document.querySelectorAll('button[data-theme]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.theme===theme)));
+}
+let toastTimer;
+function toast(message) { const el=document.getElementById('toast'); el.textContent=message; el.hidden=false; clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.hidden=true,4500); }
+function navigate(route) { state.route=route; state.confirm=null; renderDemo(); }
+function captureDraft() {
+  const form=document.querySelector('#demo-phone #schedule-form');
+  if (!form) return;
+  for (const [key,value] of new FormData(form)) state.draft[key]=value;
+}
+let previewTimer;
+document.addEventListener('input',event=>{
+  if (event.target.id==='consent') { document.querySelector('#demo-phone [data-action="save"]').disabled=!event.target.checked; return; }
+  if (event.target.closest('#demo-phone #schedule-form')) {
+    captureDraft(); clearTimeout(previewTimer);
+    if (['time','cron','zone'].includes(event.target.name)) previewTimer=setTimeout(()=>{ const well=document.querySelector('#demo-phone [data-preview]'); if(well) well.innerHTML=preview(draftCron(),state.draft.zone); },180);
+  }
+});
+document.addEventListener('change',event=>{
+  if (event.target.id==='route') { if(event.target.value==='new') { state.editing=false; state.draft=initialDraft(); } navigate(event.target.value); return; }
+  if (event.target.closest('#demo-phone #schedule-form')) { captureDraft(); const well=document.querySelector('#demo-phone [data-preview]'); if(well) well.innerHTML=preview(draftCron(),state.draft.zone); }
+});
+document.addEventListener('submit',event=>{
+  if (event.target.id!=='schedule-form') return;
+  event.preventDefault(); captureDraft();
+  if (!state.draft.name.trim() || !state.draft.prompt.trim()) { toast('Add a name and a prompt first.'); return; }
+  try { compileCron(draftCron()); } catch(error) { toast(error.message); return; }
+  state.confirm='save'; renderDemo();
+});
+document.addEventListener('click',event=>{
+  const b=event.target.closest('button, .shade');
+  if (!b) return;
+  if (b.dataset.view) {
+    if (b.dataset.view==='demo') showDemo();
+    else { document.getElementById('demo').hidden=true; document.getElementById('gallery').hidden=false; document.querySelectorAll('button[data-view]').forEach(x=>x.setAttribute('aria-pressed',String(x.dataset.view==='gallery'))); state.confirm=null; renderGallery(); }
+    return;
+  }
+  if (b.dataset.theme) { setTheme(b.dataset.theme); return; }
+  if (b.dataset.open) { if(b.dataset.open==='new') { state.editing=false; state.draft=initialDraft(); } showDemo(b.dataset.open,Boolean(b.dataset.evening)); document.querySelector('.toolbar').scrollIntoView({block:'start',behavior:'instant'}); return; }
+  if (!b.closest('#demo-phone')) return;
+  const action=b.dataset.action;
+  if (action==='dismiss-backdrop' && event.target!==b) return;
+  if (['cancel','dismiss-backdrop'].includes(action)) { const saving=state.confirm==='save', deleting=state.confirm==='delete'; state.confirm=null; renderDemo(saving ? '[form="schedule-form"]' : deleting ? '[data-action="delete-schedule"]' : '[data-action="run-now"]'); }
+  else if (action==='back') navigate(['list','offline','setup'].includes(state.route) ? 'list' : ['detail','new'].includes(state.route) ? 'list' : 'detail');
+  else if (action==='new') { state.draft=initialDraft(); state.editing=false; navigate('new'); }
+  else if (action==='select-job') { state.selected=b.dataset.id; navigate('detail'); }
+  else if (action==='toggle') { const j=activeJob(); j.enabled=!j.enabled; renderDemo('[data-action="toggle"]'); toast(j.enabled ? 'Preview: future runs enabled.' : 'Preview: future runs paused. Existing sessions are not stopped.'); }
+  else if (action==='edit') { const j=activeJob(); state.draft={...j,frequency:j.cadence==='Every day' ? 'daily' : j.cadence==='Weekdays' ? 'weekdays':'cron'}; state.editing=true; navigate('new'); }
+  else if (action==='frequency') { captureDraft(); const previousCron=draftCron(); state.draft.frequency=b.dataset.frequency; if(state.draft.frequency==='cron') state.draft.cron=previousCron; renderDemo(`[data-frequency="${b.dataset.frequency}"]`); }
+  else if (action==='run-now') { state.confirm='run'; renderDemo(); }
+  else if (action==='confirm-run') { state.confirm=null; navigate('admitted'); toast('Preview only: showing the admission state. No prompt was submitted.'); }
+  else if (action==='save') {
+    if (!document.getElementById('consent')?.checked) return;
+    const d=state.draft, existing=state.editing ? activeJob() : null;
+    const saved={id:existing?.id || 'job-'+(jobs.length+1),name:d.name.trim(),project:d.project,model:d.model,prompt:d.prompt.trim(),cron:draftCron(),zone:d.zone,cadence:d.frequency==='daily' ? 'Every day' : d.frequency==='weekdays' ? 'Weekdays':'Custom cron',time:d.time,enabled:existing ? existing.enabled:true,missed:d.missed,timeout:d.timeout};
+    if(existing) Object.assign(existing,saved); else jobs.push(saved);
+    state.selected=saved.id; state.confirm=null; navigate('detail'); toast('Saved to this preview only. No real schedule was created.');
+  }
+  else if (action==='delete-schedule') { state.confirm='delete'; renderDemo(); }
+  else if (action==='delete') { const index=jobs.findIndex(j=>j.id===state.selected); if(index>=0) jobs.splice(index,1); state.selected=jobs[0]?.id || ''; navigate('list'); toast('Removed from this preview only. Existing sessions would be kept.'); }
+  else if (action==='retry') { state.connected=true; navigate('list'); toast('Preview: showing a reconnected computer. No network request was made.'); }
+  else if (action==='setup-preview') { state.service=true; navigate('list'); toast('Preview only: no host service was installed.'); }
+  else if (action==='connection') navigate('offline');
+  else if (action==='sessions') toast('Sessions remain the existing Home destination. This prototype focuses on Schedules.');
+  else if (['detail','history','result','result-clean','interrupted','skipped','missed'].includes(action)) navigate(action);
+});
+document.addEventListener('keydown',event=>{
+  if (!state.confirm || document.getElementById('demo').hidden) return;
+  if (event.key==='Escape') { event.preventDefault(); const saving=state.confirm==='save'; const deleting=state.confirm==='delete'; state.confirm=null; renderDemo(saving ? '[form="schedule-form"]' : deleting ? '[data-action="delete-schedule"]' : '[data-action="run-now"]'); }
+  if (event.key==='Tab') {
+    const items=[...document.querySelectorAll('#demo-phone .sheet button:not(:disabled), #demo-phone .sheet input')];
+    const first=items[0], last=items[items.length-1];
+    if (event.shiftKey && document.activeElement===first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement===last) { event.preventDefault(); first.focus(); }
+  }
+});
+document.getElementById('prototype-label').innerHTML=icon('code')+'Prototype only · no jobs run';
+renderGallery();
+const params=new URLSearchParams(location.search);
+const initialRoute=params.get('screen');
+if (initialRoute && ['list','new','detail','history','result','admitted','offline','setup'].includes(initialRoute)) {
+  showDemo(initialRoute);
+  if (params.get('single')==='1') document.body.dataset.view='single';
+}
+if (params.get('theme')==='evening') setTheme('evening');
+</script>
+</body>
+</html>

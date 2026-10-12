@@ -21,8 +21,15 @@ fn setup(cx: &mut TestAppContext) -> VisualTestContext {
 
 /// Opens `/bin/sh` in `cwd` and shows it focused in the test window.
 async fn open_shell(cwd: PathBuf, cx: &mut VisualTestContext) -> Entity<TerminalView> {
-    let spawn =
-        cx.update(|window, cx| spawn_shell(cwd, Shell::Program("/bin/sh".into()), window, cx));
+    open_program(cwd, Shell::Program("/bin/sh".into()), cx).await
+}
+
+async fn open_program(
+    cwd: PathBuf,
+    shell: Shell,
+    cx: &mut VisualTestContext,
+) -> Entity<TerminalView> {
+    let spawn = cx.update(|window, cx| spawn_shell(cwd, shell, window, cx));
     let terminal = spawn.await.unwrap();
     let view = cx.new_window_entity(|window, cx| TerminalView::new(terminal, window, cx));
     cx.update(|window, cx| {
@@ -97,7 +104,18 @@ async fn type_at_prompt_types_without_running(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn multi_line_text_is_not_typed_without_bracketed_paste(cx: &mut TestAppContext) {
     let cx = &mut setup(cx);
-    let view = open_shell(std::env::temp_dir(), cx).await;
+    // /bin/sh may be Bash/readline and enable bracketed paste by default.
+    // This fixture explicitly disables it and then only echoes PTY input.
+    let shell = Shell::WithArguments {
+        program: "/bin/sh".into(),
+        args: vec![
+            "-c".into(),
+            "printf '\\033[?2004lready-no-paste\\n'; exec cat".into(),
+        ],
+        title_override: None,
+    };
+    let view = open_program(std::env::temp_dir(), shell, cx).await;
+    wait_for(&view, "ready-no-paste", cx);
     view.update(cx, |view, cx| {
         view.type_at_prompt("echo one\necho two".into(), cx)
     });

@@ -19,12 +19,32 @@ use std::{collections::VecDeque, time::Duration};
 const ADDRESS: &str = "nick@studio-mac.local";
 const QWEN: SessionId = SessionId(1);
 
+pub(crate) const SWARM_RESULT_MARKDOWN: &str = "## Findings\n\n- **Preserve Unicode:** keep `🚀` intact when shortening previews.\n- Read [the notes](https://example.com/review) before changing the boundary.\n\n```rust\nlet message = \"café 🚀\";\nassert!(message.is_char_boundary(message.len()));\n```\n\nFinished review; this is not a passing check or an applied change.";
+
 /// Every state `PhoneApp::preview` knows.
 pub const SCREENS: &[&str] = &[
     "connect",
     "reconnecting",
     "unreachable",
     "sessions",
+    "schedules",
+    "schedules-evening",
+    "schedules-offline",
+    "schedules-setup",
+    "schedule-new",
+    "schedule-review",
+    "schedule-detail",
+    "schedule-history",
+    "schedule-result",
+    "schedule-uncertain",
+    "schedule-conflict",
+    "schedule-offline",
+    "schedule-setup",
+    "schedule-stopped",
+    "schedule-unsupported",
+    "schedule-admitted",
+    "schedule-run-confirm",
+    "schedule-delete-confirm",
     "computers",
     "search",
     "start",
@@ -36,6 +56,8 @@ pub const SCREENS: &[&str] = &[
     "calls-shown",
     "waiting",
     "done",
+    "diff-spacing",
+    "call-diff-spacing",
     "many-files",
     "review",
     "typing",
@@ -84,6 +106,7 @@ pub const SCREENS: &[&str] = &[
     "tool-image",
     "media-sample",
     "subagents",
+    "subagents-home",
     "subagents-many",
     "subagents-done",
     "subagents-directory",
@@ -92,6 +115,25 @@ pub const SCREENS: &[&str] = &[
     "subagents-directory-failed",
     "subagents-directory-empty",
     "subagent",
+    "subagent-input",
+    "swarm",
+    "swarm-evening",
+    "swarm-done",
+    "swarm-many",
+    "swarm-offline",
+    "swarm-peer",
+    "swarm-map",
+    "swarm-exchanges",
+    "swarm-questions",
+    "swarm-agent",
+    "swarm-decision",
+    "swarm-groups",
+    "swarm-map-offline",
+    "swarm-results",
+    "swarm-map-evening",
+    "swarm-artifacts",
+    "swarm-no-messages",
+    "swarm-stopped",
     "logs",
 ];
 
@@ -117,6 +159,7 @@ impl PhoneApp {
         self.expanded_turns.clear();
         self.expanded_streams.clear();
         self.expanded_calls.clear();
+        self.reset_swarm_views();
         self.searching = false;
         self.preview_models.clear();
         self.preview_transport_diagnostics.clear();
@@ -156,6 +199,10 @@ impl PhoneApp {
             return;
         }
         self.open_store(ADDRESS);
+        if name == "schedules" || name.starts_with("schedules-") || name.starts_with("schedule-") {
+            self.preview_schedules(name, window, cx);
+            return;
+        }
         let finish = |this: &mut Self| {
             if let Some(store) = &mut this.store {
                 store.tick(Duration::from_secs(10));
@@ -282,6 +329,8 @@ impl PhoneApp {
                         failed: false,
                         added: 0,
                         removed: 0,
+                        diff: Vec::new(),
+                        diff_is_preview: false,
                     });
                 }
                 self.show_session(QWEN, window, cx);
@@ -438,7 +487,8 @@ impl PhoneApp {
                 }
                 self.show_session(QWEN, window, cx);
             }
-            "subagents" | "subagents-many" | "subagents-done" | "subagent" => {
+            "subagents" | "subagents-home" | "subagents-many" | "subagents-done" | "subagent"
+            | "subagent-input" => {
                 finish(self);
                 if let Some(store) = &mut self.store {
                     if let Some(shown) = store.sessions.iter_mut().find(|s| s.id == QWEN) {
@@ -448,12 +498,110 @@ impl PhoneApp {
                             _ => Crew::Working,
                         });
                         sample.title = "Provider retries".into();
+                        if name == "subagents-home" {
+                            sample.state = State::Working;
+                        }
                         *shown = sample;
                     }
                     store.sample_subagents.insert("12".into(), scout_sample());
                 }
                 self.show_session(QWEN, window, cx);
-                if name == "subagent" {
+                if name == "subagents-home" {
+                    self.routes = vec![Route::Sessions];
+                }
+                if matches!(name, "subagent" | "subagent-input") {
+                    if name == "subagent-input" {
+                        self.subagent_composers.remove(&(QWEN, "12".into()));
+                    }
+                    self.open_subagent(
+                        QWEN,
+                        crate::app::Pick {
+                            turn: 0,
+                            handoff: 0,
+                            index: 1,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            }
+            name if name.starts_with("swarm") => {
+                finish(self);
+                let closed = matches!(name, "swarm-done" | "swarm-results" | "swarm-stopped");
+                let many = matches!(name, "swarm-many" | "swarm-groups");
+                if let Some(store) = &mut self.store {
+                    if let Some(shown) = store.sessions.iter_mut().find(|s| s.id == QWEN) {
+                        *shown = swarm_sample(closed, many);
+                        if name == "swarm-results" {
+                            shown.turns[0].handoffs[0].subagents[0].output =
+                                Some(SWARM_RESULT_MARKDOWN.into());
+                            shown.turns[0].handoffs[0].subagents[1].output = Some("**Second peer:** reviewed the retry boundary.\n\n```text\nNo changes applied.\n```".into());
+                        }
+                        if name == "swarm-no-messages" {
+                            shown.turns[0].handoffs[0]
+                                .swarm
+                                .as_mut()
+                                .unwrap()
+                                .messages
+                                .clear();
+                        }
+                        if name == "swarm-stopped" {
+                            shown.turns[0].handoffs[0].subagents[0].status =
+                                pi_core::subagent::Status::Stopped;
+                        }
+                    }
+                    for index in 0..if many { 8 } else { 3 } {
+                        store.sample_subagents.insert(
+                            (11 + index).to_string(),
+                            swarm_child_sample(index, closed, many),
+                        );
+                    }
+                    store.observed_at.insert(
+                        QWEN,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64
+                            - 5_000,
+                    );
+                    if matches!(name, "swarm-offline" | "swarm-map-offline") {
+                        store.computer.connected = false;
+                    }
+                }
+                if matches!(name, "swarm-evening" | "swarm-map-evening") {
+                    self.update_prefs(cx, |prefs| prefs.appearance = Appearance::Evening);
+                    self.apply_theme(window, cx);
+                }
+                self.show_session(QWEN, window, cx);
+                if !matches!(
+                    name,
+                    "swarm"
+                        | "swarm-evening"
+                        | "swarm-done"
+                        | "swarm-many"
+                        | "swarm-offline"
+                        | "swarm-peer"
+                ) {
+                    use crate::screens::swarm::{ExchangeFilter, SwarmTab};
+                    let pick = crate::app::CrewPick {
+                        turn: 0,
+                        handoff: 0,
+                    };
+                    self.open_swarm(QWEN, pick, "retry-swarm", window, cx);
+                    let state = self.swarm_views.get_mut(&(QWEN, pick)).unwrap();
+                    state.tab = match name {
+                        "swarm-exchanges" | "swarm-questions" => SwarmTab::Exchanges,
+                        "swarm-decision" => SwarmTab::Decisions,
+                        "swarm-groups" => SwarmTab::Groups,
+                        "swarm-results" | "swarm-stopped" => SwarmTab::Results,
+                        "swarm-artifacts" => SwarmTab::Artifacts,
+                        _ => SwarmTab::Map,
+                    };
+                    if name == "swarm-questions" {
+                        state.filter = ExchangeFilter::Questions;
+                    }
+                }
+                if matches!(name, "swarm-peer" | "swarm-agent") {
                     self.open_subagent(
                         QWEN,
                         crate::app::Pick {
@@ -531,6 +679,42 @@ impl PhoneApp {
             "done" => {
                 finish(self);
                 self.show_session(QWEN, window, cx);
+            }
+            "diff-spacing" | "call-diff-spacing" => {
+                finish(self);
+                if let Some(session) = self
+                    .store
+                    .as_mut()
+                    .and_then(|store| store.sessions.iter_mut().find(|session| session.id == QWEN))
+                {
+                    let stage = session.turns[0].stage_mut(StageKind::Change);
+                    stage.diff_path = Some("crates/pi_android/src/schedules.rs".into());
+                    stage.diff = [
+                        (LineKind::Context, 998, "use super::*;"),
+                        (LineKind::Context, 999, ""),
+                        (LineKind::Removed, 1000, "fn old_name() {"),
+                        (
+                            LineKind::Added,
+                            1001,
+                            "fn schedules_open_from_the_computers_menu_and_back_returns_home() {",
+                        ),
+                        (LineKind::Context, 1002, "}"),
+                    ]
+                    .into_iter()
+                    .map(|(kind, number, text)| crate::model::DiffLine::new(kind, number, text))
+                    .collect();
+                    stage.tools[0].diff = stage.diff.clone();
+                    stage.tools[0].diff_is_preview = false;
+                }
+                self.show_session(QWEN, window, cx);
+                self.open_sheet(
+                    if name == "diff-spacing" {
+                        Sheet::Activity(QWEN, 0, StageKind::Change)
+                    } else {
+                        Sheet::Call(QWEN, 0, StageKind::Change, 0)
+                    },
+                    cx,
+                );
             }
             "many-files" => {
                 finish(self);
@@ -707,6 +891,15 @@ impl PhoneApp {
             .and_then(|id| self.store.as_ref()?.session(id));
         let composer = match self.route() {
             Route::Thread(id) => self.threads.get(&id),
+            Route::Subagent(id, pick) => self
+                .store
+                .as_ref()
+                .and_then(|store| store.session(id))
+                .and_then(|session| session.turns.get(pick.turn))
+                .and_then(|turn| turn.handoffs.get(pick.handoff))
+                .and_then(|handoff| handoff.subagents.get(pick.index))
+                .and_then(|agent| agent.conversation_id.as_ref())
+                .and_then(|conversation| self.subagent_composers.get(&(id, conversation.clone()))),
             Route::Review(_) => Some(&self.review),
             _ => Some(&self.start),
         };
@@ -723,6 +916,7 @@ impl PhoneApp {
             "file": self.file_view.as_ref().map(|view| view.path.clone()),
             "start_draft": self.start.read(cx).area.read(cx).text().to_owned(),
             "sample": self.store.as_ref().is_some_and(|store| store.is_sample()),
+            "scheduler": self.schedule_test_state(cx),
             "draft_chars": composer.map(|c| c.read(cx).area.read(cx).text().chars().count()),
             "text_menu_open": composer.is_some_and(|c| c.read(cx).area.read(cx).menu_open()),
             "draft_attachments": composer.map(|c| c.read(cx).attachments().len()),
@@ -730,6 +924,7 @@ impl PhoneApp {
             "model_search_chars": self.model_search.read(cx).text().chars().count(),
             "model": model, "thinking": thinking,
             "state": session.map(|s| format!("{:?}", s.state)),
+            "swarm_enabled": session.and_then(|s| s.details.swarm_enabled),
             "sessions": self.store.as_ref().map(|s| s.sessions.iter().map(|s| s.id.0).collect::<Vec<_>>()),
             "turns": session.map(|s| s.turns.len()),
             "expanded_activities": self.expanded_turns.values().filter(|expanded| **expanded).count(),
@@ -999,6 +1194,127 @@ fn subagent_sample(crew: Crew) -> crate::model::Session {
     )
 }
 
+/// An opt-in read-only crew, projected from the ordinary handoff wire shape.
+fn swarm_sample(closed: bool, many: bool) -> crate::model::Session {
+    use serde_json::json;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let roles = [
+        "scout", "scout", "reviewer", "scout", "scout", "planner", "scout", "reviewer",
+    ];
+    let tasks = [
+        "Map Anthropic retry behavior",
+        "Map OpenAI retry behavior",
+        "Compare findings without changing files",
+        "Read Google retry limits",
+        "Check Bedrock backoff",
+        "Plan a shared helper without editing",
+        "Read Mistral rate limits",
+        "Review the retry evidence",
+    ];
+    let count = if many { 8 } else { 3 };
+    let members = (0..count)
+        .map(|index| {
+            json!({
+                "id":format!("peer-{}", index + 1), "agent":roles[index], "task":tasks[index],
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut messages = vec![
+        json!({"id":"msg-1","sequence":1,"from":"peer-1","to":"peer-2","kind":"finding","text":"Anthropic honors Retry-After before exponential backoff.","status":"received","createdAt":now - 45_000,"receivedAt":now - 40_000}),
+        json!({"id":"msg-2","sequence":2,"from":"peer-2","to":"peer-1","kind":"question","text":"Does that also apply when the header is an HTTP date?","status":"received","createdAt":now - 35_000,"receivedAt":now - 30_000}),
+        json!({"id":"msg-3","sequence":3,"from":"peer-1","to":"peer-2","kind":"reply","replyTo":"msg-2","text":"Yes. The parser accepts seconds and HTTP dates; I found both branches.","status":if closed { "cancelled" } else { "queued" },"createdAt":now - 25_000}),
+    ];
+    if many {
+        messages.extend([
+            json!({"id":"msg-4","sequence":4,"from":"peer-4","to":"peer-6","kind":"finding","text":"Google caps the backoff at 60 seconds.","status":"received","createdAt":now - 24_000,"receivedAt":now - 23_000}),
+            json!({"id":"msg-5","sequence":5,"from":"peer-5","to":"peer-8","kind":"finding","text":"Bedrock shares the retry implementation.","status":"received","createdAt":now - 22_000,"receivedAt":now - 21_000}),
+            json!({"id":"msg-6","sequence":6,"from":"peer-6","to":"peer-7","kind":"question","text":"Are Mistral's rate-limit headers parsed?","status":"received","createdAt":now - 20_000,"receivedAt":now - 19_000}),
+            json!({"id":"msg-7","sequence":7,"from":"peer-3","to":"peer-8","kind":"finding","text":"The retry limits differ; findings are evidence, not a passing check.","status":"received","createdAt":now - 18_000,"receivedAt":now - 17_000}),
+            json!({"id":"msg-8","sequence":8,"from":"peer-7","to":"peer-6","kind":"reply","replyTo":"msg-6","text":"Only retry-after is parsed in this path.","status":"queued","createdAt":now - 16_000}),
+            json!({"id":"msg-9","sequence":9,"from":"peer-8","to":"peer-5","kind":"question","text":format!("Please compare the fallback. {}", "More read-only evidence · café 中文. ".repeat(30)),"status":"cancelled","createdAt":now - 15_000}),
+        ]);
+    }
+    // Match the broker's full-length opaque IDs so previews/tests exercise
+    // wrapping and exact reply correlation, not just short placeholder labels.
+    for message in &mut messages {
+        let sequence = message["sequence"].as_u64().unwrap();
+        message["id"] = json!(format!("message-{sequence:064x}"));
+        let reply = message["replyTo"]
+            .as_str()
+            .and_then(|id| id.strip_prefix("msg-"))
+            .and_then(|id| id.parse::<u64>().ok());
+        if let Some(reply) = reply {
+            message["replyTo"] = json!(format!("message-{reply:064x}"));
+        }
+    }
+    let args = json!({"swarm":true,"tasks":members.iter().map(|member| json!({"agent":member["agent"],"task":member["task"]})).collect::<Vec<_>>()});
+    let details = json!({
+        "version":1,"mode":"parallel","background":true,
+        "swarm":{"version":1,"id":"retry-swarm","members":members,"messages":messages,"closed":closed},
+        "results":(0..count).map(|index| json!({
+            "index":index,"peerId":format!("peer-{}", index + 1),"agent":roles[index],"task":tasks[index],
+            "status":if closed { "done" } else { "running" },"conversationId":(11 + index).to_string(),
+            "now":if closed { "Returned read-only findings" } else { "Comparing retry evidence" },
+            "startedAt":now - 60_000,"endedAt":closed.then_some(now - 10_000),"cost":0.009,
+        })).collect::<Vec<_>>(),
+    });
+    let mut pi = pi_core::session::Session::new("/repo".into());
+    pi.apply(&json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+        {"role":"user","content":"Use a read-only swarm to compare provider retries. Let the peers exchange evidence, then summarize; don't change files.","timestamp":now - 70_000},
+        {"role":"assistant","content":[{"type":"toolCall","id":"swarm-hand","name":"subagent","arguments":args}],"timestamp":now - 65_000},
+        {"role":"toolResult","toolCallId":"swarm-hand","toolName":"subagent","content":[{"type":"text","text":"Started a read-only peer swarm."}],"details":details,"isError":false,"timestamp":now - 60_000},
+    ]}})).unwrap();
+    let mut session = crate::projection::project(
+        &pi,
+        crate::projection::Facts {
+            id: QWEN,
+            cwd: "/repo",
+            folder: "~/repo".into(),
+            question: None,
+            outbox: &[],
+            key: "0123456789abcdef0123456789abcdef",
+        },
+    );
+    session.title = "Provider retry swarm".into();
+    session
+}
+
+fn swarm_child_sample(index: usize, closed: bool, many: bool) -> pi_core::session::Session {
+    use serde_json::json;
+    let roles = [
+        "scout", "scout", "reviewer", "scout", "scout", "planner", "scout", "reviewer",
+    ];
+    let members = roles
+        .iter()
+        .take(if many { 8 } else { 3 })
+        .enumerate()
+        .map(|(n, role)| format!("peer-{} · {role}", n + 1))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let received = match index {
+        0 => format!(
+            "message-{:064x} · question from peer-2: Does that also apply when the header is an HTTP date?",
+            2
+        ),
+        1 => format!(
+            "message-{:064x} · finding from peer-1: Anthropic honors Retry-After before exponential backoff.",
+            1
+        ),
+        _ => "No queued peer messages.".to_owned(),
+    };
+    pi_core::subagent::session(&json!({"busy":!closed,"messages":[
+        {"role":"user","content":format!("You are peer-{} in retry-swarm. Compare retry behavior read-only. Exchange evidence with peers; do not edit or spawn more agents.", index + 1)},
+        {"role":"assistant","content":[{"type":"toolCall","id":"members","name":"swarm_members","arguments":{}}]},
+        {"role":"toolResult","toolCallId":"members","toolName":"swarm_members","content":[{"type":"text","text":members}],"isError":false},
+        {"role":"assistant","content":[{"type":"toolCall","id":"receive","name":"swarm_receive","arguments":{"requestId":format!("sample-receive-peer-{}", index + 1)}}]},
+        {"role":"toolResult","toolCallId":"receive","toolName":"swarm_receive","content":[{"type":"text","text":received}],"isError":false},
+        {"role":"assistant","content":[{"type":"text","text":"This is retrieved peer evidence, not proof the code works. I will compare it with the source."}]},
+    ]}), "/repo".into()).unwrap()
+}
+
 /// The second scout's own run, as `get_subagent` sends it.
 fn scout_sample() -> pi_core::session::Session {
     pi_core::subagent::session(
@@ -1025,6 +1341,152 @@ fn long_text() -> String {
     format!(
         "START OF LONG TEXT\n\n{paragraphs}\n\nEND OF LONG TEXT — all forty paragraphs are present."
     )
+}
+
+impl PhoneApp {
+    fn preview_schedules(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // Explicit fixtures reset sample drafts too; host navigation outside
+        // preview still preserves unsaved drafts as before.
+        self.schedules.draft = None;
+        if let Some(host) = self.schedule_host() {
+            self.schedules.caches.remove(&host);
+        }
+        self.ensure_sample_schedules();
+        self.routes = vec![Route::Sessions, Route::Schedules];
+        self.schedules.selected = Some("sample-morning".into());
+        if name == "schedules-evening" {
+            self.update_prefs(cx, |prefs| prefs.appearance = Appearance::Evening);
+            self.apply_theme(window, cx);
+        }
+        match name {
+            "schedule-offline" | "schedules-offline" => {
+                self.schedules.sample_mode = Some("offline");
+                if let Some(host) = self.schedule_host()
+                    && let Some(cache) = self.schedules.caches.get_mut(&host)
+                {
+                    cache.trusted = false;
+                }
+            }
+            "schedule-unsupported" => self.schedules.sample_mode = Some("unsupported"),
+            "schedule-setup" | "schedules-setup" | "schedule-stopped" => {
+                if let Some(host) = self.schedule_host()
+                    && let Some(cache) = self.schedules.caches.get_mut(&host)
+                    && let Some(health) = &mut cache.health
+                {
+                    health.running = false;
+                    health.autostart_installed = name == "schedule-stopped";
+                    health.detail =
+                        "Sample scheduler is not running. This screen does not install anything."
+                            .into();
+                }
+            }
+            "schedule-new" | "schedule-review" => {
+                self.begin_schedule_draft(None, window, cx);
+                let spec = crate::schedules::sample_spec();
+                if let Some(draft) = &mut self.schedules.draft {
+                    draft
+                        .name
+                        .update(cx, |area, cx| area.set_text(&spec.name, cx));
+                    draft
+                        .cwd
+                        .update(cx, |area, cx| area.set_text(&spec.cwd, cx));
+                    draft
+                        .prompt
+                        .update(cx, |area, cx| area.set_text(&spec.prompt, cx));
+                    draft
+                        .timezone
+                        .update(cx, |area, cx| area.set_text(&spec.timezone, cx));
+                    draft.provider = spec.provider;
+                    draft.model_id = spec.model_id;
+                }
+                self.preview_schedule(cx);
+                if name == "schedule-review" {
+                    self.review_schedule(window, cx);
+                }
+            }
+            "schedule-detail" => self.push(Route::ScheduleDetail, window, cx),
+            "schedule-uncertain" => {
+                let job = self.selected_schedule().unwrap();
+                if let Some(host) = self.schedule_host()
+                    && let Some(cache) = self.schedules.caches.get_mut(&host)
+                {
+                    cache.uncertain = Some(pi_core::schedules::Request::RunNow {
+                        job_id: job.id.clone(),
+                        expected_revision: job.revision,
+                        request_id: "sample-manual-uncertain".into(),
+                        consent: true,
+                    });
+                    cache.uncertain_job = Some(job);
+                    cache.error = Some("Sample lost response. Refresh and inspect before explicitly recovering the same key. No real work was admitted.".into());
+                }
+                self.push(Route::ScheduleDetail, window, cx);
+            }
+            "schedule-conflict" => {
+                self.begin_schedule_draft(self.selected_schedule(), window, cx);
+                if let Some(host) = self.schedule_host()
+                    && let Some(cache) = self.schedules.caches.get_mut(&host)
+                    && let Some(job) = cache.jobs.first_mut()
+                {
+                    job.revision += 1;
+                    job.spec.enabled = false;
+                    job.spec.prompt = "Sample remote edit from another client".into();
+                }
+                self.preview_schedule(cx);
+                if let Some(draft) = &mut self.schedules.draft {
+                    draft.prompt.update(cx, |area, cx| {
+                        area.set_text("My local draft is kept after the revision conflict", cx)
+                    });
+                    draft.error = Some("Sample revision conflict. Inspect the latest host definition, then explicitly use its revision without replacing this draft.".into());
+                }
+            }
+            "schedule-result" => {
+                if let Some(store) = &mut self.store {
+                    store.tick(Duration::from_secs(10));
+                    store.answer(QWEN, Answer::AllowOnce);
+                    store.tick(Duration::from_secs(10));
+                }
+                self.push(Route::ScheduleDetail, window, cx);
+                self.push(Route::ScheduleHistory, window, cx);
+                if let Some(run) = self
+                    .schedule_cache()
+                    .history
+                    .get("sample-morning")
+                    .and_then(|runs| {
+                        runs.iter()
+                            .find(|run| run.status == pi_core::schedules::RunStatus::Completed)
+                    })
+                    .cloned()
+                {
+                    self.open_schedule_occurrence(run, window, cx);
+                }
+            }
+            "schedule-history" | "schedule-admitted" => {
+                if name == "schedule-admitted"
+                    && let Some(host) = self.schedule_host()
+                    && let Some(cache) = self.schedules.caches.get_mut(&host)
+                    && let Some(runs) = cache.history.get_mut("sample-morning")
+                {
+                    runs.retain(|run| run.status == pi_core::schedules::RunStatus::Accepted);
+                }
+                self.push(Route::ScheduleDetail, window, cx);
+                self.push(Route::ScheduleHistory, window, cx);
+            }
+            "schedule-run-confirm" | "schedule-delete-confirm" => {
+                self.push(Route::ScheduleDetail, window, cx);
+                self.confirm_schedule_action(
+                    if name == "schedule-delete-confirm" {
+                        "delete"
+                    } else {
+                        "run"
+                    },
+                    window,
+                    cx,
+                );
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
 }
 
 #[cfg(test)]
@@ -1120,8 +1582,23 @@ mod tests {
                 app.read_with(cx, |app, _| {
                     let expected = match *name {
                         "connect" | "reconnecting" | "unreachable" => Route::Connect,
+                        "schedules"
+                        | "schedules-evening"
+                        | "schedules-offline"
+                        | "schedules-setup"
+                        | "schedule-offline"
+                        | "schedule-setup"
+                        | "schedule-stopped"
+                        | "schedule-unsupported" => Route::Schedules,
+                        "schedule-new" | "schedule-conflict" => Route::ScheduleEdit,
+                        "schedule-uncertain" => Route::ScheduleDetail,
+                        "schedule-review" | "schedule-run-confirm" | "schedule-delete-confirm" => {
+                            Route::ScheduleConfirm
+                        }
+                        "schedule-detail" => Route::ScheduleDetail,
+                        "schedule-history" | "schedule-admitted" => Route::ScheduleHistory,
                         "sessions" | "computers" | "search" | "empty-search" | "delete"
-                        | "delete-running" => Route::Sessions,
+                        | "delete-running" | "subagents-home" => Route::Sessions,
                         "start" | "model" | "model-long-list" | "model-no-match" | "thinking"
                         | "mentions" | "image-input" | "image-only" | "attach" | "project"
                         | "long-input" | "long-labels" | "project-tree" | "project-search" => {
@@ -1136,7 +1613,26 @@ mod tests {
                         | "subagents-directory-done"
                         | "subagents-directory-stopped"
                         | "subagents-directory-failed" => Route::Subagents(QWEN),
-                        "subagent" => Route::Subagent(
+                        "swarm-map" | "swarm-exchanges" | "swarm-questions" | "swarm-decision"
+                        | "swarm-groups" | "swarm-map-offline" | "swarm-results"
+                        | "swarm-map-evening" | "swarm-artifacts" | "swarm-no-messages"
+                        | "swarm-stopped" => Route::Swarm(
+                            QWEN,
+                            crate::app::CrewPick {
+                                turn: 0,
+                                handoff: 0,
+                            },
+                        ),
+                        "swarm-peer" | "swarm-agent" => Route::SwarmPeer(
+                            QWEN,
+                            crate::app::Pick {
+                                turn: 0,
+                                handoff: 0,
+                                index: 1,
+                            },
+                            1,
+                        ),
+                        "subagent" | "subagent-input" => Route::Subagent(
                             QWEN,
                             crate::app::Pick {
                                 turn: 0,
@@ -1154,6 +1650,169 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn swarm_fixtures_use_the_opt_in_wire_contract_and_named_states() {
+        for (closed, many) in [(false, false), (true, false), (false, true)] {
+            let session = swarm_sample(closed, many);
+            let handoff = &session.turns[0].handoffs[0];
+            let swarm = handoff
+                .swarm
+                .as_ref()
+                .expect("opt-in swarm projected from tool details");
+            assert_eq!(swarm.closed, closed);
+            assert_eq!(swarm.members.len(), if many { 8 } else { 3 });
+            assert_eq!(swarm.messages.len(), if many { 9 } else { 3 });
+            assert_eq!(swarm.members[0].agent, swarm.members[1].agent);
+            assert_ne!(swarm.members[0].id, swarm.members[1].id);
+            for (member, child) in swarm.members.iter().zip(&handoff.subagents) {
+                assert_eq!(child.peer_id.as_deref(), Some(member.id.as_str()));
+                assert!(child.conversation_id.is_some());
+            }
+            assert!(
+                session.question.is_none(),
+                "peer questions are not user questions"
+            );
+        }
+        assert!(
+            subagent_sample(Crew::Working).turns[0].handoffs[0]
+                .swarm
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
+    fn swarm_recent_tiles_fit_narrow_moonstone_and_evening_views(cx: &mut TestAppContext) {
+        for name in [
+            "swarm-many",
+            "swarm-evening",
+            "swarm-offline",
+            "swarm-done",
+            "swarm-peer",
+        ] {
+            let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+            cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(640.)));
+            cx.update(|window, cx| app.update(cx, |app, cx| app.preview(name, window, cx)));
+            cx.run_until_parked();
+            let sequences = if name == "swarm-many" {
+                [7, 8, 9]
+            } else {
+                [1, 2, 3]
+            };
+            if name == "swarm-peer" {
+                let bounds = cx
+                    .debug_bounds("peer-exchanges")
+                    .expect("peer has the dedicated exchange browser entry");
+                assert!(bounds.origin.x >= gpui::px(0.) && bounds.right() <= gpui::px(320.));
+                assert!(bounds.size.height >= gpui::px(48.));
+                continue;
+            }
+            for sequence in sequences {
+                let bounds = cx
+                    .debug_bounds(format!("swarm-exchange-retry-swarm-{sequence}").leak())
+                    .expect("recent exchange tile is laid out");
+                assert!(
+                    bounds.origin.x >= gpui::px(0.),
+                    "{name}: left edge stays in viewport"
+                );
+                assert!(
+                    bounds.right() <= gpui::px(320.),
+                    "{name}: right edge stays in viewport"
+                );
+            }
+            if name == "swarm-many" {
+                for sequence in 1..7 {
+                    assert!(
+                        cx.debug_bounds(format!("swarm-exchange-retry-swarm-{sequence}").leak())
+                            .is_none()
+                    );
+                }
+                assert_eq!(
+                    (0..8)
+                        .filter(|index| cx
+                            .debug_bounds(format!("subagent-0-0-{index}").leak())
+                            .is_some())
+                        .count(),
+                    5
+                );
+                cx.update(|_, cx| {
+                    app.update(cx, |app, cx| {
+                        app.all_subagents.insert((QWEN, 0, 0));
+                        app.remeasure_thread_turn(QWEN, 0);
+                        cx.notify();
+                    })
+                });
+                cx.run_until_parked();
+                assert_eq!(
+                    (0..8)
+                        .filter(|index| cx
+                            .debug_bounds(format!("subagent-0-0-{index}").leak())
+                            .is_some())
+                        .count(),
+                    8
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn duplicate_agent_swarm_rows_open_the_exact_roster_peer_not_the_result_order(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("swarm", window, cx);
+                let handoff = &mut app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == QWEN)
+                    .unwrap()
+                    .turns[0]
+                    .handoffs[0];
+                handoff.subagents.swap(0, 1);
+                handoff.swarm.as_mut().unwrap().messages.clear();
+                app.remeasure_thread_turn(QWEN, 0);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let first_peer = cx.debug_bounds("subagent-0-0-1").unwrap();
+        let second_peer = cx.debug_bounds("subagent-0-0-0").unwrap();
+        assert!(
+            first_peer.origin.y < second_peer.origin.y,
+            "roster order stays stable"
+        );
+        cx.simulate_click(first_peer.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(
+                app.route(),
+                Route::SwarmPeer(
+                    QWEN,
+                    crate::app::Pick {
+                        turn: 0,
+                        handoff: 0,
+                        index: 1
+                    },
+                    1
+                )
+            );
+            let child = &app.store.as_ref().unwrap().session(QWEN).unwrap().turns[0].handoffs[0]
+                .subagents[1];
+            assert_eq!(child.peer_id.as_deref(), Some("peer-1"));
+            assert_eq!(child.conversation_id.as_deref(), Some("11"));
+            assert!(
+                app.subagent_sessions
+                    .values()
+                    .any(|session| session.turns[0].prompt.contains("peer-1"))
+            );
+        });
     }
 
     /// A big crew shows its first few, all on request, or just its header.
@@ -1360,6 +2019,53 @@ mod tests {
             cx.debug_bounds("stop-subagent").is_some(),
             "a running subagent can be stopped"
         );
+    }
+
+    #[gpui::test]
+    fn details_shows_background_compaction_and_the_policy_at_phone_width(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(320.), gpui::px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("details", window, cx);
+                let shown = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == QWEN)
+                    .unwrap();
+                shown.details.compaction_percent = Some(81.9294);
+                shown.details.background_compacting = true;
+                app.sheet_motion.finish();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        for selector in ["details-compaction-policy", "details-background-compaction"] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .expect("compaction information is rendered");
+            assert!(bounds.left() >= gpui::px(0.));
+            assert!(bounds.right() <= gpui::px(320.));
+        }
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == QWEN)
+                    .unwrap()
+                    .details
+                    .background_compacting = false;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("details-background-compaction").is_none());
     }
 
     /// Details exposes one live session-wide directory, whose rows keep their behavior.
@@ -2474,6 +3180,22 @@ mod tests {
             assert!(app.sheet.is_none());
             assert_eq!(app.route(), Route::Start);
         });
+    }
+
+    #[gpui::test]
+    fn the_home_crew_icon_has_space_below_the_progress_rail(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        for width in [320., 412.] {
+            cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(640.)));
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| app.preview("subagents-home", window, cx))
+            });
+            cx.run_until_parked();
+            let rail = cx.debug_bounds("session-track-1").unwrap();
+            let crew = cx.debug_bounds("session-crew-row-1").unwrap();
+            assert!(crew.top() - rail.bottom() >= gpui::px(12.));
+            assert!(crew.left() >= gpui::px(0.) && crew.right() <= gpui::px(width));
+        }
     }
 
     #[gpui::test]

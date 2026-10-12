@@ -38,6 +38,26 @@ Home).
    describes. The phone sets the model from its settings, or the first the
    computer offers.
 
+## Scheduled jobs
+
+Open **Schedules** from the **Computers** menu (tap the computer’s name on Home), marked with a calendar-and-clock icon. Back returns to your sessions. Schedules manages recurring Pi prompts on that host; the phone does not keep timers or need to stay open.
+
+- Choose a project, model, prompt, numeric five-field cron expression and IANA timezone. Preview upcoming occurrences before reviewing the schedule and explicitly allowing unattended execution.
+- Each occurrence uses a fresh durable session. Pause affects future times, not an existing run. Editing a paused schedule keeps it paused. Delete keeps sessions and project files.
+- **Run now** requires a separate confirmation and does not move the recurring clock. Pending/accepted admission is not completion; the history distinguishes finished, failed, interrupted, skipped, missed and unknown work. Open an occurrence’s session, then Back returns to its schedule history.
+- Cached schedules are unknown when the computer is unreachable; offline changes/submissions are not silently queued. Conflicts preserve the draft. An uncertain mutation requires inspection rather than an automatic fresh-key retry.
+- The computer must be awake with a configured provider and an updated durable helper advertising `schedules`. Missing/stopped scheduler setup and unsupported helpers are shown separately. Setup happens explicitly **on the computer**, never automatically from the phone.
+
+```sh
+~/.pi/desktop/bin/pi-desktop-remote scheduler start
+# Optional login autostart; does not start the service immediately:
+~/.pi/desktop/bin/pi-desktop-remote scheduler install --confirm
+```
+
+Linux/macOS hosts only for now. See [host setup and recovery](../pi_remote/README.schedules.md). Jobs can run commands and edit files as the host account; a read-only prompt is not a sandbox. Missed times are skipped by default, same-job overlaps are skipped, and timeouts request a best-effort Stop. Unknown admission can block further occurrences and needs inspection; this version has no administrative force-clear API. Task success and exactly-once external side effects are not guaranteed. Phone schedule caches/drafts and uncertain operation identities currently live in memory, not across process restarts.
+
+The [HTML design](../../design/android/schedules/index.html) is still a local prototype. Native sample-mode screens and emulator tests never submit real scheduled work; [verification instructions](scripts/SCHEDULER_VERIFICATION.md) describe that boundary.
+
 ## Connect
 
 The easiest first connection is QR pairing. On the computer, run:
@@ -92,6 +112,31 @@ shows an update message and leaves recent projects available.
 - **Questions:** a stock Pi session's confirm or select dialog opens as a
   sheet and is answered from the phone. Durable sessions have no extensions,
   so they don't ask.
+- **Native swarm observation:** an opted-in handoff opens **Map / Exchanges /
+  Agents / Results**, in Moonstone or Evening. The map keeps real roster slots
+  stable and draws only recorded, directed peer exchanges; dashed coordinator
+  links are assignments, not dependencies. Exchanges filter by kind and exact
+  peer ID, expand broker previews, and link replies to their exact question when
+  it remains in the bounded snapshot. Groups contain actual roster members.
+  Opening a peer retains its exact swarm/peer identity even if result order changes.
+  Results use the same Markdown renderer as conversation replies, including
+  headings, lists, links and copyable code blocks. Missing outputs keep an explicit
+  placeholder; the source and full-conversation link are preserved.
+  Ordinary crews and chains keep their existing navigation.
+  Queued, Received and Cancelled are distinct; Received means explicit retrieval,
+  not agreement or successful work. At most 32 recent message events and
+  500-character text previews are available, not complete mailbox history.
+  Disconnected or recovering session pipes show **Last known**, the last accepted
+  phone receipt time, and no live input/Stop. Navigation and cached inspection
+  remain available. Send rechecks connectivity, peer identity and the displayed
+  child turn; a late Send cannot silently steer a replacement run or become a
+  follow-up. Peer Stop requires exact-target confirmation and targets the current
+  child conversation, including later follow-ups; original assignment summaries
+  stay frozen. Uncertain Stop requests may be explicitly retried but are never
+  replayed on reconnect.
+  Structured user decisions, artifacts/worktrees, patches/integration/check
+  records and more than eight peers remain explicitly unavailable—not simulated.
+  See [swarm usage and limits](../../backend/durable/README.md#peer-communication-opt-in-swarm).
 - **Review:** one file at a time; tapping lines names them (“About lines
   211–212 of src/app.rs”) in a follow-up.
 - **Reconnecting:** when the connection drops, the phone connects again and
@@ -111,7 +156,11 @@ shows an update message and leaves recent projects available.
   scrolled to the top) to dismiss it. Back and close buttons remain available.
 - **Copying:** long-press a prompt, a reply, a question's command or a line in
   Review to open it as selectable text: hold a word and drag the handles to
-  copy part of it, or copy all of it.
+  copy part of it, or copy all of it. Tool output also supports long-press
+  selection; call sheets put a Copy icon beside the Output heading, with
+  “Ask about this” on its own full-width row. Edit call sheets show each call’s
+  full diff and update while open; input-only previews are labeled “Requested
+  changes” until an applied diff is reported.
   Panels follow the finger until release, then settle smoothly; partial and
   cancelled drags return to their starting position. Reduced motion is honored.
   Sheet headers and close buttons remain visible while long content scrolls.
@@ -217,6 +266,26 @@ release APKs are not. The telemetry contains routes, bounds and character/image
 counts, never credentials or prompt contents, and is disabled for real sessions.
 Screenshots require visual
 inspection: the script checks process survival and crash logs, not appearance.
+`--case draft-targets` checks first taps and holds across the draft’s text and
+padding, including a system-clipboard Copy/Paste round trip. `--case call-output`
+checks the top Copy icon, first-open selection menu and full-width Ask action.
+`--case swarm-results` checks rendered peer results, exact Unicode code copying,
+and opening the full peer conversation. `--case swarm-toggle` checks the session
+More menu's Swarm switch and captures the Home crew/rail gap. Swarm is a host-owned
+permission for **new** explicit swarm crews; switching it off leaves ordinary
+subagents and admitted crews alone. Older runners show Unavailable rather than a
+local-only switch; update the helper and start a fresh session to use it.
+`--case subagent-input` checks first taps across the compact editor and its padding,
+IME resize/typing, and the separate Send target. This dedicated fixture has no
+transport. Host touch tests also preserve catch-only taps inside a moving viewport
+while allowing the first tap on controls outside it.
+`--case diff-spacing` captures activity and per-call diff cards with four-digit
+line numbers and wrapped code. Their shared gutter keeps a 12 dp inset from the
+border and grows for larger numbers without misaligning the code rows.
+`--case gestures` scrolls the target row fully inside the list viewport before
+swiping, then verifies short swipes, cancellation and deletion of exactly the
+confirmed sample session. Targeting tests run without a device:
+`python3 crates/pi_android/scripts/test_interactions_tooling.py`.
 `test_interactions.py` waits for settled layouts and asserts the QR connect screen
 and native camera scanner, typing, model search, thinking selection, long Unicode
 edits, Stop, actual system-picker image import, image preview/send, scrollbars,

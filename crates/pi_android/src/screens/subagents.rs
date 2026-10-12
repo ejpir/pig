@@ -1,20 +1,23 @@
 //! Work Pi handed to subagents (design/android/subagents): a card in the
 //! turn, one row per subagent with what it is doing, its time and cost; and a
 //! subagent's own screen, opened from its row. Durable children can be steered
-//! or resumed directly when the backend advertises exact-target input support.
+//! directly while running when the backend advertises exact-target input support.
 
 use super::scroll_area;
 use crate::{
-    app::{PhoneApp, Pick, Route},
+    app::{CrewPick, PhoneApp, Pick, Route},
     model::{SessionId, Turn, duration_label, session_subagents, subagent_summary},
     projection,
     theme::{Theme, theme},
     ui::{self, icon},
 };
 use gpui::{
-    AnyElement, Context, Div, ElementId, FontWeight, Hsla, Stateful, Window, div, prelude::*, px,
+    AnyElement, Context, Div, ElementId, Focusable, FontWeight, Hsla, Stateful, Window, div,
+    prelude::*, px,
 };
-use pi_core::subagent::{Handoff, Mode, Status, Subagent};
+use pi_core::subagent::{
+    Handoff, Mode, Status, Subagent, Swarm, SwarmMessage, SwarmMessageKind, SwarmMessageStatus,
+};
 use std::time::Duration;
 
 /// The look of a well-known agent: its icon and hue. Others get Pi's.
@@ -44,6 +47,9 @@ fn cost_label(cost: f64) -> String {
 
 /// "3 scouts in parallel", "A chain of 2", "scout".
 fn shape(handoff: &Handoff) -> String {
+    if let Some(swarm) = &handoff.swarm {
+        return format!("Read-only swarm · {} peers", swarm.members.len());
+    }
     let first = handoff.subagents.first().map_or("", |s| s.agent.as_str());
     let same = handoff.subagents.iter().all(|s| s.agent == first);
     let count = handoff.subagents.len();
@@ -65,6 +71,247 @@ fn shape(handoff: &Handoff) -> String {
 
 /// How many subagents a card shows before Show all.
 const SHOWN: usize = 5;
+
+/// Swarms are small, read-only crews. Bound even malformed/older snapshots.
+const SWARM_PEERS: usize = 8;
+const RECENT_EXCHANGES: usize = 3;
+const EXCHANGE_CHARS: usize = 180;
+const RECEIVED_COPY: &str = "Received means the recipient explicitly retrieved it with a tool, not agreement or successful execution.";
+
+fn shown_peer_count(swarm: &Swarm, all: bool) -> usize {
+    swarm
+        .members
+        .len()
+        .min(if all { SWARM_PEERS } else { SHOWN })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwarmView {
+    Observed,
+    Sample,
+    Offline,
+}
+
+fn swarm_lifecycle(swarm: &Swarm, view: SwarmView) -> String {
+    let state = if swarm.closed { "Closed" } else { "Open" };
+    match view {
+        SwarmView::Observed => state.into(),
+        SwarmView::Sample => format!("Sample · {state}"),
+        SwarmView::Offline => format!("Last known: {state}"),
+    }
+}
+
+fn peer_label(swarm: &Swarm, id: &str) -> String {
+    match swarm.members.iter().find(|member| member.id == id) {
+        Some(member) => format!("{} · {}", member.agent, member.id),
+        None => format!("Unknown peer · {id}"),
+    }
+}
+
+fn peer_status(status: Status) -> &'static str {
+    match status {
+        Status::Waiting => "Waiting",
+        Status::Running => "Running",
+        Status::Done => "Done",
+        Status::Failed => "Failed",
+        Status::Stopped => "Stopped",
+    }
+}
+
+fn exchange_kind(kind: SwarmMessageKind) -> &'static str {
+    match kind {
+        SwarmMessageKind::Finding => "Finding",
+        SwarmMessageKind::Question => "Question",
+        SwarmMessageKind::Reply => "Reply",
+    }
+}
+
+fn exchange_delivery(status: SwarmMessageStatus, view: SwarmView) -> String {
+    let label = match status {
+        SwarmMessageStatus::Queued => "Queued · not retrieved",
+        SwarmMessageStatus::Received => "Received · retrieved by recipient",
+        SwarmMessageStatus::Cancelled => "Cancelled",
+    };
+    match view {
+        SwarmView::Observed => label.into(),
+        SwarmView::Sample => format!("Sample: {label}"),
+        SwarmView::Offline => format!("Last known: {label}"),
+    }
+}
+
+fn exchange_reply(swarm: &Swarm, message: &SwarmMessage) -> Option<String> {
+    let id = message.reply_to.as_deref()?;
+    Some(match swarm.messages.iter().find(|item| item.id == id) {
+        Some(original) => format!("Reply to #{} · {id}", original.sequence),
+        None => format!("Reply to {id} · original not in snapshot"),
+    })
+}
+
+/// Chronological tail by runtime sequence, not arrival order or wall clock.
+fn recent_exchanges<'a>(swarm: &'a Swarm, peer: Option<&str>) -> Vec<&'a SwarmMessage> {
+    let mut messages = swarm
+        .messages
+        .iter()
+        .filter(|message| peer.is_none_or(|id| message.from == id || message.to == id))
+        .collect::<Vec<_>>();
+    messages.sort_by(|a, b| a.sequence.cmp(&b.sequence).then_with(|| a.id.cmp(&b.id)));
+    let start = messages.len().saturating_sub(RECENT_EXCHANGES);
+    messages.drain(..start);
+    messages
+}
+
+/// Only message bodies are abbreviated; peer/message IDs remain exact.
+fn exchange_excerpt(text: &str) -> String {
+    // Normalize line breaks without altering case or Unicode content.
+    let mut body = text
+        .split_whitespace()
+        .enumerate()
+        .flat_map(|(index, word)| (index > 0).then_some(' ').into_iter().chain(word.chars()));
+    let mut excerpt = body.by_ref().take(EXCHANGE_CHARS).collect::<String>();
+    if body.next().is_some() {
+        excerpt.push('…');
+    }
+    excerpt
+}
+
+fn swarm_scope(swarm: &Swarm, view: SwarmView, colors: &Theme) -> Div {
+    div()
+        .px(px(16.))
+        .py(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(icon("shield", 14., colors.read))
+                .child(ui::label(
+                    format!("{} · Read-only", swarm_lifecycle(swarm, view)),
+                    colors,
+                )),
+        )
+        .child(ui::hint(
+            "No shared edits or further spawning. Peer questions stay with peers.",
+            colors,
+        ))
+        // Connection-only changes must not alter the cached turn's row height.
+        .child(
+            ui::hint(
+                match view {
+                    SwarmView::Observed => "Observed snapshot · delivery can change.",
+                    SwarmView::Sample => "Sample snapshot · no live delivery.",
+                    SwarmView::Offline => "Offline · delivery may have changed.",
+                },
+                colors,
+            )
+            .line_height(px(18.))
+            .min_h(px(36.)),
+        )
+}
+
+fn swarm_exchanges(swarm: &Swarm, peer: Option<&str>, view: SwarmView, colors: &Theme) -> Div {
+    let recent = recent_exchanges(swarm, peer);
+    let total = swarm
+        .messages
+        .iter()
+        .filter(|message| peer.is_none_or(|id| message.from == id || message.to == id))
+        .count();
+    div()
+        .px(px(16.))
+        .py(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .border_t_1()
+        .border_color(colors.line)
+        .child(ui::label(
+            format!("Recent exchanges · {} of {total}", recent.len()),
+            colors,
+        ))
+        .when(recent.is_empty(), |body| {
+            body.child(ui::hint("No recorded peer exchanges.", colors))
+        })
+        .children(recent.into_iter().map(|message| {
+            let hue = match message.status {
+                SwarmMessageStatus::Queued => colors.amber,
+                SwarmMessageStatus::Received => colors.read,
+                SwarmMessageStatus::Cancelled => colors.muted,
+            };
+            let probe = format!("swarm-exchange-{}-{}", swarm.id, message.sequence);
+            div()
+                .id(ElementId::Name(probe.clone().into()))
+                .debug_selector(move || probe.clone())
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .p(px(10.))
+                .rounded(px(10.))
+                .bg(colors.canvas)
+                .border_1()
+                .border_color(colors.line)
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(6.))
+                        .text_size(px(12.))
+                        .text_color(colors.secondary)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(peer_label(swarm, &message.from)),
+                        )
+                        .child(icon("chev_r", 14., colors.muted).mt(px(2.)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(peer_label(swarm, &message.to)),
+                        ),
+                )
+                .child(
+                    ui::mono(
+                        format!(
+                            "#{} · {} · {}",
+                            message.sequence,
+                            message.id,
+                            exchange_kind(message.kind)
+                        ),
+                        11.,
+                    )
+                    .text_color(colors.muted),
+                )
+                .children(
+                    exchange_reply(swarm, message)
+                        .map(|reply| ui::hint(reply, colors).text_size(px(11.5))),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .line_height(px(18.))
+                        .text_color(colors.secondary)
+                        .child(exchange_excerpt(&message.text)),
+                )
+                .child(
+                    ui::hint(exchange_delivery(message.status, view), colors)
+                        .text_color(hue)
+                        .line_height(px(18.))
+                        .min_h(px(36.)),
+                )
+        }))
+        .child(ui::hint(RECEIVED_COPY, colors))
+        .child(ui::hint(
+            if peer.is_some() {
+                "Full conversation below."
+            } else {
+                "Open a peer row for its full conversation."
+            },
+            colors,
+        ))
+}
 
 /// The subagents a card shows: every one, or the first few with those at work
 /// first, so a hundred side by side still show what is happening. A chain
@@ -123,24 +370,24 @@ fn first_line(text: &str) -> String {
         .to_owned()
 }
 
-fn direct_input_copy(
-    agent: &str,
-    task: &str,
-    target: &crate::live::SubagentInputTarget,
-) -> (String, &'static str, String) {
-    let label = format!("To {agent} subagent · {}", first_line(task));
+/// Finished child conversations are read-only here, even if the backend can
+/// start another turn. Only an exact active run offers a steering composer.
+fn show_direct_input(
+    target: &Result<crate::live::SubagentInputTarget, String>,
+    running: bool,
+) -> bool {
     match target {
-        crate::live::SubagentInputTarget::Steer { .. } => (
-            label,
-            "Steers the exact run shown above",
-            format!("Steer this {agent}…"),
-        ),
-        crate::live::SubagentInputTarget::FollowUp => (
-            label,
-            "Starts a new turn in this finished child conversation",
-            format!("Follow up with this {agent}…"),
-        ),
+        Ok(crate::live::SubagentInputTarget::Steer { .. }) => true,
+        Ok(crate::live::SubagentInputTarget::FollowUp) => false,
+        Err(_) => running,
     }
+}
+
+fn direct_input_copy(agent: &str) -> (&'static str, String) {
+    (
+        "Steers the exact run shown above",
+        format!("Steer this {agent}…"),
+    )
 }
 
 /// What a subagent's row says under its task.
@@ -287,6 +534,111 @@ pub(crate) fn background_at_work(turns: &[Turn]) -> usize {
 }
 
 impl PhoneApp {
+    fn swarm_view(&self, id: SessionId) -> SwarmView {
+        match self.store.as_ref() {
+            Some(store) if !store.computer.connected => SwarmView::Offline,
+            Some(store) if store.is_sample() => SwarmView::Sample,
+            Some(store)
+                if !self.is_reconnecting()
+                    && store.live.as_ref().is_some_and(|live| {
+                        !live.connection.is_closed() && live.session_current(id)
+                    }) =>
+            {
+                SwarmView::Observed
+            }
+            _ => SwarmView::Offline,
+        }
+    }
+
+    /// Roster order and exact peer IDs, never agent names or child indices, bind rows.
+    #[allow(clippy::too_many_arguments)]
+    fn swarm_peer_rows(
+        &self,
+        id: SessionId,
+        turn: usize,
+        handoff_index: usize,
+        handoff: &Handoff,
+        all: bool,
+        now: u64,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(swarm) = &handoff.swarm else {
+            return Vec::new();
+        };
+        swarm
+            .members
+            .iter()
+            .take(shown_peer_count(swarm, all))
+            .enumerate()
+            .flat_map(|(position, member)| {
+                if let Some((index, subagent)) = super::swarm::node(handoff, &member.id) {
+                    let row = self.subagent_row(
+                        id,
+                        Pick {
+                            turn,
+                            handoff: handoff_index,
+                            index,
+                        },
+                        subagent,
+                        position == 0,
+                        None,
+                        true,
+                        Some(swarm),
+                        format!("subagent-{turn}-{handoff_index}-{index}"),
+                        now,
+                        colors,
+                        cx,
+                    );
+                    std::iter::once(row.into_any_element())
+                        .chain(interrupted_note(subagent).map(|text| {
+                            note("alert", colors.amber, text, colors).into_any_element()
+                        }))
+                        .chain(subagent.model_note.clone().map(|text| {
+                            note("info", colors.muted, text, colors).into_any_element()
+                        }))
+                        .collect::<Vec<_>>()
+                } else {
+                    let (glyph, hue) = agent_look(&member.agent, colors);
+                    vec![
+                        ui::row(
+                            ElementId::Name(
+                                format!("swarm-unbound-peer-{turn}-{handoff_index}-{}", member.id)
+                                    .into(),
+                            ),
+                            position == 0,
+                            colors,
+                        )
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .size(px(32.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(10.))
+                                .bg(colors.tint(hue))
+                                .child(icon(glyph, 16., hue)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(ui::label(peer_label(swarm, &member.id), colors))
+                                .child(ui::hint(first_line(&member.task), colors).truncate())
+                                .child(ui::hint(
+                                    "Run status unavailable · no child to open",
+                                    colors,
+                                )),
+                        )
+                        .into_any_element(),
+                    ]
+                }
+            })
+            .collect()
+    }
+
     /// The shared subagent row used in a hand-off card and the session-wide directory.
     #[allow(clippy::too_many_arguments)]
     fn subagent_row(
@@ -297,13 +649,41 @@ impl PhoneApp {
         first: bool,
         chain_number: Option<usize>,
         mixed: bool,
+        swarm: Option<&Swarm>,
         probe: String,
         now: u64,
         colors: &Theme,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let opens = subagent.conversation_id.is_some();
+        let peer_namespace = self.swarm_namespace(id);
+        let peer_binding = swarm.and_then(|swarm| {
+            subagent
+                .peer_id
+                .as_ref()
+                .map(|peer| (swarm.id.clone(), peer.clone()))
+        });
         let waiting = subagent.status == Status::Waiting;
+        let identity = subagent.peer_id.as_deref().map(|peer| {
+            swarm.map_or_else(
+                || format!("{} · {peer}", subagent.agent),
+                |swarm| peer_label(swarm, peer),
+            )
+        });
+        let status = if identity.is_some() {
+            let prefix = if self.swarm_view(id) == SwarmView::Offline {
+                "Last known: "
+            } else {
+                ""
+            };
+            format!(
+                "{prefix}{} · {}",
+                peer_status(subagent.status),
+                status_line(subagent, false)
+            )
+        } else {
+            status_line(subagent, mixed)
+        };
         let time = subagent
             .elapsed_ms(now)
             .map(|ms| duration_label(Duration::from_millis(ms)));
@@ -325,6 +705,7 @@ impl PhoneApp {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .children(identity.map(|identity| ui::label(identity, colors)))
                     .child(
                         div()
                             .truncate()
@@ -342,7 +723,7 @@ impl PhoneApp {
                                 _ if waiting => colors.faint,
                                 _ => colors.muted,
                             })
-                            .child(status_line(subagent, mixed)),
+                            .child(status),
                     ),
             )
             .child(
@@ -360,7 +741,28 @@ impl PhoneApp {
             .when(opens, |row| {
                 row.child(icon("chev_r", 16., colors.faint).mr(px(-4.)))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_subagent(id, pick, window, cx)
+                        if let Some((swarm, peer)) = &peer_binding {
+                            if this.swarm_namespace(id) != peer_namespace {
+                                this.notify_user(
+                                    "This peer belonged to the previous session source.",
+                                    cx,
+                                );
+                                return;
+                            }
+                            this.open_swarm_peer_from_handoff(
+                                id,
+                                CrewPick {
+                                    turn: pick.turn,
+                                    handoff: pick.handoff,
+                                },
+                                swarm,
+                                peer,
+                                window,
+                                cx,
+                            );
+                        } else {
+                            this.open_subagent(id, pick, window, cx);
+                        }
                     }))
             })
     }
@@ -415,14 +817,27 @@ impl PhoneApp {
                             .truncate()
                             .text_size(px(15.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Handed off"),
+                            .child(if handoff.swarm.is_some() {
+                                "Swarm peers"
+                            } else {
+                                "Handed off"
+                            }),
                     )
                     .child(
                         div()
                             .truncate()
                             .text_size(px(12.5))
                             .text_color(colors.muted)
-                            .child(tally(handoff)),
+                            .child(handoff.swarm.as_ref().map_or_else(
+                                || tally(handoff),
+                                |swarm| {
+                                    format!(
+                                        "{} · {}",
+                                        swarm_lifecycle(swarm, self.swarm_view(id)),
+                                        tally(handoff)
+                                    )
+                                },
+                            )),
                     ),
             )
             .when(handoff.resumed, |header| {
@@ -459,7 +874,14 @@ impl PhoneApp {
         } else {
             shown(handoff, all)
         };
-        let hidden = handoff.subagents.len() - shown(handoff, false).len();
+        let peer_count = handoff
+            .swarm
+            .as_ref()
+            .map(|swarm| swarm.members.len().min(SWARM_PEERS));
+        let hidden = peer_count.map_or_else(
+            || handoff.subagents.len() - shown(handoff, false).len(),
+            |count| count.saturating_sub(SHOWN),
+        );
         let more = (!folded && hidden > 0).then(|| {
             let probe = format!("handoff-all-{turn_index}-{n}");
             div()
@@ -489,7 +911,7 @@ impl PhoneApp {
                 .child(if all {
                     "Show fewer".to_owned()
                 } else {
-                    format!("Show all {}", handoff.subagents.len())
+                    format!("Show all {}", peer_count.unwrap_or(handoff.subagents.len()))
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(list) = this.thread_lists.get(&id) {
@@ -502,7 +924,13 @@ impl PhoneApp {
                     cx.notify();
                 }))
         });
-        let rows =
+        let rows = if handoff.swarm.is_some() {
+            if folded {
+                Vec::new()
+            } else {
+                self.swarm_peer_rows(id, turn_index, n, handoff, all, now, colors, cx)
+            }
+        } else {
             visible
                 .into_iter()
                 .enumerate()
@@ -520,6 +948,7 @@ impl PhoneApp {
                         position == 0,
                         (handoff.mode == Mode::Chain).then_some(index + 1),
                         mixed,
+                        None,
                         format!("subagent-{turn_index}-{n}-{index}"),
                         now,
                         colors,
@@ -533,14 +962,80 @@ impl PhoneApp {
                             note("info", colors.muted, text, colors).into_any_element()
                         }))
                         .collect::<Vec<_>>()
-                });
+                })
+                .collect::<Vec<_>>()
+        };
         Some(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
                 .child(ui::label(shape(handoff), colors))
-                .child(ui::card(colors).child(header).children(rows).children(more)),
+                .child(
+                    ui::card(colors)
+                        .child(header)
+                        .when_some(handoff.swarm.as_ref().filter(|_| !folded), |card, swarm| {
+                            let expected = swarm.id.clone();
+                            let namespace = self.swarm_namespace(id);
+                            let selector = format!("open-swarm-{turn_index}-{n}");
+                            card.child(
+                                ui::button(
+                                    selector.clone(),
+                                    ui::Button::Quiet,
+                                    Some("fork"),
+                                    "Open swarm map & exchanges",
+                                    false,
+                                    colors,
+                                )
+                                .debug_selector(move || selector.clone())
+                                .w_full()
+                                .px(px(8.))
+                                .text_size(px(13.))
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        if this.swarm_namespace(id) != namespace {
+                                            this.notify_user(
+                                            "This swarm belonged to the previous session source.",
+                                            cx,
+                                        );
+                                            return;
+                                        }
+                                        this.open_swarm(
+                                            id,
+                                            CrewPick {
+                                                turn: turn_index,
+                                                handoff: n,
+                                            },
+                                            &expected,
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            )
+                            .child(swarm_scope(
+                                swarm,
+                                self.swarm_view(id),
+                                colors,
+                            ))
+                        })
+                        .children(rows)
+                        .children(more)
+                        .when_some(handoff.swarm.as_ref().filter(|_| !folded), |card, swarm| {
+                            card.when(swarm.members.len() > SWARM_PEERS, |card| {
+                                card.child(
+                                    ui::hint("Only the first 8 peers are shown.", colors)
+                                        .px(px(16.)),
+                                )
+                            })
+                            .child(swarm_exchanges(
+                                swarm,
+                                None,
+                                self.swarm_view(id),
+                                colors,
+                            ))
+                        }),
+                ),
         )
     }
 
@@ -581,6 +1076,9 @@ impl PhoneApp {
                     position == 0,
                     None,
                     true,
+                    session.turns[item.turn].handoffs[item.handoff]
+                        .swarm
+                        .as_ref(),
                     format!(
                         "directory-subagent-{}-{}-{}",
                         item.turn, item.handoff, item.index
@@ -636,6 +1134,31 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let swarm_peer = self
+            .store
+            .as_ref()
+            .and_then(|store| store.session(id))
+            .and_then(|session| session.turns.get(pick.turn))
+            .and_then(|turn| turn.handoffs.get(pick.handoff))
+            .and_then(|handoff| {
+                let swarm = handoff.swarm.as_ref()?;
+                let peer = handoff.subagents.get(pick.index)?.peer_id.clone()?;
+                Some((swarm.id.clone(), peer))
+            });
+        if let Some((swarm, peer)) = swarm_peer {
+            self.open_swarm_peer_from_handoff(
+                id,
+                CrewPick {
+                    turn: pick.turn,
+                    handoff: pick.handoff,
+                },
+                &swarm,
+                &peer,
+                window,
+                cx,
+            );
+            return;
+        }
         let conversation = self.picked(id, pick).and_then(|s| s.conversation_id);
         self.follow_subagent(id, conversation);
         self.push(Route::Subagent(id, pick), window, cx);
@@ -649,6 +1172,14 @@ impl PhoneApp {
     }
 
     fn picked(&self, id: SessionId, pick: Pick) -> Option<Subagent> {
+        if let Route::SwarmPeer(shown, original, token) = self.route() {
+            if shown != id || original != pick {
+                return None;
+            }
+            return self
+                .bound_swarm_peer(self.swarm_peer_bindings.get(&token)?)
+                .cloned();
+        }
         let session = self.store.as_ref()?.session(id)?;
         session
             .turns
@@ -686,6 +1217,14 @@ impl PhoneApp {
                 .child(ui::hint("This subagent is no longer in the session.", &colors).px(px(20.)))
                 .into_any_element();
         };
+        let swarm = self
+            .store
+            .as_ref()
+            .and_then(|store| store.session(id))
+            .and_then(|session| session.turns.get(pick.turn))
+            .and_then(|turn| turn.handoffs.get(pick.handoff))
+            .and_then(|handoff| handoff.swarm.clone());
+        let swarm_view = self.swarm_view(id);
         // The latest projection may attach/change the picked conversation
         // after navigation. Keep the displayed transcript and follow target
         // aligned; following the same child does not start another read.
@@ -788,7 +1327,12 @@ impl PhoneApp {
                     .text_color(colors.secondary)
                     .child(asked),
             );
-        let scroll = self.scroll(Route::Subagent(id, pick));
+        let route = match self.route() {
+            Route::SwarmPeer(shown, _, _) if shown == id => self.route(),
+            _ => Route::Subagent(id, pick),
+        };
+        let mut brief = Some(brief);
+        let scroll = self.scroll(route);
         let child_running = fetched
             .as_ref()
             .is_some_and(|fetched| fetched.as_ref().is_ok_and(pi_core::session::Session::busy));
@@ -802,10 +1346,27 @@ impl PhoneApp {
                         return (None, false);
                     };
                     (
-                        Some(live.subagent_input_target(id, conversation)),
+                        Some(if swarm.is_some() && swarm_view != SwarmView::Observed {
+                            Err("Reconnect to a current session before sending to this peer. Nothing is queued offline.".to_owned())
+                        } else { live.subagent_input_target(id, conversation) }),
                         live.subagent_input_pending(id, conversation),
                     )
                 });
+        // Only the isolated test APK can mount a direct composer without a host.
+        // Its sample store has no transport, so neither Send nor Stop can affect real sessions.
+        #[cfg(feature = "ui-test")]
+        let input_target = if self.paused
+            && self.store.as_ref().is_some_and(|store| store.is_sample())
+            && cx
+                .try_global::<crate::testing::State>()
+                .is_some_and(|state| state.fixture == "subagent-input")
+        {
+            Some(Ok(crate::live::SubagentInputTarget::Steer {
+                run_id: "sample-only".into(),
+            }))
+        } else {
+            input_target
+        };
         let running = child_running || subagent.status == Status::Running || input_pending;
         let label = if child_running {
             "Working"
@@ -822,7 +1383,15 @@ impl PhoneApp {
         };
         let spent = [
             subagent
-                .elapsed_ms(now_ms())
+                .elapsed_ms(if swarm.is_some() && swarm_view == SwarmView::Offline {
+                    self.store
+                        .as_ref()
+                        .and_then(|store| store.observed_at.get(&id))
+                        .copied()
+                        .unwrap_or(subagent.started_at.unwrap_or(0))
+                } else {
+                    now_ms()
+                })
                 .map(|ms| duration_label(Duration::from_millis(ms))),
             subagent.cost.filter(|cost| *cost > 0.).map(cost_label),
         ]
@@ -830,6 +1399,18 @@ impl PhoneApp {
         .flatten()
         .collect::<Vec<_>>()
         .join(" · ");
+        let label = if swarm.is_some() && swarm_view == SwarmView::Offline {
+            format!("Last known: {label}")
+        } else {
+            label.to_owned()
+        };
+        let stop_namespace = self.swarm_namespace(id);
+        let swarm_stop = swarm.as_ref().and_then(|swarm| {
+            subagent
+                .peer_id
+                .as_ref()
+                .map(|peer| (swarm.id.clone(), peer.clone()))
+        });
         let strip = div()
             .min_h(px(48.))
             .pl(px(16.))
@@ -842,7 +1423,11 @@ impl PhoneApp {
             .border_1()
             .border_color(colors.line_strong)
             .child(if running {
-                ui::ring_dot(hue).into_any_element()
+                if swarm.is_some() && swarm_view != SwarmView::Observed {
+                    div().size(px(7.)).rounded_full().bg(hue).into_any_element()
+                } else {
+                    ui::ring_dot(hue).into_any_element()
+                }
             } else {
                 icon(
                     if subagent.status == Status::Done {
@@ -871,9 +1456,12 @@ impl PhoneApp {
                     .child(spent),
             )
             .when_some(
-                conversation
-                    .clone()
-                    .filter(|_| child_running || subagent.status == Status::Running),
+                conversation.clone().filter(|_| {
+                    (child_running || subagent.status == Status::Running)
+                        && (swarm.is_none()
+                            || (swarm_view == SwarmView::Observed
+                                && (child_running || swarm.as_ref().is_some_and(|swarm| !swarm.closed))))
+                }),
                 |strip, conversation| {
                     strip.child(
                         div()
@@ -881,7 +1469,7 @@ impl PhoneApp {
                             .debug_selector(|| "stop-subagent".into())
                             .relative()
                             .child(crate::testing::probe("stop-subagent"))
-                            .h(px(40.))
+                            .h(px(if swarm.is_some() { 48. } else { 40. }))
                             .px(px(12.))
                             .flex()
                             .items_center()
@@ -892,8 +1480,24 @@ impl PhoneApp {
                             .text_color(colors.coral)
                             .active(|style| style.bg(colors.selected))
                             .child(icon("stop", 14., colors.coral))
-                            .child(format!("Stop this {}", subagent.agent))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .aria_label(format!("Stop {}", subagent.agent))
+                            .child("Stop")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some((expected, peer)) = &swarm_stop {
+                                    if this.swarm_namespace(id) != stop_namespace { this.notify_user("This peer belonged to the previous session source. Nothing was sent.", cx); return; }
+                                    this.request_swarm_peer_stop(
+                                        id,
+                                        CrewPick {
+                                            turn: pick.turn,
+                                            handoff: pick.handoff,
+                                        },
+                                        expected,
+                                        peer,
+                                        window,
+                                        cx,
+                                    );
+                                    return;
+                                }
                                 let stopped = this
                                     .store
                                     .as_mut()
@@ -907,10 +1511,27 @@ impl PhoneApp {
                     )
                 },
             );
+        if matches!(
+            input_target.as_ref(),
+            Some(Ok(crate::live::SubagentInputTarget::FollowUp))
+        ) && let Some(composer) = conversation
+            .as_ref()
+            .and_then(|conversation| self.subagent_composers.get(&(id, conversation.clone())))
+        {
+            let area = composer.read(cx).area.clone();
+            if area.read(cx).focus_handle(cx).is_focused(window) {
+                window.focus(&self.focus, cx);
+                window.dismiss_virtual_keyboard();
+            }
+        }
+        let input_target = input_target.filter(|target| show_direct_input(target, running));
         let direct = match (conversation.as_deref(), input_target) {
             (Some(conversation), Some(Ok(target))) => {
-                let (target_label, action, placeholder) =
-                    direct_input_copy(&subagent.agent, &subagent.task, &target);
+                if swarm.is_some() {
+                    self.swarm_input_targets
+                        .insert((id, conversation.to_owned()), target.clone());
+                }
+                let (action, placeholder) = direct_input_copy(&subagent.agent);
                 let accepted_input = self
                     .store
                     .as_mut()
@@ -928,14 +1549,6 @@ impl PhoneApp {
                         .flex()
                         .flex_col()
                         .gap(px(4.))
-                        .child(
-                            div()
-                                .px(px(20.))
-                                .text_size(px(12.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(colors.secondary)
-                                .child(target_label),
-                        )
                         .child(
                             div()
                                 .px(px(20.))
@@ -973,7 +1586,44 @@ impl PhoneApp {
                         .flex()
                         .flex_col()
                         .gap(px(24.))
-                        .when(own.is_none(), |column| column.child(brief))
+                        .when(swarm.is_some(), |column| column.child(brief.take().unwrap()))
+                        .children(swarm.as_ref().map(|swarm| {
+                            ui::card(&colors)
+                                .child(swarm_scope(swarm, swarm_view, &colors))
+                                .child(ui::label(
+                                    subagent.peer_id.as_deref().map_or_else(
+                                        || "Peer ID unavailable".into(),
+                                        |peer| peer_label(swarm, peer),
+                                    ),
+                                    &colors,
+                                ).px(px(16.)).pb(px(8.)))
+                                .child(ui::hint("Original tools · read + peer messaging during delegation only. No edits or further spawning.", &colors).px(px(16.)).pb(px(8.)))
+                                .child(ui::hint("Workspace · shared project for reading; no isolated editing worktree or artifact support.", &colors).px(px(16.)).pb(px(8.)))
+                                .child({
+                                    let expected = swarm.id.clone();
+                                    let namespace = self.swarm_namespace(id);
+                                    ui::button("peer-open-swarm", ui::Button::Quiet, Some("fork"), "View swarm map & exchanges", false, &colors)
+                                        .w_full().px(px(4.)).text_size(px(13.))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if this.swarm_namespace(id) != namespace { this.notify_user("This swarm belonged to the previous session source.", cx); return; }
+                                            this.open_swarm(id, CrewPick { turn: pick.turn, handoff: pick.handoff }, &expected, window, cx);
+                                        }))
+                                })
+                                .when_some(subagent.peer_id.as_deref(), |card, peer| {
+                                    let expected = swarm.id.clone();
+                                    let peer = peer.to_owned();
+                                    let namespace = self.swarm_namespace(id);
+                                    card.child(ui::button("peer-exchanges", ui::Button::Quiet, Some("chat"), "Inspect this peer’s exchanges", false, &colors).debug_selector(|| "peer-exchanges".into()).w_full().px(px(4.)).text_size(px(13.))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if this.swarm_namespace(id) != namespace { this.notify_user("This peer belonged to the previous session source.", cx); return; }
+                                            let pick = CrewPick { turn: pick.turn, handoff: pick.handoff };
+                                            this.open_swarm(id, pick, &expected, window, cx);
+                                            if let Some(state) = this.swarm_views.get_mut(&(id, pick)).filter(|state| state.swarm_id == expected) { state.tab = super::swarm::SwarmTab::Exchanges; state.filter = super::swarm::ExchangeFilter::All; state.peer = Some(peer.clone()); state.open_message = None; }
+                                            cx.notify();
+                                        })))
+                                })
+                        }))
+                        .when(own.is_none() && swarm.is_none(), |column| column.child(brief.take().unwrap()))
                         .children(interrupted_note(&subagent).map(|text| {
                             note("alert", colors.amber, text, &colors).mx(px(0.)).mb(px(0.))
                         }))
@@ -1012,6 +1662,136 @@ impl PhoneApp {
 mod tests {
     use super::*;
 
+    fn example_swarm() -> Swarm {
+        Swarm::from_details(&serde_json::json!({
+            "version":1,"id":"test-swarm","closed":false,
+            "members":[
+                {"id":"peer-1","agent":"scout","task":"Read Anthropic"},
+                {"id":"peer-2","agent":"scout","task":"Read OpenAI"}
+            ],
+            "messages":[
+                {"id":"finding-1","sequence":1,"from":"peer-1","to":"peer-2","kind":"finding","text":"Header found","status":"received","createdAt":1,"receivedAt":2},
+                {"id":"question-2","sequence":2,"from":"peer-2","to":"peer-1","kind":"question","text":"Which parser?","status":"received","createdAt":3,"receivedAt":4},
+                {"id":"reply-3","sequence":3,"from":"peer-1","to":"peer-2","kind":"reply","replyTo":"question-2","text":"The shared parser","status":"queued","createdAt":5}
+            ]
+        })).unwrap()
+    }
+
+    #[test]
+    fn swarm_copy_names_exact_peers_receipts_and_lifecycle_without_success_claims() {
+        let mut swarm = example_swarm();
+        assert_eq!(peer_label(&swarm, "peer-1"), "scout · peer-1");
+        assert_eq!(peer_label(&swarm, "peer-2"), "scout · peer-2");
+        assert_eq!(
+            peer_label(&swarm, "foreign-id"),
+            "Unknown peer · foreign-id"
+        );
+        assert_eq!(swarm_lifecycle(&swarm, SwarmView::Observed), "Open");
+        swarm.closed = true;
+        assert_eq!(swarm_lifecycle(&swarm, SwarmView::Observed), "Closed");
+        assert_eq!(
+            swarm_lifecycle(&swarm, SwarmView::Offline),
+            "Last known: Closed"
+        );
+        assert_eq!(
+            exchange_delivery(SwarmMessageStatus::Received, SwarmView::Observed),
+            "Received · retrieved by recipient"
+        );
+        assert_eq!(
+            exchange_delivery(SwarmMessageStatus::Queued, SwarmView::Observed),
+            "Queued · not retrieved"
+        );
+        assert_eq!(
+            exchange_delivery(SwarmMessageStatus::Cancelled, SwarmView::Observed),
+            "Cancelled"
+        );
+        for status in [
+            SwarmMessageStatus::Queued,
+            SwarmMessageStatus::Received,
+            SwarmMessageStatus::Cancelled,
+        ] {
+            assert!(exchange_delivery(status, SwarmView::Offline).starts_with("Last known: "));
+            assert!(exchange_delivery(status, SwarmView::Sample).starts_with("Sample: "));
+        }
+        assert!(RECEIVED_COPY.contains("explicitly retrieved"));
+        assert!(RECEIVED_COPY.contains("not agreement or successful execution"));
+        assert_eq!(exchange_kind(SwarmMessageKind::Question), "Question");
+    }
+
+    #[test]
+    fn swarm_replies_keep_exact_correlation_even_outside_recent_history() {
+        let mut swarm = example_swarm();
+        assert_eq!(
+            exchange_reply(&swarm, &swarm.messages[2]).as_deref(),
+            Some("Reply to #2 · question-2")
+        );
+        assert_eq!(exchange_reply(&swarm, &swarm.messages[0]), None);
+        swarm.messages[2].reply_to = Some("older-question-id".into());
+        assert_eq!(
+            exchange_reply(&swarm, &swarm.messages[2]).as_deref(),
+            Some("Reply to older-question-id · original not in snapshot")
+        );
+    }
+
+    #[test]
+    fn swarm_history_is_a_bounded_chronological_tail_and_child_scope_is_exact() {
+        let mut swarm = example_swarm();
+        let template = swarm.messages[0].clone();
+        swarm.messages = (0..40)
+            .rev()
+            .map(|n| SwarmMessage {
+                id: format!("msg-{n}"),
+                sequence: n,
+                from: if n % 2 == 0 {
+                    "peer-1".into()
+                } else {
+                    "peer-other".into()
+                },
+                to: "peer-2".into(),
+                ..template.clone()
+            })
+            .collect();
+        assert_eq!(
+            recent_exchanges(&swarm, None)
+                .iter()
+                .map(|m| m.sequence)
+                .collect::<Vec<_>>(),
+            [37, 38, 39]
+        );
+        assert_eq!(
+            recent_exchanges(&swarm, Some("peer-1"))
+                .iter()
+                .map(|m| m.sequence)
+                .collect::<Vec<_>>(),
+            [34, 36, 38]
+        );
+        assert!(recent_exchanges(&swarm, Some("peer-404")).is_empty());
+        swarm.messages.clear();
+        assert!(recent_exchanges(&swarm, None).is_empty());
+    }
+
+    #[test]
+    fn swarm_roster_and_unicode_body_bounds_do_not_abbreviate_ids() {
+        let mut swarm = example_swarm();
+        let mut member = swarm.members[0].clone();
+        member.id = "exact-long-id-with-no-display-name-guessing".into();
+        swarm.members = vec![member; 100];
+        assert_eq!(shown_peer_count(&swarm, false), SHOWN);
+        assert_eq!(shown_peer_count(&swarm, true), SWARM_PEERS);
+        assert!(
+            peer_label(&swarm, "exact-long-id-with-no-display-name-guessing")
+                .ends_with("exact-long-id-with-no-display-name-guessing")
+        );
+        assert_eq!(
+            exchange_excerpt(" A  finding\n\n中文 café "),
+            "A finding 中文 café"
+        );
+        let excerpt = exchange_excerpt(&"中文 café 👩🏽‍💻 ".repeat(100));
+        assert_eq!(excerpt.chars().count(), EXCHANGE_CHARS + 1);
+        assert!(excerpt.ends_with('…'));
+        assert_eq!(exchange_excerpt(""), "");
+    }
+
     fn crew(statuses: &[Status], mode: Mode) -> Handoff {
         let mut handoff = Handoff::from_args(&serde_json::json!({"tasks": statuses
             .iter()
@@ -1026,25 +1806,28 @@ mod tests {
 
     #[test]
     fn direct_input_copy_names_the_child_and_exact_lifecycle_action() {
-        let steer = direct_input_copy(
-            "scout",
-            "Inspect routing\nwithout changing files",
-            &crate::live::SubagentInputTarget::Steer {
-                run_id: "run-7".into(),
-            },
-        );
-        assert_eq!(steer.0, "To scout subagent · Inspect routing");
-        assert_eq!(steer.1, "Steers the exact run shown above");
-        assert_eq!(steer.2, "Steer this scout…");
+        let steer = direct_input_copy("scout");
+        assert_eq!(steer.0, "Steers the exact run shown above");
+        assert_eq!(steer.1, "Steer this scout…");
+    }
 
-        let follow = direct_input_copy(
-            "reviewer",
-            "Review the patch",
-            &crate::live::SubagentInputTarget::FollowUp,
-        );
-        assert_eq!(follow.0, "To reviewer subagent · Review the patch");
-        assert!(follow.1.contains("finished child conversation"));
-        assert_eq!(follow.2, "Follow up with this reviewer…");
+    #[test]
+    fn finished_subagents_never_offer_a_follow_up_composer() {
+        use crate::live::SubagentInputTarget::{FollowUp, Steer};
+        // A cached roster can lag behind the exact child's lifecycle. The
+        // backend's target, not an old Running row, determines whether to steer.
+        for running in [false, true] {
+            assert!(!show_direct_input(&Ok(FollowUp), running));
+            assert!(show_direct_input(
+                &Ok(Steer {
+                    run_id: "run-7".into()
+                }),
+                running
+            ));
+        }
+        let unavailable = Err("Disconnected".into());
+        assert!(show_direct_input(&unavailable, true));
+        assert!(!show_direct_input(&unavailable, false));
     }
 
     #[test]

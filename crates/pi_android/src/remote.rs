@@ -377,6 +377,79 @@ pub async fn sessions(connection: &Connection, helper: &Helper) -> Result<Vec<Li
     parse_sessions(&output.stdout)
 }
 
+/// Exactly one schedule request on stdin, one versioned response, then exit.
+/// Job text is never placed in a shell command. Transport failures are uncertain
+/// for mutations: callers must reconcile, not silently issue a new request.
+pub async fn schedules(
+    connection: &Connection,
+    helper: &Helper,
+    request: &pi_core::schedules::Request,
+) -> Result<pi_core::schedules::Response> {
+    helper.require_capability(helper.capabilities.schedules, "managing schedules")?;
+    let connection = connection.clone();
+    let command = helper.command("schedules --stdio")?;
+    let request = request.clone();
+    let (send, receive) = async_channel::bounded(1);
+    crate::ssh::spawn(async move {
+        let work = async {
+            let pipe = connection.pipe(command).await?;
+            schedule_exchange(pipe, &request).await
+        };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), work)
+            .await
+            .context("Schedule response timed out; the outcome may be unknown")
+            .and_then(|result| result);
+        let _ = send.send(result).await;
+    });
+    receive
+        .recv()
+        .await
+        .context("Schedule transport stopped; outcome unknown")?
+}
+
+async fn schedule_exchange(
+    pipe: Pipe,
+    request: &pi_core::schedules::Request,
+) -> Result<pi_core::schedules::Response> {
+    pipe.input.send(serde_json::to_value(request)?).await?;
+    // Retain stdin until the helper exits. Dropping Pipe::input closes the SSH
+    // channel, not just stdin; doing that here could discard a committed reply.
+    let record = pipe
+        .records
+        .recv()
+        .await
+        .context("No schedule response; outcome unknown")?;
+    let response: pi_core::schedules::Response =
+        serde_json::from_value(record).context("Invalid schedule response; outcome unknown")?;
+    ensure!(
+        response.version == pi_core::schedules::VERSION,
+        "Unsupported schedule response version; update helper"
+    );
+    ensure!(
+        pipe.records.recv().await.is_err(),
+        "Helper sent more than one schedule response; outcome unknown"
+    );
+    if response.success {
+        use pi_core::schedules::{Data, Request};
+        ensure!(
+            matches!(
+                (request, response.data.as_ref()),
+                (Request::List, Some(Data::List { .. }))
+                    | (Request::Preview { .. }, Some(Data::Preview { .. }))
+                    | (
+                        Request::Create { .. } | Request::Update { .. },
+                        Some(Data::Job { .. })
+                    )
+                    | (Request::Delete { .. }, Some(Data::Deleted))
+                    | (Request::RunNow { .. }, Some(Data::Run { .. }))
+                    | (Request::History { .. }, Some(Data::History { .. }))
+            ),
+            "Unexpected schedule response; outcome unknown"
+        );
+    }
+    Ok(response)
+}
+
 pub async fn models(
     connection: &Connection,
     helper: &Helper,
@@ -727,6 +800,140 @@ pub fn listed_target(host: &str, listed: &Listed) -> Result<SshTarget> {
 mod tests {
     use super::*;
 
+    fn schedule_pipe(records: Vec<Value>) -> (Pipe, async_channel::Receiver<Value>) {
+        let (out, input) = async_channel::unbounded();
+        let (records_out, records_in) = async_channel::unbounded();
+        for record in records {
+            records_out.send_blocking(record).unwrap();
+        }
+        drop(records_out);
+        let (_, ended) = async_channel::unbounded();
+        (
+            Pipe {
+                records: records_in,
+                input: out,
+                ended,
+            },
+            input,
+        )
+    }
+
+    #[test]
+    fn schedule_stdio_sends_exact_json_once_without_shell_escaping_user_text() {
+        use pi_core::schedules::{Data, Request, Response};
+        let mut spec = crate::schedules::sample_spec();
+        spec.prompt = "Quotes ' \"; $(touch /never)\nUnicode 中文".into();
+        let request = Request::Create {
+            spec,
+            consent: true,
+        };
+        let job = pi_core::schedules::Job {
+            id: "j".into(),
+            revision: 1,
+            spec: match &request {
+                Request::Create { spec, .. } => spec.clone(),
+                _ => unreachable!(),
+            },
+            next_due_ms: None,
+            created_ms: 1,
+            updated_ms: 1,
+        };
+        let response = Response {
+            version: 1,
+            success: true,
+            data: Some(Data::Job { job }),
+            error: None,
+        };
+        let (pipe, input) = schedule_pipe(vec![serde_json::to_value(&response).unwrap()]);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(
+            runtime.block_on(schedule_exchange(pipe, &request)).unwrap(),
+            response
+        );
+        assert_eq!(
+            input.recv_blocking().unwrap(),
+            serde_json::to_value(&request).unwrap()
+        );
+        assert!(input.try_recv().is_err());
+    }
+
+    #[test]
+    fn schedule_stdio_rejects_versions_extra_records_and_wrong_data() {
+        use pi_core::schedules::{Data, Request, Response};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for records in [
+            vec![json!({"version": 2, "success": true, "data": {"type":"deleted"}})],
+            vec![json!({"version": 1, "success": true, "data": {"type":"deleted"}})],
+            vec![
+                json!({"version": 1, "success": true, "data": {"type":"list", "jobs":[], "health": {"running":true, "autostart_installed":true, "last_tick_ms": null, "detail":"test"}}}),
+                json!({"version":1,"success":false}),
+            ],
+            vec![],
+        ] {
+            let (pipe, _input) = schedule_pipe(records);
+            assert!(
+                runtime
+                    .block_on(schedule_exchange(pipe, &Request::List))
+                    .is_err()
+            );
+        }
+        let rejected = Response {
+            version: 1,
+            success: false,
+            data: None,
+            error: Some("Revision conflict".into()),
+        };
+        let (pipe, _input) = schedule_pipe(vec![serde_json::to_value(&rejected).unwrap()]);
+        assert_eq!(
+            runtime
+                .block_on(schedule_exchange(pipe, &Request::List))
+                .unwrap(),
+            rejected
+        );
+        let _ = Data::Deleted;
+    }
+
+    #[test]
+    fn schedule_exchange_waits_for_helper_exit_and_keeps_stdin_open() {
+        use pi_core::schedules::Request;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (input_out, input) = async_channel::unbounded();
+            let (out, records) = async_channel::unbounded();
+            let (_, ended) = async_channel::unbounded();
+            out.send(json!({"version":1,"success":false,"error":"fixture"}))
+                .await
+                .unwrap();
+            let pipe = Pipe {
+                input: input_out,
+                records,
+                ended,
+            };
+            let task = tokio::spawn(async move { schedule_exchange(pipe, &Request::List).await });
+            assert_eq!(input.recv().await.unwrap(), json!({"type":"list"}));
+            tokio::task::yield_now().await;
+            assert!(
+                !task.is_finished(),
+                "One response alone does not prove one-shot exit"
+            );
+            assert!(
+                !input.is_closed(),
+                "Dropping stdin too early closes the SSH channel"
+            );
+            drop(out);
+            assert!(!task.await.unwrap().unwrap().success);
+        });
+    }
+
     #[test]
     fn folder_listings_are_versioned_and_preserve_unicode_and_spaces() {
         let listing = parse_directory(r#"{"version":1,"path":"/Users/me/my repos","parent":"/Users/me","entries":[{"name":"café's project","path":"/Users/me/my repos/café's project","project":true}],"truncated":false}"#).unwrap();
@@ -813,6 +1020,9 @@ mod tests {
     #[test]
     fn releases_compare_semantically_without_downgrade_notices() {
         let compatible = capabilities(DURABLE);
+        let mut newer = Version::parse(APP_RELEASE).unwrap();
+        newer.patch += 1;
+        let newer = newer.to_string();
         let recommended = evaluate_update(
             Some("0.0.4"),
             Some(PROTOCOL_VERSION),
@@ -833,7 +1043,7 @@ mod tests {
         );
         assert_eq!(
             evaluate_update(
-                Some("0.0.10"),
+                Some(&newer),
                 Some(PROTOCOL_VERSION),
                 Some("linux-arm64"),
                 &compatible,
@@ -858,7 +1068,7 @@ mod tests {
             reconnected.update.as_ref().map(|update| update.state),
             Some(HelperUpdateState::UpdateRequired)
         );
-        reconnected.release = Some("0.0.10".into());
+        reconnected.release = Some(APP_RELEASE.into());
         reconnected.protocol = Some(PROTOCOL_VERSION);
         reconnected.capabilities = compatible;
         reconnected.reevaluate();

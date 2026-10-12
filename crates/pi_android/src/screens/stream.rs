@@ -852,6 +852,8 @@ mod tests {
                 failed: kind == StageKind::Verify,
                 added: 0,
                 removed: 0,
+                diff: Vec::new(),
+                diff_is_preview: false,
             });
         }
         let next = next_call(&turn, StageKind::Verify, 0).map(|(kind, index, _)| (kind, index));

@@ -71,6 +71,20 @@ In the Android app, tap **Scan computer QR** and scan the code in the terminal. 
 
 See [docs/remote.md](docs/remote.md#experimental-durable-backend) for what it supports and how to install the helper, and [backend/durable](backend/durable/README.md) for its tests.
 
+## Scheduled jobs (experimental)
+
+On Android, open **Schedules** on the computer’s Home screen to create recurring prompts, preview their cron/timezone, pause future runs and inspect each occurrence as a normal durable session. Enabling and **Run now** require explicit confirmation: Pi can execute commands and change files with your host account’s permissions.
+
+Scheduling runs on the **Linux or macOS computer**, not on the phone. Use an updated durable-enabled helper, then explicitly start its scheduler locally:
+
+```sh
+~/.pi/desktop/bin/pi-desktop-remote scheduler start
+# Optional: opt in to login autostart; installation does not start it immediately.
+~/.pi/desktop/bin/pi-desktop-remote scheduler install --confirm
+```
+
+The computer must be awake. Defaults are fresh sessions, no same-job overlap and skipped missed times. Pausing/deleting a schedule keeps existing sessions. Windows durable scheduling is unsupported. See [host setup, recovery and limitations](crates/pi_remote/README.schedules.md) and the [Android guide](crates/pi_android/README.md#scheduled-jobs).
+
 ## Test
 
 ```sh

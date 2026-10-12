@@ -83,6 +83,23 @@ describe("the host's templates and skills", () => {
     expect(trusted.find((found) => found.name === "scout")).toMatchObject({ description: "The project's scout", scope: "project" });
   });
 
+  test.each([
+    ["ask", null, "user"],
+    ["never", null, "user"],
+    ["always", null, "project"],
+    ["always", false, "user"],
+    ["never", true, "project"],
+  ] as const)("agent-only projects obey default %s and remembered trust %s", (policy, remembered, scope) => {
+    const { home, agent, project } = host();
+    rmSync(join(project, ".pi", "prompts"), { recursive: true });
+    rmSync(join(project, ".agents"), { recursive: true });
+    write(join(agent, "settings.json"), JSON.stringify({ defaultProjectTrust: policy }));
+    if (remembered !== null) new ProjectTrustStore(agent).set(project, remembered);
+    const scout = loadResources(project, agent, home).agents.find((found) => found.name === "scout")!;
+    expect(scout.scope).toBe(scope);
+    expect(scout.prompt).toBe(scope === "project" ? "Look here." : "Be brief.");
+  });
+
   test("a project with nothing to trust needs no trust", () => {
     root = mkdtempSync(join(tmpdir(), "durable-resources-"));
     const agent = join(root, "agent");

@@ -4,6 +4,18 @@
 
 **[Open the gallery](index.html)** · [Overview PNG](overview.png)
 
+## Swarm communication proposal
+
+**[Open the interactive swarm HTML](swarm/index.html)** · [Architecture and interaction contract](swarm/README.md) · [Overview PNG](swarm/overview.png)
+
+Peers communicate through a durable broker on the computer, not by sharing every conversation. Eight proposed screens make agent states, questions, delivery receipts, dependencies and artifact handoffs visible, including a grouped 24-agent swarm and honest offline state. Local interactions are samples only; peer messaging and this native UI are not implemented.
+
+## Scheduling proposal
+
+**[Open the self-contained scheduling HTML](schedules/index.html)** · [Notes and interaction contract](schedules/README.md) · [Overview PNG](schedules/overview.png)
+
+Recurring work lives on the computer, not in a phone timer. Six proposed screens and a local interactive preview cover creating, pausing and reviewing scheduled jobs, including honest offline status. No scheduler or real execution is implemented by this study.
+
 ## The premise
 
 Pi does not run on the phone. It runs on your computer or a server, as it does over SSH today: the remote helper keeps sessions working when the desktop disconnects, and the phone becomes another way in. The phone is for the moments away from the desk:

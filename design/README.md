@@ -4,6 +4,14 @@
 
 **[Browse the twelve phone screens](android/index.html)**: Pi keeps running on your computer or server, and the phone follows sessions, answers questions, reviews changes and starts work. Connect, Sessions, Starting, Working, Waiting, Done, Review, Typing, Details, Notifications, Evening and Settings, in the Moonstone and Evening themes. See the [notes and phone contract](android/README.md) and the [overview](android/overview.png).
 
+## Android: swarm communication
+
+**[Open the interactive swarm study](android/swarm/index.html)**: isolated agents exchange findings, questions and immutable artifacts through a durable broker on the computer. Eight screens cover a live peer map, exchange receipts, agent details, decisions, a grouped 24-agent swarm, offline state, completion evidence and Evening. See the [architecture and interaction contract](android/swarm/README.md) and [overview](android/swarm/overview.png). Design only; no peer messaging runtime is implemented.
+
+## Android: schedules
+
+**[Open the interactive scheduling study](android/schedules/index.html)**: recurring Pi jobs on the computer, managed from the phone. Six screens cover schedules, creation, details, completed runs, offline state and Evening, with local confirmation and cron-preview flows. See the [design contract](android/schedules/README.md) and [overview](android/schedules/overview.png). This is a prototype, not an implemented scheduler.
+
 ## Android: subagents
 
 **[Browse the seven subagent screens](android/subagents/index.html)**: work Pi hands off to scouts, planners, workers and reviewers, shown inside the session that started it, including a chain picked up after the computer restarts. See the [notes](android/subagents/README.md) and the [overview](android/subagents/overview.png).

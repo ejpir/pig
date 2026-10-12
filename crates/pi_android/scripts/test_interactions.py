@@ -107,6 +107,36 @@ class Phone:
             raise AssertionError(f"Expected one control {name}/{index}, got {[key for key, _ in candidates]}")
         return candidates[0][1], state["scale"]
 
+    def scroll_into_view(self, name, scroll, index=None):
+        """Reveal a whole control inside its scroll clip before targeting it.
+
+        Layout probes include off-screen rows. Window bounds alone aren't
+        enough: a row can be inside the screen but hidden behind the dock.
+        """
+        for _ in range(8):
+            state = self.settled_state()
+            (x, y, width, height), _ = self.bounds(name, index, state)
+            (sx, sy, sw, sh), _ = self.bounds(scroll, state=state)
+            left, top = max(0, sx), max(0, sy)
+            right = min(state["viewport"][0], sx + sw)
+            bottom = min(state["viewport"][1], sy + sh)
+            # Leave a little room on either side of the vertical gesture.
+            top, bottom = top + 8, bottom - 8
+            if width <= 0 or height <= 0 or bottom <= top or height > bottom - top:
+                raise AssertionError(f"Control {name} cannot fit inside {scroll}")
+            if x < left or x + width > right:
+                raise AssertionError(f"Control {name} is horizontally clipped by {scroll}")
+            if top <= y and y + height <= bottom:
+                return state
+            center = (left + right) / 2
+            if y < top:
+                distance = min(max(top - y, 48), (bottom - top) * 0.6)
+                self.swipe((center, top), (center, top + distance))
+            else:
+                distance = min(max(y + height - bottom, 48), (bottom - top) * 0.6)
+                self.swipe((center, bottom), (center, bottom - distance))
+        raise AssertionError(f"Control {name} did not scroll into {scroll}")
+
     def tap(self, name, index=None):
         (x, y, width, height), scale = self.bounds(name, index, self.settled_state())
         self.run("shell", "input", "tap", round((x + width / 2) * scale), round((y + height / 2) * scale))
@@ -215,6 +245,137 @@ def initial_paste_menu(phone):
                "Paste remains after touch release")
     phone.wait_keyboard(False)
     phone.capture("first-long-press-paste")
+
+
+def draft_touch_targets(phone):
+    # The visible padding belongs to the input, not just the shaped text line.
+    for edge in ("left", "top", "right", "bottom"):
+        phone.fixture("start")
+        phone.wait_keyboard(False)
+        (x, y, width, height), scale = phone.bounds("draft", state=phone.settled_state())
+        points = {
+            "left": (x - 8, y + 10),
+            "top": (x + width / 2, y - 6),
+            "right": (x + width - 4, y + 10),
+            "bottom": (x + width / 2, y + height - 4),
+        }
+        phone.run("shell", "input", "tap", *(round(v * scale) for v in points[edge]))
+        phone.wait_keyboard(True)
+        phone.text("Copy_this_word")
+        phone.wait(lambda s: s["draft_chars"] == 14,
+                   f"first tap on draft {edge} accepts input")
+        phone.key("KEYCODE_BACK")
+        phone.wait_keyboard(False)
+
+    (x, y, width, height), _ = phone.bounds("draft", state=phone.settled_state())
+    phone.long_press((x + width / 2, y + height - 4))
+    phone.wait(lambda s: s["text_menu_open"] and shown(s, "text-menu-Copy"),
+               "holding below the text offers Copy on the first try")
+    phone.wait_keyboard(False)
+    phone.capture("draft-padding-copy")
+    phone.tap("text-menu-Copy")
+    phone.wait(lambda s: not s["text_menu_open"], "Copy closes the selection menu")
+
+    phone.fixture("start")
+    (x, y, width, height), _ = phone.bounds("draft", state=phone.settled_state())
+    phone.long_press((x + width / 2, y + height - 4))
+    phone.wait(lambda s: s["text_menu_open"] and shown(s, "text-menu-Paste"),
+               "first hold in an empty draft's padding offers Paste")
+    phone.tap("text-menu-Paste")
+    phone.wait(lambda s: s["draft_chars"] == 14,
+               "Copy and Paste preserve the selected word through the system clipboard")
+
+
+def call_output_actions(phone):
+    phone.fixture("call")
+    phone.wait(lambda s: shown(s, "copy-call-output"), "Copy is an icon at the output heading")
+    phone.tap("copy-call-output")
+    phone.capture("call-copy-icon")
+    phone.fixture("start")
+    (x, y, width, height), _ = phone.bounds("draft", state=phone.settled_state())
+    phone.long_press((x + width / 2, y + height - 4))
+    phone.tap("text-menu-Paste")
+    phone.wait(lambda s: s["draft_chars"] > 0, "the output icon copies to the system clipboard")
+
+    phone.fixture("call")
+    (x, y, width, height), _ = phone.bounds("call-output", state=phone.settled_state())
+    phone.long_press((x + min(40, width / 2), y + min(30, height / 2)))
+    phone.wait(lambda s: s["sheet"] == "SelectText" and shown(s, "text-menu-Copy"),
+               "holding tool output opens selectable text")
+    phone.tap("text-menu-Copy")
+    phone.wait(lambda s: s["sheet"] is None, "selected output can be copied")
+
+    phone.fixture("call")
+    for _ in range(8):
+        state = phone.settled_state()
+        (x, y, width, height), _ = phone.bounds("ask-about-call", state=state)
+        if 0 <= y and y + height <= state["viewport"][1]:
+            break
+        viewport_width, viewport_height = state["viewport"]
+        phone.swipe((viewport_width / 2, viewport_height - 120),
+                    (viewport_width / 2, 220))
+    assert 0 <= x and x + width <= state["viewport"][0], "Ask about this must not clip horizontally"
+    assert 0 <= y and y + height <= state["viewport"][1], "the complete footer must be reachable"
+    phone.capture("call-full-width-ask")
+    phone.tap("ask-about-call")
+    phone.wait(lambda s: s["sheet"] is None and s["draft_attachments"] == 1,
+               "the full-width Ask action attaches the output")
+
+
+def swarm_toggle(phone):
+    state = phone.fixture("more")
+    sessions = state["sessions"]
+    phone.wait(lambda s: s["swarm_enabled"] is True, "sample session starts with swarm allowed")
+    phone.tap("swarm-toggle")
+    phone.wait(lambda s: s["swarm_enabled"] is False and s["sessions"] == sessions,
+               "Swarm can be disabled for this session without stopping or deleting anything")
+    phone.capture("swarm-disabled")
+    phone.tap("swarm-toggle")
+    phone.wait(lambda s: s["swarm_enabled"] is True, "Swarm can be enabled again")
+    phone.capture("swarm-enabled")
+    phone.fixture("subagents-home")
+    phone.capture("home-crew-rail-spacing")
+
+
+def swarm_results_markdown(phone):
+    state = phone.fixture("swarm-results")
+    phone.wait(lambda s: shown(s, "swarm-result-markdown-peer-1")
+               and shown(s, "swarm-result-markdown-peer-2"), "peer results use the shared Markdown renderer")
+    phone.capture("swarm-results-markdown")
+    scroll = next(key for key in state["bounds"] if key.startswith("scroll:") and "swarm-observation-scroll" in key)
+    phone.scroll_into_view("copy-code", scroll, index=3)
+    phone.capture("swarm-results-code")
+    phone.tap("copy-code", 3)
+    phone.fixture("start")
+    (x, y, width, height), _ = phone.bounds("draft", state=phone.settled_state())
+    phone.long_press((x + width / 2, y + height - 4))
+    phone.tap("text-menu-Paste")
+    expected = 'let message = "café 🚀";\nassert!(message.is_char_boundary(message.len()));\n'
+    phone.wait(lambda s: s["start_draft"] == expected, "rendered code copies exact Unicode without Markdown fences")
+    state = phone.fixture("swarm-results")
+    scroll = next(key for key in state["bounds"] if key.startswith("scroll:") and "swarm-observation-scroll" in key)
+    phone.scroll_into_view("swarm-result-peer-1", scroll)
+    phone.tap("swarm-result-peer-1")
+    phone.wait(lambda s: s["route"].startswith("SwarmPeer("), "rendered result still opens the full peer conversation")
+    phone.key("KEYCODE_BACK")
+    phone.wait(lambda s: s["route"].startswith("Swarm("), "Back returns to Swarm Results")
+
+
+def diff_spacing(phone):
+    for fixture, card in (("diff-spacing", "activity-live-diff-5"),
+                          ("call-diff-spacing", "call-diff")):
+        state = phone.fixture(fixture)
+        scroll = next(key for key in state["bounds"]
+                      if key.startswith("scroll:") and "sheet-body-" in key)
+        state = phone.scroll_into_view(card, scroll)
+        (x, y, width, height), _ = phone.bounds(card, state=state)
+        assert 0 <= x and x + width <= state["viewport"][0], "diff card must fit horizontally"
+        assert 0 <= y and y + height <= state["viewport"][1], "the full diff must be reachable"
+        # Host layout tests assert the number inset and common code column;
+        # these screenshots also exercise Android's actual font rasterization.
+        phone.capture(fixture)
+        phone.key("KEYCODE_BACK")
+        phone.wait(lambda s: s["sheet"] is None, f"{fixture} closes without changing the session")
 
 
 def focus_long_press_during_ime_reflow(phone):
@@ -591,6 +752,38 @@ def commands(phone):
     phone.wait_keyboard(False)
 
 
+def subagent_input(phone):
+    for target in ("center", "left", "top", "bottom", "next-to-send"):
+        # A different fixture name prevents an outstanding frame of the previous
+        # identical fixture being mistaken for completion of the new launch.
+        phone.fixture("subagents")
+        phone.fixture("subagent-input")
+        phone.wait_keyboard(False)
+        state = phone.settled_state()
+        (x, y, width, height), scale = phone.bounds("draft", state=state)
+        (sx, sy, sw, sh), _ = phone.bounds("send", state=state)
+        assert abs(y + height - sy - sh) < 1 and x + width <= sx + 1, "Send must be beside the editor"
+        points = {"center": (x + width / 2, y + height / 2),
+                  "left": (x - 8, y + height / 2),
+                  "top": (x + width / 2, y - 2),
+                  "bottom": (x + width / 2, y + height + 2),
+                  "next-to-send": (x + width - 2, y + height / 2)}
+        before = state["draft_chars"]
+        phone.run("shell", "input", "tap", *(round(value * scale) for value in points[target]))
+        phone.wait_keyboard(True)
+        phone.text("x")
+        phone.wait(lambda s: s["draft_chars"] == before + 1,
+                   f"first subagent input tap at {target} accepts typing after IME resize")
+        phone.capture(f"subagent-input-{target}")
+        phone.key("KEYCODE_BACK")
+        phone.wait_keyboard(False)
+    # Send has its own hit target and must not reopen the keyboard. This sample
+    # has no transport: its draft cannot be sent to any real subagent.
+    phone.tap("send")
+    phone.wait_keyboard(False)
+    phone.capture("subagent-input-send-separate")
+
+
 def subagents(phone):
     phone.fixture("subagents")
     phone.wait(lambda s: all(shown(s, f"subagent-0-0-{n}") for n in range(3)),
@@ -719,12 +912,32 @@ def gestures(phone):
 
     state = phone.fixture("sessions")
     sessions = state["sessions"]
-    (x, y, width, height), _ = phone.bounds("session-row-4")
-    phone.swipe((x + 20, y + height / 2), (x + width - 20, y + height / 2), 650)
-    phone.wait(lambda s: (s["sheet"] or "").startswith("Delete(") and s["sessions"] == sessions and s["route"] == "Sessions",
-               "swipe right requests confirmation without opening or deleting the row")
+    target = "session-row-4"
+    scroll = 'scroll:Name("sessions")'
+
+    def swipe_row(short=False):
+        state = phone.scroll_into_view(target, scroll)
+        (x, y, width, height), _ = phone.bounds(target, state=state)
+        end = x + 65 if short else x + width - 20
+        phone.swipe((x + 20, y + height / 2), (end, y + height / 2), 650)
+
+    swipe_row(short=True)
+    phone.settled_state()
+    phone.wait(lambda s: s["sheet"] is None and s["sessions"] == sessions and s["route"] == "Sessions",
+               "a short row swipe snaps back without opening or deleting the session")
+    swipe_row()
+    phone.wait(lambda s: s["sheet"] == "Delete(SessionId(4))" and s["sessions"] == sessions and s["route"] == "Sessions",
+               "swipe right confirms the exact session without opening or deleting it")
+    phone.capture("swipe-delete-confirmation")
     phone.tap("cancel-delete")
     phone.wait(lambda s: s["sheet"] is None and s["sessions"] == sessions, "cancelled swipe deletion keeps the original list")
+    swipe_row()
+    phone.wait(lambda s: s["sheet"] == "Delete(SessionId(4))" and s["sessions"] == sessions,
+               "swiping again after cancellation requests confirmation again")
+    phone.tap("confirm-delete")
+    phone.wait(lambda s: s["sheet"] is None and s["sessions"] == [session_id for session_id in sessions if session_id != 4]
+               and s["route"] == "Sessions", "confirmation deletes only the swiped sample session")
+    phone.capture("swipe-delete-confirmed")
     phone.tap("new-session")
     phone.wait(lambda s: s["route"] == "Start", "the start bar opens only the new composer")
     phone.key("KEYCODE_BACK")
@@ -772,13 +985,16 @@ def native_image_picker(phone):
 
 
 CASES = {"pairing": pairing_scanner, "initial-paste": initial_paste_menu,
+         "draft-targets": draft_touch_targets, "call-output": call_output_actions,
+         "diff-spacing": diff_spacing, "swarm-results": swarm_results_markdown,
+         "swarm-toggle": swarm_toggle,
          "focus-long-press": focus_long_press_during_ime_reflow,
          "input": input_and_selectors, "long-input": long_input_and_stop,
          "models": model_scroll, "images": images, "delete": deletion,
          "picker": native_image_picker, "gestures": gestures, "ime": gboard_typing,
          "conversation": conversation, "rich-content": rich_content, "history": history,
          "projects": projects, "tool-images": tool_images, "commands": commands,
-         "subagents": subagents}
+         "subagents": subagents, "subagent-input": subagent_input}
 
 
 def main():

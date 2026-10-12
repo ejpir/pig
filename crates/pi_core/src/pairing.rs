@@ -42,6 +42,9 @@ pub struct HelperCapabilities {
     pub pi: bool,
     #[serde(default)]
     pub durable: bool,
+    /// Host scheduling API, separate from durable session support.
+    #[serde(default)]
+    pub schedules: bool,
     #[serde(default)]
     pub durable_experimental: bool,
     #[serde(default)]
@@ -267,14 +270,17 @@ mod tests {
         assert_eq!(helper.protocol, None);
         assert_eq!(helper.platform, None);
         assert_eq!(helper.capabilities, HelperCapabilities::default());
+        assert!(!helper.capabilities.schedules);
 
         let encoded = serde_json::to_value(HelperCapabilities {
             durable_experimental: true,
             image_prompts: true,
+            schedules: true,
             ..Default::default()
         })
         .unwrap();
         assert_eq!(encoded["durableExperimental"], true);
         assert_eq!(encoded["imagePrompts"], true);
+        assert_eq!(encoded["schedules"], true);
     }
 }

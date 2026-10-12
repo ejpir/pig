@@ -84,6 +84,8 @@ fn call(turn: &mut Turn, name: &str, target: &str, finished: bool) -> usize {
         failed: false,
         added: 0,
         removed: 0,
+        diff: Vec::new(),
+        diff_is_preview: false,
     });
     let index = stage.tools.len() - 1;
     turn.flow.push(Flow::Tool(kind, index));
@@ -171,6 +173,10 @@ pub(crate) fn new_session(
         details: Details {
             context_percent: Some(2),
             context_tokens: "4k of 200k tokens".into(),
+            compaction_percent: Some(81.9),
+            auto_compaction_enabled: true,
+            swarm_enabled: Some(true),
+            background_compacting: false,
             cost: "$0.00".into(),
             turns: 0,
             tools: tools(),
@@ -468,6 +474,10 @@ fn session(id: u32, title: &str, project: usize, state: State, turn: Turn) -> Se
         details: Details {
             context_percent: Some(18),
             context_tokens: "36k of 200k tokens".into(),
+            compaction_percent: Some(81.9),
+            auto_compaction_enabled: true,
+            swarm_enabled: Some(true),
+            background_compacting: false,
             cost: "$0.22".into(),
             turns: 6,
             tools: tools(),
@@ -565,6 +575,10 @@ fn qwen(id: SessionId) -> Session {
     session.details = Details {
         context_percent: Some(31),
         context_tokens: "62k of 200k tokens".into(),
+        compaction_percent: Some(81.9),
+        auto_compaction_enabled: true,
+        swarm_enabled: Some(true),
+        background_compacting: false,
         cost: "$0.41".into(),
         turns: 14,
         tools: tools(),

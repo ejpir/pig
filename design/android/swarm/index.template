@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Swarm · Pi for Android</title>
+<!-- Generated index.html is self-contained. Edit this template, swarm.css or swarm.js, then run build.cjs. -->
+<!-- INLINE_SWARM_CSS -->
+</head>
+<body>
+<div class="shell" id="study">
+  <header class="masthead"><a class="brand" href="../index.html"><span class="pi-mark">π</span> Pi in your pocket</a><span class="eyebrow">Android / Design proposal 08</span></header>
+  <section class="hero">
+    <div><div class="eyebrow">Independent minds. Shared direction.</div><h1>A swarm, not a black box.</h1><p class="lede">Let agents ask each other, share findings and hand work over. Keep their conversations separate, their exchanges visible, and you in control of the session.</p></div>
+    <aside><b>On the computer. In your pocket.</b><p>A durable message broker on studio-mac owns delivery. The phone follows a compact projection over SSH. No agent connects to another directly.</p><a href="README.md">Architecture & interaction contract ↗</a></aside>
+  </section>
+  <nav class="toolbar" aria-label="Study controls">
+    <div class="switcher"><button data-view="gallery" aria-pressed="true">Screen study</button><button data-view="demo" aria-pressed="false">Try the flow</button></div>
+    <span class="prototype">Local sample only · no agents run</span>
+    <button class="theme-toggle" id="theme-toggle" aria-pressed="false">Evening theme</button>
+  </nav>
+  <section class="gallery" id="gallery" aria-label="Eight proposed screens"></section>
+  <section id="demo" hidden>
+    <div class="demo-notes"><div class="eyebrow">Interactive walkthrough</div><h2>Follow the exchange.</h2><p>Tap an agent to inspect its work. Open the API → UI exchange to trace a question and its reply. Steer Pi, or stop one agent without stopping its peers.</p><label for="route">Jump to a state</label><select id="route"><option value="map">Live map</option><option value="messages">Exchanges</option><option value="agent">Agent details</option><option value="question">Needs your decision</option><option value="many">24-agent swarm</option><option value="offline">Connection lost</option><option value="done">Finished swarm</option></select><button class="btn" id="reset">Reset sample</button><p class="meta">Answers, sends, reconnect and Stop only change this sample in memory. Reloading resets it. Escape closes a sheet before navigating back.</p></div>
+    <div class="phone" id="demo-phone"></div>
+  </section>
+  <section class="architecture">
+    <div><div class="eyebrow">Communication contract</div><h2>Peer conversations.<br>One accountable broker.</h2><p>Messages are typed, scoped to a swarm and recorded before delivery. A receipt means delivered to context—not answered, agreed with, or executed.</p></div>
+    <div class="bus-diagram" aria-label="Scout, API, UI and reviewer use isolated conversations connected through a durable broker"><div class="bus-agents"><span>Scout</span><span>API</span><span>UI</span><span>Reviewer</span></div><div class="bus-lines" aria-hidden="true"><i></i><i></i><i></i><i></i></div><div class="broker"><b>Durable broker · studio-mac</b><span>Mailboxes / event log / artifact references / limits</span></div><div class="bus-bottom"><span>Pi · coordinates & escalates</span><span>Android · follows over SSH</span></div></div>
+  </section>
+  <footer><span>Proposed extension to <a href="../subagents/README.md">the existing subagent crew</a>. Not implemented runtime or native UI.</span><a href="overview.png">Overview PNG ↗</a></footer>
+</div>
+<div id="single" hidden></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<!-- INLINE_SWARM_JS -->
+</body>
+</html>

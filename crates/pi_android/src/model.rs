@@ -154,6 +154,10 @@ pub struct ToolActivity {
     /// Lines this call added and removed, for an edit or a write.
     pub added: u32,
     pub removed: u32,
+    /// This call's full diff, not the stage's truncated latest-edit preview.
+    pub diff: Vec<DiffLine>,
+    /// Derived from requested input rather than a reported applied diff.
+    pub diff_is_preview: bool,
 }
 
 impl ToolActivity {
@@ -570,6 +574,11 @@ pub struct Details {
     /// totals are not a substitute for this value.
     pub context_percent: Option<u32>,
     pub context_tokens: String,
+    /// Resolved backend threshold, not a design-time percentage.
+    pub compaction_percent: Option<f64>,
+    pub auto_compaction_enabled: bool,
+    pub swarm_enabled: Option<bool>,
+    pub background_compacting: bool,
     pub cost: String,
     pub turns: u32,
     pub tools: Vec<String>,

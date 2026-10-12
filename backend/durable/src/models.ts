@@ -3,6 +3,7 @@ import { ModelRuntime, type CreateModelRuntimeOptions } from "@earendil-works/pi
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { bedrockProviderModule } from "@earendil-works/pi-ai/bedrock-provider";
 import { setBedrockProviderModule } from "@earendil-works/pi-ai/compat";
+import { durableModels } from "./model-stream.ts";
 
 export async function desktopModels(options: CreateModelRuntimeOptions = {}): Promise<ModelRuntime> {
   // Match stock Pi's standalone setup without loading its CLI/agent/extension runtime.
@@ -12,5 +13,5 @@ export async function desktopModels(options: CreateModelRuntimeOptions = {}): Pr
   setBedrockProviderModule(bedrockProviderModule);
   // Same auth.json locks, token refresh, built-ins, models.json and cached catalogs as stock Pi.
   // No catalog/provider network requests just to start or enumerate the GUI's models.
-  return ModelRuntime.create({ ...options, allowModelNetwork: false });
+  return durableModels(await ModelRuntime.create({ ...options, allowModelNetwork: false }));
 }

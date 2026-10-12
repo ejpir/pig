@@ -10,12 +10,15 @@ mod pages;
 pub(crate) use pages::ShownImage;
 mod projects;
 mod review;
+mod schedules;
 mod sessions;
 mod settings;
 mod sheets;
 mod start;
 mod stream;
 mod subagents;
+pub(crate) mod swarm;
+mod swarm_map;
 mod thread;
 
 use crate::{theme::Theme, ui};

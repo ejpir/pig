@@ -205,6 +205,10 @@ pub fn listed(id: SessionId, listed: &crate::remote::Listed, folder: String) -> 
         details: Details {
             context_percent: None,
             context_tokens: "Not reported".into(),
+            compaction_percent: None,
+            auto_compaction_enabled: false,
+            swarm_enabled: None,
+            background_compacting: false,
             cost: String::new(),
             turns: 0,
             tools: Vec::new(),
@@ -463,6 +467,10 @@ fn add_tool(
         } else {
             0
         },
+        diff: lines.clone(),
+        diff_is_preview: observed.is_some_and(|tool| {
+            tool.diff.is_none() && (tool.name == "edit" || !tool.finished || tool.is_error)
+        }),
     });
     turn.flow.push(step);
     let stage = turn.stage_mut(kind);
@@ -954,6 +962,20 @@ fn details(pi: &Pi, key: &str) -> Details {
                 })
             })
             .unwrap_or_else(|| "Not reported".into()),
+        compaction_percent: usage
+            .filter(|usage| usage.context_window > 0)
+            .and_then(|usage| {
+                pi.stats.compaction.as_ref().map(|policy| {
+                    let threshold = usage
+                        .context_window
+                        .saturating_sub(policy.reserve_tokens)
+                        .saturating_sub(policy.background_tokens);
+                    threshold as f64 * 100. / usage.context_window as f64
+                })
+            }),
+        auto_compaction_enabled: pi.state.auto_compaction_enabled,
+        swarm_enabled: pi.state.swarm_enabled,
+        background_compacting: pi.state.compactions.iter().any(|item| !item.blocking),
         cost: pi
             .stats
             .cost
@@ -1157,6 +1179,40 @@ mod tests {
     }
 
     #[test]
+    fn compaction_details_use_reported_policy_and_background_activity() {
+        let mut pi = finished_run();
+        pi.apply(&json!({"type":"state_update","state":{
+            "autoCompactionEnabled":true,"compactions":[{"taskId":42,"blocking":false}]
+        }}))
+        .unwrap();
+        pi.apply(&json!({"type":"stats_update","stats":{
+            "contextUsage":{"tokens":46000,"contextWindow":272000,"percent":null},
+            "compaction":{"enabled":true,"reserveTokens":16384,"backgroundTokens":32768}
+        }}))
+        .unwrap();
+        let shown = project(&pi, facts(&[]));
+        assert!((shown.details.compaction_percent.unwrap() - 81.9294).abs() < 0.001);
+        assert!(shown.details.auto_compaction_enabled);
+        assert!(shown.details.background_compacting);
+        assert_eq!(shown.details.context_percent, Some(17));
+
+        // Changing the window changes the mark; disabling auto hides it in the view.
+        pi.stats.context_usage.as_mut().unwrap().context_window = 200000;
+        pi.state.auto_compaction_enabled = false;
+        pi.state.compactions.clear();
+        let shown = project(&pi, facts(&[]));
+        assert!((shown.details.compaction_percent.unwrap() - 75.424).abs() < 0.001);
+        assert!(!shown.details.auto_compaction_enabled);
+        assert!(!shown.details.background_compacting);
+        pi.stats.compaction.as_mut().unwrap().background_tokens = 0;
+        assert!(
+            (project(&pi, facts(&[])).details.compaction_percent.unwrap() - 91.808).abs() < 0.001
+        );
+        pi.stats.compaction = None;
+        assert_eq!(project(&pi, facts(&[])).details.compaction_percent, None);
+    }
+
+    #[test]
     fn a_running_tool_is_the_live_stage() {
         let pi = session(&[
             json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
@@ -1295,6 +1351,84 @@ mod tests {
         let shown = project(&pi, facts(&[]));
         assert_eq!(shown.state, State::Working);
         assert_eq!(shown.activity, "Compacting");
+    }
+
+    #[test]
+    fn each_call_keeps_its_full_live_diff_and_prefers_the_applied_result() {
+        let replacement = (0..24)
+            .map(|n| format!("new_{n}();"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut pi = session(&[
+            json!({"type":"agent_start"}),
+            json!({"type":"message_end","message":{"role":"user","content":"Edit two files"}}),
+            json!({"type":"message_end","message":{"role":"assistant","content":[
+                {"type":"toolCall","id":"first","name":"edit","arguments":{
+                    "path":"first.rs", "edits":[{"oldText":"old();", "newText":replacement}]
+                }}
+            ]}}),
+            json!({"type":"tool_execution_start","toolCallId":"first","toolName":"edit","args":{
+                "path":"first.rs", "edits":[{"oldText":"old();", "newText":replacement}]
+            }}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        let first = shown.turns[0].tool(StageKind::Change, 0).unwrap();
+        assert_eq!(
+            first.diff.len(),
+            25,
+            "the call is not limited to the stage's eight-line preview"
+        );
+        assert!(first.diff_is_preview);
+        assert!(!first.finished);
+        assert_eq!(first.diff.last().unwrap().text, "new_23();");
+        assert!(first.diff.iter().all(|line| line.number == 0));
+
+        pi.apply(&json!({"type":"tool_execution_end","toolCallId":"first","toolName":"edit",
+            "result":{"content":[{"type":"text","text":"Updated"}],"details":{"diff":DIFF}},"isError":false
+        })).unwrap();
+        pi.apply(
+            &json!({"type":"message_end","message":{"role":"assistant","content":[
+                {"type":"toolCall","id":"second","name":"edit","arguments":{
+                    "path":"second.rs", "oldText":"before();", "newText":"after();"
+                }}
+            ]}}),
+        )
+        .unwrap();
+        pi.apply(
+            &json!({"type":"tool_execution_start","toolCallId":"second","toolName":"edit","args":{
+                "path":"second.rs", "oldText":"before();", "newText":"after();"
+            }}),
+        )
+        .unwrap();
+        let shown = project(&pi, facts(&[]));
+        let first = shown.turns[0].tool(StageKind::Change, 0).unwrap();
+        assert!(first.finished);
+        assert!(!first.diff_is_preview);
+        assert_eq!(
+            first.diff,
+            parse_diff(DIFF)
+                .into_iter()
+                .flat_map(|h| h.lines)
+                .collect::<Vec<_>>()
+        );
+        let second = shown.turns[0].tool(StageKind::Change, 1).unwrap();
+        assert!(second.diff_is_preview);
+        assert_eq!(second.diff[0].text, "before();");
+        assert_eq!(second.diff[1].text, "after();");
+
+        pi.apply(
+            &json!({"type":"tool_execution_end","toolCallId":"second","toolName":"edit",
+                "result":{"content":[{"type":"text","text":"Not found"}]},"isError":true
+            }),
+        )
+        .unwrap();
+        let shown = project(&pi, facts(&[]));
+        let second = shown.turns[0].tool(StageKind::Change, 1).unwrap();
+        assert!(second.failed);
+        assert!(
+            second.diff_is_preview,
+            "failed replacements must not claim an applied diff"
+        );
     }
 
     #[test]

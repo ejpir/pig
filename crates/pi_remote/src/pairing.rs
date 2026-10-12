@@ -200,11 +200,9 @@ pub fn pair(arguments: &[String]) -> Result<()> {
     let approved = if options.yes {
         true
     } else {
-        print!("Press Enter to allow, or type n to deny: ");
+        print!("Type y or yes to allow, anything else to deny: ");
         io::stdout().flush()?;
-        let mut answer = String::new();
-        io::stdin().read_line(&mut answer)?;
-        !matches!(answer.trim().to_ascii_lowercase().as_str(), "n" | "no")
+        read_confirmation(&mut io::stdin().lock())?
     };
 
     let response = if approved {
@@ -243,6 +241,12 @@ pub fn pair(arguments: &[String]) -> Result<()> {
     } else {
         bail!("Pairing denied; no phone key was authorized")
     }
+}
+
+fn read_confirmation(input: &mut impl io::BufRead) -> Result<bool> {
+    let mut answer = String::new();
+    let read = input.read_line(&mut answer)?;
+    Ok(read != 0 && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Runs inside the one-use forced SSH command. It cannot authorize anything itself;
@@ -327,6 +331,7 @@ fn helper_at(executable: &Path, gateway: bool) -> Result<Helper> {
         capabilities: pairing::HelperCapabilities {
             pi: true,
             durable: cfg!(unix),
+            schedules: cfg!(any(target_os = "linux", target_os = "macos")),
             durable_experimental: true,
             watchers: true,
             sessions: true,
@@ -359,7 +364,7 @@ fn gateway_arguments(original: &str) -> Result<Vec<String>> {
     let allowed = matches!(command.as_slice(),
         [one] if matches!(one.as_str(), "sessions" | "models" | "commands" | "discover" | "--version" | "--capabilities")
     ) || matches!(command.as_slice(), [one, two] if
-        (one == "connect" || one == "files") && two == "--stdio"
+        (one == "connect" || one == "files" || one == "schedules") && two == "--stdio"
     ) || matches!(command.as_slice(), [one, two, _] if one == "directories" && two == "--path")
         || matches!(command.as_slice(), [one, two, _] if matches!(one.as_str(), "jj-history" | "jj-enable") && two == "--path")
         || matches!(command.as_slice(), [one, two, _, three, _] if one == "jj-restore" && two == "--path" && three == "--operation")
@@ -903,20 +908,22 @@ fn write_private(path: &Path, bytes: &[u8], create_new: bool) -> Result<()> {
     let parent = path.parent().context("Pairing file has no parent")?;
     fs::create_dir_all(parent)?;
     set_mode(parent, 0o700)?;
-    let mut options = OpenOptions::new();
-    options
-        .write(true)
-        .create(true)
-        .truncate(!create_new)
-        .create_new(create_new);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
+    // Polling peers must see either no file (or the previous version), or the
+    // complete JSON. Never create/truncate the published path before writing.
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    set_mode(staged.path(), 0o600)?;
+    staged.write_all(bytes)?;
+    staged.as_file().sync_all()?;
+    if create_new {
+        // Requests are one-use: concurrent exchanges must not replace a winner.
+        staged
+            .persist_noclobber(path)
+            .map_err(|error| error.error)?;
+    } else {
+        staged.persist(path).map_err(|error| error.error)?;
     }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -981,6 +988,125 @@ mod tests {
 
     fn isolated() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn confirmation_requires_an_explicit_affirmative_answer() {
+        for answer in ["", "\n", "n\n", "no\n", "maybe\n", "anything else\n"] {
+            assert!(
+                !read_confirmation(&mut io::Cursor::new(answer)).unwrap(),
+                "{answer:?}"
+            );
+        }
+        for answer in ["y\n", "yes\n", " Y \n", "YES\n"] {
+            assert!(
+                read_confirmation(&mut io::Cursor::new(answer)).unwrap(),
+                "{answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_files_are_replaced_atomically_and_requests_are_create_once() {
+        let directory = isolated();
+        let path = directory.path().join("response.json");
+        write_json(&path, &serde_json::json!({"approved": false})).unwrap();
+        let mut original = fs::File::open(&path).unwrap();
+        write_json(&path, &serde_json::json!({"approved": true})).unwrap();
+        let mut bytes = Vec::new();
+        original.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["approved"],
+            false
+        );
+        assert_eq!(
+            read_json::<serde_json::Value>(&path).unwrap()["approved"],
+            true
+        );
+
+        let request = directory.path().join("request.json");
+        write_new_json(&request, &serde_json::json!({"id": "first"})).unwrap();
+        let error = write_new_json(&request, &serde_json::json!({"id": "second"})).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            read_json::<serde_json::Value>(&request).unwrap()["id"],
+            "first"
+        );
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(&request).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn polling_private_files_never_observes_partial_json() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let directory = isolated();
+        let path = directory.path().join("response.json");
+        let value = serde_json::json!({"payload": "x".repeat(8 * 1024)});
+        write_json(&path, &value).unwrap();
+        let started = Barrier::new(2);
+        let done = AtomicBool::new(false);
+        thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                assert_eq!(read_json::<serde_json::Value>(&path).unwrap(), value);
+                started.wait();
+                while !done.load(Ordering::Acquire) {
+                    assert_eq!(read_json::<serde_json::Value>(&path).unwrap(), value);
+                }
+            });
+            started.wait();
+            for _ in 0..64 {
+                write_json(&path, &value).unwrap();
+            }
+            done.store(true, Ordering::Release);
+            reader.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn concurrent_requests_publish_exactly_one_complete_winner() {
+        use std::sync::Barrier;
+
+        let directory = isolated();
+        let path = directory.path().join("request.json");
+        let started = Barrier::new(2);
+        let results = thread::scope(|scope| {
+            let writers: Vec<_> = (0..2)
+                .map(|id| {
+                    let path = &path;
+                    let started = &started;
+                    scope.spawn(move || {
+                        started.wait();
+                        write_new_json(path, &serde_json::json!({"id": id}))
+                    })
+                })
+                .collect();
+            writers
+                .into_iter()
+                .map(|writer| writer.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let winner = results.iter().position(|result| result.is_ok()).unwrap();
+        assert_eq!(read_json::<serde_json::Value>(&path).unwrap()["id"], winner);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -1185,6 +1311,27 @@ mod tests {
         )
         .unwrap();
         assert!(bootstrap.contains(&format!("exec {} pair exchange", stable.display())));
+    }
+
+    #[test]
+    fn the_schedule_gateway_allows_only_the_exact_stdio_operation() {
+        assert_eq!(
+            gateway_arguments("pi-desktop-remote schedules --stdio").unwrap(),
+            vec!["schedules", "--stdio"]
+        );
+        for rejected in [
+            "pi-desktop-remote schedules",
+            "pi-desktop-remote schedules --stdio extra",
+            "pi-desktop-remote schedules --path /tmp",
+            "pi-desktop-remote scheduler start",
+            "pi-desktop-remote scheduler stop",
+            "pi-desktop-remote scheduler status",
+            "pi-desktop-remote scheduler install --confirm",
+            "pi-desktop-remote schedules --stdio; touch /tmp/no",
+            "pi-desktop-remote schedules --stdio && true",
+        ] {
+            assert!(gateway_arguments(rejected).is_err(), "{rejected}");
+        }
     }
 
     #[test]

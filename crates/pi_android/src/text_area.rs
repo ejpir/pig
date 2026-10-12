@@ -13,10 +13,10 @@
 use crate::theme::{SANS, theme};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, Corners,
-    DispatchPhase, Element, ElementId, ElementInputHandler, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, LayoutId,
-    LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels, Point,
-    ScrollWheelEvent, SharedString, Style, TextInputAction, TextInputConfiguration, TextRun,
+    DispatchPhase, Edges, Element, ElementId, ElementInputHandler, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId, Hitbox, HitboxBehavior,
+    LayoutId, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels,
+    Point, ScrollWheelEvent, SharedString, Style, TextInputAction, TextInputConfiguration, TextRun,
     TouchDragEvent, TouchPhase, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div,
     fill, point, prelude::*, px, relative, size,
 };
@@ -102,6 +102,10 @@ pub struct TextArea {
     configuration: TextInputConfiguration,
     /// Taller text scrolls inside the field.
     max_lines: usize,
+    /// Keep the whole draft interactive, not only its shaped text lines.
+    min_height: Pixels,
+    /// Non-text space around the field that belongs to the same input target.
+    touch_padding: Edges<Pixels>,
     layout: Option<Layout>,
     bounds: Option<Bounds<Pixels>>,
     scroll: Pixels,
@@ -166,6 +170,8 @@ impl TextArea {
                 input_action: TextInputAction::Enter,
             },
             max_lines,
+            min_height: px(0.),
+            touch_padding: Edges::default(),
             layout: None,
             bounds: None,
             scroll: px(0.),
@@ -198,6 +204,8 @@ impl TextArea {
         self.marked = None;
         self.scroll = px(0.);
         self.menu = !self.content.is_empty();
+        // The selection menu must use the new text's measured geometry.
+        self.layout = None;
         self.reveal_caret = false;
         cx.notify();
     }
@@ -235,6 +243,15 @@ impl TextArea {
 
     pub fn set_max_lines(&mut self, lines: usize) {
         self.max_lines = lines.max(1);
+    }
+
+    pub(crate) fn set_touch_target(&mut self, min_height: Pixels, padding: Edges<Pixels>) {
+        self.min_height = min_height;
+        self.touch_padding = padding;
+    }
+
+    fn shows_caret(&self) -> bool {
+        !self.read_only && !self.content.is_empty() && self.selection.is_empty()
     }
 
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
@@ -773,6 +790,7 @@ impl TextArea {
         let place = Bounds::new(point(bounds.left() + left, top), size(width, height));
         let bar = div()
             .id("text-menu")
+            .debug_selector(|| "text-menu".into())
             .child(crate::testing::probe("text-menu"))
             .h(height)
             .px(px(4.))
@@ -797,6 +815,7 @@ impl TextArea {
             .children(items.into_iter().map(|item| {
                 div()
                     .id(item.label())
+                    .child(crate::testing::probe(format!("text-menu-{}", item.label())))
                     .h(px(36.))
                     .px(padding)
                     .flex()
@@ -1113,7 +1132,6 @@ impl Render for TextArea {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::scroll_text))
             // A press anywhere but the bar closes it.
@@ -1315,7 +1333,10 @@ impl Element for TextBody {
                 let (text, runs) = area.display(style.color, colors.muted, style.font());
                 let wrap = if area.multiline { width } else { None };
                 let layout = Layout::shape(text, &runs, font_size, line_height, wrap, window);
-                let height = layout.height().min(line_height * area.max_lines as f32);
+                let height = layout
+                    .height()
+                    .min(line_height * area.max_lines as f32)
+                    .max(area.min_height);
                 size(width.unwrap_or_default(), height)
             });
         (id, ())
@@ -1396,7 +1417,7 @@ impl Element for TextBody {
             now,
         );
         let origin = point(bounds.left() - scroll_x, bounds.top() - scroll);
-        let caret = selection.is_empty().then(|| {
+        let caret = area.shows_caret().then(|| {
             fill(
                 Bounds::new(origin + end, size(px(2.), line_height)),
                 colors.accent,
@@ -1459,7 +1480,12 @@ impl Element for TextBody {
                 ));
             }
         }
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let padding = area.touch_padding;
+        let target = Bounds::from_corners(
+            bounds.origin - point(padding.left, padding.top),
+            bounds.bottom_right() + point(padding.right, padding.bottom),
+        );
+        let hitbox = window.insert_hitbox(target, HitboxBehavior::Normal);
         let focused = area.focus.is_focused(window);
         let handles = [(Handle::Start, start), (Handle::End, end)]
             .into_iter()
@@ -1586,7 +1612,14 @@ impl Element for TextBody {
         }
         self.listen(prepaint, window);
         let (layout, scroll) = (prepaint.layout.clone(), prepaint.scroll);
-        self.area.update(cx, |area, _| {
+        self.area.update(cx, |area, cx| {
+            // A newly opened selection sheet has no geometry when its menu
+            // first renders. Paint supplies it; schedule a render rather than
+            // waiting for another tap. Reposition as the sheet animates too.
+            let place_menu = area.menu
+                && (area.layout.is_none()
+                    || area.bounds != Some(bounds)
+                    || area.clip != Some(clip));
             area.layout = Some(layout);
             area.bounds = Some(bounds);
             area.clip = Some(clip);
@@ -1596,13 +1629,29 @@ impl Element for TextBody {
                 area.scrollbar_motion = Some(Instant::now());
             }
             area.reveal_caret = false;
+            if place_menu {
+                cx.on_next_frame(window, |_, _, cx| cx.notify());
+            }
         });
     }
 }
 
 impl TextBody {
-    /// Long presses select words; dragging a handle moves an end of the selection.
+    /// Taps and holds share the whole input target, including draft padding.
+    /// Dragging a handle moves an end of the selection.
     fn listen(&self, prepaint: &Prepaint, window: &mut Window) {
+        let area = self.area.clone();
+        let text = prepaint.hitbox.clone();
+        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble
+                && event.button == MouseButton::Left
+                && text.is_hovered(window)
+            {
+                window.prevent_default();
+                cx.stop_propagation();
+                area.update(cx, |area, cx| area.on_mouse_down(event, window, cx));
+            }
+        });
         // The keyboard can move the focused composer between touch-down and the
         // long-press timer. Remember ownership and the original text offset at
         // touch-down, before that reflow changes hit testing and geometry.
@@ -1611,7 +1660,7 @@ impl TextBody {
         window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && event.phase == TouchPhase::Started {
                 area.update(cx, |area, _| {
-                    if text.is_hovered(window) {
+                    if text.is_hovered(window) && !window.default_prevented() {
                         area.prepare_long_press(event.start_position);
                     } else {
                         area.pending_long_press = None;
@@ -1641,6 +1690,7 @@ impl TextBody {
                 }
                 None
             };
+            cx.stop_propagation();
             area.update(cx, |area, cx| {
                 area.long_press(event, original_offset, window, cx)
             });
@@ -1716,6 +1766,148 @@ fn mention_ranges(text: &str) -> Vec<Range<usize>> {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    fn touch(cx: &mut gpui::VisualTestContext, position: Point<Pixels>, phase: TouchPhase) {
+        use gpui::InputEvent;
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::TouchEvent {
+                    id: gpui::TouchId(81),
+                    position,
+                    phase,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn the_first_tap_focuses_the_whole_draft_including_its_padding(cx: &mut TestAppContext) {
+        for edge in ["left", "top", "right", "bottom"] {
+            let (app, cx) =
+                cx.add_window_view(|window, cx| crate::app::PhoneApp::new(None, window, cx));
+            cx.simulate_resize(size(px(384.), px(854.)));
+            cx.update(|window, cx| app.update(cx, |app, cx| app.preview("start", window, cx)));
+            cx.run_until_parked();
+            let draft = cx.debug_bounds("composer-draft").unwrap();
+            let position = match edge {
+                "left" => point(draft.left() - px(8.), draft.top() + px(10.)),
+                "top" => point(draft.center().x, draft.top() - px(6.)),
+                "right" => point(draft.right() - px(4.), draft.top() + px(10.)),
+                _ => point(draft.center().x, draft.bottom() - px(4.)),
+            };
+            touch(cx, position, TouchPhase::Started);
+            touch(cx, position, TouchPhase::Ended);
+            cx.update(|window, cx| {
+                let area = app.read(cx).start.read(cx).area.read(cx);
+                assert!(
+                    area.focus.is_focused(window),
+                    "first tap on {edge} must focus the draft"
+                );
+                assert!(!area.menu, "first tap must not open Paste");
+            });
+            cx.simulate_input("first");
+            app.read_with(cx, |app, cx| {
+                assert_eq!(app.start.read(cx).area.read(cx).text(), "first");
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn the_first_hold_in_draft_padding_opens_the_edit_menu(cx: &mut TestAppContext) {
+        for text in ["", "Copy this word"] {
+            let (app, cx) =
+                cx.add_window_view(|window, cx| crate::app::PhoneApp::new(None, window, cx));
+            cx.simulate_resize(size(px(384.), px(854.)));
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.preview("start", window, cx);
+                    app.start
+                        .update(cx, |composer, cx| composer.set_text(text, cx));
+                });
+            });
+            cx.run_until_parked();
+            let draft = cx.debug_bounds("composer-draft").unwrap();
+            let position = point(draft.center().x, draft.bottom() - px(4.));
+            touch(cx, position, TouchPhase::Started);
+            cx.executor().advance_clock(Duration::from_millis(501));
+            cx.run_until_parked();
+            touch(cx, position, TouchPhase::Ended);
+            let area = app.read_with(cx, |app, cx| app.start.read(cx).area.clone());
+            area.read_with(cx, |area, _| {
+                assert!(
+                    area.menu,
+                    "a hold anywhere in the draft must open the edit menu"
+                );
+                assert!(area.anchor.is_none(), "release completes the selection");
+                if !text.is_empty() {
+                    assert_eq!(&area.content[area.selection.clone()], "word");
+                    assert!(area.menu_items().contains(&MenuItem::Copy));
+                }
+            });
+            if !text.is_empty() {
+                cx.update(|window, cx| {
+                    area.update(cx, |area, cx| area.choose(MenuItem::Copy, window, cx));
+                    assert_eq!(
+                        cx.read_from_clipboard()
+                            .and_then(|item| item.text())
+                            .as_deref(),
+                        Some("word")
+                    );
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn a_first_hold_keeps_its_word_when_the_keyboard_moves_the_draft(cx: &mut TestAppContext) {
+        let (app, cx) =
+            cx.add_window_view(|window, cx| crate::app::PhoneApp::new(None, window, cx));
+        cx.simulate_resize(size(px(384.), px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("start", window, cx);
+                app.start
+                    .update(cx, |composer, cx| composer.set_text("first second", cx));
+            });
+        });
+        cx.run_until_parked();
+        let area = app.read_with(cx, |app, cx| app.start.read(cx).area.clone());
+        let before = area.read_with(cx, |area, _| area.bounds.unwrap());
+        let position = before.origin + point(px(8.), px(10.));
+        touch(cx, position, TouchPhase::Started);
+        // A keyboard animation changes layout while the contact is still held.
+        cx.simulate_resize(size(px(384.), px(554.)));
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| {
+            assert!(!area.bounds.unwrap().contains(&position));
+        });
+        cx.executor().advance_clock(Duration::from_millis(501));
+        cx.run_until_parked();
+        touch(cx, position, TouchPhase::Ended);
+        area.read_with(cx, |area, _| {
+            assert!(area.menu, "reflow must not lose the first hold");
+            assert_eq!(&area.content[area.selection.clone()], "first");
+        });
+    }
+
+    #[gpui::test]
+    fn the_placeholder_has_no_caret_but_editable_text_still_does(cx: &mut TestAppContext) {
+        let area = cx.new(|cx| TextArea::multiline("Steer this run…", 4, cx));
+        area.update(cx, |area, cx| {
+            assert!(!area.shows_caret());
+            area.set_text("draft", cx);
+            assert!(area.shows_caret());
+            area.selection = 0..5;
+            assert!(!area.shows_caret());
+            area.selection = 5..5;
+            area.read_only = true;
+            assert!(!area.shows_caret());
+        });
+    }
 
     #[test]
     fn mentions_have_exact_unicode_safe_ranges_without_marking_email() {

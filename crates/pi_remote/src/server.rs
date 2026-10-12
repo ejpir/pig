@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail, ensure};
-use async_channel::{Sender, bounded};
+use async_channel::{Receiver, Sender, bounded};
 use pi_core::{
     protocol::{Command, MAX_RECORD_BYTES, read_record},
     session::Session,
@@ -9,9 +9,9 @@ use pi_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{BufReader, Write},
+    io::{self, BufRead as _, BufReader, Cursor, Write},
     net::{Shutdown, TcpListener, TcpStream},
     path::PathBuf,
     process::{Command as ProcessCommand, Stdio},
@@ -60,6 +60,88 @@ pub(crate) fn private_file(path: &std::path::Path) -> Result<File> {
 }
 const LEGACY_PROTOCOL_VERSION: u32 = 1;
 const LEGACY_MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PENDING_HANDSHAKES: usize = 32;
+// A valid 4096-byte cwd can expand to nearly 24 KiB through JSON escaping.
+const MAX_HANDSHAKE_BYTES: usize = 32 * 1024;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Admission happens before spawning: silent, unauthenticated clients cannot
+/// allocate an unlimited number of workers. Authenticated attachments do not
+/// retain a handshake slot.
+struct HandshakePool {
+    available: Receiver<()>,
+    returned: Sender<()>,
+}
+impl HandshakePool {
+    fn new(capacity: usize) -> Self {
+        let (returned, available) = bounded(capacity);
+        for _ in 0..capacity {
+            returned.try_send(()).expect("Empty handshake pool");
+        }
+        Self {
+            available,
+            returned,
+        }
+    }
+
+    fn try_acquire(&self) -> Option<HandshakePermit> {
+        self.available.try_recv().ok()?;
+        Some(HandshakePermit(self.returned.clone()))
+    }
+}
+struct HandshakePermit(Sender<()>);
+impl Drop for HandshakePermit {
+    fn drop(&mut self) {
+        let _ = self.0.try_send(());
+    }
+}
+
+fn handshake_remaining(deadline: Instant) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .context("Daemon attachment handshake timed out")
+}
+
+/// Bound accumulation before parsing and use a single deadline across hello
+/// and ready. Per-read timeouts alone let trickling clients retain a worker.
+fn read_handshake_record(
+    reader: &mut BufReader<TcpStream>,
+    deadline: Instant,
+) -> Result<Option<Value>> {
+    let mut bytes = Vec::new();
+    loop {
+        reader
+            .get_ref()
+            .set_read_timeout(Some(handshake_remaining(deadline)?))?;
+        let buffer = reader
+            .fill_buf()
+            .context("reading daemon attachment handshake")?;
+        handshake_remaining(deadline)?;
+        if buffer.is_empty() {
+            // Reuse the strict RPC parser, including its unterminated-record check.
+            return read_record(&mut Cursor::new(bytes));
+        }
+        let count = buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(buffer.len(), |index| index + 1);
+        ensure!(
+            bytes.len() + count <= MAX_HANDSHAKE_BYTES,
+            "Daemon attachment handshake record exceeds {MAX_HANDSHAKE_BYTES} bytes"
+        );
+        bytes.extend_from_slice(&buffer[..count]);
+        reader.consume(count);
+        if bytes.last() == Some(&b'\n') {
+            return read_record(&mut Cursor::new(bytes));
+        }
+        // Reject a full unterminated record without waiting for another byte.
+        ensure!(
+            bytes.len() < MAX_HANDSHAKE_BYTES,
+            "Daemon attachment handshake record exceeds {MAX_HANDSHAKE_BYTES} bytes"
+        );
+    }
+}
 
 fn write_record_with_limit(
     writer: &mut impl Write,
@@ -273,6 +355,291 @@ fn attach(target: &SshTarget) -> Result<Attachment> {
     }
 }
 
+/// A scheduler is an ordinary helper client, never a runner owner or UI
+/// controller. Reattachment uses the same endpoint checks, daemon locks and
+/// durable worker ownership as desktop/phone attachment.
+pub(crate) struct SchedulerAttachment {
+    reader: BufReader<TcpStream>,
+}
+impl SchedulerAttachment {
+    pub(crate) fn open(target: &SshTarget) -> Result<Self> {
+        target.validate()?;
+        ensure!(
+            target.backend == RemoteBackend::Durable,
+            "Scheduler requires a durable session"
+        );
+        let attachment = attach(target)?;
+        ensure!(
+            attachment.daemon_version == PROTOCOL_VERSION,
+            "Scheduler requires the current helper protocol"
+        );
+        attachment
+            .reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(10)))?;
+        Ok(Self {
+            reader: attachment.reader,
+        })
+    }
+    /// Cleanup is never permission to spawn/recover a runner. If its endpoint
+    /// is absent the owner already retired (or is unavailable), retain history.
+    pub(crate) fn open_existing(target: &SshTarget) -> Result<Option<Self>> {
+        target.validate()?;
+        ensure!(
+            target.backend == RemoteBackend::Durable,
+            "Scheduler requires a durable session"
+        );
+        let path = root()?.join(format!("{}.json", target.key));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let attachment = current_attachment(target, &path)?;
+        attachment
+            .reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(10)))?;
+        Ok(Some(Self {
+            reader: attachment.reader,
+        }))
+    }
+    pub(crate) fn call(&mut self, mut record: Value) -> Result<(Value, Option<Value>)> {
+        let id = format!("scheduler-read-{:032x}", rand::random::<u128>());
+        record["id"] = json!(id);
+        write_record(self.reader.get_mut(), &record)?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut snapshot = None;
+        loop {
+            ensure!(
+                Instant::now() < deadline,
+                "Scheduler helper request timed out"
+            );
+            let value = read_record(&mut self.reader)?
+                .context("Scheduler attachment closed before acknowledgement")?;
+            if value["type"] == "remote_snapshot" {
+                snapshot = Some(value["data"].clone());
+            }
+            if value["type"] == "response" && value["id"] == id {
+                ensure!(
+                    value["success"] == true,
+                    "{}",
+                    value["error"].as_str().unwrap_or("Helper request failed")
+                );
+                return Ok((value["data"].clone(), snapshot));
+            }
+            if value["type"] == "remote_error" {
+                bail!("{}", value["error"]);
+            }
+        }
+    }
+}
+impl Drop for SchedulerAttachment {
+    fn drop(&mut self) {
+        let _ = self.reader.get_ref().shutdown(Shutdown::Both);
+    }
+}
+
+/// Session-wide ownership safety, NOT an occurrence outcome. Unknown subagent
+/// details are not evidence that its background work has finished.
+/// Unlike the UI handoff fallback, a runtime safety check must never infer
+/// that children ended merely because their parent tool returned.
+pub(crate) fn scheduler_handoff(
+    tool: &pi_core::session::Tool,
+) -> Option<pi_core::subagent::Handoff> {
+    if tool.details["version"] != 1 || !tool.details["background"].is_boolean() {
+        return None;
+    }
+    pi_core::subagent::Handoff::from_details(&tool.details)
+}
+/// Background detail updates do not reopen a tool whose result was already
+/// committed. Use the existing terminal tool record for both helper and UI
+/// projections; an actually-running tool continues to receive update records.
+fn normalize_subagent_progress(record: &mut Value, model: &Session) {
+    if record["type"] == "tool_execution_update"
+        && let Some(tool) = model
+            .tools
+            .iter()
+            .find(|tool| tool.id == record["toolCallId"].as_str().unwrap_or("") && tool.finished)
+    {
+        record["type"] = json!("tool_execution_end");
+        record["result"] = record["partialResult"].clone();
+        record["isError"] = json!(tool.is_error);
+    }
+}
+pub(crate) fn scheduler_idle(model: &Session) -> bool {
+    !model.busy()
+        && model.steering.is_empty()
+        && model.follow_up.is_empty()
+        && model.queued_submissions.is_empty()
+        && model.tools.iter().all(|tool| {
+            tool.finished
+                && (tool.name != "subagent"
+                    || scheduler_handoff(tool).is_some_and(|handoff| {
+                        handoff
+                            .subagents
+                            .iter()
+                            .all(|agent| agent.status.finished())
+                    }))
+        })
+}
+
+/// Keep durable entry identities privately in the helper. The UI's flattened
+/// Session messages deliberately do not retain them. A receipt's `answer` is
+/// the ONLY authority for which assistant answered a scheduled submission.
+#[derive(Default)]
+struct SubmissionTranscript {
+    entries: BTreeMap<u64, Value>,
+    submissions: HashMap<String, Value>,
+}
+impl SubmissionTranscript {
+    fn apply(&mut self, record: &Value) {
+        if record["type"] == "durable_state" {
+            self.entries.clear();
+            for entry in record["data"]["entries"].as_array().into_iter().flatten() {
+                self.insert(entry);
+            }
+        } else if record["type"] == "durable_events" {
+            for event in record["events"].as_array().into_iter().flatten() {
+                if event["type"] == "message_end" || event["type"] == "entry_appended" {
+                    self.insert(&event["entry"]);
+                } else if event["type"] == "submission"
+                    && let Some(id) = event["record"]["requestId"].as_str()
+                    && id.starts_with("subagent-report-")
+                {
+                    self.submissions.insert(id.into(), event["record"].clone());
+                }
+            }
+        }
+    }
+    fn insert(&mut self, entry: &Value) {
+        if let Some(id) = entry["id"].as_u64() {
+            self.entries.insert(id, entry.clone());
+        }
+    }
+    fn answer_span(&self, submission: &Value) -> Option<Value> {
+        let start = submission["entry"].as_u64()?;
+        let end = submission["answer"].as_u64()?;
+        if submission["type"] != "input" || submission["status"] != "done" || end < start {
+            return None;
+        }
+        let input = self.entries.get(&start)?["model"].as_array()?;
+        let answer = self.entries.get(&end)?["model"].as_array()?;
+        if !input.iter().any(|m| m["role"] == "user")
+            || answer.len() != 1
+            || answer[0]["role"] != "assistant"
+        {
+            return None;
+        }
+        let mut messages = Vec::new();
+        for entry in self.entries.range(start..=end).map(|(_, entry)| entry) {
+            messages.extend(entry["model"].as_array()?.iter().cloned());
+        }
+        Some(json!({"entry":start,"answer":end,"messages":messages}))
+    }
+    fn correlated(&self, submission: &Value) -> Option<Value> {
+        let mut scoped = self.answer_span(submission)?;
+        let reports = self.settled_reports();
+        let mut descendants = serde_json::Map::new();
+        let mut pending = vec![scoped["messages"].as_array()?];
+        // Follow exact report receipts, not the whole transcript after A. A
+        // report may itself delegate and finish before that delegate reports.
+        // Missing/ambiguous receipts stay missing so the worker retains A.
+        while let Some(messages) = pending.pop() {
+            for id in messages
+                .iter()
+                .flat_map(|m| m["content"].as_array().into_iter().flatten())
+                .filter(|b| b["type"] == "toolCall")
+                .filter_map(|b| b["id"].as_str())
+            {
+                if descendants.contains_key(id) {
+                    continue;
+                }
+                if let Some(report) = reports.get(id) {
+                    descendants.insert(id.into(), report.clone());
+                    if let Some(messages) = report["messages"].as_array() {
+                        pending.push(messages);
+                    }
+                }
+            }
+        }
+        scoped["reports"] = Value::Object(descendants);
+        Some(scoped)
+    }
+    /// A child's terminal status can precede its crew's queued report. Require
+    /// the exact internal report's entire answer span, not just its last answer.
+    /// Cold helpers lacking receipt events conservatively retain owners. An
+    /// unanswered report has no end boundary: its continuation remains unknown.
+    fn settled_reports(&self) -> Value {
+        let mut reports = serde_json::Map::new();
+        for submission in self.submissions.values() {
+            let Some(entry) = submission["entry"]
+                .as_u64()
+                .and_then(|id| self.entries.get(&id))
+            else {
+                continue;
+            };
+            let Some(content) = entry["model"]
+                .as_array()
+                .and_then(|messages| messages.first())
+                .filter(|m| m["role"] == "user")
+                .and_then(|m| m["content"].as_str())
+            else {
+                continue;
+            };
+            let Some(call) = content
+                .strip_prefix("<subagent_report call=\"")
+                .and_then(|s| s.split_once("\">\n").map(|(call, _)| call))
+            else {
+                continue;
+            };
+            let settled = self.answer_span(submission).and_then(|span| {
+                let answer = span["messages"].as_array()?.last()?;
+                if !matches!(answer["stopReason"].as_str(), Some("stop" | "length" | "aborted" | "error")) {
+                    return None;
+                }
+                Some(json!({"status":"done","receipt":submission,"messages":span["messages"],"answer":answer}))
+            }).unwrap_or(Value::Null);
+            // Never choose an arbitrary report if call IDs/receipts collide.
+            if let Some(previous) = reports.get_mut(call) {
+                *previous = Value::Null;
+            } else {
+                reports.insert(call.into(), settled);
+            }
+        }
+        Value::Object(reports)
+    }
+    fn background_settled(&self, model: &Session) -> bool {
+        let reports = self.settled_reports();
+        model
+            .tools
+            .iter()
+            .filter(|tool| tool.name == "subagent")
+            .all(|tool| {
+                scheduler_handoff(tool).is_some_and(|handoff| {
+                    !handoff.background
+                        || reports
+                            .get(&tool.id)
+                            .is_some_and(|report| !report.is_null())
+                })
+            })
+    }
+}
+
+fn can_retire_owner(
+    model: &Session,
+    clients: usize,
+    requests: usize,
+    bootstrap: usize,
+    dialogs: usize,
+    transcript: &SubmissionTranscript,
+) -> bool {
+    clients == 1
+        && requests == 0
+        && bootstrap == 0
+        && dialogs == 0
+        && scheduler_idle(model)
+        && transcript.background_settled(model)
+}
+
 fn normalize_daemon_record(mut record: Value, daemon_version: u32) -> Value {
     if daemon_version != PROTOCOL_VERSION && record["type"] == "remote_snapshot" {
         record["version"] = json!(PROTOCOL_VERSION);
@@ -391,11 +758,38 @@ struct Request {
     command: String,
 }
 
-fn serve(stream: TcpStream, token: String, target: SshTarget, events: Sender<Event>) -> Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+fn spawn_attachment(
+    stream: TcpStream,
+    token: &str,
+    target: &SshTarget,
+    events: &Sender<Event>,
+    handshakes: &HandshakePool,
+) -> io::Result<bool> {
+    let Some(permit) = handshakes.try_acquire() else {
+        return Ok(false); // Drop the socket, rather than queueing it or spawning.
+    };
+    let token = token.to_owned();
+    let target = target.clone();
+    let events = events.clone();
+    // A failed spawn drops the closure (and its permit) instead of panicking.
+    thread::Builder::new()
+        .name("pi-remote-attachment".into())
+        .spawn(move || {
+            let _ = serve(stream, token, target, events, permit);
+        })?;
+    Ok(true)
+}
+
+fn serve(
+    stream: TcpStream,
+    token: String,
+    target: SshTarget,
+    events: Sender<Event>,
+    permit: HandshakePermit,
+) -> Result<()> {
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let mut reader = BufReader::new(stream.try_clone()?);
-    let hello = read_record(&mut reader)?.context("No hello")?;
+    let hello = read_handshake_record(&mut reader, deadline)?.context("No hello")?;
     ensure!(
         hello["type"] == "hello"
             && hello["token"] == token
@@ -410,15 +804,18 @@ fn serve(stream: TcpStream, token: String, target: SshTarget, events: Sender<Eve
         "Invalid daemon attachment"
     );
     let mut writer = stream;
+    writer.set_write_timeout(Some(handshake_remaining(deadline)?))?;
     write_record(
         &mut writer,
         &json!({"type":"remote_hello", "version":PROTOCOL_VERSION, "key":target.key}),
     )?;
     ensure!(
-        read_record(&mut reader)?.is_some_and(|r| r["type"] == "ready"),
+        read_handshake_record(&mut reader, deadline)?.is_some_and(|r| r["type"] == "ready"),
         "No ready message"
     );
     reader.get_ref().set_read_timeout(None)?;
+    writer.set_write_timeout(Some(Duration::from_secs(10)))?;
+    drop(permit);
     let connection = rand::random();
     let (output, records) = bounded::<Value>(256);
     let (done, written) = std::sync::mpsc::channel::<()>();
@@ -488,6 +885,17 @@ fn durable_stats_need_refresh(
 ) -> bool {
     (was_busy && !model.busy()) || compaction_count(model) > previous_compactions
 }
+// Refresh once per completed answer/model change, never on streaming token updates.
+fn durable_context_changed(record: &Value) -> bool {
+    record["events"].as_array().is_some_and(|events| {
+        events.iter().any(|event| {
+            event["type"] == "agent_changed"
+                || (event["type"] == "message_end"
+                    && event["entry"]["model"][0]["role"] == "assistant")
+        })
+    })
+}
+
 fn reply(id: &str, command: &str, data: Value) -> Value {
     json!({"type":"response", "id":id, "command":command, "success":true, "data":data})
 }
@@ -604,13 +1012,9 @@ fn run(
     let token = endpoint.token.clone();
     let identity = target.clone();
     thread::spawn(move || {
+        let handshakes = HandshakePool::new(MAX_PENDING_HANDSHAKES);
         for stream in listener.incoming().flatten() {
-            let sink = sink.clone();
-            let token = token.clone();
-            let target = identity.clone();
-            thread::spawn(move || {
-                let _ = serve(stream, token, target, sink);
-            });
+            let _ = spawn_attachment(stream, &token, &identity, &sink, &handshakes);
         }
     });
     let mut bootstrap = HashSet::new();
@@ -628,6 +1032,7 @@ fn run(
     let mut clients = HashMap::<u64, Client>::new();
     let mut requests = HashMap::<String, Request>::new();
     let mut dialogs = HashMap::<String, Value>::new();
+    let mut transcript = SubmissionTranscript::default();
     let mut summary = None;
     while let Ok(event) = incoming.recv_blocking() {
         match event {
@@ -723,8 +1128,28 @@ fn run(
                         continue;
                     }
                 }
-                if record["type"] == "remote_shutdown" {
+                if record["type"] == "remote_shutdown" || record["type"] == "remote_retire" {
                     let id = record["id"].as_str().unwrap_or("");
+                    if record["type"] == "remote_retire" {
+                        // Serialized with Attach/Request/backend events. No client
+                        // can submit between this live recheck and owner teardown.
+                        if target.backend != RemoteBackend::Durable
+                            || !can_retire_owner(
+                                &model,
+                                clients.len(),
+                                requests.len(),
+                                bootstrap.len(),
+                                dialogs.len(),
+                                &transcript,
+                            )
+                        {
+                            attached.send(reply(id, "remote_retire", json!({"retired":false})));
+                            continue;
+                        }
+                        attached.send(reply(id, "remote_retire", json!({"retired":true})));
+                        close_all(clients.drain().map(|(_, client)| client));
+                        break; // normal RpcClient Drop reaps the owned runner tree
+                    }
                     if model.busy() {
                         attached.send(failure(
                             id,
@@ -870,6 +1295,9 @@ fn run(
                 }
             }
             Event::Backend(TransportEvent::Record(mut record)) => {
+                if target.backend == RemoteBackend::Durable {
+                    transcript.apply(&record);
+                }
                 let mut batch_was_busy = model.busy();
                 let previous_compactions = compaction_count(&model);
                 let durable_state =
@@ -880,6 +1308,7 @@ fn run(
                     && record["type"] == "durable_metadata";
                 let durable_subagents = target.backend == RemoteBackend::Durable
                     && record["type"] == "durable_subagents";
+                let context_changed = durable_events && durable_context_changed(&record);
                 let durable_incremental = durable_events || durable_metadata || durable_subagents;
                 let durable_projection = durable_state || durable_incremental;
                 let records = if durable_state {
@@ -892,6 +1321,9 @@ fn run(
                 } else if durable_subagents {
                     crate::durable::subagents(&record, &model, target)?
                 } else {
+                    if target.backend == RemoteBackend::Durable {
+                        crate::durable::discard_stale_stats(&mut record, &model)?;
+                    }
                     if target.backend == RemoteBackend::Durable
                         && record["type"] == "response"
                         && record["success"] == true
@@ -905,6 +1337,9 @@ fn run(
                     vec![record]
                 };
                 for mut record in records {
+                    if durable_subagents {
+                        normalize_subagent_progress(&mut record, &model);
+                    }
                     let was_busy = model.busy();
                     let id = record["id"].as_str().unwrap_or("").to_owned();
                     let was_bootstrap = bootstrap.remove(&id);
@@ -955,6 +1390,13 @@ fn run(
                         if let Some(request) = requests.remove(&id)
                             && let Some(attached) = clients.get(&request.connection)
                         {
+                            if request.command == "get_submission" && record["success"] == true {
+                                // Optional helper-local metadata; no shared command
+                                // or Session protocol changes, no last-message guess.
+                                record["data"]["correlated"] = transcript
+                                    .correlated(&record["data"]["submission"])
+                                    .unwrap_or(Value::Null);
+                            }
                             attached.send(record.clone());
                         }
                         if matches!(
@@ -966,10 +1408,29 @@ fn run(
                                     | "cycle_thinking_level"
                                     | "set_session_name"
                                     | "set_auto_compaction"
+                                    | "set_compaction_threshold"
                                     | "reload"
                             )
                         ) {
                             let _ = backend.send(Command::GetState);
+                            if target.backend == RemoteBackend::Durable
+                                && matches!(
+                                    record["command"].as_str(),
+                                    Some(
+                                        "set_model"
+                                            | "set_auto_compaction"
+                                            | "set_compaction_threshold"
+                                    )
+                                )
+                            {
+                                let _ = backend.send(Command::GetSessionStats);
+                            }
+                        }
+                        if target.backend == RemoteBackend::Durable
+                            && record["command"] == "compact"
+                            && record["success"] == true
+                        {
+                            let _ = backend.send(Command::GetSessionStats);
                         }
                     } else if bootstrap.is_empty() {
                         clients.retain(|_, attached| attached.send(record.clone()));
@@ -998,18 +1459,23 @@ fn run(
                 if let Err(error) = crate::sessions::record(&listed, &model, target, &mut summary) {
                     eprintln!("Could not update the session summary: {error}");
                 }
-                if (durable_state || durable_events)
+                if (durable_state || durable_events || durable_metadata)
                     && bootstrap.is_empty()
-                    && durable_stats_need_refresh(batch_was_busy, &model, previous_compactions)
+                    && (durable_metadata
+                        || durable_stats_need_refresh(batch_was_busy, &model, previous_compactions)
+                        || context_changed)
                 {
                     let _ = backend.send(Command::GetSessionStats);
                 }
             }
-            Event::Backend(TransportEvent::RequestFailed {
-                id,
-                command: _,
-                error,
-            }) => {
+            Event::Backend(TransportEvent::RequestFailed { id, command, error }) => {
+                if target.backend == RemoteBackend::Durable && command == "set_compaction_threshold"
+                {
+                    // A timeout is uncertain, not proof that the commit failed. Read
+                    // authoritative policy; never replay the mutation. A later metadata
+                    // publication also refreshes stats if this read arrives too early.
+                    let _ = backend.send(Command::GetSessionStats);
+                }
                 if bootstrap.contains(&id) && error.starts_with("RPC process") {
                     // Exit emits outstanding failures before its stderr-bearing event. Keep the
                     // bootstrap gate closed until that event so startup logs retain the real cause.
@@ -1055,6 +1521,475 @@ fn backend_command_error(backend: RemoteBackend, command: &Command) -> Option<&'
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read as _;
+
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    fn wait_for_handshake_slots(pool: &HandshakePool, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while pool.available.len() != count && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(pool.available.len(), count);
+    }
+
+    fn hello(target: &SshTarget) -> Value {
+        json!({"type":"hello","token":"secret","version":PROTOCOL_VERSION,"cwd":target.cwd,"backend":target.backend})
+    }
+
+    #[test]
+    fn handshake_admission_bounds_silent_clients_and_recovers_after_eof() {
+        let pool = HandshakePool::new(2);
+        let target = SshTarget::new("dev".into(), "/work".into()).unwrap();
+        let (events, _incoming) = bounded(8);
+        let mut clients = Vec::new();
+        for _ in 0..2 {
+            let (client, server) = socket_pair();
+            assert!(spawn_attachment(server, "secret", &target, &events, &pool).unwrap());
+            clients.push(client);
+        }
+        assert_eq!(pool.available.len(), 0);
+        let (mut rejected, server) = socket_pair();
+        assert!(!spawn_attachment(server, "secret", &target, &events, &pool).unwrap());
+        rejected
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(rejected.read(&mut [0]).unwrap(), 0);
+        drop(clients);
+        wait_for_handshake_slots(&pool, 2);
+    }
+
+    #[test]
+    fn handshake_permits_recover_after_malformed_or_unauthorized_records() {
+        let pool = HandshakePool::new(1);
+        let target = SshTarget::new("dev".into(), "/work".into()).unwrap();
+        let (events, incoming) = bounded(8);
+        let mut wrong_token = hello(&target);
+        wrong_token["token"] = json!("wrong");
+        let mut unauthorized = serde_json::to_vec(&wrong_token).unwrap();
+        unauthorized.push(b'\n');
+        for bytes in [b"not JSON\n".to_vec(), unauthorized] {
+            let (mut client, server) = socket_pair();
+            client.write_all(&bytes).unwrap();
+            assert!(spawn_attachment(server, "secret", &target, &events, &pool).unwrap());
+            wait_for_handshake_slots(&pool, 1);
+            assert!(
+                incoming.try_recv().is_err(),
+                "Invalid hello must not attach"
+            );
+        }
+        let (mut client, server) = socket_pair();
+        write_record(&mut client, &hello(&target)).unwrap();
+        write_record(&mut client, &json!({"type":"not-ready"})).unwrap();
+        assert!(spawn_attachment(server, "secret", &target, &events, &pool).unwrap());
+        wait_for_handshake_slots(&pool, 1);
+        assert!(
+            incoming.try_recv().is_err(),
+            "Invalid ready must not attach"
+        );
+    }
+
+    #[test]
+    fn handshake_record_limit_includes_lf_and_rejects_full_unterminated_input() {
+        for kind in ["hello", "ready"] {
+            let base = format!("{{\"type\":\"{kind}\",\"padding\":\"\"}}\n");
+            for (extra, terminated, accepted) in
+                [(0, true, true), (1, true, false), (1, false, false)]
+            {
+                let padding = "x".repeat(MAX_HANDSHAKE_BYTES - base.len() + extra);
+                let mut bytes =
+                    format!("{{\"type\":\"{kind}\",\"padding\":\"{padding}\"}}\n").into_bytes();
+                if !terminated {
+                    bytes.pop();
+                }
+                let (mut client, server) = socket_pair();
+                client.write_all(&bytes).unwrap();
+                // Keep the peer open: a full unframed record must fail immediately.
+                let result = read_handshake_record(
+                    &mut BufReader::new(server),
+                    Instant::now() + Duration::from_secs(1),
+                );
+                if accepted {
+                    assert_eq!(result.unwrap().unwrap()["type"], kind);
+                } else {
+                    assert!(result.unwrap_err().to_string().contains("exceeds"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn handshake_framing_preserves_prefetched_ready_and_large_normal_records() {
+        let (mut client, server) = socket_pair();
+        let request = json!({"type":"prompt","message":"x".repeat(2 * MAX_HANDSHAKE_BYTES)});
+        for record in [
+            json!({"type":"hello"}),
+            json!({"type":"ready"}),
+            request.clone(),
+        ] {
+            write_record(&mut client, &record).unwrap();
+        }
+        let mut reader = BufReader::with_capacity(4 * MAX_HANDSHAKE_BYTES, server);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            read_handshake_record(&mut reader, deadline)
+                .unwrap()
+                .unwrap()["type"],
+            "hello"
+        );
+        assert_eq!(
+            read_handshake_record(&mut reader, deadline)
+                .unwrap()
+                .unwrap()["type"],
+            "ready"
+        );
+        assert_eq!(read_record(&mut reader).unwrap().unwrap(), request);
+    }
+
+    #[test]
+    fn handshake_accepts_valid_maximum_length_json_escaped_cwd() {
+        let target = SshTarget::new("dev".into(), format!("/{}", "\u{0001}".repeat(4095))).unwrap();
+        let record = hello(&target);
+        let (mut client, server) = socket_pair();
+        write_record(&mut client, &record).unwrap();
+        assert_eq!(
+            read_handshake_record(
+                &mut BufReader::new(server),
+                Instant::now() + Duration::from_secs(1)
+            )
+            .unwrap()
+            .unwrap(),
+            record
+        );
+    }
+
+    #[test]
+    fn handshake_deadline_cannot_be_extended_by_trickling_and_returns_its_slot() {
+        let pool = HandshakePool::new(1);
+        let permit = pool.try_acquire().unwrap();
+        let (mut client, server) = socket_pair();
+        let peer = thread::spawn(move || {
+            let _permit = permit;
+            read_handshake_record(
+                &mut BufReader::new(server),
+                Instant::now() + Duration::from_millis(100),
+            )
+        });
+        for byte in b"{\"type\":\"hello\"}\n" {
+            if client.write_all(&[*byte]).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(peer.join().unwrap().is_err());
+        assert_eq!(pool.available.len(), 1);
+    }
+
+    #[test]
+    fn handshake_ready_shares_the_original_deadline_even_when_buffered() {
+        let (mut client, server) = socket_pair();
+        client
+            .write_all(b"{\"type\":\"hello\"}\n{\"type\":\"ready\"}\n")
+            .unwrap();
+        let mut reader = BufReader::new(server);
+        let deadline = Instant::now() + Duration::from_millis(50);
+        assert!(
+            read_handshake_record(&mut reader, deadline)
+                .unwrap()
+                .is_some()
+        );
+        thread::sleep(Duration::from_millis(60));
+        assert!(
+            read_handshake_record(&mut reader, deadline)
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
+    }
+
+    #[test]
+    fn handshake_permits_return_when_unspawned_closures_are_dropped() {
+        let pool = HandshakePool::new(1);
+        let permit = pool.try_acquire().unwrap();
+        let never_spawned = move || drop(permit);
+        assert!(pool.try_acquire().is_none());
+        drop(never_spawned);
+        assert_eq!(pool.available.len(), 1);
+    }
+
+    #[test]
+    fn authenticated_attachment_releases_slot_and_accepts_large_normal_requests() {
+        let pool = HandshakePool::new(1);
+        let target = SshTarget::new("dev".into(), "/work".into()).unwrap();
+        let (events, incoming) = bounded(8);
+        let (mut client, server) = socket_pair();
+        assert!(spawn_attachment(server, "secret", &target, &events, &pool).unwrap());
+        let request =
+            json!({"type":"prompt","id":"large","message":"x".repeat(2 * MAX_HANDSHAKE_BYTES)});
+        for record in [hello(&target), json!({"type":"ready"}), request.clone()] {
+            write_record(&mut client, &record).unwrap();
+        }
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        assert_eq!(
+            read_record(&mut reader).unwrap().unwrap()["type"],
+            "remote_hello"
+        );
+        let Event::Attach { output, .. } = incoming.recv_blocking().unwrap() else {
+            panic!("Missing attachment")
+        };
+        wait_for_handshake_slots(&pool, 1);
+        let Event::Request { record, .. } = incoming.recv_blocking().unwrap() else {
+            panic!("Missing request")
+        };
+        assert_eq!(record, request);
+        // An authenticated client still connected must not occupy a handshake slot.
+        let (silent, server) = socket_pair();
+        assert!(spawn_attachment(server, "secret", &target, &events, &pool).unwrap());
+        drop(silent);
+        wait_for_handshake_slots(&pool, 1);
+        drop(output);
+        drop(client);
+    }
+
+    #[test]
+    fn durable_receipt_answer_identity_excludes_later_work_and_missing_identity_is_unknown() {
+        let mut transcript = SubmissionTranscript::default();
+        transcript.apply(&json!({"type":"durable_state","data":{"entries":[
+            {"id":1,"model":[{"role":"user","content":"A"}]},
+            {"id":2,"model":[{"role":"assistant","stopReason":"stop","content":"A done"}]},
+            {"id":3,"model":[{"role":"user","content":"B"}]}
+        ]}}));
+        transcript.apply(&json!({"type":"durable_events","events":[{"type":"message_end","entry":
+            {"id":4,"model":[{"role":"assistant","stopReason":"error","errorMessage":"B failed"}]}
+        }]}));
+        let receipt = json!({"type":"input","status":"done","entry":1,"answer":2});
+        let correlated = transcript.correlated(&receipt).unwrap();
+        assert_eq!(correlated["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(correlated["messages"][1]["content"], "A done");
+        assert!(
+            transcript
+                .correlated(&json!({"type":"input","status":"done","entry":1,"answer":99}))
+                .is_none()
+        );
+        assert!(
+            transcript
+                .correlated(&json!({"type":"input","status":"done","entry":1}))
+                .is_none()
+        );
+        assert!(
+            transcript
+                .correlated(&json!({"type":"write","status":"done","entry":1,"answer":2}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn background_detail_progress_cannot_reopen_a_committed_terminal_tool() {
+        let mut model = Session::new("/test".into());
+        model.apply(&json!({"type":"tool_execution_start","toolCallId":"crew","toolName":"subagent","args":{}})).unwrap();
+        let update = json!({"type":"tool_execution_update","toolCallId":"crew","toolName":"subagent","partialResult":{"content":[{"type":"text","text":"Delegated"}],"details":{"version":1,"background":true,"results":[]}}});
+        let mut running = update.clone();
+        normalize_subagent_progress(&mut running, &model);
+        assert_eq!(running["type"], "tool_execution_update");
+        model.apply(&json!({"type":"tool_execution_end","toolCallId":"crew","toolName":"subagent","result":{"content":[]},"isError":true})).unwrap();
+        let mut terminal = update;
+        normalize_subagent_progress(&mut terminal, &model);
+        model.apply(&terminal).unwrap();
+        assert!(model.tools[0].finished);
+        assert!(model.tools[0].is_error);
+        assert_eq!(model.tools[0].details["background"], true);
+    }
+
+    #[test]
+    fn background_report_requires_its_own_terminal_submission_not_later_user_work() {
+        let mut transcript = SubmissionTranscript::default();
+        transcript.apply(&json!({"type":"durable_state","data":{"entries":[
+            {"id":3,"model":[{"role":"user","content":"<subagent_report call=\"crew\">\nreport"}]},
+            {"id":4,"model":[{"role":"assistant","stopReason":"stop"}]},
+            {"id":5,"model":[{"role":"user","content":"B"}]},
+            {"id":6,"model":[{"role":"assistant","stopReason":"error","errorMessage":"B failed"}]}
+        ]}}));
+        assert!(transcript.settled_reports()["crew"].is_null());
+        transcript.apply(
+            &json!({"type":"durable_events","events":[{"type":"submission","record":
+                {"id":7,"requestId":"subagent-report-42","type":"input","status":"placed","entry":3}
+            }]}),
+        );
+        assert!(transcript.settled_reports()["crew"].is_null());
+        transcript.apply(&json!({"type":"durable_events","events":[{"type":"submission","record":
+            {"id":7,"requestId":"subagent-report-42","type":"input","status":"done","entry":3,"answer":4}
+        }]}));
+        assert_eq!(
+            transcript.settled_reports()["crew"]["answer"]["stopReason"],
+            "stop"
+        );
+        assert!(transcript.settled_reports()["crew"]["answer"]["errorMessage"].is_null());
+    }
+
+    #[test]
+    fn correlated_report_continuation_tree_includes_nested_calls_and_only_exact_descendant_receipts()
+     {
+        let mut transcript = SubmissionTranscript::default();
+        transcript.apply(&json!({"type":"durable_state","data":{"entries":[
+            {"id":1,"model":[{"role":"user","content":"A"}]},
+            {"id":2,"model":[{"role":"assistant","content":[{"type":"toolCall","id":"A-crew","name":"subagent"}],"stopReason":"toolUse"}]},
+            {"id":3,"model":[{"role":"assistant","stopReason":"stop","content":"A done"}]},
+            {"id":4,"model":[{"role":"user","content":"B"}]},
+            {"id":5,"model":[{"role":"assistant","content":[{"type":"toolCall","id":"B-crew","name":"subagent"}],"stopReason":"toolUse"}]},
+            {"id":6,"model":[{"role":"assistant","stopReason":"error","errorMessage":"B failed"}]},
+            {"id":7,"model":[{"role":"user","content":"<subagent_report call=\"A-crew\">\nreport"}]},
+            {"id":8,"model":[{"role":"assistant","content":[{"type":"toolCall","id":"nested-crew","name":"subagent"}],"stopReason":"toolUse"}]},
+            {"id":9,"model":[{"role":"assistant","stopReason":"stop","content":"A report done"}]},
+            {"id":10,"model":[{"role":"user","content":"<subagent_report call=\"nested-crew\">\nreport"}]},
+            {"id":11,"model":[{"role":"assistant","content":[{"type":"toolCall","id":"third-crew","name":"subagent"}],"stopReason":"toolUse"}]},
+            {"id":12,"model":[{"role":"assistant","stopReason":"stop","content":"Nested report done"}]},
+            {"id":13,"model":[{"role":"user","content":"<subagent_report call=\"third-crew\">\nreport"}]},
+            {"id":14,"model":[{"role":"assistant","stopReason":"stop","content":"Third report done"}]},
+            {"id":15,"model":[{"role":"user","content":"<subagent_report call=\"B-crew\">\nreport"}]},
+            {"id":16,"model":[{"role":"assistant","stopReason":"error","errorMessage":"B report failed"}]}
+        ]}}));
+        let a = json!({"type":"input","status":"done","entry":1,"answer":3});
+        assert!(
+            transcript.correlated(&a).unwrap()["reports"]
+                .as_object()
+                .unwrap()
+                .is_empty(),
+            "messages alone do not prove receipt correlation"
+        );
+        transcript.apply(&json!({"type":"durable_events","events":[
+            {"type":"submission","record":{"type":"input","requestId":"subagent-report-A","status":"done","entry":7,"answer":9}},
+            {"type":"submission","record":{"type":"input","requestId":"subagent-report-nested","status":"placed","entry":10}},
+            {"type":"submission","record":{"type":"input","requestId":"subagent-report-B","status":"done","entry":15,"answer":16}}
+        ]}));
+        let scoped = transcript.correlated(&a).unwrap();
+        assert_eq!(
+            scoped["reports"]["A-crew"]["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            scoped["reports"]["A-crew"]["messages"][1]["content"][0]["id"],
+            "nested-crew"
+        );
+        assert!(
+            scoped["reports"]["nested-crew"].is_null(),
+            "placed report is still outstanding"
+        );
+        assert!(
+            scoped["reports"]["B-crew"].is_null(),
+            "unrelated B is not a descendant"
+        );
+        transcript.apply(&json!({"type":"durable_events","events":[
+            {"type":"submission","record":{"type":"input","requestId":"subagent-report-nested","status":"done","entry":10,"answer":12}},
+            {"type":"submission","record":{"type":"input","requestId":"subagent-report-third","status":"done","entry":13,"answer":14}}
+        ]}));
+        let scoped = transcript.correlated(&a).unwrap();
+        assert_eq!(scoped["reports"].as_object().unwrap().len(), 3);
+        assert_eq!(
+            scoped["reports"]["nested-crew"]["messages"][1]["content"][0]["id"],
+            "third-crew"
+        );
+        assert_eq!(scoped["reports"]["third-crew"]["receipt"]["answer"], 14);
+        assert!(!scoped.to_string().contains("B failed"));
+        assert!(!scoped.to_string().contains("B report failed"));
+        // Lost or ambiguous identity is never replaced by a nearby assistant.
+        transcript.entries.remove(&14);
+        assert!(transcript.correlated(&a).unwrap()["reports"]["third-crew"].is_null());
+        transcript.apply(&json!({"type":"durable_events","events":[
+            {"type":"submission","record":{"type":"input","requestId":"subagent-report-duplicate","status":"done","entry":7,"answer":9}}
+        ]}));
+        assert!(transcript.correlated(&a).unwrap()["reports"]["A-crew"].is_null());
+    }
+
+    #[test]
+    fn retirement_rechecks_live_work_queues_background_and_other_clients() {
+        let mut model = Session::new("/test".into());
+        let transcript = SubmissionTranscript::default();
+        assert!(can_retire_owner(&model, 1, 0, 0, 0, &transcript));
+        for counts in [(2, 0, 0, 0), (1, 1, 0, 0), (1, 0, 1, 0), (1, 0, 0, 1)] {
+            assert!(!can_retire_owner(
+                &model,
+                counts.0,
+                counts.1,
+                counts.2,
+                counts.3,
+                &transcript
+            ));
+        }
+        model.apply(&json!({"type":"agent_start"})).unwrap();
+        assert!(!can_retire_owner(&model, 1, 0, 0, 0, &transcript));
+        model.apply(&json!({"type":"agent_settled"})).unwrap();
+        model.follow_up.push("Unrelated UI input".into());
+        assert!(!can_retire_owner(&model, 1, 0, 0, 0, &transcript));
+        model.follow_up.clear();
+        model.apply(&json!({"type":"tool_execution_start","toolCallId":"crew","toolName":"subagent","args":{}})).unwrap();
+        model.apply(&json!({"type":"tool_execution_end","toolCallId":"crew","toolName":"subagent","result":{"content":[{"type":"text","text":"Delegated"}],"details":{"version":1,"mode":"parallel","background":true,"results":[{"index":0,"agent":"scout","task":"work","status":"running"}]}},"isError":false})).unwrap();
+        assert!(
+            !model.busy(),
+            "main turn is idle but background work is not"
+        );
+        assert!(!can_retire_owner(&model, 1, 0, 0, 0, &transcript));
+        model.tools.last_mut().unwrap().details["results"][0]["status"] = json!("done");
+        assert!(
+            !can_retire_owner(&model, 1, 0, 0, 0, &transcript),
+            "terminal children do not prove their background report settled"
+        );
+        model.tools.last_mut().unwrap().details["background"] = json!(false);
+        assert!(can_retire_owner(&model, 1, 0, 0, 0, &transcript));
+        model.tools.last_mut().unwrap().details = Value::Null;
+        assert!(!can_retire_owner(&model, 1, 0, 0, 0, &transcript));
+    }
+
+    #[test]
+    fn scheduler_rpc_preserves_request_key_and_reads_committed_snapshots_without_ui_takeover() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let request = read_record(&mut reader).unwrap().unwrap();
+            assert_eq!(request["type"], "prompt");
+            assert_eq!(request["requestId"], "persisted_request_key");
+            assert_eq!(request["message"], "Exact saved instruction");
+            assert!(request.get("controller").is_none());
+            write_record(reader.get_mut(), &json!({"type":"state_update","state":{}})).unwrap();
+            write_record(
+                reader.get_mut(),
+                &json!({"type":"response","id":"other-client","success":true}),
+            )
+            .unwrap();
+            write_record(
+                reader.get_mut(),
+                &json!({"type":"remote_snapshot","data":{"committed":true}}),
+            )
+            .unwrap();
+            write_record(reader.get_mut(), &json!({"type":"response","id":request["id"],"success":true,"data":{"requestId":request["requestId"],"submissionId":"7"}})).unwrap();
+        });
+        // This is the same ordinary RPC stream obtained by normal attach; the
+        // test uses a socket peer instead of spawning any runner or user session.
+        let stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut client = SchedulerAttachment {
+            reader: BufReader::new(stream),
+        };
+        let (receipt, snapshot) = client.call(json!({"type":"prompt","message":"Exact saved instruction","requestId":"persisted_request_key"})).unwrap();
+        assert_eq!(receipt["requestId"], "persisted_request_key");
+        assert_eq!(snapshot.unwrap()["committed"], true);
+        peer.join().unwrap();
+    }
+
     #[test]
     fn direct_child_input_is_rejected_before_reaching_a_non_durable_backend() {
         let command = Command::PromptSubagent {
@@ -1140,6 +2075,19 @@ mod tests {
         assert!(durable_stats_need_refresh(false, &model, 0));
         assert!(!durable_stats_need_refresh(false, &model, 1));
     }
+    #[test]
+    fn durable_context_refreshes_after_answers_not_each_stream_delta() {
+        assert!(durable_context_changed(&json!({"events":[
+            {"type":"message_end","entry":{"model":[{"role":"assistant"}]}}
+        ]})));
+        assert!(durable_context_changed(
+            &json!({"events":[{"type":"agent_changed"}]})
+        ));
+        assert!(!durable_context_changed(&json!({"events":[
+            {"type":"message_update"}, {"type":"message_end","entry":{"model":[{"role":"user"}]}}
+        ]})));
+    }
+
     #[test]
     fn records_are_bounded() {
         assert!(

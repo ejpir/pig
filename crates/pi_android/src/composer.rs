@@ -9,7 +9,7 @@ use crate::{
     ui::{self, icon},
 };
 use gpui::{
-    App, Context, Entity, EventEmitter, Focusable, FontWeight, Image, MouseButton, SharedString,
+    App, Context, Edges, Entity, EventEmitter, Focusable, FontWeight, Image, SharedString,
     Subscription, Window, div, img, prelude::*, px,
 };
 use std::sync::Arc;
@@ -477,7 +477,25 @@ impl Render for Composer {
         // Leave room for the conversation and Send even with a tall keyboard
         // or in landscape. The rest of a long draft scrolls inside the field.
         let lines = (f32::from(window.fully_visible_bounds().size.height) * 0.3 / 22.) as usize;
-        area.update(cx, |area, _| area.set_max_lines(lines.clamp(2, 8)));
+        area.update(cx, |area, _| {
+            area.set_max_lines(lines.clamp(2, 8));
+            // Message-only input has no toolbar: the entire padded editor
+            // column is interactive, stopping exactly before its Send target.
+            // Normal composers must leave their attachment/model controls alone.
+            area.set_touch_target(
+                px(if self.message_only {
+                    32.
+                } else {
+                    self.draft_height
+                }),
+                Edges {
+                    top: px(12.),
+                    right: px(if self.message_only { 8. } else { 16. }),
+                    bottom: px(if self.message_only { 12. } else { 0. }),
+                    left: px(16.),
+                },
+            );
+        });
         // Keep the visual control compact while preserving Android's 48 dp
         // touch target around it.
         let send = div()
@@ -732,57 +750,73 @@ impl Render for Composer {
                 )
         });
         let attached = strip.is_some() || lines_strip.is_some() || self.joined;
-        // A press on the box around the draft types into the draft; stop the
-        // app, which also takes focus on a press, from taking it back.
-        let focus_area = cx.listener(|this, _, window, cx| {
-            this.focus(window, cx);
-            window.request_virtual_keyboard();
-            window.prevent_default();
-        });
-        let body = div()
-            .flex()
-            .flex_col()
-            .pl(px(16.))
-            .pr(px(8.))
-            .pt(px(12.))
-            .pb(px(4.))
-            .children(attachments)
-            .child(
-                div()
-                    .id("draft-box")
-                    .debug_selector(|| "composer-draft".into())
-                    .relative()
-                    .child(crate::testing::probe("draft"))
-                    .min_h(px(self.draft_height))
-                    .pr(px(8.))
-                    .on_mouse_down(MouseButton::Left, focus_area)
-                    .child(area),
-            )
-            .child(
-                div()
-                    .mt(px(4.))
-                    .ml(px(-12.))
-                    .flex()
-                    .items_center()
-                    .when(!self.message_only, |row| {
-                        row.child(clip)
-                            .when(self.command_button && self.has_commands(), |row| {
-                                row.child(ui::tap("command", "slash", &colors).w(px(40.)).on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.start_command(window, cx)
-                                    }),
-                                ))
-                            })
-                            .child(model)
-                            .child(thinking)
-                    })
-                    .child(div().flex_1())
-                    .when(self.sending, |row| row.child(ui::hint("Sending…", &colors)))
-                    .when(self.imports > 0, |row| {
-                        row.child(ui::hint("Preparing…", &colors))
-                    })
-                    .child(send),
-            );
+        let body = if self.message_only {
+            div()
+                .flex()
+                .items_end()
+                .pl(px(16.))
+                .pr(px(4.))
+                .py(px(4.))
+                .child(
+                    div()
+                        .id("draft-box")
+                        .debug_selector(|| "composer-draft".into())
+                        .relative()
+                        .child(crate::testing::probe("draft"))
+                        .flex_1()
+                        .min_w_0()
+                        .pr(px(8.))
+                        .py(px(8.))
+                        .child(area),
+                )
+                .when(self.sending, |row| row.child(ui::hint("Sending…", &colors)))
+                .child(send)
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .pl(px(16.))
+                .pr(px(8.))
+                .pt(px(12.))
+                .pb(px(4.))
+                .children(attachments)
+                .child(
+                    div()
+                        .id("draft-box")
+                        .debug_selector(|| "composer-draft".into())
+                        .relative()
+                        .child(crate::testing::probe("draft"))
+                        .pr(px(8.))
+                        .child(area),
+                )
+                .child(
+                    div()
+                        .mt(px(4.))
+                        .ml(px(-12.))
+                        .flex()
+                        .items_center()
+                        .when(!self.message_only, |row| {
+                            row.child(clip)
+                                .when(self.command_button && self.has_commands(), |row| {
+                                    row.child(
+                                        ui::tap("command", "slash", &colors).w(px(40.)).on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.start_command(window, cx)
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .child(model)
+                                .child(thinking)
+                        })
+                        .child(div().flex_1())
+                        .when(self.sending, |row| row.child(ui::hint("Sending…", &colors)))
+                        .when(self.imports > 0, |row| {
+                            row.child(ui::hint("Preparing…", &colors))
+                        })
+                        .child(send),
+                )
+        };
         div()
             .flex()
             .flex_col()
@@ -816,6 +850,77 @@ impl Render for Composer {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn message_only_first_touch_covers_the_editor_but_not_send(cx: &mut TestAppContext) {
+        use gpui::{InputEvent, TouchPhase, point, size};
+        for width in [320., 412.] {
+            for target in ["center", "left", "top", "bottom", "next-to-send", "send"] {
+                let (app, cx) =
+                    cx.add_window_view(|window, cx| crate::app::PhoneApp::new(None, window, cx));
+                cx.simulate_resize(size(px(width), px(640.)));
+                cx.update(|window, cx| {
+                    app.update(cx, |app, cx| {
+                        app.preview("start", window, cx);
+                        app.start.update(cx, |composer, cx| {
+                            composer.set_message_only();
+                            composer
+                                .area
+                                .update(cx, |area, _| area.set_placeholder("Steer this subagent…"));
+                        });
+                    })
+                });
+                cx.run_until_parked();
+                let draft = cx.debug_bounds("composer-draft").unwrap();
+                let send = cx.debug_bounds("send").unwrap();
+                assert_eq!(
+                    draft.bottom(),
+                    send.bottom(),
+                    "Send sits beside the editor, not in a blank second row"
+                );
+                assert!(draft.right() <= send.left());
+                let position = match target {
+                    "left" => point(draft.left() - px(8.), draft.center().y),
+                    "top" => point(draft.center().x, draft.top() - px(2.)),
+                    "bottom" => point(draft.center().x, draft.bottom() + px(2.)),
+                    "next-to-send" => point(draft.right() - px(2.), draft.center().y),
+                    "send" => send.center(),
+                    _ => draft.center(),
+                };
+                for phase in [TouchPhase::Started, TouchPhase::Ended] {
+                    cx.update(|window, cx| {
+                        window.dispatch_event(
+                            gpui::TouchEvent {
+                                id: gpui::TouchId(82),
+                                position,
+                                phase,
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                            cx,
+                        );
+                    });
+                    cx.run_until_parked();
+                }
+                cx.update(|window, cx| {
+                    let area = app.read(cx).start.read(cx).area.read(cx);
+                    assert_eq!(
+                        area.focus_handle(cx).is_focused(window),
+                        target != "send",
+                        "first touch at {target}"
+                    );
+                });
+                if target != "send" {
+                    cx.simulate_resize(size(px(width), px(400.)));
+                    cx.run_until_parked();
+                    cx.simulate_input("first");
+                    app.read_with(cx, |app, cx| {
+                        assert_eq!(app.start.read(cx).area.read(cx).text(), "first")
+                    });
+                }
+            }
+        }
+    }
 
     #[gpui::test]
     fn remote_project_files_drive_mentions_and_keep_states_visible(cx: &mut TestAppContext) {

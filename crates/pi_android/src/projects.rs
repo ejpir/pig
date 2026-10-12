@@ -624,7 +624,7 @@ impl PhoneApp {
             (None, None) => return,
         };
         self.select_project(index, cx);
-        if self.route() != Route::Start {
+        if !matches!(self.route(), Route::Start | Route::ScheduleEdit) {
             self.routes = vec![Route::Sessions, Route::Start];
         }
     }
@@ -681,6 +681,17 @@ impl PhoneApp {
             return;
         }
         self.project = index;
+        if self.route() == Route::ScheduleEdit
+            && let Some(draft) = &mut self.schedules.draft
+            && let Some(project) = self
+                .store
+                .as_ref()
+                .and_then(|store| store.projects.get(index))
+        {
+            draft
+                .cwd
+                .update(cx, |area, cx| area.set_text(&project.path, cx));
+        }
         if let Some(store) = &self.store {
             let address = store.computer.address.clone();
             let path = store.projects[index].path.clone();

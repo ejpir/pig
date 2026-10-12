@@ -626,3 +626,189 @@ mod tests {
         assert!(quote("/tmp/a\\b").is_err());
     }
 }
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+    use pi_core::{
+        pairing::HelperCapabilities,
+        schedules::{Data, Request, Response},
+    };
+    use russh::server::Server as _;
+    use russh::{Channel, ChannelId, server};
+
+    #[derive(Clone)]
+    struct FixtureHelper {
+        observed: async_channel::Sender<Value>,
+        pending: Vec<u8>,
+    }
+    impl server::Server for FixtureHelper {
+        type Handler = Self;
+        fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self {
+            self.clone()
+        }
+    }
+    impl server::Handler for FixtureHelper {
+        type Error = anyhow::Error;
+        async fn auth_publickey(
+            &mut self,
+            _: &str,
+            _: &russh::keys::ssh_key::PublicKey,
+        ) -> Result<server::Auth> {
+            Ok(server::Auth::Accept)
+        }
+        async fn channel_open_session(
+            &mut self,
+            _: Channel<server::Msg>,
+            reply: server::ChannelOpenHandle,
+            _: &mut server::Session,
+        ) -> Result<()> {
+            reply.accept().await;
+            Ok(())
+        }
+        async fn exec_request(
+            &mut self,
+            channel: ChannelId,
+            command: &[u8],
+            session: &mut server::Session,
+        ) -> Result<()> {
+            self.observed
+                .send(serde_json::json!({"command": String::from_utf8_lossy(command)}))
+                .await?;
+            session.channel_success(channel)?;
+            Ok(())
+        }
+        async fn data(
+            &mut self,
+            channel: ChannelId,
+            bytes: &[u8],
+            session: &mut server::Session,
+        ) -> Result<()> {
+            self.pending.extend_from_slice(bytes);
+            if let Some(newline) = self.pending.iter().position(|b| *b == b'\n') {
+                let value: Value = serde_json::from_slice(&self.pending[..newline])?;
+                self.observed.send(value.clone()).await?;
+                let _: Request = serde_json::from_value(value)?;
+                let response = Response {
+                    version: 1,
+                    success: true,
+                    data: Some(Data::Preview {
+                        times_ms: vec![123, 456, 789],
+                    }),
+                    error: None,
+                };
+                let mut line = serde_json::to_vec(&response)?;
+                line.push(b'\n');
+                session.data(channel, line)?;
+                session.exit_status_request(channel, 0)?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            }
+            Ok(())
+        }
+    }
+    #[test]
+    fn schedules_real_ssh_channel_is_capability_gated_and_one_request_one_response() {
+        let (observed_out, observed) = async_channel::unbounded();
+        let (port_out, port) = std::sync::mpsc::channel();
+        let (stop, stopped) = async_channel::bounded::<()>(1);
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                port_out
+                    .send(listener.local_addr().unwrap().port())
+                    .unwrap();
+                let config = Arc::new(server::Config {
+                    keys: vec![PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap()],
+                    auth_rejection_time: Duration::ZERO,
+                    ..Default::default()
+                });
+                let mut fixture = FixtureHelper {
+                    observed: observed_out,
+                    pending: vec![],
+                };
+                let running = fixture.run_on_socket(config, &listener);
+                let handle = running.handle();
+                tokio::spawn(async move {
+                    stopped.recv().await.ok();
+                    handle.shutdown("fixture complete".into());
+                });
+                running.await.unwrap();
+            });
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let identity = Identity {
+                key: Arc::new(PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap()),
+            };
+            let connection = Connection::open(
+                Address {
+                    user: "fixture".into(),
+                    host: "127.0.0.1".into(),
+                    port: port.recv().unwrap(),
+                },
+                identity,
+                None,
+            )
+            .await
+            .unwrap();
+            let mut helper = crate::remote::Helper {
+                path: "/tmp/mock helper".into(),
+                home: "/tmp".into(),
+                gateway: false,
+                images: false,
+                release: None,
+                protocol: None,
+                platform: None,
+                capabilities: HelperCapabilities::default(),
+                update: None,
+            };
+            let request = Request::Preview {
+                cron: "0 9 * * 1-5".into(),
+                timezone: "Europe/Amsterdam".into(),
+                count: 3,
+            };
+            assert!(
+                crate::remote::schedules(&connection, &helper, &request)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                observed.try_recv().is_err(),
+                "Old helper must not receive a command"
+            );
+            helper.capabilities.schedules = true;
+            let response = crate::remote::schedules(&connection, &helper, &request)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.data,
+                Some(Data::Preview {
+                    times_ms: vec![123, 456, 789]
+                })
+            );
+            assert_eq!(
+                observed.recv().await.unwrap(),
+                serde_json::json!({"command": "'/tmp/mock helper' schedules --stdio"})
+            );
+            assert_eq!(
+                observed.recv().await.unwrap(),
+                serde_json::to_value(&request).unwrap()
+            );
+            assert!(
+                observed.try_recv().is_err(),
+                "Only one request, no hidden retry"
+            );
+            assert!(!connection.is_closed());
+        });
+        stop.send_blocking(()).unwrap();
+        server.join().unwrap();
+    }
+}

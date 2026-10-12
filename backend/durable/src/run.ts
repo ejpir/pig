@@ -5,11 +5,12 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message, ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
+import { calculateContextTokens, estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
 import {
-  CompactionEntry, GenerationTask, Harness, InboxDoc, LiveDoc, UserEntry, createRegistry, defineDoc,
+  CompactionEntry, DEFAULT_COMPACTION_POLICY, GenerationTask, Harness, InboxDoc, LiveDoc, UserEntry, createRegistry, defineDoc,
   defineExtension, section, watchEvents, type AgentEvent, type Conversation, type ConversationId,
-  type ConversationView, type EntryDraft, type Extension, type SnapshotEvent, type SubmissionId,
+  type ConversationView, type ContextView, type CompactionPolicy, type EntryDraft, type Extension, type SnapshotEvent, type SubmissionId,
   type UsageState, type WatchEnd,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -22,13 +23,12 @@ import { expandPromptCommand, noResources, promptCommands, type Resources } from
 import { imageRead } from "./read.ts";
 import { History, shown } from "./history.ts";
 import { Calls, subagentExtension, subagentResult, submitSubagentInput, transcript } from "./subagents.ts";
+import { SwarmTools } from "./swarm.ts";
+import { Metadata, compactionPolicy as resolveCompactionPolicy, setCompactionThreshold, setSwarmEnabled, swarmEnabled } from "./session-settings.ts";
+import { compactionRegistry } from "./compaction-policy.ts";
 
 const context = BACKGROUND_CONTEXT;
 export const MAX_RECORD = 64 * 1024 * 1024;
-const Metadata = defineDoc<{ name: string; autoCompaction: boolean; initialized: boolean }>({
-  kind: "app.desktop", version: 1, scope: "conversation", history: "latest", fork: "initial",
-  initial: () => ({ name: "", autoCompaction: true, initialized: false }),
-});
 // Bound receipt retention explicitly rather than silently expiring deduplication keys.
 const Receipts = defineDoc<{ hashes: Record<string, string> }>({
   kind: "app.desktop-receipts", version: 1, scope: "conversation", history: "latest", fork: "initial",
@@ -38,15 +38,15 @@ const commands = [
   "prompt", "abort", "clear_queue", "get_submission", "get_state", "get_messages",
   "get_session_stats", "get_backend_info", "get_active_tools", "get_available_models",
   "get_available_thinking_levels", "get_auth_providers", "get_commands", "get_settings",
-  "set_model", "set_thinking_level", "set_session_name", "set_auto_compaction",
-  "compact", "get_image",
+  "set_model", "set_thinking_level", "set_session_name", "set_auto_compaction", "set_swarm_enabled",
+  "compact", "set_compaction_threshold", "get_image",
   "cancel_submission",
   "get_subagent", "stop_subagent", "prompt_subagent",
 ];
 const info = {
   backend: "pi-durable", version: "1", piVersion: "1.1.0", protocolVersion: 2,
   bunVersion: Bun.version, workerPid: process.pid, commands,
-  features: ["durable_execution", "committed_snapshots", "incremental_events", "request_deduplication", "remote_pi_credentials", "builtin_providers", "image_prompts", "image_references", "prompt_templates", "skills", "subagents", "subagent_input", "manual_compaction"],
+  features: ["durable_execution", "committed_snapshots", "incremental_events", "request_deduplication", "remote_pi_credentials", "builtin_providers", "image_prompts", "image_references", "prompt_templates", "skills", "subagents", "subagent_input", "swarm_messaging", "manual_compaction"],
   experimental: true,
   limitations: ["Login on the SSH host; no interactive durable login flow yet", "No stock Pi extensions, Pi packages or session-tree migration"],
 };
@@ -172,27 +172,21 @@ async function abortPlacedSubmission(harness: Harness, root: Conversation, submi
   await resumeInboxAfterTargetedAbort(root);
 }
 
-function contextTokens(messages: readonly Message[]): number | undefined {
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index];
-    if (message.role !== "assistant" || message.stopReason === "aborted" || message.stopReason === "error") continue;
-    const usage = message.usage;
-    const measured = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-    if (measured <= 0) continue;
-    // Provider usage measures the context through this response. Messages after
-    // it (normally tool results or the next prompt) have not been measured yet.
-    const trailing = messages.slice(index + 1).reduce(
-      (tokens, next) => tokens + Math.ceil(JSON.stringify(next).length / 4), 0,
-    );
-    return measured + trailing;
+/** Match durable's head-aware estimate: retained usage describes the removed prefix. */
+export function contextTokens(view: ContextView): number {
+  const after = view.head?.id ?? Number.NEGATIVE_INFINITY;
+  for (let index = view.entries.length - 1; index >= 0; index--) {
+    if (view.entries[index].id <= after) continue;
+    const message = view.contributions[index].findLast((message) =>
+      message.role === "assistant" && message.stopReason !== "aborted" && message.stopReason !== "error"
+      && calculateContextTokens(message.usage) > 0);
+    if (message?.role !== "assistant") continue;
+    const position = view.messages.lastIndexOf(message);
+    if (position < 0) continue;
+    return calculateContextTokens(message.usage)
+      + view.messages.slice(position + 1).reduce((tokens, next) => tokens + estimateMessageTokens(next), 0);
   }
-  return undefined;
-}
-
-function estimatedContextTokens(messages: readonly Message[]): number {
-  return contextTokens(messages) ?? messages.reduce(
-    (tokens, message) => tokens + Math.ceil(JSON.stringify(message).length / 4), 0,
-  );
+  return view.messages.reduce((tokens, message) => tokens + estimateMessageTokens(message), 0);
 }
 
 const SUMMARY_PREFIX = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
@@ -211,7 +205,8 @@ function compactionSummary(messages: readonly Message[] | undefined): string {
 }
 
 export function sessionStats(
-  state: UsageState | undefined, messages: readonly Message[], contextWindow: number | undefined,
+  state: UsageState | undefined, view: ContextView, contextWindow: number | undefined,
+  compaction: CompactionPolicy = DEFAULT_COMPACTION_POLICY,
 ) {
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let cost = 0;
@@ -224,13 +219,13 @@ export function sessionStats(
       cost += value.cost.total;
     }
   }
-  const current = contextTokens(messages);
+  const current = contextTokens(view);
   return {
-    tokens, cost,
-    ...(contextWindow === undefined ? {} : { contextUsage: {
-      tokens: current ?? null,
+    tokens, cost, compaction, contextHeadId: view.head?.id ?? 0,
+    ...(contextWindow === undefined || contextWindow <= 0 ? {} : { contextUsage: {
+      tokens: current,
       contextWindow,
-      percent: current === undefined ? null : current / contextWindow * 100,
+      percent: current / contextWindow * 100,
     } }),
   };
 }
@@ -298,10 +293,21 @@ export async function run(
   // The tool runs only once the Harness below is open.
   let opened: Harness | undefined;
   registry.install(subagentExtension(models, () => opened!, () => found));
+  // Definitions are recoverable in the registry, but only opted-in children
+  // explicitly select these tools; parent and ordinary crew defaults exclude them.
+  registry.install(SwarmTools);
   for (const extension of extensions) registry.install(extension);
-  let autoCompaction = true;
+  // Live resolvers are bound to committed views before resume starts any work.
+  let compactionMetadata: () => { autoCompaction: boolean; compactionThresholdPercent?: number } = () => ({ autoCompaction: true });
+  let contextWindow: () => number | undefined = () => undefined;
+  const compactionPolicy = (): CompactionPolicy => resolveCompactionPolicy(compactionMetadata(), contextWindow());
   const harness = opened = await Harness.open(storage, {
-    models, registry, settings: { get compaction() { return { enabled: autoCompaction }; } },
+    models, registry: compactionRegistry(registry, () => compactionMetadata()), settings: {
+      extensions: registry.snapshot().installed().filter((extension) => extension.name !== SwarmTools.name),
+      // Percentage offsets are resolved per generation by the registry adapter.
+      // Other tasks need only the unchanged reserve/retention and enabled flag.
+      get compaction() { return resolveCompactionPolicy(compactionMetadata(), undefined); },
+    },
     env: ({ cwd: selected = cwd }) => new NodeExecutionEnv({ cwd: selected }),
     onReport: (error) => console.error("Durable report:", error),
   }, context);
@@ -311,7 +317,9 @@ export async function run(
     cwd, ...(provider && modelId ? { model: { provider, modelId } } : {}),
   } });
   await root.commit(async (tx) => {
-    (await tx.doc(Metadata, root.id)).initialized = true;
+    const metadata = await tx.doc(Metadata, root.id);
+    metadata.initialized = true;
+    metadata.swarmEnabled ??= true;
     // Made here, so the apps can follow it before any subagent starts.
     (await tx.doc(Calls, root.id)).calls ??= {};
   }, context);
@@ -321,7 +329,12 @@ export async function run(
   // Subagents working in the background, which the view's own documents don't carry.
   const calls = await harness.documentState(Calls, root.id, context);
   if (!calls) throw new Error("Durable subagent calls were not committed");
-  autoCompaction = metadata.value.autoCompaction;
+  compactionMetadata = () => metadata.value!;
+  const chosenModel = () => {
+    const selected = state.value.docs["pi.agent"].model as { provider: string; modelId: string } | undefined;
+    return selected ? models.getModel(selected.provider, selected.modelId) : undefined;
+  };
+  contextWindow = () => chosenModel()?.contextWindow;
   const events = await watchEvents(harness, root.id, context);
   // One output line at a time, with backpressure. The durable event watch itself
   // bounds pending frames and replaces an overflow with one resync snapshot.
@@ -404,10 +417,6 @@ export async function run(
   // Missing definitions, corrupt/newer storage and startup errors must fail closed, not select stock Pi.
   harness.resume();
 
-  const chosenModel = () => {
-    const selected = state.value.docs["pi.agent"].model as { provider: string; modelId: string } | undefined;
-    return selected ? models.getModel(selected.provider, selected.modelId) : undefined;
-  };
   /** One of this session's subagents: a conversation a call of its own created. */
   const subagent = async (record: Record<string, unknown>) => {
     const conversationId = string(record, "conversationId");
@@ -486,12 +495,13 @@ export async function run(
         const current = await root.context(context);
         return sessionStats(
           value.docs["pi.usage"] as unknown as UsageState | undefined,
-          current.messages,
+          current,
           chosenModel()?.contextWindow,
+          compactionPolicy(),
         );
       }
       case "get_commands": return { commands: promptCommands(found = resources(cwd)) };
-      case "get_settings": return { effective: { compaction: { enabled: autoCompaction } }, durable: true };
+      case "get_settings": return { effective: { compaction: compactionPolicy(), subagents: { swarmEnabled: swarmEnabled(metadata.value) } }, compactionThresholdPercent: metadata.value?.compactionThresholdPercent ?? null, durable: true };
       case "get_active_tools": return { activeTools: (await root.agent(context)).tools.map((tool) => ({ name: tool.name, description: tool.description })) };
       case "get_available_models": {
         await models.refresh({ allowNetwork: false }); // Reload host-side auth/models files and cached catalogs.
@@ -513,10 +523,14 @@ export async function run(
         await root.configure({ thinkingLevel: level as ModelThinkingLevel }, context);
         return { level };
       }
+      case "set_swarm_enabled": return setSwarmEnabled(root, record.enabled, context);
+      case "set_compaction_threshold": {
+        const result = await setCompactionThreshold(root, record.percent, context);
+        return { ...result, compaction: compactionPolicy() };
+      }
       case "set_auto_compaction": {
         if (typeof record.enabled !== "boolean") throw new Error("enabled must be a boolean");
         await root.commit(async (tx) => { (await tx.doc(Metadata, root.id)).autoCompaction = record.enabled as boolean; }, context);
-        autoCompaction = record.enabled;
         return {};
       }
       case "set_session_name": {
@@ -538,7 +552,7 @@ export async function run(
           throw new Error("Stop the session and clear queued prompts before compacting");
         }
         const before = await root.context(context);
-        const tokensBefore = estimatedContextTokens(before.messages);
+        const tokensBefore = contextTokens(before);
         const task = await harness.waitForTask(await root.compact(instructions, context), context);
         const outcome = task.state.outcome;
         if (outcome.status === "failed" || outcome.status === "faulted") throw new Error(outcome.error.message);
@@ -564,7 +578,7 @@ export async function run(
           summary: compactionSummary(entry.model),
           firstKeptEntryId: String(entry.head),
           tokensBefore,
-          estimatedTokensAfter: estimatedContextTokens(after.messages),
+          estimatedTokensAfter: contextTokens(after),
         };
       }
       case "prompt": {
@@ -654,7 +668,7 @@ export async function run(
         tracked.catch((error) => console.error("Durable report:", error));
         continue;
       }
-      if (compacting !== undefined && record.type !== "abort") {
+      if (compacting !== undefined && record.type !== "abort" && record.type !== "get_session_stats") {
         await send({ type: "response", id: record.id, command: record.type, success: false, error: "Wait for compaction to finish" });
         continue;
       }

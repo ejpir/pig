@@ -51,15 +51,20 @@ jobs:
           key: checks
       # Do not traverse/format the sibling Zed checkout.
       - name: Format
-        run: cargo fmt -p pi_core -p pi_remote -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
+        run: cargo fmt -p pi_core -p pi_remote -p pi_android -p gpui_android -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
       - name: Rust tests
         run: cargo test --locked --workspace
+      - name: Android scheduling UI tests (sample only)
+        run: cargo test --locked -p pi_android --features ui-test
+      - name: Scheduler emulator harness safety tests
+        run: python -m unittest discover -s crates/pi_android/scripts -p 'test_*_tooling.py' -v
       # These test-support features must not join the workspace build.
       - name: Language-server bridge tests
         run: cargo test --locked -p pi_lsp_bridge --features fake-lsp
       - name: Lints
         run: |
           cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p pi_android --features ui-test --all-targets --no-deps -- -D warnings
           cargo clippy --locked -p pi_lsp_bridge --features fake-lsp --all-targets --no-deps -- -D warnings
       # The pi that release builds embed: the desktop extension against it (no
       # provider calls), and the desktop with it embedded.
@@ -175,6 +180,8 @@ jobs:
           cd ../..
           PI_DESKTOP_TEST_DURABLE_RUNNER="$PWD/artifacts/durable/pi-desktop-durable-fixture" \
             cargo test --locked -p pi_remote --test durable -- --ignored
+          PI_DESKTOP_TEST_DURABLE_RUNNER="$PWD/artifacts/durable/pi-desktop-durable-fixture" \
+            cargo test --locked -p pi_remote --test schedules -- --ignored
           PI_DESKTOP_TEST_DURABLE_PRODUCTION="$PWD/artifacts/durable/pi-desktop-durable" \
           PI_DESKTOP_TEST_DURABLE_AUTH_PROBE="$PWD/artifacts/durable/pi-desktop-durable-auth-probe" \
             cargo test --locked -p pi_remote --test durable_auth -- --ignored
@@ -299,6 +306,8 @@ jobs:
           if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/release/* --repo "$REPOSITORY"
           else
+            notes="docs/releases/$RELEASE_TAG.md"
+            test -s "$notes" || { echo "::error::Missing release notes: $notes"; exit 1; }
             gh release create "$RELEASE_TAG" "$RUNNER_TEMP"/release/* \
-              --repo "$REPOSITORY" --title "$RELEASE_TAG" --generate-notes
+              --repo "$REPOSITORY" --title "$RELEASE_TAG" --notes-file "$notes"
           fi

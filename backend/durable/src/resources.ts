@@ -66,7 +66,9 @@ export function loadResources(cwd?: string, agentDir = getAgentDir(), home = hom
 
 /** Stock Pi's decision when it can't ask: a remembered answer, else the default, unless there is nothing to trust. */
 function trusted(cwd: string, agentDir: string): boolean {
-  if (!hasTrustRequiringProjectResources(cwd)) return true;
+  // Stock Pi's resource whitelist doesn't include the agent presets we load.
+  const hasAgents = existsSync(join(resolve(cwd), CONFIG_DIR_NAME, "agents"));
+  if (!hasAgents && !hasTrustRequiringProjectResources(cwd)) return true;
   const remembered = new ProjectTrustStore(agentDir).get(cwd);
   if (remembered !== null) return remembered;
   return SettingsManager.create(cwd, agentDir, { projectTrusted: false }).getDefaultProjectTrust() === "always";

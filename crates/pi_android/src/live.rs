@@ -62,6 +62,8 @@ enum Request {
     Commands,
     SetModel,
     SetThinking(String),
+    SetSwarmEnabled(bool),
+    SetCompactionThreshold(f64),
     InitialThinkingLevels(String),
     Stop,
     Compact,
@@ -211,6 +213,8 @@ struct Watch {
     current: bool,
     /// A valid authoritative snapshot remains displayable across pipe resets.
     cached_snapshot: bool,
+    /// Phone receipt time of successfully applied session data, not command acks.
+    observed_at: Option<u64>,
     /// Failed pipes retry independently of SSH reconnection and session listings.
     retry_at: Option<Instant>,
     retry_failures: u32,
@@ -407,6 +411,7 @@ impl Watch {
             input: None,
             current: false,
             cached_snapshot: false,
+            observed_at: None,
             retry_at: None,
             retry_failures: 0,
             ready: false,
@@ -869,6 +874,31 @@ impl Live {
         }
         self.refresh_models();
         self.refresh_commands();
+    }
+
+    /// Attach a ledger's existing durable session without sending any prompt,
+    /// configuring a model, or generating a new admission identity.
+    pub fn open_scheduled(&mut self, key: &str, cwd: &str) -> Result<SessionId, String> {
+        self.helper
+            .require_attach("opening a scheduled session")
+            .map_err(|e| e.to_string())?;
+        let target = SshTarget {
+            host: self.host.clone(),
+            cwd: cwd.to_owned(),
+            key: key.to_owned(),
+            backend: pi_core::ssh::RemoteBackend::Durable,
+            session_file: None,
+        };
+        target.validate().map_err(|e| e.to_string())?;
+        let id = self.id_for(key);
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.watches.entry(id) {
+            let mut watch = Watch::new(target.clone());
+            watch.reset_transport();
+            let generation = watch.generation;
+            entry.insert(watch);
+            self.attach(id, target, generation);
+        }
+        Ok(id)
     }
 
     /// A new durable session in `folder`, starting with `prompt`.
@@ -1430,6 +1460,143 @@ impl Live {
         )
     }
 
+    fn compaction_threshold_supported(watch: &Watch) -> bool {
+        watch.target.backend == RemoteBackend::Durable
+            && matches!(&watch.pi.backend, pi_core::session::BackendInfo::Found(info)
+                if info["commands"].as_array().is_some_and(|commands|
+                    commands.iter().any(|command| command == "set_compaction_threshold")))
+    }
+
+    pub(crate) fn supports_compaction_threshold(&self, id: SessionId) -> bool {
+        self.watches
+            .get(&id)
+            .is_some_and(Self::compaction_threshold_supported)
+    }
+
+    pub(crate) fn compaction_threshold_max(&self, id: SessionId) -> Option<f64> {
+        let watch = self.watches.get(&id)?;
+        let window = watch.pi.stats.context_usage.as_ref()?.context_window;
+        let reserve = watch.pi.stats.compaction.as_ref()?.reserve_tokens;
+        (window > 0).then(|| {
+            // Round down so moving to the end cannot cross the blocking limit.
+            ((window.saturating_sub(reserve) as f64 / window as f64 * 1000.).floor() / 10.).min(95.)
+        })
+    }
+
+    pub(crate) fn compaction_threshold_pending(&self, id: SessionId) -> Option<f64> {
+        self.watches
+            .get(&id)?
+            .sent
+            .values()
+            .find_map(|sent| match sent.request {
+                Request::SetCompactionThreshold(percent) => Some(percent),
+                _ => None,
+            })
+    }
+
+    pub(crate) fn set_compaction_threshold(
+        &mut self,
+        id: SessionId,
+        percent: f64,
+    ) -> Result<(), String> {
+        let watch = self
+            .watches
+            .get_mut(&id)
+            .ok_or("Wait for this session to connect.")?;
+        Self::set_compaction_threshold_watch(watch, percent)
+    }
+
+    fn set_compaction_threshold_watch(watch: &mut Watch, percent: f64) -> Result<(), String> {
+        if !percent.is_finite() || !(10. ..=95.).contains(&percent) {
+            return Err("Choose a compaction threshold between 10% and 95%.".into());
+        }
+        if !Self::compaction_threshold_supported(watch) {
+            return Err("Update the computer helper to change the compaction threshold.".into());
+        }
+        if !watch.current || watch.input.as_ref().is_none_or(|input| input.is_closed()) {
+            return Err("Reconnect before changing compaction. Nothing was queued.".into());
+        }
+        if watch
+            .sent
+            .values()
+            .any(|sent| matches!(sent.request, Request::SetCompactionThreshold(_)))
+        {
+            return Err("Wait for the computer to confirm the compaction threshold.".into());
+        }
+        if Self::send(
+            watch,
+            json!({"type":"set_compaction_threshold", "percent":percent}),
+            Request::SetCompactionThreshold(percent),
+        ) {
+            Ok(())
+        } else {
+            Err("The session disconnected before the threshold could be changed.".into())
+        }
+    }
+
+    fn swarm_enabled_watch(watch: &Watch) -> Option<bool> {
+        if watch.target.backend != RemoteBackend::Durable {
+            return None;
+        }
+        let pi_core::session::BackendInfo::Found(info) = &watch.pi.backend else {
+            return None;
+        };
+        info["commands"]
+            .as_array()
+            .filter(|commands| {
+                commands
+                    .iter()
+                    .any(|command| command == "set_swarm_enabled")
+            })
+            .and(watch.pi.state.swarm_enabled)
+    }
+
+    pub(crate) fn swarm_enabled(&self, id: SessionId) -> Option<bool> {
+        Self::swarm_enabled_watch(self.watches.get(&id)?)
+    }
+
+    pub(crate) fn swarm_toggle_pending(&self, id: SessionId) -> bool {
+        self.watches.get(&id).is_some_and(|watch| {
+            watch
+                .sent
+                .values()
+                .any(|sent| matches!(sent.request, Request::SetSwarmEnabled(_)))
+        })
+    }
+
+    pub(crate) fn set_swarm_enabled(&mut self, id: SessionId, enabled: bool) -> Result<(), String> {
+        let watch = self
+            .watches
+            .get_mut(&id)
+            .ok_or("Wait for this session to connect.")?;
+        Self::set_swarm_enabled_watch(watch, enabled)
+    }
+
+    fn set_swarm_enabled_watch(watch: &mut Watch, enabled: bool) -> Result<(), String> {
+        if Self::swarm_enabled_watch(watch).is_none() {
+            return Err("This session needs an updated computer helper to change Swarm.".into());
+        }
+        if !watch.current || watch.input.as_ref().is_none_or(|input| input.is_closed()) {
+            return Err("Reconnect before changing Swarm. Nothing was queued.".into());
+        }
+        if watch
+            .sent
+            .values()
+            .any(|sent| matches!(sent.request, Request::SetSwarmEnabled(_)))
+        {
+            return Err("Wait for the computer to confirm the Swarm setting.".into());
+        }
+        if Self::send(
+            watch,
+            json!({"type":"set_swarm_enabled", "enabled":enabled}),
+            Request::SetSwarmEnabled(enabled),
+        ) {
+            Ok(())
+        } else {
+            Err("The session disconnected before Swarm could be changed.".into())
+        }
+    }
+
     pub fn set_thinking(&mut self, id: SessionId, shown: &str) -> Result<(), String> {
         let level = thinking_level(shown).ok_or("Unknown thinking level.")?;
         let watch = self
@@ -1769,6 +1936,13 @@ impl Live {
                 false
             }
         };
+        if applied && observes_session(record) {
+            watch.observed_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |time| time.as_millis() as u64),
+            );
+        }
         if applied
             && previous_model
                 != watch
@@ -2059,6 +2233,34 @@ impl Live {
                     Self::hold_failed(watch, &error);
                 }
                 failed.then_some(error)
+            }
+            Request::SetCompactionThreshold(percent) => {
+                if failed {
+                    Some(error)
+                } else if record["data"]["percent"].as_f64() != Some(percent) {
+                    Self::send(watch, json!({"type":"get_session_stats"}), Request::Quiet);
+                    Some("The computer did not confirm the compaction threshold. Refresh before trying again.".into())
+                } else if let Ok(policy) = serde_json::from_value::<
+                    pi_core::protocol::CompactionPolicy,
+                >(record["data"]["compaction"].clone())
+                {
+                    watch.pi.stats.compaction = Some(policy);
+                    None
+                } else {
+                    Self::send(watch, json!({"type":"get_session_stats"}), Request::Quiet);
+                    Some("The computer sent an unreadable compaction policy.".into())
+                }
+            }
+            Request::SetSwarmEnabled(enabled) => {
+                if failed {
+                    Some(error)
+                } else if record["data"]["enabled"].as_bool() != Some(enabled) {
+                    Self::send(watch, json!({"type":"get_state"}), Request::Quiet);
+                    Some("The computer did not confirm the Swarm setting. Refresh before trying again.".into())
+                } else {
+                    watch.pi.state.swarm_enabled = Some(enabled);
+                    None
+                }
             }
             Request::InitialThinkingLevels(wanted) => {
                 if failed || watch.pi.thinking_levels.is_empty() {
@@ -2499,12 +2701,15 @@ impl Live {
                 watch.current && watch.input.as_ref().is_some_and(|input| !input.is_closed())
             })
             .ok_or("Reconnect to the computer before stopping this subagent.")?;
-        Self::send(
+        if Self::send(
             watch,
             json!({"type": "stop_subagent", "conversationId": conversation}),
             Request::Other,
-        );
-        Ok(())
+        ) {
+            Ok(())
+        } else {
+            Err("The Stop request was not sent. Reconnect and explicitly retry.".into())
+        }
     }
 
     /// The session as the phone shows it.
@@ -2520,6 +2725,17 @@ impl Live {
             listed,
             self.helper.short(&listed.cwd),
         ))
+    }
+
+    /// A healthy SSH connection is not proof that this particular session pipe is current.
+    pub(crate) fn session_current(&self, id: SessionId) -> bool {
+        self.watches.get(&id).is_some_and(|watch| {
+            watch.current && watch.input.as_ref().is_some_and(|input| !input.is_closed())
+        })
+    }
+
+    pub(crate) fn observed_at(&self, id: SessionId) -> Option<u64> {
+        self.watches.get(&id)?.observed_at
     }
 
     /// When a session last moved, in seconds since 1970, for the list's order.
@@ -2554,6 +2770,43 @@ impl Live {
             }
         }
         folders
+    }
+}
+
+/// Only successfully parsed session-data records count as observation. Child
+/// responses and command receipts do not refresh an older parent swarm snapshot.
+fn observes_session(record: &Value) -> bool {
+    match record["type"].as_str() {
+        Some(
+            "remote_snapshot"
+            | "state_update"
+            | "stats_update"
+            | "agent_start"
+            | "agent_settled"
+            | "compaction_start"
+            | "compaction_end"
+            | "auto_retry_start"
+            | "auto_retry_end"
+            | "summarization_retry_scheduled"
+            | "message_start"
+            | "message_update"
+            | "message_end"
+            | "tool_execution_start"
+            | "tool_execution_update"
+            | "tool_execution_end"
+            | "queue_update"
+            | "session_info_changed"
+            | "thinking_level_changed"
+            | "bash_execution_update",
+        ) => true,
+        Some("response") => {
+            record["success"] == true
+                && matches!(
+                    record["command"].as_str(),
+                    Some("get_state" | "get_messages" | "get_session_stats" | "get_active_tools")
+                )
+        }
+        _ => false,
     }
 }
 
@@ -2734,6 +2987,165 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("not retained")
+        );
+    }
+
+    #[test]
+    fn observation_time_requires_accepted_session_data_not_stale_or_rejected_records() {
+        let (mut watch, sent) = watch();
+        watch.observed_at = Some(123);
+        let now = Instant::now();
+        let generation = watch.generation;
+        pipe_update(
+            &mut watch,
+            Update::Record(
+                generation + 1,
+                json!({"type":"remote_snapshot", "data":Pi::default()}),
+            ),
+            now,
+        );
+        assert_eq!(watch.observed_at, Some(123));
+        pipe_update(
+            &mut watch,
+            Update::Record(generation, json!({"type":"remote_snapshot", "data":[]})),
+            now,
+        );
+        assert_eq!(watch.observed_at, Some(123));
+        pipe_update(
+            &mut watch,
+            Update::Record(generation, json!({"type":"future_record"})),
+            now,
+        );
+        assert_eq!(watch.observed_at, Some(123));
+        pipe_update(
+            &mut watch,
+            Update::Record(
+                generation,
+                json!({"type":"response", "id":"unknown-request", "command":"get_messages", "success":true, "data":{"messages":[]}}),
+            ),
+            now,
+        );
+        assert_eq!(watch.observed_at, Some(123));
+
+        assert!(Live::send(
+            &mut watch,
+            json!({"type":"get_messages"}),
+            Request::Other
+        ));
+        let request = sent.try_recv().unwrap();
+        pipe_update(
+            &mut watch,
+            Update::Record(
+                generation,
+                json!({"type":"response", "id":request["id"], "command":"get_state", "success":true, "data":{}}),
+            ),
+            now,
+        );
+        assert_eq!(
+            watch.observed_at,
+            Some(123),
+            "mismatched command must not count"
+        );
+        pipe_update(
+            &mut watch,
+            Update::Record(
+                generation,
+                json!({"type":"response", "id":request["id"], "command":"get_messages", "success":true, "data":{"messages":"invalid"}}),
+            ),
+            now,
+        );
+        assert_eq!(
+            watch.observed_at,
+            Some(123),
+            "rejected schema must not count"
+        );
+        pipe_update(
+            &mut watch,
+            Update::Record(
+                generation,
+                json!({"type":"remote_snapshot", "data":Pi::default()}),
+            ),
+            now,
+        );
+        assert!(watch.observed_at.is_some_and(|at| at > 123));
+        assert!(watch.current);
+        watch.observed_at = Some(456);
+        pipe_update(
+            &mut watch,
+            Update::Ended(generation, "pipe lost".into()),
+            now,
+        );
+        assert!(!watch.current);
+        assert_eq!(watch.observed_at, Some(456));
+        pipe_update(
+            &mut watch,
+            Update::Record(
+                generation,
+                json!({"type":"remote_snapshot", "data":Pi::default()}),
+            ),
+            now,
+        );
+        assert_eq!(
+            watch.observed_at,
+            Some(456),
+            "retired generation cannot refresh cached data"
+        );
+        let (input, _receipts) = async_channel::unbounded();
+        let next = watch.generation;
+        pipe_update(&mut watch, Update::Opened(next, input), now);
+        assert!(
+            !watch.current,
+            "an open pipe alone is not a session observation"
+        );
+        assert_eq!(watch.observed_at, Some(456));
+    }
+
+    #[test]
+    fn child_responses_and_command_acks_do_not_refresh_parent_observation() {
+        let (mut watch, sent) = watch();
+        for command in [
+            "get_subagent",
+            "stop_subagent",
+            "prompt_subagent",
+            "prompt",
+            "get_backend_info",
+        ] {
+            watch.observed_at = Some(123);
+            assert!(Live::send(
+                &mut watch,
+                json!({"type":command}),
+                Request::Other
+            ));
+            let request = sent.try_recv().unwrap();
+            Live::record(
+                &mut watch,
+                &json!({"type":"response", "id":request["id"], "command":command, "success":true, "data":{}}),
+                "",
+                "",
+                &mut Vec::new(),
+            );
+            assert_eq!(
+                watch.observed_at,
+                Some(123),
+                "{command} is not a parent snapshot"
+            );
+        }
+        watch.observed_at = Some(123);
+        assert!(Live::send(
+            &mut watch,
+            json!({"type":"get_messages"}),
+            Request::Other
+        ));
+        let request = sent.try_recv().unwrap();
+        let response = json!({"type":"response", "id":request["id"], "command":"get_messages", "success":true, "data":{"messages":[]}});
+        Live::record(&mut watch, &response, "", "", &mut Vec::new());
+        assert!(watch.observed_at.is_some_and(|at| at > 123));
+        watch.observed_at = Some(456);
+        Live::record(&mut watch, &response, "", "", &mut Vec::new());
+        assert_eq!(
+            watch.observed_at,
+            Some(456),
+            "duplicate receipt is not a new observation"
         );
     }
 
@@ -3904,6 +4316,107 @@ mod tests {
             admission(sent.try_recv().unwrap()),
             json!({"type":"compact"})
         );
+    }
+
+    #[test]
+    fn compaction_threshold_is_capability_gated_confirmed_and_never_queued_offline() {
+        let (mut watch, sent) = watch();
+        watch.target.backend = RemoteBackend::Durable;
+        let old = json!({"enabled":true,"reserveTokens":16384,"backgroundTokens":32768});
+        watch.pi.stats.compaction = Some(serde_json::from_value(old.clone()).unwrap());
+        assert!(Live::set_compaction_threshold_watch(&mut watch, 70.).is_err());
+        watch.pi.backend =
+            pi_core::session::BackendInfo::Found(json!({"commands":["set_compaction_threshold"]}));
+        assert!(Live::set_compaction_threshold_watch(&mut watch, 70.).is_err());
+        watch.current = true;
+        for percent in [f64::NAN, f64::INFINITY, 9.9, 95.1] {
+            assert!(Live::set_compaction_threshold_watch(&mut watch, percent).is_err());
+        }
+        Live::set_compaction_threshold_watch(&mut watch, 70.).unwrap();
+        let request = sent.try_recv().unwrap();
+        assert_eq!(
+            admission(request.clone()),
+            json!({"type":"set_compaction_threshold","percent":70.})
+        );
+        assert_eq!(
+            watch
+                .pi
+                .stats
+                .compaction
+                .as_ref()
+                .unwrap()
+                .background_tokens,
+            32768
+        );
+        assert!(Live::set_compaction_threshold_watch(&mut watch, 60.).is_err());
+        let failed = json!({"type":"response","id":request["id"],"command":"set_compaction_threshold","success":false,"error":"not committed"});
+        assert_eq!(
+            Live::record(&mut watch, &failed, "", "", &mut Vec::new()).as_deref(),
+            Some("not committed")
+        );
+        assert_eq!(
+            watch
+                .pi
+                .stats
+                .compaction
+                .as_ref()
+                .unwrap()
+                .background_tokens,
+            32768
+        );
+        Live::set_compaction_threshold_watch(&mut watch, 70.).unwrap();
+        let request = sent.try_recv().unwrap();
+        let applied = json!({"type":"response","id":request["id"],"command":"set_compaction_threshold","success":true,
+            "data":{"percent":70.,"compaction":{"enabled":true,"reserveTokens":16384,"backgroundTokens":43616}}});
+        assert!(Live::record(&mut watch, &applied, "", "", &mut Vec::new()).is_none());
+        assert_eq!(
+            watch
+                .pi
+                .stats
+                .compaction
+                .as_ref()
+                .unwrap()
+                .background_tokens,
+            43616
+        );
+        watch.current = false;
+        assert!(Live::set_compaction_threshold_watch(&mut watch, 60.).is_err());
+        assert!(sent.try_recv().is_err());
+        assert!(watch.outbox.is_empty());
+    }
+
+    #[test]
+    fn swarm_toggle_waits_for_capability_and_ack_and_never_queues_offline() {
+        let (mut watch, sent) = watch();
+        watch.target.backend = RemoteBackend::Durable;
+        watch.pi.state.swarm_enabled = Some(true);
+        assert!(Live::set_swarm_enabled_watch(&mut watch, false).is_err());
+        watch.pi.backend =
+            pi_core::session::BackendInfo::Found(json!({"commands":["set_swarm_enabled"]}));
+        assert!(Live::set_swarm_enabled_watch(&mut watch, false).is_err());
+        watch.current = true;
+        Live::set_swarm_enabled_watch(&mut watch, false).unwrap();
+        let request = sent.try_recv().unwrap();
+        assert_eq!(request["type"], "set_swarm_enabled");
+        assert_eq!(request["enabled"], false);
+        assert_eq!(watch.pi.state.swarm_enabled, Some(true), "not optimistic");
+        assert!(Live::set_swarm_enabled_watch(&mut watch, false).is_err());
+        assert!(sent.try_recv().is_err());
+        let failed = json!({"type":"response","id":request["id"],"command":"set_swarm_enabled","success":false,"error":"not committed"});
+        assert_eq!(
+            Live::record(&mut watch, &failed, "", "", &mut Vec::new()).as_deref(),
+            Some("not committed")
+        );
+        assert_eq!(watch.pi.state.swarm_enabled, Some(true));
+        Live::set_swarm_enabled_watch(&mut watch, false).unwrap();
+        let request = sent.try_recv().unwrap();
+        let applied = json!({"type":"response","id":request["id"],"command":"set_swarm_enabled","success":true,"data":{"enabled":false}});
+        assert!(Live::record(&mut watch, &applied, "", "", &mut Vec::new()).is_none());
+        assert_eq!(watch.pi.state.swarm_enabled, Some(false));
+        watch.current = false;
+        assert!(Live::set_swarm_enabled_watch(&mut watch, true).is_err());
+        assert!(sent.try_recv().is_err());
+        assert!(watch.outbox.is_empty());
     }
 
     #[test]

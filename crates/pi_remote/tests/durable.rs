@@ -784,6 +784,136 @@ fn durable_target(directory: &Path) -> SshTarget {
 
 #[test]
 #[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn swarm_permission_is_acknowledged_projected_and_survives_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = durable_target(directory.path());
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut bridge = Bridge::new(directory.path(), &target);
+    assert_eq!(bridge.snapshot()["data"]["state"]["swarmEnabled"], true);
+    bridge.send(json!({"type":"get_backend_info","id":"capabilities"}));
+    assert!(
+        bridge.response("capabilities")["data"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "set_swarm_enabled")
+    );
+    bridge.send(json!({"type":"set_swarm_enabled","id":"disable","enabled":false}));
+    let response = bridge.response("disable");
+    assert_eq!(response["success"], true);
+    assert_eq!(response["data"]["enabled"], false);
+    bridge.until(|record| {
+        record["type"] == "remote_snapshot" && record["data"]["state"]["swarmEnabled"] == false
+    });
+    bridge.send(json!({"type":"set_swarm_enabled","id":"invalid","enabled":"true"}));
+    assert_eq!(bridge.response("invalid")["success"], false);
+    bridge.send(json!({"type":"get_settings","id":"settings"}));
+    assert_eq!(
+        bridge.response("settings")["data"]["effective"]["subagents"]["swarmEnabled"],
+        false
+    );
+    bridge.send(json!({"type":"remote_shutdown","id":"shutdown"}));
+    assert_eq!(bridge.response("shutdown")["success"], true);
+    bridge.closed();
+    drop(bridge);
+    // Closing clients precedes the daemon's endpoint removal. Do not attach to
+    // the old, still-shutting-down socket when testing a genuine restart.
+    let endpoint = directory
+        .path()
+        .join("1")
+        .join(format!("{}.json", target.key));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while endpoint.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!endpoint.exists(), "the isolated daemon shut down");
+    let mut bridge = Bridge::new(directory.path(), &target);
+    assert_eq!(bridge.snapshot()["data"]["state"]["swarmEnabled"], false);
+    bridge.send(json!({"type":"set_swarm_enabled","id":"enable","enabled":true}));
+    assert_eq!(bridge.response("enable")["success"], true);
+    bridge.until(|record| {
+        record["type"] == "remote_snapshot" && record["data"]["state"]["swarmEnabled"] == true
+    });
+}
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn custom_compaction_threshold_is_effective_and_survives_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = durable_target(directory.path());
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+    bridge.send(json!({"type":"get_backend_info","id":"capabilities"}));
+    assert!(
+        bridge.response("capabilities")["data"]["commands"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("set_compaction_threshold"))
+    );
+    bridge.send(json!({"type":"set_compaction_threshold","id":"threshold","percent":65.}));
+    let response = bridge.response("threshold");
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["data"]["percent"], 65.);
+    assert_eq!(response["data"]["compaction"]["reserveTokens"], 16384);
+    bridge.send(json!({"type":"get_session_stats","id":"stats"}));
+    let stats = bridge.response("stats");
+    let window = stats["data"]["contextUsage"]["contextWindow"]
+        .as_f64()
+        .unwrap();
+    let reserve = stats["data"]["compaction"]["reserveTokens"]
+        .as_f64()
+        .unwrap();
+    let background = stats["data"]["compaction"]["backgroundTokens"]
+        .as_f64()
+        .unwrap();
+    assert!(((window - reserve - background) / window * 100. - 65.).abs() < 0.001);
+    bridge.send(json!({"type":"set_compaction_threshold","id":"invalid","percent":"70"}));
+    assert_eq!(bridge.response("invalid")["success"], false);
+    bridge.send(json!({"type":"set_compaction_threshold","id":"missing"}));
+    assert_eq!(
+        bridge.response("missing")["success"],
+        false,
+        "omission must not become a reset"
+    );
+    bridge.until(|record| {
+        record["type"] == "stats_update"
+            && record["stats"]["compaction"]["backgroundTokens"] == background
+    });
+    bridge.send(json!({"type":"remote_shutdown","id":"shutdown"}));
+    assert_eq!(bridge.response("shutdown")["success"], true);
+    bridge.closed();
+    drop(bridge);
+    // The client EOF precedes the detached daemon's endpoint cleanup.
+    let endpoint = directory
+        .path()
+        .join("1")
+        .join(format!("{}.json", target.key));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while endpoint.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "Old daemon did not finish shutting down"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+    bridge.send(json!({"type":"get_settings","id":"settings"}));
+    let settings = bridge.response("settings");
+    assert_eq!(settings["data"]["compactionThresholdPercent"], 65.);
+    assert_eq!(
+        settings["data"]["effective"]["compaction"]["backgroundTokens"],
+        background
+    );
+    bridge.send(json!({"type":"set_compaction_threshold","id":"reset","percent":null}));
+    let reset = bridge.response("reset");
+    assert_eq!(reset["success"], true);
+    assert_eq!(reset["data"]["compaction"]["backgroundTokens"], 32768);
+}
+
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
 fn manual_compaction_is_an_action_and_never_a_slash_prompt() {
     let directory = tempfile::tempdir().unwrap();
     let target = durable_target(directory.path());
@@ -834,6 +964,72 @@ fn manual_compaction_is_an_action_and_never_a_slash_prompt() {
             .to_string()
             .contains("/compact")
     );
+}
+
+/// Covers the actual run.ts registry/defaults with SQLite and the existing
+/// remote snapshot/child RPC path, not a specially configured test harness.
+#[test]
+#[ignore = "Build the standalone faux-only durable fixture and set PI_DESKTOP_TEST_DURABLE_RUNNER"]
+fn swarm_runner_wires_child_only_tools_and_projects_real_mailbox_receipts() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = durable_target(directory.path());
+    let _cleanup = Cleanup(directory.path().into(), target.key.clone());
+    let mut bridge = Bridge::new(directory.path(), &target);
+    bridge.snapshot();
+    bridge.send(json!({"type":"get_backend_info","id":"capabilities"}));
+    let info = bridge.response("capabilities");
+    assert!(
+        info["data"]["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("swarm_messaging")),
+        "{info}"
+    );
+    bridge.send(json!({"type":"get_active_tools","id":"tools"}));
+    let tools = bridge.response("tools");
+    assert!(
+        tools["data"]["activeTools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| !tool["name"].as_str().unwrap().starts_with("swarm_")),
+        "{tools}"
+    );
+    bridge.send(
+        json!({"type":"prompt","id":"delegate","message":"delegate swarm","requestId":"delegate"}),
+    );
+    assert_eq!(bridge.response("delegate")["success"], true);
+    let settled = bridge.until(|r| {
+        r["type"] == "remote_snapshot" && r["data"]["run"] == "Idle" && said(r, "Heard back:")
+    });
+    let call = handoff(&settled).unwrap();
+    let swarm = &call["details"]["swarm"];
+    assert_eq!(swarm["closed"], true, "{call}");
+    assert_eq!(swarm["members"][0]["id"], "peer-1");
+    assert_eq!(swarm["members"][1]["id"], "peer-2");
+    assert_eq!(swarm["members"][0]["agent"], swarm["members"][1]["agent"]);
+    assert_eq!(swarm["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(swarm["messages"][0]["from"], "peer-1");
+    assert_eq!(swarm["messages"][0]["to"], "peer-2");
+    assert_eq!(swarm["messages"][0]["status"], "received");
+    let results = call["details"]["results"].as_array().unwrap();
+    for (index, result) in results.iter().enumerate() {
+        assert_eq!(result["peerId"], format!("peer-{}", index + 1));
+        assert_eq!(result["status"], "done");
+    }
+    bridge.send(
+        json!({"type":"get_subagent","id":"child","conversationId":results[1]["conversationId"]}),
+    );
+    let child = bridge.response("child");
+    assert_eq!(child["success"], true, "{child}");
+    assert!(
+        child["data"]["messages"]
+            .to_string()
+            .contains("swarm received: SQLite keeps committed receipts")
+    );
+    bridge.send(json!({"type":"remote_shutdown","id":"shutdown"}));
+    assert_eq!(bridge.response("shutdown")["success"], true);
+    bridge.detach();
 }
 
 #[test]

@@ -96,6 +96,7 @@ impl PhoneApp {
                 .child(
                     div()
                         .id("computers")
+                        .debug_selector(|| "computers".into())
                         .relative()
                         .child(crate::testing::probe("computers"))
                         .flex_1()
@@ -624,11 +625,21 @@ impl PhoneApp {
                                     .child(meta(time.into())),
                             )
                             .children(session.turn().map(|turn| {
-                                ui::track(&turn.times, turn.live_stage(), span, colors).mt(px(8.))
+                                ui::track(&turn.times, turn.live_stage(), span, colors)
+                                    .mt(px(8.))
+                                    .debug_selector(move || format!("session-track-{}", id.0))
                             }))
                             .child(
                                 div()
-                                    .mt(px(6.))
+                                    // Leave room for the crew icon's 4 dp halo below the rail.
+                                    .mt(px(
+                                        if super::subagents::at_work(&session.turns).is_some() {
+                                            12.
+                                        } else {
+                                            6.
+                                        },
+                                    ))
+                                    .debug_selector(move || format!("session-crew-row-{}", id.0))
                                     .flex()
                                     .items_center()
                                     .gap(px(12.))

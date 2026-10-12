@@ -20,9 +20,14 @@ import type { Models } from "@earendil-works/pi-ai/models";
 import {
   configure, ConversationBusy, defineDoc, defineExtension, defineTask, defineTool, InboxDoc, LiveDoc,
   type Conversation, type ConversationId, type ConversationView, type Extension, type Harness, type TaskId,
-  type TaskRuntime, type Tx,
+  type SettledSubmissionRecord, type TaskRuntime, type Tx,
 } from "@earendil-works/pi-durable";
 import type { AgentDefinition, Resources } from "./commands.ts";
+import { Metadata, swarmEnabled } from "./session-settings.ts";
+import {
+  cancelPeer, Children, closeSwarm, createSwarm, SWARM_LIMITS, SwarmTools, swarmInstructions, swarmProjection,
+  type SwarmDetails,
+} from "./swarm.ts";
 
 const MAX_TASKS = 200;
 const CONCURRENCY = 8;
@@ -38,6 +43,7 @@ export type SubagentStatus = "waiting" | "running" | "done" | "failed" | "stoppe
 
 export type SubagentResult = {
   index: number;
+  peerId?: string;
   agent: string;
   task: string;
   status: SubagentStatus;
@@ -65,13 +71,8 @@ export type SubagentDetails = {
   /** The subagents work on after the call returned: this, not the call's end, says how each is doing. */
   background: true;
   results: SubagentResult[];
+  swarm?: SwarmDetails;
 };
-
-/** Which conversation runs each task of a crew, and when it ran: survives a restart. */
-const Children = defineDoc<{ started: boolean; children: Record<string, { id: number; startedAt: number; endedAt?: number }> }>({
-  kind: "app.subagents", version: 1, scope: "task",
-  initial: () => ({ started: false, children: {} }),
-});
 
 /** Every call's subagents as they are now, by call ID: what the apps show once a call has returned. */
 export const Calls = defineDoc<{ calls: Record<string, SubagentDetails> }>({
@@ -230,6 +231,7 @@ const Parameters = Type.Object({
   instructions: Type.Optional(Type.String({ description: `${INSTRUCTIONS} (for single mode)` })),
   tools: Type.Optional(Type.Array(Type.String(), { description: `${AGENT_TOOLS} (for single mode)` })),
   tasks: Type.Optional(Type.Array(Task, { description: "Array of {agent, task} for parallel execution" })),
+  swarm: Type.Optional(Type.Boolean({ description: "Opt-in peer mailboxes for 2–8 parallel tasks only. Peers get read + peer tools only; explicit/preset write/edit/bash/search policies are rejected (shell writes are not sandboxed). Parent remains the writer. Messages never start new turns; received means recipient tool retrieval, not agreement or guaranteed effects." })),
   chain: Type.Optional(Type.Array(ChainTask, { description: "Array of {agent, task} for sequential execution" })),
   agentScope: Type.Optional(Type.String({ description: 'Which agents to use: "user", "project" or "both". Default "both"; a project\'s own agents only once Pi trusts the project.' })),
   cwd: Type.Optional(Type.String({ description: "Working directory for the agent (single mode)" })),
@@ -240,6 +242,7 @@ type Item = { agent: string; task: string; instructions?: string; tools?: string
 type CrewInput = {
   callId: string;
   mode: SubagentDetails["mode"];
+  swarm?: true;
   items: (Item & { definition: Definition })[];
   /** First input of the run that made the tool call: stable across that run's turns. */
   runInput?: number;
@@ -326,6 +329,12 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
             result.endedAt ??= Date.now();
           }
         }
+        const doc = await tx.doc(Children, crew.id);
+        if (doc.swarm) {
+          closeSwarm(doc.swarm);
+          for (const child of Object.values(doc.children)) child.endedAt ??= Date.now();
+          if (details) details.swarm = swarmProjection(doc.swarm);
+        }
         return { status: "terminal", outcome: { status: "aborted" } };
       }, context);
     },
@@ -341,11 +350,24 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
         "Don't do a task you handed off yourself, or check on it: that fills your context with what their answers will say.",
         "Modes: single (agent + task), parallel (tasks array), chain (sequential, with a {previous} placeholder for the prior step's output).",
         "Use a listed agent, or define one: give it a short name (\"architecture\", \"code-quality\"), instructions for its role and output, and tools.",
+        "swarm:true enables bounded peer mailboxes for 2–8 parallel tasks only, with read-only peers. Explicit/preset write/edit/bash/search policies are not allowed: shell writes are not sandboxed. The coordinator remains the writer.",
       ].join(" "),
       parameters: Parameters,
       // A rerun after a restart finds the crew it started.
       replay: "safe",
       execute: async (args, api, context) => {
+        // An admitted swarm's frozen roster/policy wins over agent files changed
+        // since the call. Recovery must not revalidate or replace its identity.
+        if (args.swarm) {
+          const admitted = await api.commit(async (tx) => {
+            const calls = (await tx.doc(Calls, api.conversationId)).calls;
+            return Object.hasOwn(calls, api.callId) ? JSON.parse(JSON.stringify(calls[api.callId])) as SubagentDetails : undefined;
+          }, context);
+          if (admitted) return {
+            content: [{ type: "text" as const, text: "This crew was already started. Its durable roster and mailboxes are reused; no tasks were started twice." }],
+            details: admitted,
+          };
+        }
         const agents = resources().agents.filter((agent) =>
           args.agentScope === "user" ? agent.scope === "user" : args.agentScope === "project" ? agent.scope === "project" : true);
         const items: Item[] = args.chain?.length ? args.chain : args.tasks?.length ? args.tasks
@@ -356,21 +378,45 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
         const unnamed = items.find((item) => !/^[\w.-]{1,64}$/.test(item.agent));
         if (unnamed) return failure(`Name each agent in a word or two, such as "architecture": "${unnamed.agent}" isn't one.`);
         const toolless = items.find((item) => item.tools && !durableTools(item.tools).length);
-        if (toolless) return failure(`The ${toolless.agent} agent needs at least one of: ${TOOLS.join(", ")}`);
+        if (toolless) return failure(args.swarm
+          ? "Swarm peers must use only read; an explicit policy must include read. Current tool names do not sandbox shell writes."
+          : `The ${toolless.agent} agent needs at least one of: ${TOOLS.join(", ")}`);
         const mode: SubagentDetails["mode"] = args.chain?.length ? "chain" : args.tasks?.length ? "parallel" : "single";
-        const details: SubagentDetails = { version: 1, mode, background: true, results: items.map((item, index) => ({ index, agent: item.agent, task: item.task, status: "waiting" })) };
-        // One commit records the call and starts its crew, once.
-        await api.commit(async (tx) => {
+        if (args.swarm) {
+          if (mode !== "parallel" || items.length < SWARM_LIMITS.minPeers || items.length > SWARM_LIMITS.maxPeers) {
+            return failure("swarm:true requires 2–8 parallel tasks; single and chain modes are not supported.");
+          }
+          const unsafe = items.find((item) => {
+            const policy = item.tools ?? agents.find((agent) => agent.name === item.agent)?.tools;
+            return policy && (!policy.includes("read") || policy.some((tool) => tool !== "read"));
+          });
+          if (unsafe) return failure(`Swarm peer ${unsafe.agent} must use only read. Explicit/preset write, edit, bash and search policies are not supported: current tool names do not sandbox shell writes. The parent coordinator remains the writer.`);
+          if (!((await api.agent(context)).tools.some((tool) => tool.name === "read"))) return failure("Swarm peers require the parent's read tool.");
+          if (!api.registry.extension(SwarmTools.name)) return failure("Swarm peer tools are not registered in this runner.");
+        }
+        const swarm = args.swarm ? createSwarm(api.conversationId, api.callId, items) : undefined;
+        const details: SubagentDetails = {
+          version: 1, mode, background: true,
+          results: items.map((item, index) => ({ index, ...(swarm ? { peerId: swarm.members[index].id } : {}), agent: item.agent, task: item.task, status: "waiting" })),
+          ...(swarm ? { swarm: swarmProjection(swarm) } : {}),
+        };
+        // The permission and new admission share one commit. A previously
+        // admitted crew always retains its frozen policy, even after disabling.
+        const allowed = await api.commit(async (tx) => {
           const calls = (await tx.doc(Calls, api.conversationId)).calls;
-          if (Object.hasOwn(calls, api.callId)) return;
+          if (Object.hasOwn(calls, api.callId)) return true;
+          if (swarm && !swarmEnabled(await tx.doc(Metadata, api.conversationId))) return false;
           calls[api.callId] = JSON.parse(JSON.stringify(details));
           const runInput = (await tx.doc(LiveDoc, api.conversationId)).run?.inputs[0];
           const input: CrewInput = JSON.parse(JSON.stringify({
-            callId: api.callId, mode, items: items.map((item) => ({ ...item, definition: definition(item, agents) })),
+            callId: api.callId, mode, ...(swarm ? { swarm: true } : {}), items: items.map((item) => ({ ...item, definition: definition(item, agents) })),
             ...(runInput === undefined ? {} : { runInput: Number(runInput) }),
           }));
-          await tx.createTask(Crew, input, { ownership: { kind: "conversation" }, background: true });
+          const crewId = await tx.createTask(Crew, input, { ownership: { kind: "conversation" }, background: true });
+          if (swarm) (await tx.doc(Children, crewId)).swarm = swarm;
+          return true;
         }, context);
+        if (!allowed) return failure("Swarm is disabled for new crews in this session. Ordinary subagents remain available; existing swarms continue unchanged.");
         const who = [...new Set(items.map((item) => item.agent))].join(", ");
         const text = `Started ${items.length === 1 ? `the ${who} subagent` : `${items.length} subagents (${who})`} in the background. `
           + "They are doing this work now, and their answers come back to you in one message when the last one finishes. "
@@ -379,6 +425,11 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
       },
     })],
     sections: [{
+      key: "subagent-swarm-policy",
+      render: async (input, context) => swarmEnabled(await input.read.snapshot(Metadata, input.conversationId, context))
+        ? "Swarm is allowed for new crews when explicitly requested with swarm:true. Ordinary delegations are unchanged."
+        : "Swarm is disabled for new crews in this session. Do not request swarm:true. Ordinary subagents remain available; already-admitted swarms keep their policy.",
+    }, {
       key: "subagents",
       tag: false,
       render: () => {
@@ -412,7 +463,7 @@ class CrewRun {
   ) {
     this.mode = input.mode;
     this.items = input.items;
-    this.results = input.items.map((item, index) => ({ index, agent: item.agent, task: item.task, status: "waiting" }));
+    this.results = input.items.map((item, index) => ({ index, ...(input.swarm ? { peerId: `peer-${index + 1}` } : {}), agent: item.agent, task: item.task, status: "waiting" }));
   }
 
   get taskId(): TaskId {
@@ -430,11 +481,28 @@ class CrewRun {
     this.#resumed = await this.write(async (tx) => {
       const doc = await tx.doc(Children, this.taskId);
       const resumed = doc.started;
+      // Restore completed delegated tasks before publishing recovery progress.
+      // Older rows have only endedAt: their original receipt, not the child's
+      // current transcript (which may include follow-ups), supplies the answer.
+      const previous = (await tx.doc(Calls, this.runtime.conversationId)).calls[this.input.callId];
+      for (const [key, child] of Object.entries(doc.children)) {
+        const index = Number(key);
+        if (child.result) this.results[index] = JSON.parse(JSON.stringify(child.result));
+        else if (child.endedAt !== undefined) this.results[index] = await this.freeze(tx, index, {
+          ...(previous?.results[index] ?? this.results[index]),
+          conversationId: String(child.id), startedAt: child.startedAt,
+        });
+      }
       doc.started = true;
       return resumed;
     });
     await this.report(true);
     try {
+      // Establish every durable child/peer binding before submitting any work.
+      // All swarm peers fit in the parallel worker pool, so none wait for a slot.
+      if (this.input.swarm) {
+        for (const [index, item] of this.items.entries()) await this.child(index, item.definition, item);
+      }
       if (this.mode === "chain") {
         let previous = "";
         for (const [index, item] of this.items.entries()) {
@@ -452,62 +520,117 @@ class CrewRun {
         };
         await Promise.all(Array.from({ length: Math.min(CONCURRENCY, this.items.length) }, worker));
       }
+    } catch (error) {
+      // A normal failure closes mail before the crew faults. During cancellation
+      // runtime writes are rejected; the bottom-up abort handler closes it instead.
+      if (this.input.swarm) {
+        try {
+          await this.write(async (tx) => {
+            const swarm = (await tx.doc(Children, this.taskId)).swarm;
+            if (swarm) closeSwarm(swarm);
+          });
+          await this.report(true);
+        } catch { /* The abort handler owns cancellation/recovery. */ }
+      }
+      throw error;
     } finally {
       clearTimeout(this.#timer);
     }
+    if (this.input.swarm) await this.write(async (tx) => {
+      const swarm = (await tx.doc(Children, this.taskId)).swarm;
+      if (swarm) closeSwarm(swarm);
+    });
     await this.report(true);
     return this.answer();
   }
 
   /** Runs one task to its end in its own conversation; found again after a restart. */
   async run(index: number, item: CrewInput["items"][number]): Promise<SubagentResult> {
+    const child = await this.child(index, item.definition, item);
+    if (child.result || child.endedAt !== undefined) {
+      const result = this.results[index] = child.result
+        ? JSON.parse(JSON.stringify(child.result)) as SubagentResult
+        : await this.write((tx) => this.freeze(tx, index, this.results[index]));
+      await this.report(true);
+      return result;
+    }
     const result = this.results[index];
     result.task = item.task;
-    const { id: number, startedAt, endedAt } = await this.child(index, item.definition, item);
-    const id = number as unknown as ConversationId;
-    result.conversationId = String(number);
-    result.startedAt = startedAt;
+    const id = child.id as unknown as ConversationId;
+    result.conversationId = String(child.id);
+    result.startedAt = child.startedAt;
     result.status = "running";
     const conversation = (await this.harness.conversation(id, this.context))!;
     const view = await conversation.viewState(this.context);
     const follow = () => { this.observe(result, view.value); this.report(false).catch(() => {}); };
     const unsubscribe = view.subscribe(follow);
+    let settlement: SettledSubmissionRecord;
     try {
       follow();
-      if (endedAt === undefined) {
-        const handle = (await this.runtime.conversation(id, this.context))!;
-        // The request ID makes a rerun find the same submission instead of sending the task twice.
-        const submission = await handle.submit({ type: "input", content: item.task, requestId: `subagent-${index}` }, this.context);
-        await submission.wait(this.context);
-        await handle.waitForIdle(this.context);
-        await this.write(async (tx) => {
-          const child = (await tx.doc(Children, this.taskId)).children[index];
-          child.endedAt ??= Date.now();
-        });
-      }
-      this.observe(result, view.value);
-      result.endedAt = endedAt ?? Date.now();
-      await this.report(true);
-      return result;
+      const handle = (await this.runtime.conversation(id, this.context))!;
+      // The request ID makes a rerun find the same submission instead of sending the task twice.
+      const submission = await handle.submit({ type: "input", content: item.task, requestId: `subagent-${index}` }, this.context);
+      settlement = await submission.wait(this.context);
+      // A receipt belongs to this delegated task; conversation-wide idle may
+      // instead wait for a later follow-up and expose that turn's answer.
     } finally {
       unsubscribe();
       view.dispose();
     }
+    const frozen = this.results[index] = await this.write((tx) => this.freeze(tx, index, result, settlement));
+    await this.report(true);
+    return frozen;
+  }
+
+  /** End one original submission, atomically freezing its bounded result and closing its mailbox. */
+  async freeze(tx: Tx, index: number, progress: SubagentResult, settled?: SettledSubmissionRecord): Promise<SubagentResult> {
+    const doc = await tx.doc(Children, this.taskId);
+    const child = doc.children[index];
+    if (child.result) return JSON.parse(JSON.stringify(child.result));
+    const settlement = settled ?? await tx.submissionByRequest(child.id as unknown as ConversationId, `subagent-${index}`);
+    if (settlement?.type !== "input" || (settlement.status !== "done" && settlement.status !== "unanswered")) {
+      throw new Error(`Original subagent-${index} submission has no durable settlement`);
+    }
+    const result: SubagentResult = {
+      ...progress, conversationId: String(child.id), startedAt: child.startedAt,
+      endedAt: child.endedAt ?? Date.now(),
+    };
+    delete result.output;
+    if (settlement.status === "done") {
+      const answer = (await tx.entry(settlement.answer))?.model?.find((message) => message.role === "assistant");
+      if (!answer) throw new Error(`Original subagent-${index} answer entry is missing`);
+      const output = answer.content.map((block) => block.type === "text" ? block.text : "").join("").trim();
+      result.status = "done";
+      result.output = output.length > MAX_OUTPUT ? `${output.slice(0, MAX_OUTPUT)}…` : output;
+      result.now = gist(output);
+    } else {
+      result.status = ["aborted", "reset"].includes(settlement.reason) ? "stopped" : "failed";
+      result.now = typeof settlement.detail === "string" ? firstLine(settlement.detail)
+        : result.status === "stopped" ? "Stopped" : `Failed (${settlement.reason})`;
+    }
+    child.endedAt = result.endedAt;
+    child.result = JSON.parse(JSON.stringify(result));
+    if (doc.swarm) cancelPeer(doc.swarm, doc.swarm.members[index].id);
+    return JSON.parse(JSON.stringify(result));
   }
 
   /** The conversation that runs task `index`: created once, configured from its definition. */
-  async child(index: number, definition: Definition, item: Item) {
+  async child(index: number, definition: Definition, item: Item): Promise<{ id: number; startedAt: number; endedAt?: number; result?: SubagentResult }> {
     const parent = await this.runtime.agent(this.context);
     const { model, note } = this.model(definition, parent.model);
-    if (note) this.results[index].modelNote = note;
-    this.results[index].model = model ? `${model.provider}/${model.modelId}` : undefined;
-    const tools = definition.tools
-      ? parent.tools.filter((tool) => definition.tools!.includes(tool.name) && TOOLS.includes(tool.name))
-      : undefined;
+    if (!terminal(this.results[index].status)) {
+      if (note) this.results[index].modelNote = note;
+      this.results[index].model = model ? `${model.provider}/${model.modelId}` : undefined;
+    }
+    const tools = this.input.swarm
+      ? [...parent.tools.filter((tool) => tool.name === "read"), ...SwarmTools.tools!]
+      : definition.tools
+        ? parent.tools.filter((tool) => definition.tools!.includes(tool.name) && TOOLS.includes(tool.name))
+        : undefined;
     return this.write(async (tx) => {
       const doc = await tx.doc(Children, this.taskId);
       const existing = doc.children[index];
-      if (existing) return { ...existing };
+      if (existing) return JSON.parse(JSON.stringify(existing));
       // A copy of this conversation's agent: cwd, thinking level, extensions.
       const created = await tx.createConversation({ ownership: { kind: "task", taskId: this.taskId } });
       await configure(tx, created.id, {
@@ -515,13 +638,16 @@ class CrewRun {
         ...(tools ? { tools } : {}),
         ...(item.cwd ? { cwd: item.cwd } : {}),
         // No subagents of its own.
-        extensions: { remove: [this.extension] },
+        extensions: this.input.swarm
+          ? [...parent.extensions.filter((ext) => ext.name !== this.extension.name && ext.name !== SwarmTools.name), SwarmTools]
+          : { remove: [this.extension, SwarmTools] },
         instructions: [
           `You are the ${definition.name} subagent. Another agent handed you this task; your final answer goes back to it, so make it complete and concise.`,
           definition.prompt.trim(),
+          ...(doc.swarm ? [swarmInstructions(doc.swarm, index)] : []),
         ].filter(Boolean).join("\n\n"),
       });
-      const child: { id: number; startedAt: number; endedAt?: number } = { id: Number(created.id), startedAt: Date.now() };
+      const child: { id: number; startedAt: number; endedAt?: number; result?: SubagentResult } = { id: Number(created.id), startedAt: Date.now() };
       doc.children[index] = child;
       return child;
     });
@@ -540,8 +666,9 @@ class CrewRun {
     return { model: fallback, note: `${definition.model} isn't set up on this computer; using ${instead}` };
   }
 
-  /** Reads a subagent's state, latest step, cost and answer from its view. */
+  /** Views supply progress/presentation only; original submission receipts decide the result. */
   observe(result: SubagentResult, view: ConversationView) {
+    if (terminal(result.status)) return;
     const messages = transcript(view);
     const live = view.docs["pi.live"] as { run?: unknown; generation?: unknown; tools?: { callId: string; name: string; status: string }[] } | undefined;
     result.cost = Object.values((view.docs["pi.usage"] ?? {}) as Record<string, Record<string, { cost?: { total?: number } }>>)
@@ -572,14 +699,6 @@ class CrewRun {
         : live.generation ? "Thinking" : "Working";
       return;
     }
-    const last = [...messages].reverse().find((message) => message.role === "assistant");
-    if (!last || result.status === "waiting") return;
-    const output = last.content.map((block) => block.type === "text" ? block.text : "").join("").trim();
-    result.output = output.length > MAX_OUTPUT ? `${output.slice(0, MAX_OUTPUT)}…` : output;
-    // A run that ended at its tools, with no answer after them, was stopped.
-    const unanswered = messages.at(-1)?.role !== "assistant" || last.stopReason === "toolUse";
-    result.status = last.stopReason === "error" ? "failed" : last.stopReason === "aborted" || unanswered ? "stopped" : "done";
-    result.now = result.status === "done" ? gist(output) : last.errorMessage ?? (result.status === "stopped" ? "Stopped" : "Failed");
   }
 
   /** Publishes progress, at most once a second unless `now`. */
@@ -590,10 +709,17 @@ class CrewRun {
       return;
     }
     this.#reported = Date.now();
-    const results = this.results.map((result) => result.output && result.output.length > MAX_SHOWN
-      ? { ...result, output: `${result.output.slice(0, MAX_SHOWN)}…` } : result);
-    const details: SubagentDetails = { version: 1, mode: this.mode, background: true, ...(this.#resumed ? { resumed: true } : {}), results };
     await this.write(async (tx) => {
+      const doc = await tx.doc(Children, this.taskId);
+      // A queued progress report must not overwrite a result frozen since it
+      // was scheduled, including while the crew is recovering.
+      const results = this.results.map((progress, index) => {
+        const result = doc.children[index]?.result ?? progress;
+        return result.output && result.output.length > MAX_SHOWN
+          ? { ...result, output: `${result.output.slice(0, MAX_SHOWN)}…` } : result;
+      });
+      const details: SubagentDetails = { version: 1, mode: this.mode, background: true, ...(this.#resumed ? { resumed: true } : {}), results };
+      if (doc.swarm) details.swarm = swarmProjection(doc.swarm);
       (await tx.doc(Calls, this.runtime.conversationId)).calls[this.input.callId] = JSON.parse(JSON.stringify(details));
     });
   }

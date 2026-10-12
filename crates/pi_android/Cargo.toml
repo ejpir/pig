@@ -24,6 +24,8 @@ anyhow.workspace = true
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 async-channel.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
 gpui.workspace = true
 gpui_android = { path = "../gpui_android" }
 libc = "0.2"

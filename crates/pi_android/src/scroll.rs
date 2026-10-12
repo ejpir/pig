@@ -4,9 +4,9 @@
 use crate::theme::theme;
 use gpui::{
     AnyElement, App, Bounds, DispatchPhase, Div, ElementId, IntoElement, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, RenderOnce, ScrollHandle, Stateful,
-    StyleRefinement, TouchDragEvent, TouchPhase, Window, canvas, div, fill, point, prelude::*, px,
-    size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderOnce, ScrollHandle,
+    Stateful, StyleRefinement, TouchDragEvent, TouchPhase, Window, canvas, div, fill, point,
+    prelude::*, px, size,
 };
 use std::{
     cell::RefCell,
@@ -24,12 +24,38 @@ const SETTLED_DISTANCE: f32 = 15.;
 /// the first momentum frame, or immediately after the final momentum frame.
 const INPUT_QUIET: Duration = Duration::from_millis(200);
 
+#[derive(Clone)]
+enum Viewport {
+    Scroll(ScrollHandle),
+    List(ListState),
+}
+
+impl Viewport {
+    fn bounds(&self) -> Bounds<Pixels> {
+        match self {
+            Self::Scroll(handle) => handle.bounds(),
+            Self::List(state) => state.viewport_bounds(),
+        }
+    }
+}
+
+fn outside_viewport(position: Point<Pixels>, bounds: Bounds<Pixels>) -> bool {
+    bounds.size.width > px(0.)
+        && bounds.size.height > px(0.)
+        && [bounds.left(), bounds.top(), bounds.right(), bounds.bottom()]
+            .iter()
+            .all(|value| f32::from(*value).is_finite())
+        && !bounds.contains(&position)
+}
+
 /// Visible movement and the actual touch-scroll lifecycle, across every scroll area.
 #[derive(Default)]
 struct Motion {
     moved: VecDeque<(Instant, f32)>,
     scrolling: bool,
     last_input: Option<Instant>,
+    /// The gesture's source, not whichever viewport happened to paint last.
+    viewport: Option<Viewport>,
 }
 
 impl Motion {
@@ -68,11 +94,33 @@ thread_local! {
     static MOTION: RefCell<Motion> = RefCell::default();
 }
 
-/// Whether scrolling has visibly stopped, so a touch should tap rather than
-/// catch a fling that only GPUI still thinks is running.
+/// Outside the moving viewport, the first touch belongs to the new control.
+/// Inside it, preserve catch-only behavior until momentum visibly settles.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn release_fling_at(position: Point<Pixels>) -> bool {
+    MOTION.with(|motion| {
+        let mut motion = motion.borrow_mut();
+        let viewport = motion.viewport.take();
+        motion.settled(Instant::now())
+            || viewport.is_some_and(|viewport| outside_viewport(position, viewport.bounds()))
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn settled() -> bool {
     MOTION.with(|motion| motion.borrow().settled(Instant::now()))
+}
+
+fn note_viewport_input(phase: TouchPhase, viewport: Viewport) {
+    MOTION.with(|motion| {
+        let mut motion = motion.borrow_mut();
+        motion.input(phase, Instant::now());
+        // Ended may be the synthetic cancellation of an old fling. Keep a
+        // source through finger-up, but never restore one cleared by new Down.
+        if matches!(phase, TouchPhase::Started | TouchPhase::Moved) {
+            motion.viewport = Some(viewport);
+        }
+    });
 }
 
 /// Whether a finger-driven scroll or its momentum is still active. Unlike
@@ -212,6 +260,7 @@ impl RenderOnce for ScrollArea {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let measure = self.handle.clone();
         let handle = self.handle.clone();
+        let source = Viewport::Scroll(self.handle.clone());
         self.outer
             .child(
                 div()
@@ -220,7 +269,9 @@ impl RenderOnce for ScrollArea {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.handle)
-                    .on_scroll_wheel(|event, _, _| note_input(event.touch_phase))
+                    .on_scroll_wheel(move |event, _, _| {
+                        note_viewport_input(event.touch_phase, source.clone())
+                    })
                     .children(self.children),
             )
             .child(
@@ -398,6 +449,7 @@ pub(crate) struct ListScrollArea {
 
 pub(crate) fn virtual_list(id: impl Into<ElementId>, state: &ListState) -> ListScrollArea {
     let id = id.into();
+    let source = Viewport::List(state.clone());
     ListScrollArea {
         #[cfg(feature = "ui-test")]
         name: format!("{id:?}"),
@@ -407,7 +459,9 @@ pub(crate) fn virtual_list(id: impl Into<ElementId>, state: &ListState) -> ListS
             .min_h_0()
             .flex()
             .flex_col()
-            .on_scroll_wheel(|event, _, _| note_input(event.touch_phase)),
+            .on_scroll_wheel(move |event, _, _| {
+                note_viewport_input(event.touch_phase, source.clone())
+            }),
         state: state.clone(),
         children: Vec::new(),
     }
@@ -607,6 +661,41 @@ mod tests {
         assert_eq!(top.offset(top.track.bottom(), px(0.)), px(-4500.));
         let end = Geometry::new(bounds, px(4500.), px(-9999.)).unwrap();
         assert_eq!(end.thumb.bottom(), end.track.bottom());
+    }
+
+    #[test]
+    fn only_valid_viewports_allow_outside_taps_to_release_momentum() {
+        let bounds = Bounds::new(point(px(10.), px(100.)), size(px(300.), px(400.)));
+        assert!(!outside_viewport(point(px(100.), px(250.)), bounds));
+        assert!(outside_viewport(point(px(100.), px(550.)), bounds));
+        assert!(outside_viewport(point(px(100.), px(30.)), bounds));
+        assert!(!outside_viewport(
+            point(px(100.), px(550.)),
+            Bounds::default()
+        ));
+        let invalid = Bounds::new(point(px(f32::NAN), px(100.)), size(px(300.), px(400.)));
+        assert!(!outside_viewport(point(px(100.), px(550.)), invalid));
+        MOTION.with(|motion| *motion.borrow_mut() = Motion::default());
+        note_movement(px(100.));
+        assert!(
+            !release_fling_at(point(px(100.), px(550.))),
+            "unknown source remains catch-only"
+        );
+        note_viewport_input(TouchPhase::Started, Viewport::Scroll(ScrollHandle::new()));
+        note_input(TouchPhase::Ended);
+        MOTION.with(|motion| assert!(motion.borrow().viewport.is_some()));
+        assert!(
+            !release_fling_at(point(px(100.), px(550.))),
+            "unlaid-out source remains catch-only"
+        );
+        note_viewport_input(TouchPhase::Ended, Viewport::Scroll(ScrollHandle::new()));
+        MOTION.with(|motion| {
+            assert!(
+                motion.borrow().viewport.is_none(),
+                "synthetic Ended cannot restore the old source"
+            );
+            *motion.borrow_mut() = Motion::default();
+        });
     }
 
     #[test]

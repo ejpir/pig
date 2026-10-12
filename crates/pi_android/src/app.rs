@@ -41,6 +41,11 @@ actions!(pi_android, [GoBack]);
 pub enum Route {
     Connect,
     Sessions,
+    Schedules,
+    ScheduleEdit,
+    ScheduleDetail,
+    ScheduleConfirm,
+    ScheduleHistory,
     Projects,
     Start,
     /// A file from the project browser, read-only.
@@ -51,6 +56,10 @@ pub enum Route {
     Diagnostics(SessionId),
     /// Every subagent across all of a session's turns and hand-offs.
     Subagents(SessionId),
+    /// One session-owned swarm: map, addressed exchanges and peer roster.
+    Swarm(SessionId, CrewPick),
+    /// An immutable swarm/peer binding; Pick is only its original presentation slot.
+    SwarmPeer(SessionId, Pick, u64),
     /// One subagent of a session, with exact-target input when durable APIs support it.
     Subagent(SessionId, Pick),
     Settings,
@@ -62,6 +71,13 @@ pub struct Pick {
     pub turn: usize,
     pub handoff: usize,
     pub index: usize,
+}
+
+/// A crew within the originating session; UI state additionally binds its exact swarm ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CrewPick {
+    pub turn: usize,
+    pub handoff: usize,
 }
 
 /// Getting back to the saved computer when the app opens, in place of setup.
@@ -240,6 +256,7 @@ impl RenderStats {
 }
 
 pub struct PhoneApp {
+    pub(crate) schedules: crate::schedules::Schedules,
     pub(crate) store: Option<Store>,
     pub(crate) routes: Vec<Route>,
     pub(crate) sheet: Option<Sheet>,
@@ -282,6 +299,10 @@ pub struct PhoneApp {
     /// or showing every subagent instead of the first few.
     pub(crate) folded_handoffs: HashSet<(SessionId, usize, usize)>,
     pub(crate) all_subagents: HashSet<(SessionId, usize, usize)>,
+    pub(crate) swarm_input_targets: HashMap<(SessionId, String), crate::live::SubagentInputTarget>,
+    pub(crate) next_swarm_peer: u64,
+    pub(crate) swarm_peer_bindings: HashMap<u64, crate::screens::swarm::SwarmPeerBinding>,
+    pub(crate) swarm_views: HashMap<(SessionId, CrewPick), crate::screens::swarm::SwarmScreenState>,
     /// A sheet transition gives focus back to the app once, before its fields can focus.
     sheet_focus_pending: bool,
     /// The answer picked in the question sheet; sent only with Answer.
@@ -518,6 +539,7 @@ impl PhoneApp {
             .map(|identity| identity.public_line());
         cx.set_global(prefs);
         let mut app = Self {
+            schedules: crate::schedules::Schedules::default(),
             store: None,
             routes: vec![Route::Connect],
             sheet: None,
@@ -547,6 +569,10 @@ impl PhoneApp {
             all_files: HashSet::new(),
             folded_handoffs: HashSet::new(),
             all_subagents: HashSet::new(),
+            swarm_input_targets: HashMap::new(),
+            next_swarm_peer: 1,
+            swarm_peer_bindings: HashMap::new(),
+            swarm_views: HashMap::new(),
             sheet_focus_pending: false,
             choice: None,
             expanded: HashSet::new(),
@@ -643,6 +669,14 @@ impl PhoneApp {
 
     pub(crate) fn scroll(&mut self, route: Route) -> ScrollHandle {
         self.scrolls.entry(route).or_default().clone()
+    }
+
+    pub(crate) fn reset_swarm_views(&mut self) {
+        self.swarm_views.clear();
+        self.swarm_peer_bindings.clear();
+        self.swarm_input_targets.clear();
+        self.scrolls
+            .retain(|route, _| !matches!(route, Route::Swarm(_, _) | Route::SwarmPeer(_, _, _)));
     }
 
     /// Follow content updates only while the reader is at the bottom. Doing
@@ -785,14 +819,25 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.routes = vec![Route::Sessions];
+        self.push_session(id, window, cx);
+    }
+
+    /// Opens an ordinary session while preserving the caller's return stack
+    /// (for example, schedule history). Session setup must match the list opener.
+    pub(crate) fn push_session(
+        &mut self,
+        id: SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(store) = &mut self.store {
             store.watch(id);
         }
         if !self.scrolls.contains_key(&Route::Thread(id)) {
             self.scroll(Route::Thread(id)).scroll_to_bottom();
         }
-        self.routes = vec![Route::Sessions, Route::Thread(id)];
-        self.entered(window, cx);
+        self.push(Route::Thread(id), window, cx);
     }
 
     /// Tells the connection which session is on screen: idle ones elsewhere
@@ -804,6 +849,8 @@ impl PhoneApp {
             | Route::History(id)
             | Route::Diagnostics(id)
             | Route::Subagents(id)
+            | Route::Swarm(id, _)
+            | Route::SwarmPeer(id, _, _)
             | Route::Subagent(id, _) => Some(id),
             _ => None,
         };
@@ -827,6 +874,8 @@ impl PhoneApp {
         | Route::History(id)
         | Route::Diagnostics(id)
         | Route::Subagents(id)
+        | Route::Swarm(id, _)
+        | Route::SwarmPeer(id, _, _)
         | Route::Subagent(id, _) = self.route()
         {
             activity::cancel_notification(alerts::question_id(id));
@@ -1007,8 +1056,16 @@ impl PhoneApp {
         }
         if self.routes.len() > 1 {
             let left = self.routes.pop();
-            if let Some(Route::Subagent(id, _)) = left {
+            if left == Some(Route::ScheduleConfirm) {
+                self.schedules.confirmation = None;
+                self.schedules.consent = false;
+            }
+            if let Some(Route::Subagent(id, _) | Route::SwarmPeer(id, _, _)) = left {
                 self.follow_subagent(id, None);
+            }
+            if let Some(route @ Route::SwarmPeer(_, _, token)) = left {
+                self.swarm_peer_bindings.remove(&token);
+                self.scrolls.remove(&route);
             }
             self.show_live();
             if let Route::Thread(id) = self.route() {
@@ -1062,6 +1119,8 @@ impl PhoneApp {
 
     /// The sample sessions, for trying the app without a computer.
     pub(crate) fn open_store(&mut self, address: &str) {
+        self.reset_swarm_views();
+        self.schedules.invalidate();
         self.project_browser.clear();
         self.project_files_generation += 1;
         self.project = 0;
@@ -1118,14 +1177,21 @@ impl PhoneApp {
     }
 
     fn begin_connection_attempt(&mut self) -> u64 {
+        self.schedules.invalidate();
         self.connection_generation = self.connection_generation.wrapping_add(1);
         self.connecting = true;
         self.connection_generation
     }
 
+    /// Cached screens must not present an in-flight reconnect as fresh state.
+    pub(crate) fn is_reconnecting(&self) -> bool {
+        self.reconnecting
+    }
+
     /// Retires an in-flight connection without relying on its transport being cancellable.
     /// Its task may finish, but the generation check prevents stale navigation or state.
     pub(crate) fn cancel_connection_attempt(&mut self) {
+        self.schedules.invalidate();
         self.connection_generation = self.connection_generation.wrapping_add(1);
         self.connecting = false;
         self.pairing_status = None;
@@ -1391,6 +1457,7 @@ impl PhoneApp {
         self.thread_pending_remeasure.clear();
         self.thread_snapshots.clear();
         self.thread_list_offsets.clear();
+        self.reset_swarm_views();
         self.store = Some(store);
         self.routes = vec![Route::Sessions, Route::Projects];
         self.threads.clear();
@@ -1592,7 +1659,9 @@ impl PhoneApp {
         let Ok(identity) = self.identity() else {
             return;
         };
-        let known = self.prefs(cx).host_keys.get(&address.to_string()).cloned();
+        let host = address.to_string();
+        let generation = self.connection_generation;
+        let known = self.prefs(cx).host_keys.get(&host).cloned();
         self.reconnecting = true;
         self.last_reconnect = Instant::now();
         cx.spawn(async move |this, cx| {
@@ -1603,6 +1672,14 @@ impl PhoneApp {
             }
             .await;
             this.update(cx, |this, cx| {
+                if this.connection_generation != generation
+                    || this
+                        .store
+                        .as_ref()
+                        .is_none_or(|store| store.computer.address != host || store.is_sample())
+                {
+                    return;
+                }
                 this.reconnecting = false;
                 let Some(store) = &mut this.store else {
                     return;
@@ -1651,6 +1728,8 @@ impl PhoneApp {
             | Route::History(id)
             | Route::Diagnostics(id)
             | Route::Subagents(id)
+            | Route::Swarm(id, _)
+            | Route::SwarmPeer(id, _, _)
             | Route::Subagent(id, _) => Some(id),
             _ => None,
         }
@@ -1658,6 +1737,11 @@ impl PhoneApp {
 
     /// The current session's confirmed model, or defaults on New session.
     pub(crate) fn model_settings(&self, cx: &App) -> (String, String) {
+        if self.route() == Route::ScheduleEdit
+            && let Some(draft) = &self.schedules.draft
+        {
+            return (draft.model_id.clone(), String::new());
+        }
         if let Some(id) = self.model_session() {
             if let Some(live) = self.store.as_ref().and_then(|store| store.live.as_ref()) {
                 return live
@@ -1679,6 +1763,14 @@ impl PhoneApp {
         model_id: String,
         cx: &mut Context<Self>,
     ) {
+        if self.route() == Route::ScheduleEdit
+            && let Some(draft) = &mut self.schedules.draft
+        {
+            draft.provider = provider;
+            draft.model_id = model_id;
+            cx.notify();
+            return;
+        }
         if let Some(id) = self.model_session() {
             let (_, thinking) = self.model_settings(cx);
             if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
@@ -1722,6 +1814,10 @@ impl PhoneApp {
 
     /// Leaves the computer: back to Connect, its host key forgotten.
     pub(crate) fn forget_computer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(host) = self.schedule_host() {
+            self.schedules.caches.remove(&host);
+        }
+        self.schedules.invalidate();
         let address = self
             .store
             .as_ref()
@@ -1854,7 +1950,7 @@ impl PhoneApp {
 
     fn viewing(&self, id: SessionId) -> bool {
         self.visible
-            && matches!(self.route(), Route::Thread(shown) | Route::Review(shown) | Route::History(shown) | Route::Diagnostics(shown) | Route::Subagents(shown) | Route::Subagent(shown, _) if shown == id)
+            && matches!(self.route(), Route::Thread(shown) | Route::Review(shown) | Route::History(shown) | Route::Diagnostics(shown) | Route::Subagents(shown) | Route::Swarm(shown, _) | Route::SwarmPeer(shown, _, _) | Route::Subagent(shown, _) if shown == id)
     }
 
     fn alert(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -1948,6 +2044,8 @@ impl PhoneApp {
             | Route::History(id)
             | Route::Diagnostics(id)
             | Route::Subagents(id)
+            | Route::Swarm(id, _)
+            | Route::SwarmPeer(id, _, _)
             | Route::Subagent(id, _) = self.route()
         {
             activity::cancel_notification(alerts::question_id(id));
@@ -2041,6 +2139,8 @@ impl PhoneApp {
                         failed: false,
                         added: 0,
                         removed: 0,
+                        diff: Vec::new(),
+                        diff_is_preview: false,
                     });
                 }
                 let tool = stage.tools.last_mut().unwrap();
@@ -2068,6 +2168,8 @@ impl PhoneApp {
                 | Route::History(id)
                 | Route::Diagnostics(id)
                 | Route::Subagents(id)
+                | Route::Swarm(id, _)
+                | Route::SwarmPeer(id, _, _)
                 | Route::Subagent(id, _) => self.store.as_ref().and_then(|s| s.session(id)),
                 _ => None,
             };
@@ -2277,8 +2379,17 @@ impl PhoneApp {
         self.scrolls.remove(&Route::History(id));
         self.scrolls.remove(&Route::Diagnostics(id));
         self.scrolls.remove(&Route::Subagents(id));
+        self.scrolls
+            .retain(|route, _| !matches!(route, Route::Swarm(session, _) if *session == id));
+        self.swarm_views.retain(|(session, _), _| *session != id);
+        self.swarm_peer_bindings
+            .retain(|_, binding| binding.id != id);
+        self.swarm_input_targets
+            .retain(|(session, _), _| *session != id);
+        self.scrolls
+            .retain(|route, _| !matches!(route, Route::SwarmPeer(session, _, _) if *session == id));
         self.preview_transport_diagnostics.remove(&id);
-        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) | Route::History(session) | Route::Diagnostics(session) | Route::Subagents(session) | Route::Subagent(session, _) if *session == id));
+        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) | Route::History(session) | Route::Diagnostics(session) | Route::Subagents(session) | Route::Swarm(session, _) | Route::SwarmPeer(session, _, _) | Route::Subagent(session, _) if *session == id));
         if self.sheet == Some(Sheet::Delete(id)) {
             self.close_sheet(cx);
         }
@@ -2557,11 +2668,15 @@ impl PhoneApp {
             .clone()
             .update(cx, |area, _| area.enter_sends = sends);
         let conversation = conversation.to_owned();
+        let swarm = match self.route() {
+            Route::SwarmPeer(_, _, token) => self.swarm_peer_bindings.get(&token).cloned(),
+            _ => None,
+        };
         self.subscriptions.push(cx.subscribe_in(
             &composer,
             window,
             move |this, _, event, window, cx| {
-                this.subagent_composer_event(id, &conversation, event, window, cx)
+                this.subagent_composer_event(id, &conversation, swarm.as_ref(), event, window, cx)
             },
         ));
         self.subagent_composers.insert(key, composer.clone());
@@ -2572,12 +2687,36 @@ impl PhoneApp {
         &mut self,
         id: SessionId,
         conversation: &str,
+        swarm: Option<&crate::screens::swarm::SwarmPeerBinding>,
         event: &ComposerEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
             ComposerEvent::Send { text, attachments } => {
+                let active_swarm = match self.route() {
+                    Route::SwarmPeer(_, _, token) => self.swarm_peer_bindings.get(&token),
+                    _ => None,
+                };
+                if swarm
+                    .or(active_swarm)
+                    .is_some_and(|binding| !self.can_send_swarm_peer(binding, conversation))
+                {
+                    self.notify_user("Open this exact peer with a current connection before sending. Nothing was queued.", cx);
+                    return;
+                }
+                if swarm.or(active_swarm).is_some() {
+                    let expected = self.swarm_input_targets.get(&(id, conversation.to_owned()));
+                    let current = self
+                        .store
+                        .as_ref()
+                        .and_then(|store| store.live.as_ref())
+                        .and_then(|live| live.subagent_input_target(id, conversation).ok());
+                    if !crate::screens::swarm::input_target_current(expected, current.as_ref()) {
+                        self.notify_user("The displayed child turn changed. Review the peer before explicitly retrying; nothing was queued.", cx);
+                        return;
+                    }
+                }
                 if !attachments.is_empty() {
                     self.notify_user("Direct subagent input supports text only.", cx);
                     return;
@@ -2589,7 +2728,15 @@ impl PhoneApp {
                     .ok_or_else(|| {
                         "Direct subagent input requires a live durable session.".to_owned()
                     })
-                    .and_then(|live| live.prompt_subagent(id, conversation, text.clone()));
+                    .and_then(|live| {
+                        if matches!(
+                            live.subagent_input_target(id, conversation)?,
+                            crate::live::SubagentInputTarget::FollowUp
+                        ) {
+                            return Err("This subagent has finished. Nothing was sent.".into());
+                        }
+                        live.prompt_subagent(id, conversation, text.clone())
+                    });
                 match sent {
                     Ok(()) => {
                         window.dismiss_virtual_keyboard();
@@ -3102,6 +3249,9 @@ impl Render for PhoneApp {
         #[cfg(feature = "ui-test")]
         if cx.has_global::<crate::testing::State>() {
             let state = cx.global_mut::<crate::testing::State>();
+            // Probes describe this frame, not controls/scroll viewports left
+            // behind on earlier routes. Stale bounds must never authorize taps.
+            state.bounds.clear();
             state.scale = window.scale_factor();
             state.viewport = [
                 window.viewport_size().width.into(),
@@ -3122,6 +3272,11 @@ impl Render for PhoneApp {
         let screen = match self.route() {
             Route::Connect => self.connect_screen(window, cx).into_any_element(),
             Route::Sessions => self.sessions_screen(window, cx).into_any_element(),
+            Route::Schedules
+            | Route::ScheduleEdit
+            | Route::ScheduleDetail
+            | Route::ScheduleConfirm
+            | Route::ScheduleHistory => self.schedules_screen(window, cx),
             Route::Projects => self.projects_screen(window, cx).into_any_element(),
             Route::Start => self.start_screen(window, cx).into_any_element(),
             Route::File => self.file_screen(window, cx).into_any_element(),
@@ -3130,7 +3285,10 @@ impl Render for PhoneApp {
             Route::History(id) => self.history_screen(id, window, cx),
             Route::Diagnostics(id) => self.diagnostics_screen(id, window, cx),
             Route::Subagents(id) => self.subagents_screen(id, window, cx),
-            Route::Subagent(id, pick) => self.subagent_screen(id, pick, window, cx),
+            Route::Swarm(id, pick) => self.swarm_screen(id, pick, window, cx),
+            Route::Subagent(id, pick) | Route::SwarmPeer(id, pick, _) => {
+                self.subagent_screen(id, pick, window, cx)
+            }
             Route::Settings => self.settings_screen(window, cx).into_any_element(),
         };
         let sheet = self.sheet.or(self.closing_sheet).map(|sheet| {

@@ -43,6 +43,8 @@ pub struct Subagent {
     pub status: Status,
     /// What `get_subagent` takes; absent before it starts, and in stock Pi.
     pub conversation_id: Option<String>,
+    /// Stable address inside an opt-in swarm; display names need not be unique.
+    pub peer_id: Option<String>,
     /// "provider/model".
     pub model: Option<String>,
     /// Why it doesn't run on the model its agent file names.
@@ -68,6 +70,153 @@ impl Subagent {
     }
 }
 
+/// Explicit peer communication attached to one opt-in, session-owned crew.
+/// This is a bounded display projection, not mailbox admission authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Swarm {
+    pub id: String,
+    pub members: Vec<SwarmMember>,
+    pub messages: Vec<SwarmMessage>,
+    pub closed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwarmMember {
+    pub id: String,
+    pub agent: String,
+    pub task: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwarmMessageKind {
+    Finding,
+    Question,
+    Reply,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwarmMessageStatus {
+    Queued,
+    /// The recipient explicitly retrieved it through its peer tool. Not agreement,
+    /// a passing check, or proof of successful downstream execution.
+    Received,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwarmMessage {
+    pub id: String,
+    pub sequence: u64,
+    pub from: String,
+    pub to: String,
+    pub kind: SwarmMessageKind,
+    pub text: String,
+    pub reply_to: Option<String>,
+    pub status: SwarmMessageStatus,
+    pub created_at: u64,
+    pub received_at: Option<u64>,
+}
+
+impl Swarm {
+    /// Old helpers and unsupported versions remain ordinary handoffs. Reject
+    /// ambiguous rosters rather than guessing which duplicate name was addressed.
+    pub fn from_details(value: &Value) -> Option<Self> {
+        if value["version"] != 1 {
+            return None;
+        }
+        let id = bounded(value, "id", 256)?;
+        let rows = value["members"].as_array()?;
+        if !(2..=8).contains(&rows.len()) {
+            return None;
+        }
+        let mut members = Vec::<SwarmMember>::new();
+        for row in rows {
+            let member_id = bounded(row, "id", 64)?;
+            if members.iter().any(|member| member.id == member_id) {
+                return None;
+            }
+            members.push(SwarmMember {
+                id: member_id,
+                agent: bounded(row, "agent", 64)?,
+                task: shortened(&text(row, "task"), 512),
+            });
+        }
+        let mut messages = Vec::<SwarmMessage>::new();
+        // Defensive UI bound in addition to the computer-side projection limit.
+        let rows = value["messages"].as_array().map_or(&[][..], Vec::as_slice);
+        for row in rows.iter().skip(rows.len().saturating_sub(32)) {
+            let Some(message) = SwarmMessage::from_value(row) else {
+                continue;
+            };
+            if !members.iter().any(|member| member.id == message.from)
+                || !members.iter().any(|member| member.id == message.to)
+                || messages.iter().any(|existing| existing.id == message.id)
+            {
+                continue;
+            }
+            messages.push(message);
+        }
+        Some(Self {
+            id,
+            members,
+            messages,
+            closed: value["closed"] == true,
+        })
+    }
+
+    pub fn member(&self, id: &str) -> Option<&SwarmMember> {
+        self.members.iter().find(|member| member.id == id)
+    }
+}
+
+impl SwarmMessage {
+    fn from_value(value: &Value) -> Option<Self> {
+        let kind = match value["kind"].as_str()? {
+            "finding" => SwarmMessageKind::Finding,
+            "question" => SwarmMessageKind::Question,
+            "reply" => SwarmMessageKind::Reply,
+            _ => return None,
+        };
+        let status = match value["status"].as_str()? {
+            "queued" => SwarmMessageStatus::Queued,
+            "received" => SwarmMessageStatus::Received,
+            "cancelled" => SwarmMessageStatus::Cancelled,
+            _ => return None,
+        };
+        let reply_to = bounded(value, "replyTo", 256);
+        if kind == SwarmMessageKind::Reply && reply_to.is_none() {
+            return None;
+        }
+        Some(Self {
+            id: bounded(value, "id", 256)?,
+            sequence: value["sequence"].as_u64()?,
+            from: bounded(value, "from", 64)?,
+            to: bounded(value, "to", 64)?,
+            kind,
+            text: shortened(value["text"].as_str()?, 4096),
+            reply_to,
+            status,
+            created_at: value["createdAt"].as_u64()?,
+            received_at: value["receivedAt"].as_u64(),
+        })
+    }
+}
+
+fn bounded(value: &Value, key: &str, bytes: usize) -> Option<String> {
+    value[key]
+        .as_str()
+        .filter(|text| !text.trim().is_empty() && text.len() <= bytes)
+        .map(str::to_owned)
+}
+
+fn shortened(text: &str, bytes: usize) -> String {
+    let mut end = text.len().min(bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
 /// One `subagent` call: its subagents in order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Handoff {
@@ -77,6 +226,8 @@ pub struct Handoff {
     /// Its subagents work on after the call returns, and report through the session.
     pub background: bool,
     pub subagents: Vec<Subagent>,
+    /// Present only when the computer reports opt-in peer communications.
+    pub swarm: Option<Swarm>,
 }
 
 impl Handoff {
@@ -123,6 +274,7 @@ impl Handoff {
             resumed: false,
             background: false,
             subagents,
+            swarm: None,
         }
     }
 
@@ -143,6 +295,7 @@ impl Handoff {
             resumed: details["resumed"] == true,
             background: details["background"] == true,
             subagents,
+            swarm: Swarm::from_details(&details["swarm"]),
         })
     }
 
@@ -168,6 +321,7 @@ impl Subagent {
             task,
             status: Status::Waiting,
             conversation_id: None,
+            peer_id: None,
             model: None,
             model_note: None,
             now: None,
@@ -190,6 +344,7 @@ impl Subagent {
             _ => Status::Waiting,
         };
         subagent.conversation_id = optional(result, "conversationId");
+        subagent.peer_id = bounded(result, "peerId", 64);
         subagent.model = optional(result, "model");
         subagent.model_note = optional(result, "modelNote");
         subagent.now = optional(result, "now");
@@ -371,6 +526,85 @@ mod tests {
             Handoff::of(&tool).unwrap().subagents[0].status,
             Status::Running
         );
+    }
+
+    fn swarm_details() -> Value {
+        json!({"version":1,"id":"crew-123","closed":false,"members":[
+            {"id":"peer-1","agent":"scout","task":"Find clients"},
+            {"id":"peer-2","agent":"scout","task":"Find protocol constraints"}
+        ],"messages":[
+            {"id":"m-1","sequence":1,"from":"peer-1","to":"peer-2","kind":"question","text":"Can we keep snapshots?","status":"received","createdAt":1000,"receivedAt":2000},
+            {"id":"m-2","sequence":2,"from":"peer-2","to":"peer-1","kind":"reply","replyTo":"m-1","text":"Yes, keep v1.","status":"queued","createdAt":3000}
+        ]})
+    }
+
+    #[test]
+    fn swarm_addresses_disambiguate_repeated_names_and_keep_receipts_separate() {
+        let handoff = Handoff::from_details(&json!({"version":1,"mode":"parallel","background":true,
+            "results":[{"agent":"scout","task":"Find clients","status":"running","conversationId":"3","peerId":"peer-1"}],
+            "swarm":swarm_details()
+        })).unwrap();
+        let swarm = handoff.swarm.unwrap();
+        assert_eq!(handoff.subagents[0].peer_id.as_deref(), Some("peer-1"));
+        assert_eq!(swarm.members.len(), 2);
+        assert_eq!(
+            swarm.member("peer-2").unwrap().task,
+            "Find protocol constraints"
+        );
+        assert_eq!(swarm.messages[0].status, SwarmMessageStatus::Received);
+        assert_eq!(swarm.messages[0].received_at, Some(2000));
+        assert_eq!(swarm.messages[1].kind, SwarmMessageKind::Reply);
+        assert_eq!(swarm.messages[1].reply_to.as_deref(), Some("m-1"));
+        assert_eq!(swarm.messages[1].status, SwarmMessageStatus::Queued);
+        assert!(!swarm.closed);
+    }
+
+    #[test]
+    fn invalid_rosters_and_foreign_messages_are_not_invented_as_live_swarm_state() {
+        let mut details = swarm_details();
+        details["version"] = json!(2);
+        assert!(Swarm::from_details(&details).is_none());
+        details["version"] = json!(1);
+        details["members"][1]["id"] = json!("peer-1");
+        assert!(Swarm::from_details(&details).is_none());
+        details["members"][1]["id"] = json!("peer-2");
+        details["messages"][0]["to"] = json!("foreign-peer");
+        details["messages"][1]["kind"] = json!("unknown");
+        assert!(Swarm::from_details(&details).unwrap().messages.is_empty());
+        assert!(
+            Handoff::from_args(&json!({"swarm":true,"tasks":[]}))
+                .swarm
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn swarm_history_is_bounded_and_unicode_text_remains_valid() {
+        let mut details = swarm_details();
+        let mut messages = Vec::new();
+        for sequence in 1..=60 {
+            messages.push(json!({"id":format!("m-{sequence}"),"sequence":sequence,"from":"peer-1","to":"peer-2",
+                "kind":"finding","text":"🦀".repeat(2000),"status":"cancelled","createdAt":1000}));
+        }
+        details["messages"] = json!(messages);
+        details["closed"] = json!(true);
+        let swarm = Swarm::from_details(&details).unwrap();
+        assert_eq!(swarm.messages.len(), 32);
+        assert_eq!(swarm.messages[0].sequence, 29);
+        assert_eq!(swarm.messages[31].sequence, 60);
+        assert_eq!(swarm.messages[0].text.len(), 4096);
+        assert!(swarm.closed);
+        assert_eq!(swarm.messages[0].status, SwarmMessageStatus::Cancelled);
+    }
+
+    #[test]
+    fn ordinary_handoffs_do_not_gain_peer_capabilities() {
+        let handoff = Handoff::from_details(&json!({"version":1,"mode":"single","results":[
+            {"agent":"worker","task":"build","status":"running"}
+        ]}))
+        .unwrap();
+        assert!(handoff.swarm.is_none());
+        assert!(handoff.subagents[0].peer_id.is_none());
     }
 
     #[test]

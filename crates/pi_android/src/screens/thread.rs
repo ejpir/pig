@@ -46,9 +46,17 @@ fn composer_status(session: &Session, compacting: bool) -> &'static str {
         "Compacting"
     } else if session.state == State::NeedsYou {
         "Needs you"
+    } else if session.details.background_compacting {
+        "Compacting"
     } else {
         "Working"
     }
+}
+
+/// Background compaction is visible work, but must not make an idle parent
+/// busy or replace the action needed to answer a question.
+fn composer_shows_stage(session: &Session, compacting: bool) -> bool {
+    !compacting && !session.details.background_compacting && session.state != State::NeedsYou
 }
 
 fn active_background_subagents(session: &Session) -> usize {
@@ -491,7 +499,8 @@ impl PhoneApp {
         let active_subagents = active_background_subagents(&session);
         let idle_subagents = idle_subagents(&session);
         composer.update(cx, |composer, _| {
-            composer.set_joined(working || idle_subagents > 0)
+            composer
+                .set_joined(working || idle_subagents > 0 || session.details.background_compacting)
         });
         let pages = session.turn().is_some_and(|turn| !turn.pages.is_empty());
         let area = composer.read(cx).area.clone();
@@ -644,9 +653,19 @@ impl PhoneApp {
                                 cx,
                             ))
                         })
-                        .when(idle_subagents > 0, |dock| {
-                            dock.child(subagent_working_strip(id, idle_subagents, &colors, cx))
-                        })
+                        .when(
+                            !running
+                                && (idle_subagents > 0 || session.details.background_compacting),
+                            |dock| {
+                                dock.child(idle_working_strip(
+                                    id,
+                                    idle_subagents,
+                                    session.details.background_compacting,
+                                    &colors,
+                                    cx,
+                                ))
+                            },
+                        )
                         .child(composer),
                 )
                 .into_any_element()
@@ -1459,6 +1478,7 @@ impl PhoneApp {
         };
         div()
             .id("question-card")
+            .debug_selector(|| "question-card".into())
             .relative()
             .child(crate::testing::probe("question-card"))
             .occlude()
@@ -1499,6 +1519,9 @@ impl PhoneApp {
                             ),
                     ),
             )
+            .when(session.details.background_compacting, |card| {
+                card.child(background_compaction_notice(colors).min_h(px(32.)))
+            })
             .child(
                 div()
                     .mt(px(12.))
@@ -1948,22 +1971,50 @@ fn subagent_working_link(
         )
 }
 
-/// Background work that does not make the parent run busy, on the composer's top edge.
-fn subagent_working_strip(
+fn background_compaction_notice(colors: &Theme) -> Div {
+    div()
+        .debug_selector(|| "composer-background-compaction".into())
+        .min_h(px(48.))
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(ui::ring_dot(colors.read))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(14.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Compacting in background…"),
+        )
+}
+
+/// Background work stays visible without disabling the idle parent's composer.
+fn idle_working_strip(
     id: SessionId,
     count: usize,
+    background_compacting: bool,
     colors: &Theme,
     cx: &Context<PhoneApp>,
-) -> impl IntoElement {
-    subagent_working_link(id, count, colors, cx)
+) -> Div {
+    div()
         .mx(px(12.))
         .mb(px(-1.))
         .px(px(16.))
+        .min_w_0()
         .bg(colors.panel)
         .border_1()
         .border_b_0()
         .border_color(colors.line_strong)
         .rounded_t(px(24.))
+        .when(count > 0, |strip| {
+            strip.child(subagent_working_link(id, count, colors, cx))
+        })
+        .when(background_compacting, |strip| {
+            strip.child(background_compaction_notice(colors))
+        })
 }
 
 /// Working, the time and Stop, on the composer's top edge.
@@ -1978,6 +2029,7 @@ fn working_strip(
     let id = session.id;
     let waiting = !compacting && session.state == State::NeedsYou;
     let status = composer_status(session, compacting);
+    let show_stage = composer_shows_stage(session, compacting);
     let last = session.turns.len().saturating_sub(1);
     let stage = session
         .turns
@@ -2006,19 +2058,21 @@ fn working_strip(
             button.on_click(cx.listener(move |this, _, _, cx| this.stop(id, cx)))
         });
     let strip = div()
+        .debug_selector(|| "composer-working-strip".into())
         .mx(px(12.))
         .mb(px(-1.))
+        .min_w_0()
         .min_h(px(48.))
         .pr(px(8.))
         .flex()
         .items_center()
-        .gap(px(12.))
+        .gap(px(8.))
         .bg(colors.panel)
         .border_1()
         .border_b_0()
         .border_color(colors.line_strong)
         .rounded_t(px(24.));
-    if active_subagents > 0 && !waiting && !compacting {
+    if active_subagents > 0 && show_stage {
         return strip
             .pl(px(8.))
             .child(
@@ -2029,35 +2083,62 @@ fn working_strip(
             )
             .child(stop);
     }
+    // Keep the status and timing in one shrinkable column. A one-row layout
+    // made the stage, segments and hour-long timer compete with the fixed-size
+    // actions, pushing Stop past the composer's border on phone-sized screens.
+    let (label, hue) = match (!show_stage, &stage) {
+        (false, Some((_, kind))) => (kind.name(StageStatus::Live), ui::stage_hue(*kind, colors)),
+        _ => (status, if waiting { colors.wait } else { colors.read }),
+    };
+    let details = div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .map(|details| match (!show_stage, &stage) {
+            (false, Some((turn, _))) => details.child(super::stream::segments(turn, colors)),
+            _ => details.child(ui::ring_dot(hue)),
+        })
+        .child(
+            meta(
+                if session.details.background_compacting && !compacting {
+                    if waiting {
+                        "Compacting in background…".into()
+                    } else {
+                        format!("In background · {}", duration_label(session.elapsed))
+                    }
+                } else {
+                    duration_label(session.elapsed)
+                },
+                colors,
+            )
+            .debug_selector(|| "composer-working-elapsed".into())
+            .min_w_0()
+            .flex_1()
+            .truncate(),
+        );
     strip
         .pl(px(16.))
-        .map(|strip| match (waiting || compacting, &stage) {
-            // The run line folded to four segments, and the stage it is in.
-            (false, Some((turn, kind))) => {
-                strip.child(super::stream::segments(turn, colors)).child(
-                    div()
-                        .flex_none()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(ui::stage_hue(*kind, colors))
-                        .child(kind.name(StageStatus::Live)),
-                )
-            }
-            _ => strip
-                .child(ui::ring_dot(if waiting {
-                    colors.wait
-                } else {
-                    colors.read
-                }))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .py(px(4.))
+                .flex()
+                .flex_col()
                 .child(
                     div()
-                        .flex_none()
+                        .debug_selector(|| "composer-working-status".into())
+                        .min_w_0()
+                        .truncate()
                         .text_size(px(14.))
+                        .line_height(px(20.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child(status),
-                ),
-        })
-        .child(meta(duration_label(session.elapsed), colors).flex_1())
+                        .text_color(hue)
+                        .child(label),
+                )
+                .child(details),
+        )
         .when(stage.is_some() && !waiting, |strip| {
             strip.child(
                 ui::tap("run-line", "chev_u", colors)
@@ -2100,6 +2181,178 @@ mod tests {
         cell::{Cell, RefCell},
         rc::Rc,
     };
+
+    struct WorkingFrame {
+        app: gpui::Entity<PhoneApp>,
+        session: Session,
+        compacting: bool,
+        active_subagents: usize,
+    }
+
+    impl Render for WorkingFrame {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.app.update(cx, |_, cx| {
+                let colors = theme(cx);
+                let running = thread_running(&self.session, self.compacting);
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .when(running, |frame| {
+                        frame.child(working_strip(
+                            &self.session,
+                            false,
+                            self.compacting,
+                            self.active_subagents,
+                            &colors,
+                            cx,
+                        ))
+                    })
+                    .when(!running, |frame| {
+                        frame.child(idle_working_strip(
+                            self.session.id,
+                            self.active_subagents,
+                            self.session.details.background_compacting,
+                            &colors,
+                            cx,
+                        ))
+                    })
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn composer_stop_stays_inside_border_on_narrow_screens(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = cx.new(|cx| PhoneApp::new(None, window, cx));
+            let mut session = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+            session.elapsed = Duration::from_secs(3_819);
+            WorkingFrame {
+                app,
+                session,
+                compacting: false,
+                active_subagents: 0,
+            }
+        });
+        for width in [320., 360., 393.] {
+            cx.simulate_resize(gpui::size(px(width), px(200.)));
+            // Stage + hour-long timer, blocking compaction, question deferred,
+            // and a live crew all reserve room for the independent Stop action.
+            for (state, compacting, background_compacting, active_subagents) in [
+                (State::Working, false, false, 0),
+                (State::Working, true, false, 0),
+                (State::NeedsYou, false, false, 0),
+                (State::Working, false, false, 12),
+                (State::Working, false, true, 12),
+                (State::NeedsYou, false, true, 0),
+            ] {
+                cx.update(|_, cx| {
+                    view.update(cx, |view, cx| {
+                        view.session.state = state;
+                        view.compacting = compacting;
+                        view.session.details.background_compacting = background_compacting;
+                        view.active_subagents = active_subagents;
+                        cx.notify();
+                    })
+                });
+                cx.run_until_parked();
+                let strip = cx.debug_bounds("composer-working-strip").unwrap();
+                let stop = cx.debug_bounds("composer-stop").unwrap();
+                assert!(stop.left() >= strip.left());
+                assert!(
+                    stop.right() <= strip.right() - px(8.),
+                    "Stop overflows at {width} dp"
+                );
+                assert!(stop.top() >= strip.top());
+                assert!(stop.bottom() <= strip.bottom());
+                if active_subagents == 0 || background_compacting {
+                    let status = cx.debug_bounds("composer-working-status").unwrap();
+                    assert!(status.size.width > px(0.));
+                    assert!(status.right() <= stop.left());
+                    let elapsed = cx.debug_bounds("composer-working-elapsed").unwrap();
+                    assert!(elapsed.size.width > px(0.));
+                    assert!(elapsed.right() <= stop.left());
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn idle_background_compaction_is_visible_without_a_foreground_stop(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = cx.new(|cx| PhoneApp::new(None, window, cx));
+            let mut session = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+            session.state = State::Done;
+            session.details.background_compacting = true;
+            WorkingFrame {
+                app,
+                session,
+                compacting: false,
+                active_subagents: 0,
+            }
+        });
+        cx.simulate_resize(gpui::size(px(320.), px(200.)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("composer-background-compaction").is_some());
+        assert!(cx.debug_bounds("composer-stop").is_none());
+
+        // A crew can coexist with background compaction; neither hides the other.
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.active_subagents = 2;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("subagents-working").is_some());
+        assert!(cx.debug_bounds("composer-background-compaction").is_some());
+
+        cx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.session.details.background_compacting = false;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("composer-background-compaction").is_none());
+        assert!(cx.debug_bounds("subagents-working").is_some());
+    }
+
+    #[gpui::test]
+    fn open_question_keeps_background_compaction_visible(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(px(320.), px(700.)));
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.open_store("sample@computer.local");
+                app.routes = vec![Route::Sessions, Route::Thread(id)];
+                let session = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == id)
+                    .unwrap();
+                session.state = State::NeedsYou;
+                session.script = None;
+                session.details.background_compacting = true;
+                session.question = Some(crate::model::Question {
+                    title: "Continue?".into(),
+                    body: "Choose whether to continue".into(),
+                    command: String::new(),
+                    choices: Vec::new(),
+                });
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("question-card").is_some());
+        assert!(cx.debug_bounds("composer-background-compaction").is_some());
+        assert!(cx.debug_bounds("composer-working-strip").is_none());
+        assert!(cx.debug_bounds("composer-stop").is_none());
+    }
 
     /// Keep the rendered queue snapshot even as the store changes. This drives
     /// the real X listener, not a second implementation of index/key dispatch.
@@ -2566,6 +2819,28 @@ mod tests {
         assert!(!thread_running(&session, false));
         assert!(thread_running(&session, true));
         assert_eq!(composer_status(&session, true), "Compacting");
+    }
+
+    #[test]
+    fn background_compaction_overrides_the_stage_without_blocking_idle_chat() {
+        let mut session = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+        assert!(session.turns.last().unwrap().live_stage().is_some());
+        assert!(composer_shows_stage(&session, false));
+
+        session.details.background_compacting = true;
+        assert_eq!(composer_status(&session, false), "Compacting");
+        assert!(!composer_shows_stage(&session, false));
+
+        session.state = State::Done;
+        assert!(!thread_running(&session, false));
+        assert_eq!(composer_status(&session, false), "Compacting");
+        session.state = State::NeedsYou;
+        assert_eq!(composer_status(&session, false), "Needs you");
+        assert_eq!(composer_status(&session, true), "Compacting");
+        session.details.background_compacting = false;
+        session.state = State::Working;
+        assert!(composer_shows_stage(&session, false));
+        assert_eq!(composer_status(&session, false), "Working");
     }
 
     #[test]

@@ -8,7 +8,7 @@ Pi Desktop is a native GPUI application. It embeds Zed's editor, project, Markdo
 | --- | --- |
 | `pi_desktop` | Window, session controllers/views, navigation, preferences and native dialogs |
 | `pi_core` | GPUI-independent session reducer, typed commands and their routing, local/SSH transport, desktop channel, desktop extension and process ownership |
-| `pi_remote` | Cross-platform headless SSH helper: installation target, disposable stdio bridge, detached per-session backend owner, reconnect snapshots and independent file RPC |
+| `pi_remote` | Headless SSH helper: installation target, disposable stdio bridge, detached per-session backend owner, reconnect snapshots, independent file RPC and optional Linux/macOS host scheduler |
 | `backend/durable` | Experimental standalone durable runner: committed execution state, SQLite recovery and a text/coding-tool adapter; not a stock extension host |
 | `pi_editor` | Shared Zed projects/buffers, file operations and editor integration |
 | `pi_lsp_bridge` | Socket answering the desktop extension's language-server and jj requests |
@@ -105,9 +105,21 @@ A new SSH target can opt into `RemoteBackend::Durable`; legacy targets deseriali
 
 The runner reuses stock Pi's public `ModelRuntime` from the pinned 1.0.2 SDK for built-in providers, host-side `auth.json`/OAuth refresh under the existing credential lock, global `models.json` and cached catalogs. It never constructs a stock agent or extension runtime. Model/auth metadata excludes credentials and request headers; catalog refresh is offline/cache-only. Interactive login remains a terminal handoff on the SSH host.
 
-The runner uses pinned pi-durable 1.0.2 and its SQLite adapter with WAL/`synchronous=FULL`. A serialized committed watch supplies transcript, live generation/tool state, inbox and usage; Rust reconstructs a disposable `Session` projection and sends authoritative snapshots. Runner read acknowledgements never overwrite that projection with empty state. Reconnect after process/host failure reopens the same storage and resumes checkpoints; there is no unattended reboot service yet.
+The runner uses pinned pi-durable 1.0.2 and its SQLite adapter with WAL/`synchronous=FULL`. A serialized committed watch supplies transcript, live generation/tool state, inbox and usage; Rust reconstructs a disposable `Session` projection and sends authoritative snapshots. Runner read acknowledgements never overwrite that projection with empty state. Reconnect after process/host failure reopens the same storage and resumes checkpoints. Ad-hoc sessions still require reconnect; the optional host scheduler independently reopens its own unresolved occurrences.
 
 Prompt request keys are independent of correlation counters. Admission is acknowledged only after durable commit, same-key explicit retries deduplicate and payload collisions fail. Uncertain submissions are never automatically replayed; the desktop outbox is not crash-persistent yet. Unsafe interrupted tools return errors instead of being automatically repeated. Authentication/resources/stock-extension parity, capabilities UI, migration and native runtime gates precede making this the default. See [the runner walkthrough](../backend/durable/README.md) and [remote scope](remote.md).
+
+## Host-owned schedules
+
+`pi_core::schedules` defines the version-1 shared wire contract. Android calls the helper's one-request `schedules --stdio` API over its existing SSH connection, separately from session controllers. The paired gateway permits exactly that command, not scheduler lifecycle commands. `schedules` is a separate default-false helper capability; old helpers and offline hosts cannot authorize mutations.
+
+`pi_remote/src/schedules` owns a private SQLite definition/occurrence ledger, optimistic job revisions, cron/IANA calendar previews, missed-run policy, same-job overlap prevention and stable admission identities. Exact prompt/model snapshots, fresh session keys and request keys are committed before dispatch. Claims serialize transactionally; scheduled UTC identities are independent of job revision. Pending, accepted, running and settled outcomes stay distinct. A lost admission is queried by its original durable key, never automatically replayed as a new prompt; an intent-before-send crash may remain Unknown and block overlap rather than risk unsafe execution.
+
+The scheduler attaches through normal helper ownership paths without replacing a UI controller or bypassing durable writer locks. Per-session daemons continue when the scheduler stops. Repeated DST minutes fire at the first UTC instant; nonexistent local times are skipped. Missed ranges are bounded/coalesced; default policy skips rather than builds a backlog. Timeout Stop is best-effort, not a sandbox or task-success guarantee. Different jobs sharing a project are not isolated workspaces.
+
+Start/stop/status are explicit local commands. Optional login autostart installation requires `scheduler install --confirm` and writes a Linux systemd user unit or macOS LaunchAgent without starting it or enabling lingering. Services pin their installed executable, so moving/upgrading it requires explicit reinstallation. Windows scheduling is refused. See [host setup and recovery](../crates/pi_remote/README.schedules.md).
+
+Android keeps per-computer schedule caches, drafts and pending mutations, rejects obsolete callbacks after switching hosts, previews before reviewed consent, and links occurrences to ordinary sessions. Cached offline data is unknown, never permission to queue changes. Conflicts preserve drafts; uncertain mutations require inspection or explicit same-key manual recovery. Phone state is currently in-memory, not crash-persistent. Native/emulator sample fixtures do not call providers or install services.
 
 ## Built-in pi
 

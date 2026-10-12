@@ -23,6 +23,7 @@ mod projection;
 mod projects;
 mod prompt;
 mod remote;
+mod schedules;
 mod screens;
 mod scroll;
 mod ssh;
@@ -30,6 +31,7 @@ mod store;
 mod testing;
 mod text_area;
 mod theme;
+mod threshold_slider;
 mod ui;
 
 pub use app::{GoBack, PhoneApp};
@@ -99,7 +101,7 @@ fn android_main(app: gpui_android::AndroidApp) {
     use std::rc::Rc;
 
     gpui_android::init_logging("pi", log::LevelFilter::Info);
-    gpui_android::release_settled_flings(scroll::settled);
+    gpui_android::release_flings_before_touch(scroll::release_fling_at);
     let data_dir = app.internal_data_path();
     let platform = match gpui_android::AndroidPlatform::new(app) {
         Ok(platform) => platform,
