@@ -1006,7 +1006,10 @@ mod tests {
         }
     }
 
+    // QR enrollment is Unix-only. These tests additionally require POSIX
+    // replacement of a pathname while a reader retains the old open inode.
     #[test]
+    #[cfg(unix)]
     fn private_files_are_replaced_atomically_and_requests_are_create_once() {
         let directory = isolated();
         let path = directory.path().join("response.json");
@@ -1051,6 +1054,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn polling_private_files_never_observes_partial_json() {
         use std::sync::{
             Barrier,
@@ -1065,19 +1069,36 @@ mod tests {
         let done = AtomicBool::new(false);
         thread::scope(|scope| {
             let reader = scope.spawn(|| {
-                assert_eq!(read_json::<serde_json::Value>(&path).unwrap(), value);
+                // Always rendezvous before a read assertion can panic.
                 started.wait();
+                let deadline = Instant::now() + Duration::from_secs(30);
                 while !done.load(Ordering::Acquire) {
+                    assert!(
+                        Instant::now() < deadline,
+                        "private-file writer did not finish"
+                    );
                     assert_eq!(read_json::<serde_json::Value>(&path).unwrap(), value);
                 }
             });
             started.wait();
-            for _ in 0..64 {
-                write_json(&path, &value).unwrap();
-            }
+            let written = (0..64).try_for_each(|_| write_json(&path, &value));
+            // Stop/join the reader even when publication failed, before
+            // asserting, so a failed write cannot deadlock the scoped thread.
             done.store(true, Ordering::Release);
             reader.join().unwrap();
+            written.unwrap();
         });
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn qr_pairing_rejects_unsupported_platforms_before_touching_host_state() {
+        assert!(
+            pair(&[])
+                .unwrap_err()
+                .to_string()
+                .contains("requires OpenSSH on macOS or Linux")
+        );
     }
 
     #[test]
