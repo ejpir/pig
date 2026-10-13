@@ -39,7 +39,11 @@ use std::{
 };
 
 /// How long queued main-thread tasks may run before input and frames get a turn.
-const TASK_BUDGET: Duration = Duration::from_millis(8);
+const TASK_BUDGET: Duration = Duration::from_millis(2);
+// Keep input ahead of painting, but do not let a continuous drain postpone an
+// already arrived frame indefinitely. Acknowledged FIFO events are never dropped.
+const INPUT_BUDGET: Duration = Duration::from_millis(2);
+const INPUT_BATCH: usize = 64;
 
 /// Android's `ViewConfiguration` defaults, so touches feel native.
 struct AndroidGestures;
@@ -89,6 +93,7 @@ enum Pick {
 
 pub struct AndroidPlatform {
     app: AndroidApp,
+    dispatcher: Arc<AndroidDispatcher>,
     java: Rc<Java>,
     main_queue: RefCell<MainQueue>,
     background_executor: BackgroundExecutor,
@@ -113,12 +118,32 @@ pub struct AndroidPlatform {
     quitting: Cell<bool>,
 }
 
+struct DispatcherStartup(Option<Arc<AndroidDispatcher>>);
+impl Drop for DispatcherStartup {
+    fn drop(&mut self) {
+        if let Some(dispatcher) = self.0.take() {
+            dispatcher.shutdown();
+        }
+    }
+}
+struct PlatformShutdown<'a>(&'a AndroidPlatform);
+impl Drop for PlatformShutdown<'_> {
+    fn drop(&mut self) {
+        self.0.shutdown();
+    }
+}
+impl Drop for AndroidPlatform {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 impl AndroidPlatform {
     /// Call from `android_main`, on the thread that will run the app.
     pub fn new(app: AndroidApp) -> Result<Self> {
         let waker = app.create_waker();
         let (dispatcher, main_queue) = AndroidDispatcher::new(move || waker.wake());
-        let dispatcher = Arc::new(dispatcher);
+        let mut startup = DispatcherStartup(Some(dispatcher.clone()));
         let text_system = Arc::new(CosmicTextSystem::new_without_system_fonts("Roboto"));
         let started = Instant::now();
         let fonts = fonts::system_fonts();
@@ -130,7 +155,8 @@ impl AndroidPlatform {
         );
         let java = Rc::new(Java::attach(&app));
         java::set_current(&java);
-        Ok(Self {
+        let platform = Self {
+            dispatcher: dispatcher.clone(),
             clock: Rc::new(FrameClock::new(app.create_waker())?),
             java,
             app,
@@ -150,7 +176,29 @@ impl AndroidPlatform {
             back_taken: Cell::new(false),
             insets: Cell::new(None),
             quitting: Cell::new(false),
-        })
+        };
+        startup.0.take();
+        Ok(platform)
+    }
+
+    /// Complete owner-thread retirement after the consuming GPUI app drops.
+    pub fn finish(&self) {
+        self.shutdown();
+    }
+
+    fn shutdown(&self) {
+        // No more delivery into the retiring native loop, even when executors
+        // or old Java callbacks still retain their separate handles.
+        self.java.shutdown();
+        self.clock.shutdown();
+        self.dispatcher.shutdown();
+        let callbacks = std::mem::take(&mut *self.callbacks.borrow_mut());
+        let picks = std::mem::take(&mut *self.picks.borrow_mut());
+        drop(callbacks);
+        drop(picks);
+        // Closing callbacks/pickers can wake local futures while their event
+        // listeners hold internal notification locks. Drain only after return.
+        self.dispatcher.shutdown();
     }
 
     fn window(&self) -> Option<Rc<WindowState>> {
@@ -162,27 +210,38 @@ impl AndroidPlatform {
     fn turn(&self, timeout: Option<Duration>) -> bool {
         let mut input = false;
         let mut destroyed = false;
-        self.app.poll_events(timeout, |event| {
-            if let PollEvent::Main(event) = event {
-                match event {
-                    MainEvent::InputAvailable => input = true,
-                    MainEvent::Destroy => destroyed = true,
-                    event => self.handle_main_event(event),
+        {
+            let _poll_trace = crate::trace::scope(c"pi.main.poll");
+            self.app.poll_events(timeout, |event| {
+                if let PollEvent::Main(event) = event {
+                    match event {
+                        MainEvent::InputAvailable => input = true,
+                        MainEvent::Destroy => destroyed = true,
+                        event => self.handle_main_event(event),
+                    }
                 }
-            }
-        });
+            });
+        }
+        if destroyed {
+            return false;
+        }
         if input {
             self.handle_input();
         }
-        for event in java::take_events() {
-            self.java_event(event);
+        {
+            let _java_trace = crate::trace::scope(c"pi.main.java_events");
+            for event in self.java.take_events() {
+                self.java_event(event);
+            }
         }
         if self.clock.take_tick()
             && let Some(window) = self.window()
         {
+            let _service_trace = crate::trace::scope(c"pi.frame.service");
             window.frame(false);
         }
         if let Some(window) = self.window() {
+            let _settle_trace = crate::trace::scope(c"pi.main.settle");
             window.settle();
         }
         !destroyed
@@ -213,6 +272,9 @@ impl AndroidPlatform {
                 window.press("enter");
             }
             JavaEvent::Insets { bars, ime } => window.set_reported_insets(bars, ime),
+            JavaEvent::InlineTouch { action, x, y } => window.inline_page_touch(action, x, y),
+            JavaEvent::InlineBack => window.press("back"),
+            JavaEvent::InlineFailed => window.inline_page_failed(),
             JavaEvent::Picked { .. } | JavaEvent::OpenUrl(_) => {}
         }
     }
@@ -337,14 +399,22 @@ impl AndroidPlatform {
     }
 
     fn handle_input(&self) {
+        let _trace = crate::trace::scope(c"pi.input.drain");
         let Ok(mut events) = self.app.input_events_iter() else {
             return;
         };
+        let start = Instant::now();
+        let mut count = 0;
         while events.next(|event| match event {
             InputEvent::MotionEvent(motion) => self.motion(motion),
             InputEvent::KeyEvent(key) => self.key(key),
             _ => InputStatus::Unhandled,
-        }) {}
+        }) {
+            count += 1;
+            if count >= INPUT_BATCH || start.elapsed() >= INPUT_BUDGET {
+                break;
+            }
+        }
     }
 
     fn key(&self, key: &KeyEvent<'_>) -> InputStatus {
@@ -423,6 +493,19 @@ impl AndroidPlatform {
     }
 
     fn motion(&self, motion: &MotionEvent<'_>) -> InputStatus {
+        if crate::frame_profile::enabled()
+            && motion.action() == MotionAction::Move
+            && let Some(now) = crate::frame_profile::monotonic_ns()
+        {
+            crate::frame_profile::input(
+                motion.event_time(),
+                now,
+                motion
+                    .pointers()
+                    .next()
+                    .map_or(0, |pointer| pointer.history().count()),
+            );
+        }
         let Some(window) = self.window() else {
             return InputStatus::Unhandled;
         };
@@ -490,6 +573,7 @@ impl Platform for AndroidPlatform {
     /// destroys the activity or the app quits. Returning from `android_main`
     /// afterwards finishes the activity.
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
+        let _shutdown = PlatformShutdown(self);
         while self.app.native_window().is_none() {
             if !self.turn(None) {
                 return;
@@ -497,8 +581,20 @@ impl Platform for AndroidPlatform {
         }
         on_finish_launching();
         while !self.quitting.get() {
-            let pending = self.main_queue.borrow_mut().run(TASK_BUDGET);
-            if !self.turn(pending.then_some(Duration::ZERO)) {
+            let task_start = crate::frame_profile::enabled().then(std::time::Instant::now);
+            let pending = {
+                let _task_trace = crate::trace::scope(c"pi.main.tasks");
+                self.main_queue
+                    .borrow_mut()
+                    .run_until(TASK_BUDGET, || self.clock.has_tick())
+            };
+            if let Some(start) = task_start {
+                crate::frame_profile::record(
+                    crate::frame_profile::Stage::MainTasks,
+                    start.elapsed(),
+                );
+            }
+            if !self.turn((pending || self.clock.has_tick()).then_some(Duration::ZERO)) {
                 break;
             }
         }

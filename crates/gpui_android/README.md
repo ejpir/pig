@@ -78,6 +78,31 @@ unit-tested on any host.
 Not yet: screen readers, stored credentials, and mouse or stylus as anything
 but touch.
 
+## Inline HTML surfaces
+
+GPUI still owns the full-screen NativeActivity surface. `InlinePageHost` uses
+app-attached, UI-thread-owned `PopupWindow`/`WebView` surfaces synchronized from
+native **painted** bounds and visibility. Partial clipping changes the outer
+window, not the document viewport; expansion, scrolling and appearance changes
+do not reload it. There is one visible surface, three retained views and eight
+document registrations. Explicit revisions replace a view; hiding retains it.
+
+The Rust API is `activity::{supports_inline_pages, inline_pages_available,
+prepare_inline_page, sync_inline_page, clear_inline_pages}`. JNI forwards
+browser-edge drags, Back and failure events to GPUI. Parent decor insets remain
+authoritative: popup-local keyboard overlap is clip-relative, and caused resize
+feedback when forwarded as a full-screen inset. Renderer/provider failures stop
+retries until explicit clear/Retry. All app-owned browser clients handle renderer
+exits because their process may be shared with posters/the separate viewer.
+
+The inline host serves an intercepted, random-origin document under a trusted
+opaque CSP sandbox, blocks network/file/content/navigation/permissions/downloads,
+removes RTC constructors before page scripts and accepts no JavaScript bridge.
+See [native verification and policy limits](../pi_android/scripts/INLINE_PAGES_VERIFICATION.md)
+for emulator evidence, reset behaviour, legacy-path scope and remaining gaps.
+Fixture DOM readback is shell/DUMP protected and native-sample gated, not a
+production API. This feature has been tested on an emulator, not a physical device.
+
 ## Try it
 
 `examples/touch/` is a small app: a message field with Send, Paste, Copy,

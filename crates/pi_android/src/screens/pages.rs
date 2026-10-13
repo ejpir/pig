@@ -28,6 +28,7 @@ fn image_intersects_viewport(bounds: Bounds<Pixels>, viewport: Bounds<Pixels>) -
 impl PhoneApp {
     pub(crate) fn page_cards(
         &self,
+        id: SessionId,
         index: usize,
         turn: &Turn,
         colors: &Theme,
@@ -35,7 +36,8 @@ impl PhoneApp {
     ) -> Option<Div> {
         (!turn.pages.is_empty()).then(|| {
             div().flex().flex_col().gap(px(12.)).children(
-                (0..turn.pages.len()).filter_map(|n| self.page_card(index, turn, n, colors, cx)),
+                (0..turn.pages.len())
+                    .filter_map(|n| self.page_card(id, index, turn, n, colors, cx)),
             )
         })
     }
@@ -43,12 +45,16 @@ impl PhoneApp {
     /// Page `n` of a turn: how it looks, its name, Source and Open.
     pub(crate) fn page_card(
         &self,
+        id: SessionId,
         index: usize,
         turn: &Turn,
         n: usize,
         colors: &Theme,
         cx: &Context<Self>,
     ) -> Option<Div> {
+        if self.uses_inline_page(id, index, n) {
+            return self.inline_page_card(id, index, turn, n, false, colors, cx);
+        }
         let page = turn.pages.get(n)?;
         Some({
             {
@@ -432,7 +438,7 @@ impl PhoneApp {
         )
     }
 
-    fn open_page(&mut self, page: &Page, source: bool, cx: &mut Context<Self>) {
+    pub(crate) fn open_page(&mut self, page: &Page, source: bool, cx: &mut Context<Self>) {
         let Some(html) = page.html.clone() else {
             self.notify_user(
                 "Pi changed this page in a way the phone can't follow. Ask Pi to write it again.",

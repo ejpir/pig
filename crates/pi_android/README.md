@@ -38,6 +38,18 @@ Home).
    describes. The phone sets the model from its settings, or the first the
    computer offers.
 
+## Native mini-apps with `@Visualize`
+
+Type **`@Visualize build me a calculator`**, or choose **@Visualize · Native mini-app** in the `@` picker, then Send. The mention requests one plain JavaScript program in a closed `javascript pi-visual` fence, not an escaped JSON/Rhai bundle. Picking the mention only edits the draft.
+
+QuickJS executes a small `app`/`ui`/drawing API; GPUI paints native rows, columns, text, 48dp buttons/sliders and interactive canvases. No HTML/WebView or per-app Rust compilation. Try **`@Visualize create an interactive spirograph`**. Computed text is separate from fixed flat persisted state; changing source creates a new local state identity. Copy/Source exposes the original program; Reset restores its initial state. Input/ticks do not call the model, and available replies can run without a connection.
+
+The opt-in enables native blocks in subsequent assistant replies while the admitted turn remains loaded. File/code/quote/attachment occurrences do not opt in, ordinary JavaScript fences remain code, and partial/oversized fences never execute. Guest contexts expose no file/network/process/DOM/agent APIs. Heap/stack/cooperative time limits and schema/geometry checks are in-process safeguards, not OS isolation. Event callbacks and uncached presentation use isolated VMs so closures/globals cannot escape rollback.
+
+Omitted animation fps follows this device's actual display; explicit caps remain honored. Latest drag input is coalesced per display frame. Animation requires painted, foreground/focused canvases, stops behind sheets, and respects Remove animations. Frames never persist to disk; controls persist on release. The optional diagnostics distinguish view-update gaps/build time from script, input, layout/prepaint, paint/path cache, and native CPU submission work; they do not claim actual presentation FPS.
+
+Rhai has been removed. Old JSON/Rhai visuals remain inert and source-readable; their original source and saved local data are not erased. Regenerate using @Visualize after updating the client. Existing admitted guides retain retry identity and clean labels. See [verification](scripts/VISUALIZE_VERIFICATION.md) and [`pi_visual`](../pi_visual/README.md). Native JavaScript preview fixtures include calculator, spirograph, and growing trace; they never call a provider.
+
 ## Scheduled jobs
 
 Open **Schedules** from the **Computers** menu (tap the computer’s name on Home), marked with a calendar-and-clock icon. Back returns to your sessions. Schedules manages recurring Pi prompts on that host; the phone does not keep timers or need to stay open.
@@ -176,14 +188,19 @@ shows an update message and leaves recent projects available.
   Tap a stage for commands, full tool output and file details. Live commentary
   and tool previews stay visible while the run works; scrolling up pauses
   following, and **Latest reply** returns to the bottom.
-- **Pages Pi makes:** when Pi writes an `.html` file, a card under the turn
-  opens it full screen, with a Preview tab (a web view) and a Code tab. The
-  phone already has the page from Pi's `write`, and applies later exact edits
-  itself; an edit it can't follow says so instead of showing an old page. Ask
-  for one self-contained file: other files next to it aren't loaded. The page
-  runs its scripts and may use the network, but has no access to the app, its
-  files or a native bridge; links it follows on a tap open in the browser. The
-  desktop preview opens pages in the browser.
+- **Pages Pi makes:** the latest self-contained HTML artifact is interactive
+  directly in its Android reply: calculators, inputs and local scripts work
+  without opening another activity. Expand and Source retain its running state;
+  later exact edits require **Load update**, which explicitly resets inputs.
+  An untracked edit shows Unavailable, with an explicitly labelled saved-version
+  choice. Inline pages cannot use the network, app files/data, native bridges or
+  permission requests. Three native views and eight documents are cached, with
+  a 2 MiB HTML limit; eviction, reconnect/store replacement and process death
+  can reset them. Source stays readable after a browser failure; Retry starts
+  fresh without restarting chat. Older cards and **Open separately** retain the
+  existing viewer; desktop previews open in the browser. Ask for one complete
+  file with embedded assets. [Design](../../design/android/inline-pages/README.md)
+  · [native architecture, limits and emulator evidence](scripts/INLINE_PAGES_VERIFICATION.md).
 - **Long drafts:** bounded, scrollable composers; horizontal scrolling for
   one-line inputs; Unicode-aware cursor/deletion. Return adds a line by
   default. With Return sends enabled, Shift+Return still adds a line.
@@ -255,6 +272,7 @@ python3 crates/pi_android/scripts/build_apk.py --ui-test
 adb install -r dist/pi-ui-test.apk
 python3 crates/pi_android/scripts/test_device.py --serial DEVICE --output /tmp/pi-phone-screens
 python3 crates/pi_android/scripts/test_interactions.py --serial DEVICE --output /tmp/pi-phone-interactions
+python3 crates/pi_android/scripts/test_inline_pages.py --serial DEVICE --output /tmp/pi-inline-pages
 adb shell am start -n dev.pi.android.uitest/dev.pi.gpui.GpuiActivity \
   -a android.intent.action.VIEW -d pi://preview/long-input
 ```
@@ -264,6 +282,9 @@ Fixture links are compiled only with `ui-test`. This separate APK is debuggable
 so the test runner can read app-private fixture telemetry via `run-as`; normal
 release APKs are not. The telemetry contains routes, bounds and character/image
 counts, never credentials or prompt contents, and is disabled for real sessions.
+The inline-page harness additionally records synthetic fixture document values
+and geometry through a shell-only, DUMP-protected readback. It does not add a
+page-callable JavaScript interface; see the [verification notes](scripts/INLINE_PAGES_VERIFICATION.md).
 Screenshots require visual
 inspection: the script checks process survival and crash logs, not appearance.
 `--case draft-targets` checks first taps and holds across the draft’s text and
@@ -275,9 +296,9 @@ More menu's Swarm switch and captures the Home crew/rail gap. Swarm is a host-ow
 permission for **new** explicit swarm crews; switching it off leaves ordinary
 subagents and admitted crews alone. Older runners show Unavailable rather than a
 local-only switch; update the helper and start a fresh session to use it.
-`--case subagent-input` checks first taps across the compact editor and its padding,
-IME resize/typing, and the separate Send target. This dedicated fixture has no
-transport. Host touch tests also preserve catch-only taps inside a moving viewport
+`--case subagent-input` checks the shared regular editor without selection controls,
+its integrated Working/Stop header, first taps across its padding, IME resize/typing,
+and independent Send/Stop targets. This dedicated fixture has no transport. Host touch tests also preserve catch-only taps inside a moving viewport
 while allowing the first tap on controls outside it.
 `--case diff-spacing` captures activity and per-call diff cards with four-digit
 line numbers and wrapped code. Their shared gutter keeps a 12 dp inset from the

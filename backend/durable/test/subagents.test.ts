@@ -99,7 +99,7 @@ test("direct child input steers only an exact run and starts follow-ups only fro
       if (command !== "hold") throw new Error(`Unexpected command: ${command}`);
       started.open();
       await release.promise;
-      return { content: [{ type: "text" as const, text: "released" }] };
+      return { output: [{ type: "text" as const, text: "released" }] };
     },
   })] }));
   const harness = await Harness.open(new MemoryStorage(), { models, registry }, context);
@@ -226,7 +226,7 @@ test("background reports steer only their delegating run and wait behind a later
       } else {
         throw new Error(`Unexpected command: ${command}`);
       }
-      return { content: [{ type: "text" as const, text: `${command} complete` }] };
+      return { output: [{ type: "text" as const, text: `${command} complete` }] };
     },
   })] }));
   let harness!: Harness;

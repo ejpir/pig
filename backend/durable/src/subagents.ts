@@ -31,7 +31,6 @@ import {
 
 const MAX_TASKS = 200;
 const CONCURRENCY = 8;
-const MAX_OUTPUT = 4000;
 /** An answer as the apps see it: they show its first line, and the whole one is the subagent's own. */
 const MAX_SHOWN = 500;
 /** How often running subagents report, at most: each report is a commit. */
@@ -57,7 +56,7 @@ export type SubagentResult = {
   startedAt?: number;
   endedAt?: number;
   cost?: number;
-  /** Its final answer, shortened. */
+  /** Its final answer; shortened only in the app's Calls projection. */
   output?: string;
   /** Commands a restart cut off, which weren't repeated by themselves. */
   interrupted?: string[];
@@ -364,7 +363,7 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
             return Object.hasOwn(calls, api.callId) ? JSON.parse(JSON.stringify(calls[api.callId])) as SubagentDetails : undefined;
           }, context);
           if (admitted) return {
-            content: [{ type: "text" as const, text: "This crew was already started. Its durable roster and mailboxes are reused; no tasks were started twice." }],
+            output: [{ type: "text" as const, text: "This crew was already started. Its durable roster and mailboxes are reused; no tasks were started twice." }],
             details: admitted,
           };
         }
@@ -421,7 +420,7 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
         const text = `Started ${items.length === 1 ? `the ${who} subagent` : `${items.length} subagents (${who})`} in the background. `
           + "They are doing this work now, and their answers come back to you in one message when the last one finishes. "
           + "Don't do it yourself, check on them or prepare for their answers: end your turn now, unless the user asked for something they aren't doing.";
-        return { content: [{ type: "text" as const, text }], details };
+        return { output: [{ type: "text" as const, text }], details };
       },
     })],
     sections: [{
@@ -445,7 +444,7 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
 }
 
 function failure(text: string) {
-  return { content: [{ type: "text" as const, text }], isError: true };
+  return { output: [{ type: "text" as const, text }], isError: true };
 }
 
 /** One crew: its subagents, their progress, and what it reports. */
@@ -582,7 +581,7 @@ class CrewRun {
     return frozen;
   }
 
-  /** End one original submission, atomically freezing its bounded result and closing its mailbox. */
+  /** End one original submission, atomically freezing its full result and closing its mailbox. */
   async freeze(tx: Tx, index: number, progress: SubagentResult, settled?: SettledSubmissionRecord): Promise<SubagentResult> {
     const doc = await tx.doc(Children, this.taskId);
     const child = doc.children[index];
@@ -601,7 +600,7 @@ class CrewRun {
       if (!answer) throw new Error(`Original subagent-${index} answer entry is missing`);
       const output = answer.content.map((block) => block.type === "text" ? block.text : "").join("").trim();
       result.status = "done";
-      result.output = output.length > MAX_OUTPUT ? `${output.slice(0, MAX_OUTPUT)}…` : output;
+      result.output = output;
       result.now = gist(output);
     } else {
       result.status = ["aborted", "reset"].includes(settlement.reason) ? "stopped" : "failed";

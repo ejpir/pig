@@ -78,6 +78,9 @@ impl PhoneApp {
             Sheet::EnableJj(id) => self.enable_jj_sheet(id, &colors, cx),
             Sheet::Computers => self.computers_sheet(&colors, cx),
             Sheet::Logs => self.logs_sheet(&colors, cx),
+            Sheet::InlineSource | Sheet::InlineUpdate | Sheet::InlinePermissions => {
+                self.inline_page_sheet(sheet, &colors, window, cx)
+            }
             Sheet::SelectText => {
                 let lines = (f32::from(window.viewport_size().height) * 0.5 / 22.) as usize;
                 self.selectable
@@ -257,6 +260,9 @@ impl PhoneApp {
                         .map_or_else(|| "Image".into(), |image| image.name.clone().into()),
                     Sheet::Computers => "Computers".into(),
                     Sheet::SelectText => "Select text".into(),
+                    Sheet::InlineSource => "Page source".into(),
+                    Sheet::InlineUpdate => "Update the running page?".into(),
+                    Sheet::InlinePermissions => "Local page permissions".into(),
                 };
                 self.sheet_title(title, &colors, cx)
             }
@@ -531,7 +537,7 @@ impl PhoneApp {
     }
 
     /// A session of the computer's, or a subagent's whose screen is open.
-    fn session(&self, id: SessionId) -> Option<&Session> {
+    pub(crate) fn session(&self, id: SessionId) -> Option<&Session> {
         self.store
             .as_ref()
             .and_then(|store| store.session(id))
@@ -2099,7 +2105,7 @@ impl PhoneApp {
         let sample = store.is_some_and(|store| store.is_sample());
         let on = if sample {
             self.session(id)
-                .map(|session| session.details.swarm_enabled.unwrap_or(true))
+                .map(|session| session.details.swarm_enabled.unwrap_or(false))
         } else {
             live.and_then(|live| live.swarm_enabled(id))
         };
@@ -2222,6 +2228,9 @@ impl PhoneApp {
                     .children(rows.into_iter().enumerate().map(
                         |(index, (glyph, text, color, action))| {
                             ui::row(("action", index), index == 0, colors)
+                                .when(glyph == "info", |row| {
+                                    row.debug_selector(|| "rendering-stats-toggle".into())
+                                })
                                 .child(icon(glyph, 20., color))
                                 .child(
                                     div()
@@ -2357,7 +2366,7 @@ mod tests {
             });
             cx.run_until_parked();
             let before = app.read_with(cx, |app, _| app.store.as_ref().unwrap().sessions.clone());
-            for enabled in [false, true] {
+            for enabled in [true, false] {
                 let toggle = cx.debug_bounds("swarm-toggle").unwrap();
                 assert!(toggle.left() >= px(0.) && toggle.right() <= px(width));
                 cx.simulate_click(toggle.center(), gpui::Modifiers::none());

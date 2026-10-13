@@ -789,7 +789,7 @@ fn swarm_permission_is_acknowledged_projected_and_survives_restart() {
     let target = durable_target(directory.path());
     let _cleanup = Cleanup(directory.path().into(), target.key.clone());
     let mut bridge = Bridge::new(directory.path(), &target);
-    assert_eq!(bridge.snapshot()["data"]["state"]["swarmEnabled"], true);
+    assert_eq!(bridge.snapshot()["data"]["state"]["swarmEnabled"], false);
     bridge.send(json!({"type":"get_backend_info","id":"capabilities"}));
     assert!(
         bridge.response("capabilities")["data"]["commands"]
@@ -995,6 +995,8 @@ fn swarm_runner_wires_child_only_tools_and_projects_real_mailbox_receipts() {
             .all(|tool| !tool["name"].as_str().unwrap().starts_with("swarm_")),
         "{tools}"
     );
+    bridge.send(json!({"type":"set_swarm_enabled","id":"swarm-opt-in","enabled":true}));
+    assert_eq!(bridge.response("swarm-opt-in")["success"], true);
     bridge.send(
         json!({"type":"prompt","id":"delegate","message":"delegate swarm","requestId":"delegate"}),
     );

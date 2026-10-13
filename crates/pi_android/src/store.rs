@@ -212,6 +212,7 @@ impl Store {
 
     /// Shows a live session as it is now; returns what changed for the user.
     fn reproject(&mut self, id: SessionId) -> Vec<Event> {
+        let _trace = gpui_android::trace::scope(c"pi.app.reproject");
         let Some(live) = &self.live else {
             return Vec::new();
         };

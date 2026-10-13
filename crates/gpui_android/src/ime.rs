@@ -252,7 +252,12 @@ fn diff(old: &ImeState, new: &ImeState, start: usize) -> Vec<Edit> {
             .composing
             .as_ref()
             .is_some_and(|region| new.composing != old.composing && selection_in(region));
-        if new.selection != old.selection && !selected {
+        let composition_moved_caret = new.composing != old.composing
+            && new
+                .composing
+                .as_ref()
+                .is_some_and(|region| !selection_in(region));
+        if (new.selection != old.selection || composition_moved_caret) && !selected {
             edits.push(Edit::Select(shift(&new.selection)));
         }
         return edits;
@@ -396,6 +401,22 @@ mod tests {
         let mut mirror = Mirror::default();
         mirror.reported(1, 0, state(text, caret..caret, None));
         mirror
+    }
+
+    #[test]
+    fn marking_a_word_does_not_move_an_unchanged_caret_outside_it() {
+        let mut mirror = mirror("hello.", 6);
+        assert_eq!(
+            mirror.reported(2, 0, state("hello.", 6..6, Some(0..5))),
+            [
+                Edit::Compose {
+                    range: 0..5,
+                    text: "hello".into(),
+                    selection: 5..5
+                },
+                Edit::Select(6..6),
+            ]
+        );
     }
 
     #[test]

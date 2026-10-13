@@ -77,6 +77,12 @@ pub fn project_queue_keys(
             .unwrap_or_else(|| "failed".into())
     });
     let mut turns = turns;
+    for turn in &mut turns {
+        turn.visual_identity = turn
+            .visual_identity
+            .take()
+            .map(|identity| format!("{}:{identity}", facts.key));
+    }
     // The phone's prompt shows at once, before the computer has it.
     let optimistic = facts.outbox.first().filter(|prompt| prompt.starts_turn);
     if let Some(prompt) = optimistic {
@@ -120,7 +126,7 @@ pub fn project_queue_keys(
         // Subagents' answers wait for Pi like a follow-up, but nobody typed them.
         .map(|text| match pi_core::subagent::report(text) {
             Some(_) => "Subagents reported back".to_owned(),
-            None => text.clone(),
+            None => crate::visualize_prompt::label(text),
         })
         .collect();
     queued.extend(
@@ -308,7 +314,7 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
         }
         match message["role"].as_str() {
             Some("user") => {
-                let text = text_of(message);
+                let text = crate::visualize_prompt::label(&text_of(message));
                 let reported = pi_core::subagent::report(&text).map(str::to_owned);
                 // A `/skill:` prompt arrives expanded; it reads as it was typed.
                 let text = match pi_core::skill::parse_skill_block(&text) {
@@ -325,6 +331,22 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                 let mut turn =
                     Turn::new(text, timestamp(message).map(clock_at).unwrap_or_default());
                 turn.reported = reported.is_some();
+                {
+                    use sha2::{Digest, Sha256};
+                    // User messages are immutable; unlike turn indices this
+                    // identity survives compaction/history rebasing.
+                    if message.get("id").is_some_and(|v| !v.is_null())
+                        || message.get("timestamp").is_some_and(|v| !v.is_null())
+                    {
+                        let identity = serde_json::json!({"id":message.get("id"), "timestamp":message.get("timestamp"), "prompt":turn.prompt});
+                        turn.visual_identity = Some(format!(
+                            "{:x}",
+                            Sha256::digest(serde_json::to_vec(&identity).unwrap_or_default())
+                        ));
+                    }
+                    // Legacy messages without an identity/timestamp cannot be
+                    // safely distinguished across compaction; keep apps inert.
+                }
                 turn.stages.clear();
                 let images = message["content"].as_array().map_or(0, |blocks| {
                     blocks.iter().filter(|b| b["type"] == "image").count()
@@ -1858,5 +1880,43 @@ mod tests {
             shown.turns[1].prompt,
             "Subagents reported back\n\n## scout: find alpha\n\nfound alpha"
         );
+    }
+}
+
+#[cfg(test)]
+mod visual_regressions {
+    use super::*;
+    fn facts() -> Facts<'static> {
+        Facts {
+            id: SessionId(1),
+            cwd: "/repo",
+            folder: "repo".into(),
+            question: None,
+            outbox: &[],
+            key: "durable-session-key",
+        }
+    }
+    #[test]
+    fn queued_contracts_are_hidden_without_mutating_authoritative_payloads() {
+        let mut pi = Pi::default();
+        let wire = crate::visualize_prompt::expand("@Visualize make a counter");
+        pi.steering = vec![wire.clone()];
+        let projected = project(&pi, facts());
+        assert_eq!(projected.queued, ["@Visualize make a counter"]);
+        assert_eq!(pi.steering, [wire]);
+    }
+    #[test]
+    fn visual_message_identity_survives_history_rebasing() {
+        let mut pi = Pi::default();
+        pi.messages = vec![
+            serde_json::json!({"role":"user","timestamp":100,"content":"Earlier"}),
+            serde_json::json!({"role":"user","timestamp":200,"content":"@Visualize make a counter"}),
+        ];
+        let original = project(&pi, facts()).turns[1].visual_identity.clone();
+        pi.messages.remove(0);
+        assert_eq!(project(&pi, facts()).turns[0].visual_identity, original);
+        let mut other = facts();
+        other.key = "other-session-key";
+        assert_ne!(project(&pi, other).turns[0].visual_identity, original);
     }
 }

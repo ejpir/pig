@@ -12,10 +12,12 @@ from package_remote import asset_name
 
 # Built by crates/pi_android/scripts/build_apk.py in CI's Android job.
 ANDROID_APK = "pi-android-arm64.apk"
-ANDROID_FONT_LICENSES = {
+ANDROID_LICENSES = {
     "NotoEmoji-OFL.txt": ROOT / "crates/gpui_android/assets/fonts/OFL.txt",
     "IBM-PLEX-OFL.txt": ROOT / "licenses/IBM-PLEX-OFL.txt",
     "COMMIT-MONO-OFL.txt": ROOT / "licenses/COMMIT-MONO-OFL.txt",
+    "QUICKJS-NG-MIT.txt": ROOT / "licenses/QUICKJS-NG-MIT.txt",
+    "RQUICKJS-MIT.txt": ROOT / "licenses/RQUICKJS-MIT.txt",
 }
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?")
 
@@ -34,14 +36,14 @@ def validate_release_version(tag: str, version: str) -> None:
 
 
 def validate_android_notices(apk: Path) -> None:
-    """Do not publish embedded fonts without their complete reviewed notices."""
+    """Do not publish embedded fonts or script runtimes without their complete reviewed notices."""
     try:
         with zipfile.ZipFile(apk) as archive:
-            for name, source in ANDROID_FONT_LICENSES.items():
+            for name, source in ANDROID_LICENSES.items():
                 if archive.read(f"assets/licenses/{name}") != source.read_bytes():
-                    raise ValueError(f"APK has an incomplete or changed font notice: {name}")
+                    raise ValueError(f"APK has an incomplete or changed embedded notice: {name}")
     except (zipfile.BadZipFile, KeyError) as error:
-        raise ValueError(f"APK is invalid or missing embedded font notices: {apk}") from error
+        raise ValueError(f"APK is invalid or missing embedded notices: {apk}") from error
 
 
 def manifest(directory: Path) -> Path:

@@ -29,6 +29,19 @@ class Phone:
         self.fixture_name = None
 
     def run(self, *args):
+        if args[:2] == ("shell", "input"):
+            # Fixture telemetry can outlive the process or a manual app switch.
+            # Never inject its stale coordinates into the main app/another app.
+            activity = self.run("shell", "dumpsys", "activity", "activities").decode()
+            resumed = [line for line in activity.splitlines()
+                       if "topResumedActivity" in line or "mResumedActivity" in line]
+            if not any(re.search(r"\b" + re.escape(PACKAGE) + r"/", line) for line in resumed):
+                raise AssertionError("UI-test package is not foreground; no input was injected")
+            # A resumed Activity can sit behind an ANR/system/permission window.
+            windows = self.run("shell", "dumpsys", "window").decode()
+            focused = [line for line in windows.splitlines() if "mCurrentFocus=" in line]
+            if not any(re.search(r"\b" + re.escape(PACKAGE) + r"/", line) for line in focused):
+                raise AssertionError("UI-test window does not own input focus; no input was injected")
         return subprocess.check_output(self.adb + list(map(str, args)), stderr=subprocess.STDOUT, timeout=20)
 
     def state(self):
@@ -325,14 +338,15 @@ def call_output_actions(phone):
 def swarm_toggle(phone):
     state = phone.fixture("more")
     sessions = state["sessions"]
-    phone.wait(lambda s: s["swarm_enabled"] is True, "sample session starts with swarm allowed")
+    phone.wait(lambda s: s["swarm_enabled"] is False, "sample session starts with swarm disabled")
     phone.tap("swarm-toggle")
-    phone.wait(lambda s: s["swarm_enabled"] is False and s["sessions"] == sessions,
-               "Swarm can be disabled for this session without stopping or deleting anything")
-    phone.capture("swarm-disabled")
-    phone.tap("swarm-toggle")
-    phone.wait(lambda s: s["swarm_enabled"] is True, "Swarm can be enabled again")
+    phone.wait(lambda s: s["swarm_enabled"] is True and s["sessions"] == sessions,
+               "Swarm can be explicitly enabled without changing sessions")
     phone.capture("swarm-enabled")
+    phone.tap("swarm-toggle")
+    phone.wait(lambda s: s["swarm_enabled"] is False,
+               "Swarm can be disabled without stopping or deleting admitted work")
+    phone.capture("swarm-disabled")
     phone.fixture("subagents-home")
     phone.capture("home-crew-rail-spacing")
 
@@ -542,8 +556,10 @@ def long_input_and_stop(phone):
     assert count > 9000
     phone.tap("draft")
     phone.wait_keyboard(True)
+    focused = phone.settled_state()["draft_input"]
+    assert focused["selection"][0] == focused["selection"][1], "First tap places a caret, not a word selection"
     phone.text("XYZ")
-    phone.wait(lambda s: s["draft_chars"] == count + 3, "long Unicode follow-up accepts an edit without lost or duplicated text")
+    phone.wait(lambda s: s["draft_chars"] == count + 3 and s["long_draft_intact"], "long Unicode follow-up inserts without replacing the keyboard's correction word")
     phone.capture("long-follow-up-edited")
     phone.key("KEYCODE_BACK")
     phone.wait_keyboard(False)
@@ -688,7 +704,7 @@ def rich_content(phone):
     phone.capture("markdown-shared-renderer")
 
     phone.fixture("page")
-    phone.tap("page-0-0")
+    phone.tap("inline-open-0-0")
     phone.wait_activity("dev.pi.gpui.PageActivity", "page card opens the sandboxed preview")
     # topResumedActivity changes before WebView's first frame reaches SurfaceFlinger.
     time.sleep(0.4)
@@ -753,7 +769,7 @@ def commands(phone):
 
 
 def subagent_input(phone):
-    for target in ("center", "left", "top", "bottom", "next-to-send"):
+    for target in ("center", "left", "top", "bottom", "right"):
         # A different fixture name prevents an outstanding frame of the previous
         # identical fixture being mistaken for completion of the new launch.
         phone.fixture("subagents")
@@ -762,12 +778,21 @@ def subagent_input(phone):
         state = phone.settled_state()
         (x, y, width, height), scale = phone.bounds("draft", state=state)
         (sx, sy, sw, sh), _ = phone.bounds("send", state=state)
-        assert abs(y + height - sy - sh) < 1 and x + width <= sx + 1, "Send must be beside the editor"
+        assert y + height <= sy + 1 and x + width >= sx + sw - 1, "Send must be below the full-width editor"
+        (cx, cy, cw, _), _ = phone.bounds("composer", state=state)
+        (wx, wy, ww, wh), _ = phone.bounds("subagent-working-strip", state=state)
+        # Probes report the border-inset content bounds; the header's missing
+        # bottom border meets the composer's inset top edge without a gap.
+        assert abs(wx - cx) < 1 and abs(ww - cw) < 1 and abs(wy + wh - cy) < 1, \
+            "Working/Stop must share the composer's top edge"
+        assert not any(shown(state, control) for control in
+                       ("attach", "command", "composer-model", "composer-thinking")), \
+            "Direct child input has no selection controls"
         points = {"center": (x + width / 2, y + height / 2),
                   "left": (x - 8, y + height / 2),
                   "top": (x + width / 2, y - 2),
                   "bottom": (x + width / 2, y + height + 2),
-                  "next-to-send": (x + width - 2, y + height / 2)}
+                  "right": (x + width + 2, y + height / 2)}
         before = state["draft_chars"]
         phone.run("shell", "input", "tap", *(round(value * scale) for value in points[target]))
         phone.wait_keyboard(True)
@@ -782,6 +807,9 @@ def subagent_input(phone):
     phone.tap("send")
     phone.wait_keyboard(False)
     phone.capture("subagent-input-send-separate")
+    phone.tap("stop-subagent")
+    phone.wait_keyboard(False)
+    phone.capture("subagent-input-integrated-status")
 
 
 def subagents(phone):

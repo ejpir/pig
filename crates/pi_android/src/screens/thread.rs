@@ -779,12 +779,14 @@ impl PhoneApp {
                 turn.pt(px(24.)).border_t_1().border_color(colors.line)
             })
             .child(self.prompt(id, index, turn, live, many, colors, cx))
-            .child(if live && turn.streams() {
-                div()
-            } else if live {
-                self.stations(session, index, turn, true, colors, cx)
-            } else {
-                self.turn_activity(id, index, turn, false, colors, cx)
+            .when(live || !turn.stages.is_empty(), |column| {
+                column.child(if live && turn.streams() {
+                    div()
+                } else if live {
+                    self.stations(session, index, turn, true, colors, cx)
+                } else {
+                    self.turn_activity(id, index, turn, false, colors, cx)
+                })
             })
             .when(!live, |column| {
                 column.children(self.calls_fold(id, index, turn, colors, cx))
@@ -793,15 +795,23 @@ impl PhoneApp {
                 if streamed {
                     column.child(self.stream(session, index, live, colors, cx))
                 } else if turn.interleaved() {
-                    column.children(self.flow(id, index, turn, colors, cx))
+                    column.children(self.flow(session, index, turn, colors, cx))
                 } else {
+                    let text = turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
+                    // Choose native rendering BEFORE constructing/highlighting the
+                    // large script fence; the discarded ordinary reply was expensive.
+                    let column =
+                        if self.visual_enabled(session, index) && self.visual_has_app(&text) {
+                            column.child(self.visual_reply(session, index, 0, &text, colors, cx))
+                        } else {
+                            column.children(
+                                reply(turn, index == last, colors)
+                                    .map(|reply| reply.relative().child(self.copyable(text, cx))),
+                            )
+                        };
                     column
-                        .children(reply(turn, index == last, colors).map(|reply| {
-                            let text = turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
-                            reply.relative().child(self.copyable(text, cx))
-                        }))
                         .children(self.image_cards(id, index, turn, colors, cx))
-                        .children(self.page_cards(index, turn, colors, cx))
+                        .children(self.page_cards(id, index, turn, colors, cx))
                 }
             })
             .children(ending)
@@ -898,29 +908,26 @@ impl PhoneApp {
     /// made them.
     fn flow(
         &self,
-        id: SessionId,
+        session: &Session,
         index: usize,
         turn: &Turn,
         colors: &Theme,
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
+        let id = session.id;
         turn.flow
             .iter()
             .enumerate()
             .filter_map(|(n, step)| match step {
                 Flow::Text(text) => Some(
-                    div()
-                        .relative()
-                        .min_w_0()
-                        .child(crate::message::render(text, colors))
-                        .child(self.copyable(text.clone(), cx))
+                    self.visual_reply(session, index, n, text, colors, cx)
                         .into_any_element(),
                 ),
                 Flow::Image(n) => self
                     .image_card(id, index, turn, *n, colors, cx)
                     .map(IntoElement::into_any_element),
                 Flow::Page(n) => self
-                    .page_card(index, turn, *n, colors, cx)
+                    .page_card(id, index, turn, *n, colors, cx)
                     .map(IntoElement::into_any_element),
                 Flow::Handoff(n) => self
                     .handoff_card(id, index, turn, *n, colors, cx)
@@ -2057,21 +2064,8 @@ fn working_strip(
         .when(!stopping, |button| {
             button.on_click(cx.listener(move |this, _, _, cx| this.stop(id, cx)))
         });
-    let strip = div()
-        .debug_selector(|| "composer-working-strip".into())
-        .mx(px(12.))
-        .mb(px(-1.))
-        .min_w_0()
-        .min_h(px(48.))
-        .pr(px(8.))
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .bg(colors.panel)
-        .border_1()
-        .border_b_0()
-        .border_color(colors.line_strong)
-        .rounded_t(px(24.));
+    let strip =
+        ui::composer_status_strip(true, colors).debug_selector(|| "composer-working-strip".into());
     if active_subagents > 0 && show_stage {
         return strip
             .pl(px(8.))

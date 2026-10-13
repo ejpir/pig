@@ -1,0 +1,22 @@
+[package]
+name = "pi_visual"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Portable native mini-app definitions and a bounded QuickJS runtime"
+
+[dependencies]
+anyhow.workspace = true
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+pulldown-cmark = "0.13"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[target.'cfg(target_os = "android")'.dependencies]
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "bindgen"] }

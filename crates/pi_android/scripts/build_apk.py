@@ -26,11 +26,12 @@ PI = build_apk.App(
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.CAMERA",
     ),
+    profileable=True,
     qr_scanner=True,
     deep_links=(("pi", "pair"),),
     launcher=(Path(__file__).resolve().parents[1] / "assets" / "launcher", 0xFF161D27),
     licenses=tuple(build_apk.WORKSPACE / "licenses" / name for name in (
-        "IBM-PLEX-OFL.txt", "COMMIT-MONO-OFL.txt",
+        "IBM-PLEX-OFL.txt", "COMMIT-MONO-OFL.txt", "RQUICKJS-MIT.txt", "QUICKJS-NG-MIT.txt",
     )),
 )
 

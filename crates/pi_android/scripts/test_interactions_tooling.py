@@ -92,5 +92,26 @@ class GestureTargetTests(unittest.TestCase):
             self.assertEqual(swipe.call_count, 8, "scroll attempts must be bounded")
 
 
+class ForegroundSafetyTests(unittest.TestCase):
+    def test_resumed_fixture_behind_anr_overlay_never_receives_injection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            phone=Phone("not-a-device",Path(directory))
+            outputs=[b'topResumedActivity=ActivityRecord{0 u0 dev.pi.android.uitest/dev.pi.gpui.GpuiActivity}',
+                     b'mCurrentFocus=Window{0 u0 Application Not Responding: dev.pi.android.uitest}']
+            with patch('test_interactions.subprocess.check_output',side_effect=outputs) as call:
+                with self.assertRaisesRegex(AssertionError,'does not own input focus'):
+                    phone.run('shell','input','tap',1,1)
+                self.assertEqual(call.call_count,2)
+
+    def test_fixture_window_with_input_focus_allows_injection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            phone=Phone("not-a-device",Path(directory))
+            outputs=[b'topResumedActivity=ActivityRecord{0 u0 dev.pi.android.uitest/dev.pi.gpui.GpuiActivity}',
+                     b'mCurrentFocus=Window{0 u0 dev.pi.android.uitest/dev.pi.gpui.GpuiActivity}',b'']
+            with patch('test_interactions.subprocess.check_output',side_effect=outputs) as call:
+                phone.run('shell','input','tap',1,1)
+                self.assertEqual(call.call_count,3)
+
+
 if __name__ == "__main__":
     unittest.main()

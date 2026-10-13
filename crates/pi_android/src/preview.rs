@@ -89,6 +89,19 @@ pub const SCREENS: &[&str] = &[
     "markdown",
     "page",
     "html-page",
+    "visual-calculator",
+    "visual-spirograph",
+    "visual-spirograph-evening",
+    "visual-spirograph-trace",
+    "visual-calculator-evening",
+    "visual-calculator-partial",
+    "visual-calculator-invalid",
+    "visual-calculator-unrequested",
+    "inline-calculator",
+    "inline-calculator-evening",
+    "inline-input",
+    "inline-scroll",
+    "inline-boundary",
     "history",
     "multi-turn",
     "tool-output",
@@ -160,6 +173,7 @@ impl PhoneApp {
         self.expanded_streams.clear();
         self.expanded_calls.clear();
         self.reset_swarm_views();
+        self.visual_apps.borrow_mut().clear_running();
         self.searching = false;
         self.preview_models.clear();
         self.preview_transport_diagnostics.clear();
@@ -380,6 +394,133 @@ impl PhoneApp {
                 self.search.update(cx, |area, cx| {
                     area.set_text("no-matching-session-".repeat(20), cx)
                 });
+            }
+            "visual-calculator"
+            | "visual-calculator-evening"
+            | "visual-calculator-partial"
+            | "visual-calculator-invalid"
+            | "visual-calculator-unrequested"
+            | "visual-spirograph"
+            | "visual-spirograph-evening"
+            | "visual-spirograph-trace" => {
+                let spirograph = name.starts_with("visual-spirograph");
+                let bundle = if name == "visual-spirograph-trace" {
+                    include_str!("../assets/samples/spirograph-trace.pi-visual.js")
+                } else if spirograph {
+                    include_str!("../assets/samples/spirograph.pi-visual.js")
+                } else {
+                    include_str!("../assets/samples/calculator.pi-visual.js")
+                };
+                let source = match name {
+                    "visual-calculator-partial" => format!("```javascript pi-visual\n{bundle}"),
+                    "visual-calculator-invalid" => {
+                        "```javascript pi-visual\napp({ broken JavaScript\n```".into()
+                    }
+                    _ if spirograph => format!(
+                        "A native spirograph lab. Drag the controls, then tap Play.\n\n```javascript pi-visual\n{bundle}\n```"
+                    ),
+                    _ => format!(
+                        "Here you go. A native calculator, right here.\n\n```javascript pi-visual\n{bundle}\n```\n\nTap the keys to calculate. No browser needed."
+                    ),
+                };
+                if let Some(session) = self
+                    .store
+                    .as_mut()
+                    .and_then(|s| s.sessions.iter_mut().find(|s| s.id == QWEN))
+                {
+                    session.title = if spirograph {
+                        "A spirograph, please"
+                    } else {
+                        "A calculator, please"
+                    }
+                    .into();
+                    session.project = "Little tools".into();
+                    session.state = State::Done;
+                    session.elapsed = Duration::from_secs(4);
+                    session.script = None;
+                    session.files.clear();
+                    session.check = None;
+                    session.question = None;
+                    session.queued.clear();
+                    session.queued_keys.clear();
+                    let mut turn = Turn::new(
+                        if name.ends_with("unrequested") {
+                            "Show me source."
+                        } else if spirograph {
+                            "@Visualize create an interactive spirograph."
+                        } else {
+                            "@Visualize build me a calculator."
+                        },
+                        "09:41",
+                    );
+                    turn.stages.clear();
+                    turn.summary = Some(Summary {
+                        headline: String::new(),
+                        body: String::new(),
+                        source: Some(source.clone()),
+                    });
+                    turn.flow = vec![Flow::Text(source)];
+                    session.turns = vec![turn];
+                }
+                if name.ends_with("evening") {
+                    self.update_prefs(cx, |p| p.appearance = Appearance::Evening);
+                    self.apply_theme(window, cx);
+                }
+                self.show_session(QWEN, window, cx);
+            }
+            "inline-calculator"
+            | "inline-calculator-evening"
+            | "inline-input"
+            | "inline-scroll"
+            | "inline-boundary" => {
+                let mut html = if name == "inline-boundary" {
+                    include_str!("../assets/samples/inline-boundary.html")
+                } else {
+                    include_str!("../assets/samples/calculator.html")
+                }
+                .to_owned();
+                if name == "inline-input" {
+                    html = html.replace("<main class=\"calculator\"", "<label style=\"display:block;padding:12px;font-size:14px\">Page note<input aria-label=\"Page note\" placeholder=\"Page note\" style=\"display:block;width:100%;min-height:48px;font-size:16px\"></label><main class=\"calculator\"");
+                }
+                if let Some(session) = self
+                    .store
+                    .as_mut()
+                    .and_then(|store| store.sessions.iter_mut().find(|s| s.id == QWEN))
+                {
+                    session.title = "Build a calculator".into();
+                    session.project = "tools".into();
+                    session.state = State::Done;
+                    session.elapsed = Duration::from_secs(8);
+                    session.script = None;
+                    session.files.clear();
+                    session.check = None;
+                    session.question = None;
+                    session.queued.clear();
+                    session.queued_keys.clear();
+                    let mut turn = Turn::new("Build me a calculator I can use here.", "09:41");
+                    turn.stages.clear();
+                    turn.pages = vec![pi_markdown::Page {
+                        path: "demo/calculator.html".into(),
+                        html: Some(html),
+                    }];
+                    turn.flow = vec![
+                        Flow::Text(
+                            "Here you go. A small calculator, right in the conversation.".into(),
+                        ),
+                        Flow::Page(0),
+                        Flow::Text(if name == "inline-scroll" {
+                            "The page is part of the reply. Scroll back to use it; your calculation is kept while this page stays cached.\n\n".repeat(20)
+                        } else {
+                            "Want a different layout? Just ask.".into()
+                        }),
+                    ];
+                    session.turns = vec![turn];
+                }
+                if name.ends_with("evening") {
+                    self.update_prefs(cx, |prefs| prefs.appearance = Appearance::Evening);
+                    self.apply_theme(window, cx);
+                }
+                self.show_session(QWEN, window, cx);
             }
             "long-reply" | "streaming-reply" | "failed" | "stopped" | "markdown" | "page"
             | "multi-turn" => {
@@ -910,6 +1051,10 @@ impl PhoneApp {
             "scale": probes.scale, "bounds": probes.bounds, "viewport": probes.viewport,
             "pointer": probes.pointer,
             "route": format!("{:?}", self.route()), "sheet": self.sheet.map(|s| format!("{s:?}")),
+            "inline_expanded": self.inline_pages.borrow().expanded.is_some(),
+            "inline_available": gpui_android::activity::inline_pages_available(),
+            "visual_apps": self.visual_apps.borrow().telemetry(),
+            "visual_profile": crate::visual_profile::telemetry(cx),
             "project": self.store.as_ref().and_then(|s| s.projects.get(self.project)).map(|p| p.path.clone()),
             "picked": self.project_browser.picked.clone(),
             "open_folders": self.project_browser.open.len(),
@@ -918,6 +1063,8 @@ impl PhoneApp {
             "sample": self.store.as_ref().is_some_and(|store| store.is_sample()),
             "scheduler": self.schedule_test_state(cx),
             "draft_chars": composer.map(|c| c.read(cx).area.read(cx).text().chars().count()),
+            "draft_input": composer.map(|c| c.read(cx).area.read(cx).test_input_state()),
+            "long_draft_intact": (probes.fixture == "follow-up-input").then(|| composer.is_some_and(|c| c.read(cx).area.read(cx).text().replace("XYZ", "") == long_text())),
             "text_menu_open": composer.is_some_and(|c| c.read(cx).area.read(cx).menu_open()),
             "draft_attachments": composer.map(|c| c.read(cx).attachments().len()),
             "draft_images": composer.map(|c| c.read(cx).attachments().iter().filter(|a| matches!(a, Attachment::Image { .. })).count()),

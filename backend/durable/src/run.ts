@@ -44,7 +44,7 @@ const commands = [
   "get_subagent", "stop_subagent", "prompt_subagent",
 ];
 const info = {
-  backend: "pi-durable", version: "1", piVersion: "1.1.0", protocolVersion: 2,
+  backend: "pi-durable", version: "1", piVersion: "1.2.0", protocolVersion: 2,
   bunVersion: Bun.version, workerPid: process.pid, commands,
   features: ["durable_execution", "committed_snapshots", "incremental_events", "request_deduplication", "remote_pi_credentials", "builtin_providers", "image_prompts", "image_references", "prompt_templates", "skills", "subagents", "subagent_input", "swarm_messaging", "manual_compaction"],
   experimental: true,
@@ -77,6 +77,9 @@ export async function eventStreamFailure(closed: Promise<WatchEnd>): Promise<nev
   const end = await closed;
   if (end.reason === "listener_error") {
     throw new Error(`Durable event stream listener failed: ${end.error.message}`, { cause: end.error });
+  }
+  if (end.reason === "session_failed") {
+    throw new Error(`Durable session failed: ${String(end.error)}`, { cause: end.error });
   }
   throw new Error(`Durable event stream closed unexpectedly: ${end.reason}`);
 }
@@ -319,7 +322,7 @@ export async function run(
   await root.commit(async (tx) => {
     const metadata = await tx.doc(Metadata, root.id);
     metadata.initialized = true;
-    metadata.swarmEnabled ??= true;
+    metadata.swarmEnabled ??= false;
     // Made here, so the apps can follow it before any subagent starts.
     (await tx.doc(Calls, root.id)).calls ??= {};
   }, context);
@@ -374,6 +377,8 @@ export async function run(
         ...(snapshot.run === undefined ? {} : { run: snapshot.run }),
         ...(snapshot.generation === undefined ? {} : { generation: snapshot.generation }),
         tools: snapshot.tools,
+        nestedTools: snapshot.nestedTools,
+        compactionFailure: snapshot.compactionFailure,
         compactions: snapshot.compactions,
       },
       "pi.inbox": { items: inboxAt(snapshot) },

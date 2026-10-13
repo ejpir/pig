@@ -124,6 +124,9 @@ pub enum Sheet {
     Computers,
     /// Text from the thread, to select part of and copy.
     SelectText,
+    InlineSource,
+    InlineUpdate,
+    InlinePermissions,
 }
 
 #[derive(Clone, Debug)]
@@ -137,6 +140,7 @@ pub(crate) struct RenderStats {
     pub(crate) visible: bool,
     last_frame: Option<Instant>,
     intervals: VecDeque<Duration>,
+    build_times: VecDeque<Duration>,
     refresh_rate: Option<f32>,
     max_refresh_rate: Option<f32>,
     last_rate_read: Option<Instant>,
@@ -150,6 +154,7 @@ impl Default for RenderStats {
             visible: false,
             last_frame: None,
             intervals: VecDeque::new(),
+            build_times: VecDeque::new(),
             refresh_rate: None,
             max_refresh_rate: None,
             last_rate_read: None,
@@ -181,8 +186,16 @@ impl RenderStats {
     fn reset(&mut self) {
         self.last_frame = None;
         self.intervals.clear();
+        self.build_times.clear();
         self.frames_since_label = 10;
         self.cached_label = "".into();
+    }
+
+    fn observe_build(&mut self, elapsed: Duration) {
+        if self.build_times.len() == 120 {
+            self.build_times.pop_front();
+        }
+        self.build_times.push_back(elapsed);
     }
 
     fn refresh_display_rates(&mut self, now: Instant) {
@@ -246,8 +259,19 @@ impl RenderStats {
                 (label, late)
             },
         );
+        let build = self
+            .build_times
+            .back()
+            .map_or(0.0, |t| t.as_secs_f32() * 1000.0);
+        let mut builds: Vec<_> = self.build_times.iter().copied().collect();
+        builds.sort_unstable();
+        let build95 = if builds.is_empty() {
+            0.0
+        } else {
+            builds[(builds.len() - 1) * 95 / 100].as_secs_f32() * 1000.0
+        };
         self.cached_label = format!(
-            "{fps:.0} FPS / {rate}\n{latest:.1} ms · p95 {p95:.1} · late {late}/{}",
+            "view {fps:.0} FPS / {rate}\ngap {latest:.1} ms · p95 {p95:.1} · late {late}/{}\nbuild {build:.1} ms · p95 {build95:.1}",
             self.intervals.len()
         )
         .into();
@@ -256,6 +280,8 @@ impl RenderStats {
 }
 
 pub struct PhoneApp {
+    pub(crate) inline_pages: std::cell::RefCell<crate::inline_page::InlinePages>,
+    pub(crate) visual_apps: std::cell::RefCell<crate::visual_apps::VisualApps>,
     pub(crate) schedules: crate::schedules::Schedules,
     pub(crate) store: Option<Store>,
     pub(crate) routes: Vec<Route>,
@@ -394,9 +420,10 @@ pub struct PhoneApp {
     pub(crate) thread_list_offsets: HashMap<SessionId, Pixels>,
     pub(crate) prefs_path: Option<PathBuf>,
     pub(crate) visible: bool,
+    window_active: bool,
     /// The text of the working notification, while one is shown.
     working_posted: Option<String>,
-    /// Live transcript changes held outside the store until scrolling settles.
+    /// Live transcript changes held until scrolling/direct manipulation settles.
     deferred_updates: Vec<(Option<SessionId>, Update)>,
     deferred_flush_scheduled: bool,
     last_tick: Instant,
@@ -410,6 +437,9 @@ pub struct PhoneApp {
 
 impl PhoneApp {
     pub fn new(prefs_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::visual_profile::install_trace();
+        #[cfg(target_os = "android")]
+        cx.set_reduce_motion(activity::reduced_motion());
         let prefs = prefs_path.as_deref().map(Prefs::load).unwrap_or_default();
         let address = cx.new(|cx| {
             TextArea::single_line(
@@ -505,6 +535,16 @@ impl PhoneApp {
             cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)),
             cx.observe_window_visibility(window, |this, visibility, _, cx| {
                 this.set_visible(visibility, cx)
+            }),
+            cx.observe_window_activation(window, |this, window, cx| {
+                this.window_active = window.is_window_active();
+                if !this.window_active {
+                    this.visual_apps
+                        .borrow_mut()
+                        .projection_deferred(this.route(), false);
+                }
+                // Rollback on blur and rearm visible animation on activation.
+                cx.notify();
             }),
         ];
         // Tests read the screen from what each tick writes, so it stays current.
@@ -609,6 +649,10 @@ impl PhoneApp {
             file_view: None,
             tool_images: Default::default(),
             tool_image_demands: Default::default(),
+            inline_pages: Default::default(),
+            visual_apps: std::cell::RefCell::new(crate::visual_apps::VisualApps::load(
+                prefs_path.as_deref(),
+            )),
             posters_drawing: Default::default(),
             file_generation: 0,
             project_files_generation: 0,
@@ -630,6 +674,7 @@ impl PhoneApp {
             thread_list_offsets: HashMap::new(),
             prefs_path,
             visible: window.visibility().is_visible(),
+            window_active: window.is_window_active(),
             working_posted: None,
             deferred_updates: Vec::new(),
             deferred_flush_scheduled: false,
@@ -1037,6 +1082,12 @@ impl PhoneApp {
             cx.notify();
             return true;
         }
+        if self.inline_pages.borrow_mut().expanded.take().is_some() {
+            window.dismiss_virtual_keyboard();
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return true;
+        }
         if self.searching {
             self.searching = false;
             self.search.update(cx, |search, cx| {
@@ -1119,6 +1170,7 @@ impl PhoneApp {
 
     /// The sample sessions, for trying the app without a computer.
     pub(crate) fn open_store(&mut self, address: &str) {
+        self.reset_inline_pages();
         self.reset_swarm_views();
         self.schedules.invalidate();
         self.project_browser.clear();
@@ -1458,6 +1510,7 @@ impl PhoneApp {
         self.thread_snapshots.clear();
         self.thread_list_offsets.clear();
         self.reset_swarm_views();
+        self.reset_inline_pages();
         self.store = Some(store);
         self.routes = vec![Route::Sessions, Route::Projects];
         self.threads.clear();
@@ -1496,6 +1549,8 @@ impl PhoneApp {
         };
         self._pump = Some(cx.spawn(async move |this, cx| {
             while let Ok(first) = updates.recv().await {
+                // Lexical guard ends before the next recv().await.
+                let _trace = gpui_android::trace::scope(c"pi.app.pump");
                 let mut batch = vec![first];
                 while let Ok(more) = updates.try_recv() {
                     batch.push(more);
@@ -1513,7 +1568,7 @@ impl PhoneApp {
     fn take_updates(&mut self, batch: Vec<(Option<SessionId>, Update)>, cx: &mut Context<Self>) {
         // Once a queue exists, every later batch joins it even if motion has
         // just ended. The one flush task then preserves protocol order.
-        if self.scroll_in_motion() || self.deferred_flush_scheduled {
+        if self.projection_deferred() || self.deferred_flush_scheduled {
             self.deferred_updates.extend(batch);
             if !self.deferred_flush_scheduled {
                 self.deferred_flush_scheduled = true;
@@ -1523,7 +1578,7 @@ impl PhoneApp {
                             .timer(Duration::from_millis(50))
                             .await;
                         let Ok(done) = this.update(cx, |this, cx| {
-                            if this.scroll_in_motion() {
+                            if this.projection_deferred() {
                                 return false;
                             }
                             this.deferred_flush_scheduled = false;
@@ -1548,6 +1603,7 @@ impl PhoneApp {
     }
 
     fn apply_updates(&mut self, batch: Vec<(Option<SessionId>, Update)>, cx: &mut Context<Self>) {
+        let _trace = gpui_android::trace::scope(c"pi.app.updates");
         self.keep_latest_in_view();
         let global_commands = batch
             .iter()
@@ -1822,6 +1878,7 @@ impl PhoneApp {
             .store
             .as_ref()
             .map(|store| store.computer.address.clone());
+        self.reset_inline_pages();
         self.store = None;
         self.deferred_updates.clear();
         self.thread_lists.clear();
@@ -1877,13 +1934,35 @@ impl PhoneApp {
         crate::scroll::in_motion()
     }
 
+    /// Keep transcript snapshot freezing separate from direct manipulation:
+    /// local script/animation frames must continue while remote geometry waits.
+    fn projection_deferred(&self) -> bool {
+        let visual = self.visual_apps.borrow_mut().projection_deferred(
+            self.route(),
+            self.visible
+                && self.window_active
+                && self.sheet.is_none()
+                && self.closing_sheet.is_none(),
+        );
+        self.scroll_in_motion() || visual
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
+        let _trace = gpui_android::trace::scope(c"pi.app.tick");
+        // Framework duration-scale updates can arrive while we stay visible.
+        // Poll at the existing low-frequency ticker, never on animation frames.
+        #[cfg(target_os = "android")]
+        if self.visible {
+            cx.set_reduce_motion(activity::reduced_motion());
+        }
         #[cfg(feature = "ui-test")]
         self.write_fixture_state(cx);
         let now = Instant::now();
-        let scrolling = self.scroll_in_motion();
+        // Flush queued records first after release rather than projecting stale
+        // state here and then reconstructing it again in the pending flush.
+        let projection_deferred = self.projection_deferred() || self.deferred_flush_scheduled;
         let paused = self.paused && !self.playing;
-        if !paused && !scrolling {
+        if !paused && !projection_deferred {
             self.keep_latest_in_view();
         }
         if self
@@ -1936,7 +2015,7 @@ impl PhoneApp {
         // A live projection or sample transition can resize the content even
         // without a remote record. Keep the elapsed interval intact and apply
         // it once the manipulation and momentum have ended.
-        if scrolling {
+        if projection_deferred {
             return;
         }
         let elapsed = now - self.last_tick;
@@ -2038,6 +2117,16 @@ impl PhoneApp {
         let visible = visibility.is_visible();
         let changed = self.visible != visible;
         self.visible = visible;
+        if !visible {
+            // Cancel synchronously even if Hidden→Visible happens between ticks.
+            self.visual_apps
+                .borrow_mut()
+                .projection_deferred(self.route(), false);
+        }
+        #[cfg(target_os = "android")]
+        if visible {
+            cx.set_reduce_motion(activity::reduced_motion());
+        }
         if self.visible
             && let Route::Thread(id)
             | Route::Review(id)
@@ -2066,6 +2155,82 @@ impl PhoneApp {
             self.close_sheet(cx);
             self.routes = vec![Route::Sessions];
             cx.notify();
+            return;
+        }
+        #[cfg(feature = "ui-test")]
+        if let Some(request) = url.strip_prefix("pi://test/inline-inspect/") {
+            if self.paused
+                && self.store.as_ref().is_some_and(|store| store.is_sample())
+                && cx
+                    .try_global::<crate::testing::State>()
+                    .is_some_and(|state| state.fixture.starts_with("inline-"))
+            {
+                activity::inspect_inline_page_for_test(request);
+            }
+            return;
+        }
+        #[cfg(feature = "ui-test")]
+        if url == "pi://test/inline-crash" {
+            if self.paused
+                && self.store.as_ref().is_some_and(|store| store.is_sample())
+                && cx
+                    .try_global::<crate::testing::State>()
+                    .is_some_and(|state| state.fixture.starts_with("inline-"))
+            {
+                activity::terminate_inline_page_for_test();
+            }
+            return;
+        }
+        #[cfg(feature = "ui-test")]
+        if matches!(url, "pi://test/inline-evening" | "pi://test/inline-light") {
+            if self.paused
+                && self.store.as_ref().is_some_and(|store| store.is_sample())
+                && cx
+                    .try_global::<crate::testing::State>()
+                    .is_some_and(|state| state.fixture.starts_with("inline-"))
+            {
+                self.update_prefs(cx, |prefs| {
+                    prefs.appearance = if url.ends_with("inline-evening") {
+                        Appearance::Evening
+                    } else {
+                        Appearance::Moonstone
+                    }
+                });
+                self.apply_theme(window, cx);
+                cx.notify();
+            }
+            return;
+        }
+        #[cfg(feature = "ui-test")]
+        if matches!(
+            url,
+            "pi://test/inline-update" | "pi://test/inline-unavailable"
+        ) {
+            // Fixture-only mutations of an inert sample, never a remote session.
+            if self.paused
+                && self.store.as_ref().is_some_and(|store| store.is_sample())
+                && cx
+                    .try_global::<crate::testing::State>()
+                    .is_some_and(|state| state.fixture.starts_with("inline-"))
+                && let Some(session) = self.store.as_mut().and_then(|store| {
+                    store
+                        .sessions
+                        .iter_mut()
+                        .find(|session| session.id == SessionId(1))
+                })
+                && let Some(page) = session
+                    .turns
+                    .first_mut()
+                    .and_then(|turn| turn.pages.first_mut())
+            {
+                if url.ends_with("inline-unavailable") {
+                    page.html = None;
+                } else if let Some(html) = &mut page.html {
+                    *html =
+                        html.replace("<title>Calculator</title>", "<title>Calculator v2</title>");
+                }
+                cx.notify();
+            }
             return;
         }
         #[cfg(feature = "ui-test")]
@@ -3200,7 +3365,7 @@ fn prompt_for(
     file: Option<&str>,
 ) -> Result<crate::prompt::Prompt, String> {
     use base64::Engine;
-    let mut message = text.to_owned();
+    let mut message = crate::visualize_prompt::expand(text);
     let mut images = Vec::new();
     for attachment in attachments {
         match attachment {
@@ -3216,7 +3381,7 @@ fn prompt_for(
                 ));
             }
             Attachment::File { name, contents, .. } => message.push_str(&format!(
-                "\n\nAttached text file: {name}\n{contents}\nEnd of attached file: {name}"
+                "\n\nAttached text file: {}\nContent byte length: {}\n{contents}\nEnd of attached file: {}", serde_json::to_string(name).unwrap_or_default(), contents.len(), serde_json::to_string(name).unwrap_or_default()
             )),
             Attachment::Lines(lines) => {
                 let file =
@@ -3241,6 +3406,19 @@ pub(crate) fn size_label(bytes: u64) -> String {
 
 impl Render for PhoneApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _trace = gpui_android::trace::scope(c"pi.root.build");
+        // Route/sheet transitions cancel before a retained old surface can run
+        // another callback. Do not wait for the next ticker or remote record.
+        self.visual_apps.borrow_mut().projection_deferred(
+            self.route(),
+            self.visible
+                && self.window_active
+                && self.sheet.is_none()
+                && self.closing_sheet.is_none(),
+        );
+        crate::visual_profile::enable(cx, self.render_stats.visible);
+        gpui_android::frame_profile::set_enabled(self.render_stats.visible);
+        let render_start = self.render_stats.visible.then(Instant::now);
         if self.render_stats.visible {
             let now = Instant::now();
             self.render_stats.refresh_display_rates(now);
@@ -3269,27 +3447,41 @@ impl Render for PhoneApp {
         }
         let colors = theme(cx);
         let insets = Self::insets(window);
-        let screen = match self.route() {
-            Route::Connect => self.connect_screen(window, cx).into_any_element(),
-            Route::Sessions => self.sessions_screen(window, cx).into_any_element(),
-            Route::Schedules
-            | Route::ScheduleEdit
-            | Route::ScheduleDetail
-            | Route::ScheduleConfirm
-            | Route::ScheduleHistory => self.schedules_screen(window, cx),
-            Route::Projects => self.projects_screen(window, cx).into_any_element(),
-            Route::Start => self.start_screen(window, cx).into_any_element(),
-            Route::File => self.file_screen(window, cx).into_any_element(),
-            Route::Thread(id) => self.thread_screen(id, window, cx),
-            Route::Review(id) => self.review_screen(id, window, cx),
-            Route::History(id) => self.history_screen(id, window, cx),
-            Route::Diagnostics(id) => self.diagnostics_screen(id, window, cx),
-            Route::Subagents(id) => self.subagents_screen(id, window, cx),
-            Route::Swarm(id, pick) => self.swarm_screen(id, pick, window, cx),
-            Route::Subagent(id, pick) | Route::SwarmPeer(id, pick, _) => {
-                self.subagent_screen(id, pick, window, cx)
+        let inline_slot = self.inline_pages.borrow().slot.clone();
+        inline_slot.borrow_mut().take();
+        let native_page_visible = self.visible
+            && self.sheet.is_none()
+            && self.closing_sheet.is_none()
+            && self.notice.is_none();
+        let expanded_page = self.inline_expanded_screen(window, cx);
+        if expanded_page.is_none() {
+            self.inline_pages.borrow_mut().expanded = None;
+        }
+        let screen = if let Some(expanded) = expanded_page {
+            expanded.into_any_element()
+        } else {
+            match self.route() {
+                Route::Connect => self.connect_screen(window, cx).into_any_element(),
+                Route::Sessions => self.sessions_screen(window, cx).into_any_element(),
+                Route::Schedules
+                | Route::ScheduleEdit
+                | Route::ScheduleDetail
+                | Route::ScheduleConfirm
+                | Route::ScheduleHistory => self.schedules_screen(window, cx),
+                Route::Projects => self.projects_screen(window, cx).into_any_element(),
+                Route::Start => self.start_screen(window, cx).into_any_element(),
+                Route::File => self.file_screen(window, cx).into_any_element(),
+                Route::Thread(id) => self.thread_screen(id, window, cx),
+                Route::Review(id) => self.review_screen(id, window, cx),
+                Route::History(id) => self.history_screen(id, window, cx),
+                Route::Diagnostics(id) => self.diagnostics_screen(id, window, cx),
+                Route::Subagents(id) => self.subagents_screen(id, window, cx),
+                Route::Swarm(id, pick) => self.swarm_screen(id, pick, window, cx),
+                Route::Subagent(id, pick) | Route::SwarmPeer(id, pick, _) => {
+                    self.subagent_screen(id, pick, window, cx)
+                }
+                Route::Settings => self.settings_screen(window, cx).into_any_element(),
             }
-            Route::Settings => self.settings_screen(window, cx).into_any_element(),
         };
         let sheet = self.sheet.or(self.closing_sheet).map(|sheet| {
             let content = self.sheet_content(sheet, window, cx);
@@ -3373,7 +3565,12 @@ impl Render for PhoneApp {
                 })
         });
         let rendering_stats = self.render_stats.visible.then(|| {
-            let label = self.render_stats.label();
+            let label: SharedString = format!(
+                "{}{}",
+                self.render_stats.label(),
+                crate::visual_profile::label(cx)
+            )
+            .into();
             div()
                 .id("rendering-stats")
                 .debug_selector(|| "rendering-stats".into())
@@ -3490,7 +3687,7 @@ impl Render for PhoneApp {
                     .into_any_element()
             }
         });
-        div()
+        let root = div()
             .id("pi")
             .key_context("PhoneApp")
             .track_focus(&self.focus)
@@ -3516,6 +3713,27 @@ impl Render for PhoneApp {
             .children(sheet)
             .children(notice)
             .children(rendering_stats)
+            // Publish only after actual painting. Measurement of virtual rows
+            // must neither execute HTML nor leave a native window above a sheet.
+            .child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |_, _, _, _| {
+                        let slot = inline_slot.borrow_mut().take();
+                        activity::sync_inline_page(if native_page_visible {
+                            slot.as_deref().unwrap_or("{}")
+                        } else {
+                            "{}"
+                        });
+                    },
+                )
+                .absolute()
+                .size_full(),
+            );
+        if let Some(start) = render_start {
+            self.render_stats.observe_build(start.elapsed());
+        }
+        crate::visual_profile::root(root)
     }
 }
 
@@ -3524,6 +3742,19 @@ fn sheet_scrim_opacity(open: bool, progress: f32) -> f32 {
 }
 
 impl PhoneApp {
+    pub(crate) fn show_selected_text(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selectable
+            .update(cx, |area, cx| area.show_selected(text, cx));
+        self.open_sheet(Sheet::SelectText, cx);
+        self.sheet_focus_pending = false;
+        window.focus(&self.selectable.read(cx).focus_handle(cx), cx);
+    }
+
     /// Laid over a block of content: a long press opens `text` to select
     /// and copy all of it or part, with the phone's buzz.
     pub(crate) fn copyable(
@@ -3573,6 +3804,62 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn visualize_expands_only_draft_text_before_attachment_and_review_encoding() {
+        use crate::composer::Attachment;
+        let files = [Attachment::File {
+            name: "note.txt".into(),
+            size: "10 B".into(),
+            contents: "@Visualize".into(),
+        }];
+        let inert = super::prompt_for("Read this", &files, None).unwrap();
+        assert!(!inert.message.contains(crate::visualize_prompt::CONTRACT));
+        assert_eq!(
+            super::prompt_for(&inert.message, &[], None)
+                .unwrap()
+                .message,
+            inert.message
+        );
+        let active = super::prompt_for("@Visualize build a calc", &files, None).unwrap();
+        assert_eq!(
+            active
+                .message
+                .matches(crate::visualize_prompt::CONTRACT)
+                .count(),
+            1
+        );
+        assert!(
+            active
+                .label()
+                .starts_with("@Visualize build a calc\n\nAttached text file:")
+        );
+        assert!(!active.label().contains("Pi native visual app request"));
+        assert_eq!(
+            super::prompt_for(&active.message, &[], None)
+                .unwrap()
+                .message,
+            active.message
+        );
+        let review = super::prompt_for(
+            "@Visualize show a counter",
+            &[Attachment::Lines("lines 1–2".into())],
+            Some("src/main.rs"),
+        )
+        .unwrap();
+        assert!(
+            review
+                .message
+                .starts_with("About lines 1–2 of src/main.rs: @Visualize")
+        );
+        assert_eq!(
+            review
+                .message
+                .matches(crate::visualize_prompt::CONTRACT)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn render_stats_measure_active_frames_without_counting_idle_time() {
         let mut stats = RenderStats::default();
         let start = Instant::now();
@@ -3609,6 +3896,56 @@ mod tests {
         stats.observe(start + Duration::from_millis(17));
         let label = stats.label();
         assert!(label.contains("late 0/1"), "{label}");
+    }
+
+    #[gpui::test]
+    fn native_manipulation_defers_remote_records_and_release_preserves_queue_order(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let barrier = app.update(cx, |app, _| {
+            app.visual_apps
+                .borrow_mut()
+                .test_projection_barrier(app.route())
+        });
+        let lease = barrier.acquire();
+        app.update(cx, |app, cx| {
+            assert!(app.projection_deferred());
+            app.take_updates(
+                vec![(Some(SessionId(1)), Update::Ended(1, "first".into()))],
+                cx,
+            );
+            assert!(app.deferred_flush_scheduled);
+            assert_eq!(app.deferred_updates.len(), 1);
+        });
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| assert_eq!(app.deferred_updates.len(), 1));
+        drop(lease);
+        app.update(cx, |app, cx| {
+            assert!(!app.projection_deferred());
+            app.take_updates(
+                vec![(Some(SessionId(1)), Update::Ended(1, "second".into()))],
+                cx,
+            );
+            let reasons = app
+                .deferred_updates
+                .iter()
+                .map(|(_, update)| match update {
+                    Update::Ended(_, reason) => reason.as_str(),
+                    _ => "wrong update",
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(reasons, ["first", "second"]);
+        });
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(!app.deferred_flush_scheduled);
+            assert!(app.deferred_updates.is_empty());
+        });
     }
 
     #[gpui::test]

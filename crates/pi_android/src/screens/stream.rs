@@ -444,18 +444,14 @@ impl PhoneApp {
                         column = flush(column, &mut calls);
                         let element = match step {
                             Flow::Text(text) => Some(
-                                div()
-                                    .relative()
-                                    .min_w_0()
-                                    .child(crate::message::render(text, colors))
-                                    .child(self.copyable(text.clone(), cx))
+                                self.visual_reply(session, index, n, text, colors, cx)
                                     .into_any_element(),
                             ),
                             Flow::Image(n) => self
                                 .image_card(id, index, turn, *n, colors, cx)
                                 .map(IntoElement::into_any_element),
                             Flow::Page(n) => self
-                                .page_card(index, turn, *n, colors, cx)
+                                .page_card(id, index, turn, *n, colors, cx)
                                 .map(IntoElement::into_any_element),
                             Flow::Handoff(n) => self
                                 .handoff_card(id, index, turn, *n, colors, cx)

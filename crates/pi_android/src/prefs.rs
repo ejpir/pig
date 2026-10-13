@@ -87,6 +87,7 @@ impl Prefs {
     }
 
     pub fn save(&self, path: &Path) {
+        let _trace = gpui_android::trace::scope(c"pi.app.prefs.save");
         let result = serde_json::to_vec_pretty(self)
             .map_err(std::io::Error::other)
             .and_then(|bytes| {

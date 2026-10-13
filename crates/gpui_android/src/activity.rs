@@ -92,6 +92,19 @@ pub fn notifications_enabled() -> bool {
     }
 }
 
+/// Whether Android's system animation duration scale is disabled.
+/// Other platforms retain GPUI's own reduced-motion setting.
+pub fn reduced_motion() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current().is_some_and(|java| java.reduced_motion())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
 /// The refresh rate Android reports to this app, including rate overrides.
 pub fn refresh_rate() -> Option<f32> {
     #[cfg(target_os = "android")]
@@ -198,6 +211,83 @@ pub fn show_page(
     {
         let _ = (title, html, dark, source, poster, site);
         false
+    }
+}
+
+/// Whether this platform can host an interactive, offline page inside GPUI.
+pub fn supports_inline_pages() -> bool {
+    cfg!(target_os = "android")
+}
+
+/// Whether the Java host is healthy. Failures are recoverable, but do not
+/// automatically retry an unavailable provider or a crashing document.
+pub fn inline_pages_available() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current().is_some_and(|java| java.inline_pages_available())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
+/// Registers an immutable page document without executing it. The native host
+/// retains a bounded document cache; query it again before publishing a slot.
+/// `revision` changes only when the user explicitly loads a different document.
+pub fn prepare_inline_page(id: &str, revision: &str, html: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current().is_some_and(|java| java.prepare_inline_page(id, revision, html))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (id, revision, html);
+        false
+    }
+}
+
+/// Publishes the actually painted slot, in physical window pixels, as JSON.
+/// An empty object hides the host without destroying its running document.
+/// Calls must follow painting, not virtual-list measurement. This is an
+/// offline, scripts-only host: no network, file access, permissions or bridge.
+pub fn sync_inline_page(slot: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current().is_some_and(|java| java.sync_inline_page(slot))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = slot;
+        false
+    }
+}
+
+/// Fixture-only, read-only native document inspection; not a page bridge.
+#[doc(hidden)]
+pub fn inspect_inline_page_for_test(request: &str) {
+    #[cfg(target_os = "android")]
+    if let Some(java) = crate::java::current() {
+        java.inspect_inline_page_for_test(request);
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = request;
+}
+
+/// Fixture harness only: terminate the isolated browser renderer, not the app.
+#[doc(hidden)]
+pub fn terminate_inline_page_for_test() {
+    #[cfg(target_os = "android")]
+    if let Some(java) = crate::java::current() {
+        java.terminate_inline_page_for_test();
+    }
+}
+
+/// Discards all inline document state when the app changes computer/store.
+pub fn clear_inline_pages() {
+    #[cfg(target_os = "android")]
+    if let Some(java) = crate::java::current() {
+        java.clear_inline_pages();
     }
 }
 

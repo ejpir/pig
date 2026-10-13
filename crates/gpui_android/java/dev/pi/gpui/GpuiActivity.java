@@ -17,8 +17,6 @@ import android.os.Build;
 import android.text.Editable;
 import android.text.Selection;
 import android.text.SpannableStringBuilder;
-import android.text.Spanned;
-import android.text.style.UnderlineSpan;
 import android.util.Log;
 import android.view.Display;
 import android.view.HapticFeedbackConstants;
@@ -59,8 +57,58 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class GpuiActivity extends NativeActivity {
     private static final String TAG = "GpuiActivity";
     private static final int QR_REQUEST = 0x6F10;
+    private final InlinePageHost inlinePages = new InlinePageHost(this);
+    private android.content.BroadcastReceiver inlineInspector;
+    private static native void nativeInlineTouch(long generation, int action, float x, float y);
+    private static native void nativeInlineBack(long generation);
+    private static native void nativeInlineFailed(long generation);
 
-    private static native void nativeImeState(
+    void inlineTouch(int action, float x, float y) {
+        if (nativeReady) nativeInlineTouch(nativeGeneration, action, x, y);
+    }
+    void inlineBack() { if (nativeReady) nativeInlineBack(nativeGeneration); }
+    void inlineFailed() { if (nativeReady) nativeInlineFailed(nativeGeneration); }
+    public boolean inlinePagesAvailable() { return inlinePages.isAvailable(); }
+    /** Native fixture harness only; never installed as a JavaScript interface. */
+    public void terminateInlinePageForTest() { inlinePages.terminateForTest(); }
+    public void inspectInlinePageForTest(String request) { inlinePages.inspectForTest(request); }
+    void inlineInsets(WindowInsets insets) {
+        // Child-window insets are relative to the clipped popup, not the
+        // full-screen surface. Forwarding its IME intersection causes resize
+        // feedback (resize -> smaller IME overlap -> grow -> resize).
+        // The parent receives the same global inset sources in screen space.
+        sendInsets(getWindow().getDecorView().getRootWindowInsets());
+    }
+
+    public boolean hasInlinePageDocument(String id, String revision) {
+        return inlinePages.hasDocument(id, revision);
+    }
+    public boolean prepareInlinePage(String id, String revision, String html) {
+        return inlinePages.prepare(id, revision, html);
+    }
+    public boolean syncInlinePage(String slot) { return inlinePages.sync(slot); }
+    public void clearInlinePages() { inlinePages.clear(); }
+    public void releaseInlinePageFocus() { inlinePages.releaseFocus(); }
+
+    @Override protected void onResume() { super.onResume(); inlinePages.resume(); }
+    @Override protected void onPause() { inlinePages.pause(); super.onPause(); }
+    @Override protected void onDestroy() {
+        synchronized (openUrlLock) {
+            destroyed = true;
+            nativeReady = false;
+            pendingOpenUrls.clear();
+        }
+        if (nativeGeneration != 0) nativeDetach(nativeGeneration);
+        keyboardRequest.incrementAndGet();
+        if (currentConnection != null) {
+            currentConnection.retire();
+            currentConnection = null;
+        }
+        if (inlineInspector != null) unregisterReceiver(inlineInspector);
+        inlinePages.destroy(); super.onDestroy();
+    }
+
+    private static native void nativeImeState(long generation,
             int seq,
             int pushId,
             String text,
@@ -69,18 +117,18 @@ public class GpuiActivity extends NativeActivity {
             int composingStart,
             int composingEnd);
 
-    private static native void nativeEditorAction(int action);
+    private static native void nativeEditorAction(long generation, int action);
 
     /**
      * The result of {@link #pickFiles} or {@link #pickSaveFile}: paths separated by NUL,
      * or null with an error, or both null when the user cancelled.
      */
-    private static native void nativePicked(int request, String paths, String error);
+    private static native void nativePicked(long generation, int request, String paths, String error);
 
     /** A URL the app was opened with, from a link or a notification. */
-    private static native void nativeOpenUrl(String url);
+    private static native void nativeOpenUrl(long generation, String url);
 
-    private static native void nativeInsets(
+    private static native void nativeInsets(long generation,
             int barsLeft,
             int barsTop,
             int barsRight,
@@ -92,7 +140,6 @@ public class GpuiActivity extends NativeActivity {
 
     // Keyboard state, only touched on the UI thread.
     private final Editable mirror = new SpannableStringBuilder();
-    private final Object composing = new UnderlineSpan();
     private int seq;
     private int batchDepth;
     private boolean edited;
@@ -112,6 +159,9 @@ public class GpuiActivity extends NativeActivity {
 
     /** Set once native code is listening. */
     private volatile boolean nativeReady;
+    private volatile long nativeGeneration;
+    private volatile boolean destroyed;
+    private static native void nativeDetach(long generation);
 
     /**
      * VIEW intents can arrive before NativeActivity has attached the Rust application.
@@ -142,6 +192,22 @@ public class GpuiActivity extends NativeActivity {
         // both cases; otherwise notification and preview links silently open
         // whatever screen Android happened to restore.
         openIntent(getIntent());
+        // Shell-only readback in the separately packaged fixture app. A VIEW
+        // intent pauses/hides its popup before the native request is handled;
+        // a broadcast leaves the actual input/surface lifecycle untouched.
+        if (getPackageName().endsWith(".uitest")) {
+            inlineInspector = new android.content.BroadcastReceiver() {
+                @Override public void onReceive(android.content.Context context, Intent intent) {
+                    String request = intent.getStringExtra("request");
+                    if (nativeReady && request != null && request.matches("[0-9]{1,32}"))
+                        nativeOpenUrl(nativeGeneration, "pi://test/inline-inspect/" + request);
+                }
+            };
+            android.content.IntentFilter filter = new android.content.IntentFilter("dev.pi.gpui.INLINE_INSPECT");
+            if (android.os.Build.VERSION.SDK_INT >= 33)
+                registerReceiver(inlineInspector, filter, android.Manifest.permission.DUMP, null, android.content.Context.RECEIVER_EXPORTED);
+            else registerReceiver(inlineInspector, filter, android.Manifest.permission.DUMP, null);
+        }
         // Draw under the system bars and keyboard; native code avoids them using the
         // insets reported below. Android 15 does this by itself for apps targeting it.
         drawEdgeToEdge();
@@ -233,6 +299,7 @@ public class GpuiActivity extends NativeActivity {
                 && intent.getData() != null) {
             String url = intent.getData().toString();
             synchronized (openUrlLock) {
+                if (destroyed) return;
                 if (!nativeReady) {
                     pendingOpenUrls.add(url);
                     Log.i(TAG, "Queued a VIEW intent until the native app attaches");
@@ -240,7 +307,7 @@ public class GpuiActivity extends NativeActivity {
                 }
             }
             Log.i(TAG, "Delivering a VIEW intent to the native app");
-            nativeOpenUrl(url);
+            nativeOpenUrl(nativeGeneration, url);
         }
     }
 
@@ -267,31 +334,39 @@ public class GpuiActivity extends NativeActivity {
         if (!nativeReady || insets == null) {
             return;
         }
+        sendNativeInsets(insets);
+    }
+
+    private void sendNativeInsets(WindowInsets insets) {
+        if (insets == null) return;
         Insets bars =
                 insets.getInsets(
                         WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
         Insets ime = insets.getInsets(WindowInsets.Type.ime());
-        nativeInsets(
+        nativeInsets(nativeGeneration,
                 bars.left, bars.top, bars.right, bars.bottom,
                 ime.left, ime.top, ime.right, ime.bottom);
     }
 
     /** Native code is listening: replay launch URLs and send the current insets. */
-    public void attachNative() {
-        List<String> urls;
-        synchronized (openUrlLock) {
-            nativeReady = true;
-            urls = new ArrayList<>(pendingOpenUrls);
-            pendingOpenUrls.clear();
-        }
-        Log.i(TAG, "Native app attached; replaying " + urls.size() + " queued VIEW intent(s)");
-        for (String url : urls) {
-            nativeOpenUrl(url);
-        }
-        runOnUiThread(() -> sendInsets(getWindow().getDecorView().getRootWindowInsets()));
+    public void attachNative(long generation) {
+        // Serialize bootstrap with onNewIntent/inset/input callbacks on their
+        // UI owner. Publish readiness only after older launch URLs and the
+        // initial inset snapshot have entered the generation-scoped FIFO.
+        runOnUiThread(() -> {
+            synchronized (openUrlLock) {
+                if (destroyed) return;
+                nativeGeneration = generation;
+                for (String url : pendingOpenUrls) nativeOpenUrl(generation, url);
+                pendingOpenUrls.clear();
+                sendNativeInsets(getWindow().getDecorView().getRootWindowInsets());
+                nativeReady = true;
+            }
+        });
     }
 
     public void showKeyboard() {
+        inlinePages.releaseFocus();
         int request = keyboardRequest.incrementAndGet();
         runOnUiThread(
                 () -> {
@@ -388,11 +463,13 @@ public class GpuiActivity extends NativeActivity {
                             mirror, clamp(selectionStart, length), clamp(selectionEnd, length));
                     BaseInputConnection.removeComposingSpans(mirror);
                     if (0 <= composingStart && composingStart < composingEnd) {
-                        mirror.setSpan(
-                                composing,
-                                clamp(composingStart, length),
-                                clamp(composingEnd, length),
-                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE | Spanned.SPAN_COMPOSING);
+                        // Android's composing getters look for its private
+                        // COMPOSING marker, not merely a SPAN_COMPOSING flag.
+                        // Restore it without going through our reporting Connection.
+                        new BaseInputConnection(editor, true) {
+                            @Override public Editable getEditable() { return mirror; }
+                        }.setComposingRegion(
+                                clamp(composingStart, length), clamp(composingEnd, length));
                     }
                     report(pushId);
                     if (restart) {
@@ -434,7 +511,7 @@ public class GpuiActivity extends NativeActivity {
         if (!nativeReady) {
             return;
         }
-        nativeImeState(
+        nativeImeState(nativeGeneration,
                 seq,
                 pushId,
                 mirror.toString(),
@@ -680,6 +757,13 @@ public class GpuiActivity extends NativeActivity {
                     private boolean saved;
 
                     @Override
+                    public boolean onRenderProcessGone(android.webkit.WebView page, android.webkit.RenderProcessGoneDetail detail) {
+                        saved = true;
+                        if (page.getParent() instanceof ViewGroup) ((ViewGroup) page.getParent()).removeView(page);
+                        page.destroy();
+                        return true; // Shared renderer failures cannot take down the native app.
+                    }
+                    @Override
                     public void onPageFinished(android.webkit.WebView page, String url) {
                         Log.i(TAG, "Drawing a page's poster");
                         // Give scripts a moment to draw, as the full page does.
@@ -748,7 +832,7 @@ public class GpuiActivity extends NativeActivity {
     protected void onActivityResult(int request, int result, Intent data) {
         if (request == QR_REQUEST) {
             if (result == RESULT_OK && data != null && data.getData() != null) {
-                nativeOpenUrl(data.getData().toString());
+                nativeOpenUrl(nativeGeneration, data.getData().toString());
             }
             return;
         }
@@ -792,7 +876,7 @@ public class GpuiActivity extends NativeActivity {
 
     private void picked(int request, String paths, String error) {
         if (nativeReady) {
-            nativePicked(request, paths, error);
+            nativePicked(nativeGeneration, request, paths, error);
         }
     }
 
@@ -836,6 +920,11 @@ public class GpuiActivity extends NativeActivity {
 
     public void cancelNotification(int id) {
         Notifications.cancel(this, id);
+    }
+
+    /** Android's Remove animations preference (framework observes duration-scale changes). */
+    public boolean reducedMotion() {
+        return !android.animation.ValueAnimator.areAnimatorsEnabled();
     }
 
     /** The refresh rate Android reports to this app, including frame-rate overrides. */
@@ -1000,7 +1089,7 @@ public class GpuiActivity extends NativeActivity {
         public boolean performEditorAction(int action) {
             if (!active) return false;
             if (nativeReady) {
-                nativeEditorAction(action);
+                nativeEditorAction(nativeGeneration, action);
             }
             return true;
         }

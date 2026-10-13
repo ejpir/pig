@@ -49,7 +49,7 @@ test("busy steering is queued during tools, then joins the run at the next postT
       started[round - 1].open();
       await release[round - 1].promise;
       completed.push(round);
-      return { content: [{ type: "text", text: `round ${round} complete` }] };
+      return { output: [{ type: "text", text: `round ${round} complete` }] };
     },
   })] }));
   const harness = await Harness.open(new MemoryStorage(), { models, registry }, context);

@@ -296,7 +296,7 @@ describe("durable swarm mailboxes", () => {
   });
 });
 
-async function runtimeFixture(respond: (request: TranscriptContext) => ReturnType<typeof fauxAssistantMessage> | Promise<ReturnType<typeof fauxAssistantMessage>>, presets: AgentDefinition[] = [], read?: () => Promise<void>, storage: Storage = new MemoryStorage()) {
+async function runtimeFixture(respond: (request: TranscriptContext) => ReturnType<typeof fauxAssistantMessage> | Promise<ReturnType<typeof fauxAssistantMessage>>, presets: AgentDefinition[] = [], read?: () => Promise<void>, storage: Storage = new MemoryStorage(), swarmAllowed = true) {
   const faux = fauxProvider(), models = createModels(), registry = createRegistry();
   models.setProvider(faux.provider);
   faux.setResponses(Array.from({ length: 100 }, () => respond));
@@ -305,7 +305,7 @@ async function runtimeFixture(respond: (request: TranscriptContext) => ReturnTyp
     execute: async () => {
       if (name !== "read") throw new Error("Swarm must never run a writer or shell");
       await read?.();
-      return { content: [{ type: "text" as const, text: "read complete" }] };
+      return { output: [{ type: "text" as const, text: "read complete" }] };
     },
   })) });
   registry.install(coding);
@@ -318,6 +318,7 @@ async function runtimeFixture(respond: (request: TranscriptContext) => ReturnTyp
   harness = await Harness.open(storage, options, context);
   const model = faux.getModel();
   let root = await harness.root(context, { agent: { model: { provider: model.provider, modelId: model.id } } });
+  if (swarmAllowed) await setSwarmEnabled(root, true, context);
   const details = () => root.commit(async (tx) => clone((await tx.doc(Calls, root.id)).calls["swarm-call"]), context);
   return {
     get harness() { return harness; }, get root() { return root; }, details, close: () => harness.close(context),
@@ -341,9 +342,12 @@ test("session policy rejects new swarms without silently downgrading ordinary de
         : call("subagent", { tasks: [{ agent: "a", task: "read a" }, { agent: "b", task: "read b" }], swarm: latest !== "ordinary" }, id);
     }
     return fauxAssistantMessage("Read-only result.");
-  });
+  }, [], undefined, new MemoryStorage(), false);
   try {
-    expect(swarmEnabled(undefined)).toBe(true);
+    expect(swarmEnabled(undefined)).toBe(false);
+    expect(swarmEnabled({})).toBe(false);
+    expect(swarmEnabled({ swarmEnabled: true })).toBe(true);
+    expect(await fixture.root.commit(async (tx) => swarmEnabled(await tx.doc(Metadata, fixture.root.id)), context)).toBe(false);
     for (const invalid of ["false", 0, null, undefined]) {
       await expect(setSwarmEnabled(fixture.root, invalid, context)).rejects.toThrow("boolean");
     }

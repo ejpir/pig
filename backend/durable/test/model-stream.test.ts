@@ -333,7 +333,7 @@ async function streamingHarness(args?: ToolCall["arguments"]) {
     parameters: Type.Object({ payload: Type.String(), nested: Type.Any() }, { additionalProperties: true }),
     execute: async (args) => {
       received.push(clone(args));
-      return { content: [{ type: "text", text: "captured" }] };
+      return { output: [{ type: "text", text: "captured" }] };
     },
   })] }));
   const harness = await Harness.open(new MemoryStorage(), {

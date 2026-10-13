@@ -29,13 +29,18 @@ final class Files {
     private static final String TAG = "GpuiActivity";
     /** Keeps save watchers alive; they stop when collected. */
     private static final List<FileObserver> SAVES = new ArrayList<>();
+    private static boolean prepared;
 
     private Files() {}
 
     /** Forgets files picked in earlier runs; their paths were only good for that run. */
-    static void clearPicked(Context context) {
+    static synchronized void clearPicked(Context context) {
+        // A new Activity is not a new process: prior copies/save watchers may
+        // still be working. Sweep only stale files from the preceding process.
+        if (prepared) return;
         delete(new File(context.getCacheDir(), "picked"));
         delete(new File(context.getCacheDir(), "saving"));
+        prepared = true;
     }
 
     private static void delete(File file) {
@@ -78,8 +83,9 @@ final class Files {
 
     /** A path whose writes reach {@code document}. */
     static String prepareSave(Context context, int request, Uri document) throws IOException {
-        File folder = folder(context, "saving", request);
-        File file = new File(folder, displayName(context, document));
+        final Context application = context.getApplicationContext();
+        File folder = folder(application, "saving", request);
+        File file = new File(folder, displayName(application, document));
         // Watch the folder rather than the file: apps may write a temporary file and
         // rename it into place.
         FileObserver observer =
@@ -87,7 +93,7 @@ final class Files {
                     @Override
                     public void onEvent(int event, String name) {
                         if (file.getName().equals(name)) {
-                            copyOut(context, file, document);
+                            copyOut(application, file, document);
                         }
                     }
                 };

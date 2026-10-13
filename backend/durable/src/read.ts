@@ -31,7 +31,7 @@ export async function readImage(path: string, api: ReadApi, context: Context) {
     throw new Error(`${path} is ${(bytes.byteLength / 1e6).toFixed(1)} MB; images can be at most 1 MB. Make it smaller first, for example a screenshot with a smaller --window-size.`);
   }
   return {
-    content: [
+    output: [
       { type: "text" as const, text: `${path} [${mimeType}]` },
       { type: "image" as const, data: Buffer.from(bytes).toString("base64"), mimeType },
     ],

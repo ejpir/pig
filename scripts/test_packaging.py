@@ -13,7 +13,7 @@ from unittest.mock import patch
 import fetch_pi
 from package_desktop import TARGETS, archive_name, check_binary, package
 from release_desktop import (
-    ANDROID_APK, ANDROID_FONT_LICENSES, manifest, validate_android_notices,
+    ANDROID_APK, ANDROID_LICENSES, manifest, validate_android_notices,
     validate_tag, validate_release_version,
 )
 from package_remote import asset_name, package as package_remote
@@ -56,6 +56,8 @@ class PackagingTests(unittest.TestCase):
             "NotoEmoji-OFL.txt": root / "crates/gpui_android/assets/fonts/OFL.txt",
             "IBM-PLEX-OFL.txt": root / "licenses/IBM-PLEX-OFL.txt",
             "COMMIT-MONO-OFL.txt": root / "licenses/COMMIT-MONO-OFL.txt",
+            "QUICKJS-NG-MIT.txt": root / "licenses/QUICKJS-NG-MIT.txt",
+            "RQUICKJS-MIT.txt": root / "licenses/RQUICKJS-MIT.txt",
         }
         with zipfile.ZipFile(output) as apk:
             self.assertEqual(set(apk.namelist()), {f"assets/licenses/{name}" for name in sources})
@@ -64,11 +66,14 @@ class PackagingTests(unittest.TestCase):
                     notice = apk.read(f"assets/licenses/{name}")
                     self.assertEqual(notice, source.read_bytes())
                     self.assertIn(b"Copyright", notice)
-                    self.assertIn(b"SIL OPEN FONT LICENSE", notice)
+                    if name.endswith("OFL.txt"):
+                        self.assertIn(b"SIL OPEN FONT LICENSE", notice)
+                    else:
+                        self.assertIn(b"Permission is hereby granted", notice)
 
     def android_apk(self, path, missing=None, incomplete=None):
         with zipfile.ZipFile(path, "w") as apk:
-            for name, source in ANDROID_FONT_LICENSES.items():
+            for name, source in ANDROID_LICENSES.items():
                 if name != missing:
                     apk.writestr(f"assets/licenses/{name}",
                                  b"license URL only" if name == incomplete else source.read_bytes())
@@ -77,7 +82,7 @@ class PackagingTests(unittest.TestCase):
         apk = self.root / ANDROID_APK
         self.android_apk(apk)
         validate_android_notices(apk)
-        for name in ANDROID_FONT_LICENSES:
+        for name in ANDROID_LICENSES:
             for change in ["missing", "incomplete"]:
                 with self.subTest(font=name, change=change):
                     self.android_apk(apk, **{change: name})

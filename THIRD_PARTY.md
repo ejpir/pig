@@ -14,7 +14,12 @@ Source: https://github.com/zed-industries/zed, revision
 - `crates/pi_lsp_bridge` links Zed's `project`, `language` and `lsp` crates (GPL-3.0-or-later); its tests use Zed's fake language server and FakeFs. Its pi extension (`extension/pi-desktop-lsp.ts`) is original code that uses only pi's public extension API.
 - Architectural/pattern references, not vendored implementations: `crates/ui/src/components/stack.rs` and `button/button.rs` (flex helpers and builder-style components); `crates/gpui/examples/hello_world.rs` (native application/window bootstrap); `crates/gpui/examples/testing.rs` (entity/action/visual-test contexts). The app uses GPUI's entity ownership, weak async updates, task retention, action dispatch, and render traits.
 
-The sibling Zed checkout is intentionally unchanged. A future dependency update must re-check both the input adapter and native platform feature wiring.
+The native-input workarounds do not require changing sibling Zed code. The later opt-in renderer CPU timing path adds a small host-only timing API in `gpui_wgpu`; it measures acquire/encode/submit/present-call CPU duration, not GPU execution or actual presentation. The reviewed `packaging/zed.patch` also integrates Activity-scoped scheduler retirement and late-wakeup handling; CI applies it to the pinned checkout. A future dependency update must re-check the input adapter, scheduler retirement and native platform feature wiring.
+
+## Native visual mini-apps
+
+`pi_visual` embeds rquickjs 0.14.0 (MIT, https://github.com/DelSkayn/rquickjs), which bundles QuickJS-NG 0.16.2 (MIT, https://github.com/quickjs-ng/quickjs), for explicitly requested JavaScript-native mini-apps. Full upstream notices are in `licenses/RQUICKJS-MIT.txt` and `licenses/QUICKJS-NG-MIT.txt` and included in Android APK assets. No filesystem, network, process, DOM or agent capabilities/module loader are registered. App widgets/drawing are native GPUI, not HTML/WebView. Rhai has been removed from runtime dependencies; historical sources and state files are not deleted. Guest resource limits are cooperative in-process safeguards, not OS sandboxing.
+
 
 ## Fonts
 
@@ -35,17 +40,17 @@ Selected SVGs copied from Zed's `assets/icons/`, including those Zed's `ui` comp
 
 Pi runs outside the Rust UI in a subprocess. Protocol definitions were checked against Pi's `rpc-types.ts` and `docs/{rpc,rpc-commands,json,message-types,rpc-extension-ui}.md`. The fallback `scripts/pi-rpc.mjs` launches a sibling source checkout using its own source resolver.
 
-Release builds embed Pi's official 1.0.0 release binary (MIT), downloaded by `scripts/fetch_pi.py` and checked against the SHA-256 digests committed in `packaging/pi-release.sha256`. Packages carry Pi's license as `licenses/PI-MIT.txt` and, as `licenses/PI-NOTICES.txt`, the licenses of the npm packages compiled into Pi's executable, collected by installing Pi's release lockfile (`fetch_pi.py --notices`).
+Release builds embed Pi's official 1.2.0 release binary (MIT), downloaded by `scripts/fetch_pi.py` and checked against the SHA-256 digests committed in `packaging/pi-release.sha256`. Packages carry Pi's license as `licenses/PI-MIT.txt` and, as `licenses/PI-NOTICES.txt`, the licenses of the npm packages compiled into Pi's executable, collected by installing Pi's release lockfile (`fetch_pi.py --notices`).
 
 The desktop extension, `crates/pi_core/extension/pi-desktop.ts`, uses only Pi's public extension API and package exports. Its sharing flow follows Pi's `/share` (branch export with a `pi.share` entry, Radius upload, private gist fallback).
 
 ## Bun
 
-Pi's release binary is a Bun standalone executable (Bun 1.3.14 for Pi 1.0.0), so it contains the Bun runtime: MIT-licensed, statically linking JavaScriptCore/WebKit (LGPL-2) and the other libraries listed in `licenses/BUN-LICENSE.md` (copied unmodified from Bun's `LICENSE.md` at tag `bun-v1.3.14`; update it when a new Pi release reports another `bunVersion`). That file also explains how to rebuild Bun with a modified JavaScriptCore, as the LGPL requires. The executable is embedded compressed in `pi-desktop` and written to the user's cache folder before it runs.
+Pi's release binary is a Bun standalone executable (Bun 1.3.14 for Pi 1.2.0), so it contains the Bun runtime: MIT-licensed, statically linking JavaScriptCore/WebKit (LGPL-2) and the other libraries listed in `licenses/BUN-LICENSE.md` (copied unmodified from Bun's `LICENSE.md` at tag `bun-v1.3.14`; update it when a new Pi release reports another `bunVersion`). That file also explains how to rebuild Bun with a modified JavaScriptCore, as the LGPL requires. The executable is embedded compressed in `pi-desktop` and written to the user's cache folder before it runs.
 
 ## Experimental durable runner
 
-`backend/durable` pins `@earendil-works/pi-durable`, `pi-ai`, `chord` and `pi-coding-agent` 1.0.2 (MIT) through its npm lockfile. The coding-agent SDK supplies only the public model/auth runtime and credential locking; the runner does not start its agent or extension host. Its native standalone executable contains Bun 1.4.2; `licenses/DURABLE-BUN-LICENSE.md` is copied unmodified from `oven-sh/bun` tag `bun-v1.4.2`, and covers JavaScriptCore/WebKit relinking and runtime dependencies for this separate version. `backend/durable/build.ts` gathers full installed dependency notices plus the application and matching Bun notices into `artifacts/durable/NOTICES.txt`. `pi_remote` embeds/prints these with the optional `bundled-durable` feature. The faux-only test runner is not shipped. Normal release packaging still selects stock Pi pending the durable compatibility gates.
+`backend/durable` pins `@earendil-works/pi-durable`, `pi-ai`, `chord` and `pi-coding-agent` 1.2.0 (MIT) through its npm lockfile. The coding-agent SDK supplies only the public model/auth runtime and credential locking; the runner does not start its agent or extension host. Its native standalone executable contains Bun 1.4.2; `licenses/DURABLE-BUN-LICENSE.md` is copied unmodified from `oven-sh/bun` tag `bun-v1.4.2`, and covers JavaScriptCore/WebKit relinking and runtime dependencies for this separate version. `backend/durable/build.ts` gathers full installed dependency notices plus the application and matching Bun notices into `artifacts/durable/NOTICES.txt`. `pi_remote` embeds/prints these with the optional `bundled-durable` feature. The faux-only test runner is not shipped. Normal release packaging still selects stock Pi pending the durable compatibility gates.
 
 ## Design
 

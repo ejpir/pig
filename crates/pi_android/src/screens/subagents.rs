@@ -1411,49 +1411,63 @@ impl PhoneApp {
                 .as_ref()
                 .map(|peer| (swarm.id.clone(), peer.clone()))
         });
-        let strip = div()
-            .min_h(px(48.))
+        let joined_input = conversation.is_some()
+            && matches!(
+                input_target.as_ref(),
+                Some(Ok(crate::live::SubagentInputTarget::Steer { .. }))
+            );
+        let strip = ui::composer_status_strip(joined_input, &colors)
+            .debug_selector(|| "subagent-working-strip".into())
+            .relative()
+            .child(crate::testing::probe("subagent-working-strip"))
             .pl(px(16.))
-            .pr(px(8.))
-            .flex()
-            .items_center()
-            .gap(px(12.))
-            .rounded(px(24.))
-            .bg(colors.panel)
-            .border_1()
-            .border_color(colors.line_strong)
-            .child(if running {
-                if swarm.is_some() && swarm_view != SwarmView::Observed {
-                    div().size(px(7.)).rounded_full().bg(hue).into_any_element()
-                } else {
-                    ui::ring_dot(hue).into_any_element()
-                }
-            } else {
-                icon(
-                    if subagent.status == Status::Done {
-                        "check"
-                    } else {
-                        "stop"
-                    },
-                    16.,
-                    colors.muted,
-                )
-                .into_any_element()
-            })
-            .child(
-                div()
-                    .text_size(px(14.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(label),
-            )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(px(12.5))
-                    .text_color(colors.muted)
-                    .child(spent),
+                    .py(px(4.))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(14.))
+                            .line_height(px(20.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(hue)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(if running {
+                                if swarm.is_some() && swarm_view != SwarmView::Observed {
+                                    div().size(px(7.)).rounded_full().bg(hue).into_any_element()
+                                } else {
+                                    ui::ring_dot(hue).into_any_element()
+                                }
+                            } else {
+                                icon(
+                                    if subagent.status == Status::Done { "check" } else { "stop" },
+                                    16.,
+                                    colors.muted,
+                                )
+                                .into_any_element()
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(12.5))
+                                    .text_color(colors.muted)
+                                    .child(spent),
+                            ),
+                    ),
             )
             .when_some(
                 conversation.clone().filter(|_| {
@@ -1470,6 +1484,7 @@ impl PhoneApp {
                             .relative()
                             .child(crate::testing::probe("stop-subagent"))
                             .h(px(if swarm.is_some() { 48. } else { 40. }))
+                            .flex_none()
                             .px(px(12.))
                             .flex()
                             .items_center()
@@ -1525,6 +1540,7 @@ impl PhoneApp {
             }
         }
         let input_target = input_target.filter(|target| show_direct_input(target, running));
+        let mut strip = Some(strip);
         let direct = match (conversation.as_deref(), input_target) {
             (Some(conversation), Some(Ok(target))) => {
                 if swarm.is_some() {
@@ -1539,6 +1555,7 @@ impl PhoneApp {
                     .and_then(|live| live.take_accepted_subagent_input(id, conversation));
                 let composer = self.subagent_composer(id, conversation, &placeholder, window, cx);
                 composer.update(cx, |composer, cx| {
+                    composer.set_joined(true);
                     composer.set_sending(input_pending);
                     if let Some(accepted) = accepted_input.as_deref() {
                         composer.clear_if_text(accepted, cx);
@@ -1556,7 +1573,13 @@ impl PhoneApp {
                                 .text_color(colors.muted)
                                 .child(action),
                         )
-                        .child(composer)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .children(strip.take())
+                                .child(composer),
+                        )
                         .into_any_element(),
                 )
             }
@@ -1633,7 +1656,6 @@ impl PhoneApp {
             .child(
                 div()
                     .flex_none()
-                    .px(px(12.))
                     .pt(px(8.))
                     .pb(px(12.))
                     .flex()
@@ -1643,7 +1665,7 @@ impl PhoneApp {
                     .when(conversation.is_none(), |dock| {
                         dock.child(
                             div()
-                                .px(px(8.))
+                                .px(px(20.))
                                 .text_size(px(12.5))
                                 .line_height(px(18.))
                                 .text_color(colors.muted)
@@ -1652,7 +1674,7 @@ impl PhoneApp {
                                 )),
                         )
                     })
-                    .child(strip),
+                    .children(strip),
             )
             .into_any_element()
     }
@@ -1661,6 +1683,45 @@ impl PhoneApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "ui-test")]
+    #[gpui::test]
+    fn direct_input_joins_working_and_stop_to_the_regular_composer(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::testing::State::default()));
+        for (width, height) in [(320., 640.), (412., 915.), (640., 360.), (320., 400.)] {
+            let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| app.preview("subagent-input", window, cx));
+            });
+            cx.run_until_parked();
+            let strip = cx.debug_bounds("subagent-working-strip").unwrap();
+            let composer = cx.debug_bounds("composer").unwrap();
+            let draft = cx.debug_bounds("composer-draft").unwrap();
+            let stop = cx.debug_bounds("stop-subagent").unwrap();
+            let send = cx.debug_bounds("send").unwrap();
+            assert_eq!(strip.left(), composer.left());
+            assert_eq!(strip.right(), composer.right());
+            assert_eq!(strip.bottom(), composer.top() + px(1.));
+            assert!(strip.top() <= stop.top() && stop.bottom() <= strip.bottom());
+            assert!(strip.left() <= stop.left() && stop.right() <= strip.right());
+            assert!(draft.bottom() <= send.top());
+            assert!(composer.bottom() <= px(height));
+            assert!(cx.debug_bounds("composer-model").is_none());
+            assert!(cx.debug_bounds("composer-thinking").is_none());
+
+            cx.update(|window, cx| {
+                app.update(cx, |app, cx| app.preview("subagent", window, cx));
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("subagent-working-strip").is_some());
+            assert!(cx.debug_bounds("stop-subagent").is_some());
+            assert!(
+                cx.debug_bounds("composer").is_none(),
+                "no editable input without a live target"
+            );
+        }
+    }
 
     fn example_swarm() -> Swarm {
         Swarm::from_details(&serde_json::json!({

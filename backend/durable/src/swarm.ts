@@ -247,7 +247,7 @@ export const SwarmTools = defineExtension({
     defineTool({
       name: "swarm_members", outputLimits: { maxBytes: 16_384, maxLines: 2000 }, description: "Your exact peer ID and this crew's bounded roster (tasks shortened to 240 characters). No transcripts are shared.",
       parameters: Type.Object({}), replay: "safe",
-      execute: async (_, api, context) => ({ content: [{ type: "text", text: JSON.stringify(await api.commit((tx) => swarmMembers(tx, api.conversationId), context)) }] }),
+      execute: async (_, api, context) => ({ output: [{ type: "text", text: JSON.stringify(await api.commit((tx) => swarmMembers(tx, api.conversationId), context)) }] }),
     }),
     defineTool({
       name: "swarm_send", outputLimits: { maxBytes: 32_768, maxLines: 2000 }, description: "Send bounded peer text to an exact roster ID. Use a stable unique requestId; retries must keep the same payload. No new turns are started. queued is not delivery; received means explicit tool retrieval, not agreement or guaranteed effects.",
@@ -255,12 +255,12 @@ export const SwarmTools = defineExtension({
         to: Type.String(), kind: Type.Union([Type.Literal("finding"), Type.Literal("question"), Type.Literal("reply")]),
         text: Type.String(), requestId: Type.String(), replyTo: Type.Optional(Type.String()),
       }, { additionalProperties: false }), replay: "safe",
-      execute: async (args, api, context) => ({ content: [{ type: "text", text: JSON.stringify(await api.commit((tx) => swarmSend(tx, api.conversationId, args), context)) }] }),
+      execute: async (args, api, context) => ({ output: [{ type: "text", text: JSON.stringify(await api.commit((tx) => swarmSend(tx, api.conversationId, args), context)) }] }),
     }),
     defineTool({
       name: "swarm_receive", outputLimits: { maxBytes: 512_000, maxLines: 2000 }, description: "Nonblocking read of up to 16 queued messages (default 8). Each fresh requestId reads once, including empty reads; same requestId and limit replay the exact batch after a restart while your original delegated task is active. Later child follow-ups cannot reuse this crew's tools or receipts. A different requestId never redelivers received messages. received means retrieval only, not agreement or guaranteed effects. At most 256 read receipts per peer.",
       parameters: Type.Object({ requestId: Type.String(), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })) }, { additionalProperties: false }), replay: "safe",
-      execute: async (args, api, context) => ({ content: [{ type: "text", text: JSON.stringify(await api.commit((tx) => swarmReceive(tx, api.conversationId, args), context)) }] }),
+      execute: async (args, api, context) => ({ output: [{ type: "text", text: JSON.stringify(await api.commit((tx) => swarmReceive(tx, api.conversationId, args), context)) }] }),
     }),
   ],
 });

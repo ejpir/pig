@@ -16,7 +16,7 @@ use jni::{
     Env, EnvUnowned, JValue, JavaVM, jni_sig, jni_str,
     objects::{JByteArray, JClass, JObject, JObjectArray, JString},
     refs::Global,
-    sys::{jint, jobject, jstring},
+    sys::{jfloat, jint, jlong, jobject, jstring},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -36,7 +36,10 @@ pub(crate) enum JavaEvent {
     EditorAction(i32),
     /// System bars with display cutouts, and the keyboard, in device pixels:
     /// left, top, right, bottom.
-    Insets { bars: [i32; 4], ime: [i32; 4] },
+    Insets {
+        bars: [i32; 4],
+        ime: [i32; 4],
+    },
     /// The paths a file pick produced; `None` when the user cancelled.
     Picked {
         request: i32,
@@ -44,33 +47,37 @@ pub(crate) enum JavaEvent {
     },
     /// The app was opened with a URL: a link or a notification.
     OpenUrl(String),
+    /// Android-originated drag outside a page's own scrollable document.
+    InlineTouch {
+        action: i32,
+        x: f32,
+        y: f32,
+    },
+    InlineBack,
+    InlineFailed,
 }
 
-struct Inbox {
-    events: Vec<JavaEvent>,
-    waker: Option<AndroidAppWaker>,
-}
+static INBOX: Mutex<crate::java_inbox::Inbox<JavaEvent, AndroidAppWaker>> =
+    Mutex::new(crate::java_inbox::Inbox::new());
 
-static INBOX: Mutex<Inbox> = Mutex::new(Inbox {
-    events: Vec::new(),
-    waker: None,
-});
-
-fn deliver(event: JavaEvent) {
+fn deliver(generation: jlong, event: JavaEvent) {
     let mut inbox = INBOX.lock().unwrap_or_else(PoisonError::into_inner);
-    inbox.events.push(event);
-    if let Some(waker) = &inbox.waker {
+    if let Some(waker) = inbox.deliver(generation as u64, event) {
         waker.wake();
+    } else {
+        let _trace = crate::trace::scope(c"pi.java.event.stale");
     }
 }
-
-/// Events from Java since the last call, oldest first.
-pub(crate) fn take_events() -> Vec<JavaEvent> {
-    std::mem::take(&mut INBOX.lock().unwrap_or_else(PoisonError::into_inner).events)
+fn retire(generation: u64) {
+    INBOX
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retire(generation);
 }
 
 pub(crate) struct Java {
     app: AndroidApp,
+    generation: u64,
     available: Cell<bool>,
 }
 
@@ -90,16 +97,36 @@ pub(crate) fn set_current(java: &Rc<Java>) {
 
 impl Java {
     pub fn attach(app: &AndroidApp) -> Self {
-        INBOX.lock().unwrap_or_else(PoisonError::into_inner).waker = Some(app.create_waker());
+        let generation = INBOX
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .attach(app.create_waker());
         let java = Self {
             app: app.clone(),
+            generation,
             available: Cell::new(true),
         };
         java.call("attachNative", |env, activity| {
-            env.call_method(activity, jni_str!("attachNative"), jni_sig!("()V"), &[])?;
+            env.call_method(
+                activity,
+                jni_str!("attachNative"),
+                jni_sig!("(J)V"),
+                &[JValue::Long(generation as jlong)],
+            )?;
             Ok(())
         });
         java
+    }
+
+    pub fn shutdown(&self) {
+        retire(self.generation);
+    }
+
+    pub fn take_events(&self) -> Vec<JavaEvent> {
+        INBOX
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take(self.generation)
     }
 
     /// Whether the activity is `GpuiActivity`, as far as calls so far showed.
@@ -366,6 +393,108 @@ impl Java {
         .unwrap_or(false)
     }
 
+    pub fn inline_pages_available(&self) -> bool {
+        self.call("inlinePagesAvailable", |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("inlinePagesAvailable"),
+                jni_sig!("()Z"),
+                &[],
+            )?
+            .z()
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn prepare_inline_page(&self, id: &str, revision: &str, html: &str) -> bool {
+        self.call("prepareInlinePage", |env, activity| {
+            let id = JString::from_str(env, id)?;
+            let revision = JString::from_str(env, revision)?;
+            let known = env
+                .call_method(
+                    activity,
+                    jni_str!("hasInlinePageDocument"),
+                    jni_sig!("(Ljava/lang/String;Ljava/lang/String;)Z"),
+                    &[JValue::Object(&id), JValue::Object(&revision)],
+                )?
+                .z()?;
+            if known {
+                return Ok(true);
+            }
+            let html = JString::from_str(env, html)?;
+            env.call_method(
+                activity,
+                jni_str!("prepareInlinePage"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z"),
+                &[
+                    JValue::Object(&id),
+                    JValue::Object(&revision),
+                    JValue::Object(&html),
+                ],
+            )?
+            .z()
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn sync_inline_page(&self, slot: &str) -> bool {
+        self.call("syncInlinePage", |env, activity| {
+            let slot = JString::from_str(env, slot)?;
+            env.call_method(
+                activity,
+                jni_str!("syncInlinePage"),
+                jni_sig!("(Ljava/lang/String;)Z"),
+                &[JValue::Object(&slot)],
+            )?
+            .z()
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn inspect_inline_page_for_test(&self, request: &str) {
+        self.call("inspectInlinePageForTest", |env, activity| {
+            let request = JString::from_str(env, request)?;
+            env.call_method(
+                activity,
+                jni_str!("inspectInlinePageForTest"),
+                jni_sig!("(Ljava/lang/String;)V"),
+                &[JValue::Object(&request)],
+            )?;
+            Ok(())
+        });
+    }
+
+    pub fn terminate_inline_page_for_test(&self) {
+        self.call("terminateInlinePageForTest", |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("terminateInlinePageForTest"),
+                jni_sig!("()V"),
+                &[],
+            )?;
+            Ok(())
+        });
+    }
+
+    pub fn clear_inline_pages(&self) {
+        self.call("clearInlinePages", |env, activity| {
+            env.call_method(activity, jni_str!("clearInlinePages"), jni_sig!("()V"), &[])?;
+            Ok(())
+        });
+    }
+
+    pub fn release_inline_page_focus(&self) {
+        self.call("releaseInlinePageFocus", |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("releaseInlinePageFocus"),
+                jni_sig!("()V"),
+                &[],
+            )?;
+            Ok(())
+        });
+    }
+
     pub fn render_poster(&self, html: &str, path: &str) -> bool {
         self.call("renderPoster", |env, activity| {
             let html = JString::from_str(env, html)?;
@@ -394,6 +523,14 @@ impl Java {
             let name = env.cast_local::<JString>(name)?;
             name.try_to_string(env)
         })
+    }
+
+    pub fn reduced_motion(&self) -> bool {
+        self.call("reducedMotion", |env, activity| {
+            env.call_method(activity, jni_str!("reducedMotion"), jni_sig!("()Z"), &[])?
+                .z()
+        })
+        .unwrap_or(false)
     }
 
     pub fn notifications_enabled(&self) -> bool {
@@ -531,6 +668,7 @@ fn offset(value: jint) -> usize {
 pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeImeState<'caller>(
     mut env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    generation: jlong,
     seq: jint,
     push_id: jint,
     text: JString<'caller>,
@@ -542,16 +680,19 @@ pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeImeState<'caller>(
     native(&mut env, |env| {
         let text = text.try_to_string(env)?;
         let (start, end) = (offset(selection_start), offset(selection_end));
-        deliver(JavaEvent::Ime {
-            seq,
-            push_id,
-            state: ImeState {
-                text,
-                selection: start.min(end)..start.max(end),
-                composing: (composing_start >= 0 && composing_start < composing_end)
-                    .then(|| offset(composing_start)..offset(composing_end)),
+        deliver(
+            generation,
+            JavaEvent::Ime {
+                seq,
+                push_id,
+                state: ImeState {
+                    text,
+                    selection: start.min(end)..start.max(end),
+                    composing: (composing_start >= 0 && composing_start < composing_end)
+                        .then(|| offset(composing_start)..offset(composing_end)),
+                },
             },
-        });
+        );
         Ok(())
     });
 }
@@ -560,6 +701,7 @@ pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeImeState<'caller>(
 pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativePicked<'caller>(
     mut env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    generation: jlong,
     request: jint,
     paths: JString<'caller>,
     error: JString<'caller>,
@@ -573,7 +715,7 @@ pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativePicked<'caller>(
             let paths = paths.try_to_string(env)?;
             Ok(Some(paths.split('\0').map(String::from).collect()))
         };
-        deliver(JavaEvent::Picked { request, result });
+        deliver(generation, JavaEvent::Picked { request, result });
         Ok(())
     });
 }
@@ -582,10 +724,11 @@ pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativePicked<'caller>(
 pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeOpenUrl<'caller>(
     mut env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    generation: jlong,
     url: JString<'caller>,
 ) {
     native(&mut env, |env| {
-        deliver(JavaEvent::OpenUrl(url.try_to_string(env)?));
+        deliver(generation, JavaEvent::OpenUrl(url.try_to_string(env)?));
         Ok(())
     });
 }
@@ -594,10 +737,11 @@ pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeOpenUrl<'caller>(
 pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeEditorAction<'caller>(
     mut env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    generation: jlong,
     action: jint,
 ) {
     native(&mut env, |_| {
-        deliver(JavaEvent::EditorAction(action));
+        deliver(generation, JavaEvent::EditorAction(action));
         Ok(())
     });
 }
@@ -607,6 +751,7 @@ pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeEditorAction<'caller>
 pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeInsets<'caller>(
     mut env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    generation: jlong,
     bars_left: jint,
     bars_top: jint,
     bars_right: jint,
@@ -617,10 +762,13 @@ pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeInsets<'caller>(
     ime_bottom: jint,
 ) {
     native(&mut env, |_| {
-        deliver(JavaEvent::Insets {
-            bars: [bars_left, bars_top, bars_right, bars_bottom],
-            ime: [ime_left, ime_top, ime_right, ime_bottom],
-        });
+        deliver(
+            generation,
+            JavaEvent::Insets {
+                bars: [bars_left, bars_top, bars_right, bars_bottom],
+                ime: [ime_left, ime_top, ime_right, ime_bottom],
+            },
+        );
         Ok(())
     });
 }
@@ -664,6 +812,47 @@ pub extern "system" fn Java_dev_pi_gpui_PairScannerActivity_nativeDecodeQr<'call
     result
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeInlineTouch<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    generation: jlong,
+    action: jint,
+    x: jfloat,
+    y: jfloat,
+) {
+    native(&mut env, |_| {
+        if x.is_finite() && y.is_finite() {
+            deliver(generation, JavaEvent::InlineTouch { action, x, y });
+        }
+        Ok(())
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeInlineBack<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    generation: jlong,
+) {
+    native(&mut env, |_| {
+        deliver(generation, JavaEvent::InlineBack);
+        Ok(())
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeInlineFailed<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    generation: jlong,
+) {
+    native(&mut env, |_| {
+        deliver(generation, JavaEvent::InlineFailed);
+        Ok(())
+    });
+}
+
 /// A `String[]` for Java.
 fn string_array<'local, 'a>(
     env: &mut Env<'local>,
@@ -679,4 +868,22 @@ fn string_array<'local, 'a>(
         array.set_element(env, index, item)?;
     }
     Ok(array)
+}
+
+impl Drop for Java {
+    fn drop(&mut self) {
+        retire(self.generation);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeDetach<'caller>(
+    mut env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    generation: jlong,
+) {
+    native(&mut env, |_| {
+        retire(generation as u64);
+        Ok(())
+    });
 }

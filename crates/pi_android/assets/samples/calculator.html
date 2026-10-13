@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calculator</title>
+<style>
+:root{color-scheme:light dark;--bg:#fff;--key:#f2f0ec;--operator:#e4eaf0;--display:#edf0f3;--text:#253140;--muted:#647080;--accent:#4b607c;--on-accent:#fff}
+@media(prefers-color-scheme:dark){:root{--bg:#202731;--key:#293441;--operator:#334556;--display:#17212d;--text:#ebe7e4;--muted:#a4b1c1;--accent:#9bb7d2;--on-accent:#172434}}
+:root[data-pi-theme="light"]{--bg:#fff;--key:#f2f0ec;--operator:#e4eaf0;--display:#edf0f3;--text:#253140;--muted:#647080;--accent:#4b607c;--on-accent:#fff}
+:root[data-pi-theme="dark"]{--bg:#202731;--key:#293441;--operator:#334556;--display:#17212d;--text:#ebe7e4;--muted:#a4b1c1;--accent:#9bb7d2;--on-accent:#172434}
+*{box-sizing:border-box}html,body{height:100%;margin:0}body{background:var(--bg);color:var(--text);font:16px system-ui,sans-serif}.calculator{height:100%;min-height:376px;padding:14px;display:flex;flex-direction:column;gap:8px}.display{background:var(--display);border-radius:12px;padding:12px 16px;display:flex;flex-direction:column;align-items:flex-end;justify-content:center;min-height:76px;flex:1}.expression{height:18px;color:var(--muted);font-size:12px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.result{font-size:36px;font-variant-numeric:tabular-nums;letter-spacing:-.04em;max-width:100%;overflow:hidden;text-overflow:ellipsis}.result.error{font-size:20px}.keys{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:repeat(5,minmax(48px,1fr));gap:6px;flex:3}button{border:0;border-radius:10px;min-height:48px;background:var(--key);color:var(--text);font:20px system-ui,sans-serif;touch-action:manipulation}button:active{opacity:.65}button:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}.function{font-size:14px;color:var(--muted)}.operator{background:var(--operator);color:var(--accent);font-size:24px}.equals{background:var(--accent);color:var(--on-accent)}.zero{grid-column:span 2}
+</style>
+</head>
+<body>
+<main class="calculator" aria-label="Calculator">
+<div class="display" tabindex="0" aria-label="Result: 0"><div class="expression" id="expression"></div><output class="result" id="result" aria-live="polite">0</output></div>
+<div class="keys">
+<button class="function" data-key="AC" aria-label="Clear all">AC</button><button class="function" data-key="sign" aria-label="Change sign">+/−</button><button class="function" data-key="%" aria-label="Percent">%</button><button class="operator" data-key="/" aria-label="Divide">÷</button>
+<button data-key="7">7</button><button data-key="8">8</button><button data-key="9">9</button><button class="operator" data-key="*" aria-label="Multiply">×</button>
+<button data-key="4">4</button><button data-key="5">5</button><button data-key="6">6</button><button class="operator" data-key="-" aria-label="Subtract">−</button>
+<button data-key="1">1</button><button data-key="2">2</button><button data-key="3">3</button><button class="operator" data-key="+" aria-label="Add">+</button>
+<button class="zero" data-key="0">0</button><button data-key="." aria-label="Decimal point">.</button><button class="equals" data-key="=" aria-label="Equals">=</button>
+</div>
+</main>
+<script>
+(()=>{
+let value='0',expression='',stored=null,op=null,fresh=true;
+const symbols={'+':'+','-':'−','*':'×','/':'÷'};
+const format=n=>Number.isFinite(n)?String(Number(n.toPrecision(12))):'Error';
+function calculate(a,b,operator){if(operator==='/'&&b===0)return 'Can’t divide by zero';return format(operator==='+'?a+b:operator==='-'?a-b:operator==='*'?a*b:a/b)}
+function render(){document.querySelector('.display').setAttribute('aria-label','Result: '+value);document.getElementById('result').setAttribute('aria-label','Result: '+value);document.getElementById('result').textContent=value;document.getElementById('result').classList.toggle('error',!Number.isFinite(Number(value)));document.getElementById('expression').textContent=expression}
+function press(key){
+if(/^[0-9]$/.test(key)){if(fresh||!Number.isFinite(Number(value))){value=key;fresh=false}else if(value.replace(/[^0-9]/g,'').length<12)value=value==='0'?key:value+key;if(!op)expression=''}
+else if(key==='AC'){value='0';expression='';stored=null;op=null;fresh=true}
+else if(key==='.'){if(fresh){value='0.';fresh=false}else if(!value.includes('.'))value+='.';if(!op)expression=''}
+else if(key==='sign'&&Number.isFinite(Number(value)))value=format(-Number(value));
+else if(key==='%'&&Number.isFinite(Number(value)))value=format(Number(value)/100);
+else if(['+','-','*','/'].includes(key)&&Number.isFinite(Number(value))){if(op&&!fresh)value=calculate(stored,Number(value),op);if(Number.isFinite(Number(value))){stored=Number(value);op=key;expression=value+' '+symbols[key];fresh=true}else{stored=null;op=null;fresh=true}}
+else if(key==='='&&op&&Number.isFinite(Number(value))){expression=stored+' '+symbols[op]+' '+value+' =';value=calculate(stored,Number(value),op);stored=null;op=null;fresh=true}
+render();
+}
+document.addEventListener('click',e=>{const button=e.target.closest('[data-key]');if(button)press(button.dataset.key)});
+document.addEventListener('keydown',e=>{if(e.target.matches('input,textarea,select')||e.target.isContentEditable)return;if((e.key==='Enter'||e.key===' ')&&e.target.matches('button'))return;const key=e.key==='Enter'?'=':e.key==='Escape'?'AC':e.key;if(/^[0-9.+*/%=-]$/.test(key)||key==='AC'){e.preventDefault();press(key)}});
+render();
+})();
+</script>
+</body>
+</html>

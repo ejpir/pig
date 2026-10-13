@@ -30,6 +30,14 @@ repos/
   zed/
 ```
 
+Apply this repository's reviewed GPUI lifecycle/tracing patch to that exact checkout (CI does this automatically):
+
+```sh
+git -C ../zed apply ../pi-desktop/packaging/zed.patch
+```
+
+The patch is already applied if you are using the development checkout from this change; do not apply it twice.
+
 You need rustup and CMake (macOS: Xcode Command Line Tools and `brew install cmake`).
 
 Fetch pi's release build, point the build at it, and run:

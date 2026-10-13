@@ -52,6 +52,7 @@ class App:
     output: str  # the library's folder under target/<triple>/<profile>
     permissions: tuple = ()
     debuggable: bool = False  # permits read-only run-as fixture telemetry, independent of Rust optimization
+    profileable: bool = False  # permits opt-in shell/system timing traces, not run-as/private-data access
     qr_scanner: bool = False
     deep_links: tuple = ()  # (scheme, host), opened in the main activity
     # The launcher icon: a folder with ic_launcher_foreground.png (432 px, the
@@ -139,6 +140,9 @@ def ndk_linker_env(sdk, target):
         f"CC_{rust_env}": str(clang),
         f"CXX_{rust_env}": str(bin_dir / f"{target}{MIN_SDK}-clang++{suffix}"),
         f"AR_{rust_env}": str(bin_dir / "llvm-ar"),
+        # QuickJS-NG's generated bindings must use Bionic, not host glibc.
+        f"BINDGEN_EXTRA_CLANG_ARGS_{rust_env}": f"--target={target}{MIN_SDK} --sysroot={bin_dir.parent / 'sysroot'}",
+        "LIBCLANG_PATH": str(bin_dir.parent / "lib"),
     }
 
 
@@ -160,6 +164,7 @@ ATTRIBUTE_IDS = {  # android.R.attr
     "versionName": 0x0101021C, "targetSdkVersion": 0x01010270,
     "drawable": 0x01010199, "extractNativeLibs": 0x010104EA, "roundIcon": 0x0101052C,
     "enableOnBackInvokedCallback": 0x0101066C,
+    "shell": 0x01010594,  # android.R.attr.shell (profileable, API 29)
 }
 THEME_NO_ACTION_BAR = 0x01030129  # @android:style/Theme.DeviceDefault.NoActionBar
 # ActivityInfo.CONFIG_*: rotation, resizing, density, dark mode and keyboards
@@ -211,6 +216,7 @@ def manifest(app, debuggable):
             # only to apps that leave predictive back off.
             attribute("enableOnBackInvokedCallback", BOOLEAN, False),
         ], [
+            *([element("profileable", [attribute("shell", BOOLEAN, True)])] if app.profileable else []),
             element("activity", [
                 attribute("name", STRING, ACTIVITY),
                 attribute("exported", BOOLEAN, True),

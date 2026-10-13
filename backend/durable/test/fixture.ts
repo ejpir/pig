@@ -22,7 +22,7 @@ const work = (name: string, replay: "safe" | "unsafe", release = "release") => d
       if (context.abortSignal?.aborted) throw context.abortSignal.reason;
       await Bun.sleep(20);
     }
-    return { content: [{ type: "text" as const, text: "work complete" }] };
+    return { output: [{ type: "text" as const, text: "work complete" }] };
   },
 });
 let publishSwarm!: () => void;

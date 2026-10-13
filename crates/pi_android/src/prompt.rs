@@ -39,13 +39,14 @@ impl Prompt {
     }
 
     pub fn label(&self) -> String {
+        let message = crate::visualize_prompt::label(&self.message);
         if self.images.is_empty() {
-            self.message.clone()
+            message
         } else {
             format!(
                 "{}{}{} image{}",
-                self.message,
-                if self.message.is_empty() { "" } else { " · " },
+                message,
+                if message.is_empty() { "" } else { " · " },
                 self.images.len(),
                 if self.images.len() == 1 { "" } else { "s" }
             )

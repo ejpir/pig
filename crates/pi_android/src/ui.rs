@@ -32,6 +32,29 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
         .text_color(color)
 }
 
+/// A status row sharing the composer's top border, or a standalone pill when
+/// there is no editable composer. Parent and subagent docks use the same shell.
+pub fn composer_status_strip(joined: bool, colors: &Theme) -> Div {
+    div()
+        .mx(px(12.))
+        .min_w_0()
+        .min_h(px(48.))
+        .pr(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .bg(colors.panel)
+        .border_1()
+        .border_color(colors.line_strong)
+        .map(|strip| {
+            if joined {
+                strip.mb(px(-1.)).border_b_0().rounded_t(px(24.))
+            } else {
+                strip.rounded(px(24.))
+            }
+        })
+}
+
 /// A 48 dp round touch target around a 20 dp icon.
 pub fn tap(id: impl Into<ElementId>, glyph: &str, colors: &Theme) -> Stateful<Div> {
     let id = id.into();

@@ -1,0 +1,22 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local boundary checks</title><style>body{margin:0;padding:16px;font:16px system-ui;background:#fff;color:#253140}button{display:block;min-height:48px;width:100%;margin:10px 0;font:inherit}p{line-height:1.5}iframe{display:none}</style></head><body><p id="status" role="status">Ready for boundary checks</p><button id="run">Run boundary checks</button><button id="modal">Try a modal</button><button id="navigate">Try app navigation</button><script>
+const status=document.getElementById('status');
+document.getElementById('run').onclick=async()=>{
+  const failures=[];
+  for(const name of ['RTCPeerConnection','webkitRTCPeerConnection','RTCIceGatherer','RTCIceTransport'])if(typeof window[name]!=='undefined')failures.push(name);
+  const frame=document.createElement('iframe');document.body.append(frame);
+  try{if(frame.contentWindow.RTCPeerConnection)failures.push('child RTC realm');}catch(e){if(e.name!=='SecurityError')failures.push('child isolation');}
+  frame.remove();
+  try{document.cookie='carry=42;Domain=inline.invalid;Path=/';if(document.cookie)failures.push('cookie');}catch(e){if(e.name!=='SecurityError')failures.push('cookie isolation');}
+  if(typeof Android!=='undefined'||typeof accessibility!=='undefined'||typeof searchBoxJavaBridge_!=='undefined')failures.push('native bridge');
+  const network=await Promise.all([
+    fetch('http://127.0.0.1:18789/fetch',{mode:'no-cors'}).then(()=>false,()=>true),
+    fetch('file:///data/user/0/dev.pi.android.uitest/files/ui-test-state.json').then(()=>false,()=>true),
+    new Promise(resolve=>{const img=new Image();img.onload=()=>resolve(false);img.onerror=()=>resolve(true);img.src='http://127.0.0.1:18789/image';}),
+    new Promise(resolve=>{try{const socket=new WebSocket('ws://127.0.0.1:18789/socket');socket.onopen=()=>{socket.close();resolve(false)};socket.onerror=()=>resolve(true);}catch(e){resolve(true)}})
+  ]);
+  if(network.some(blocked=>!blocked))failures.push('network or file access');
+  status.textContent=failures.length?'Boundary failure: '+failures.join(', '):'Boundary checks passed';
+};
+document.getElementById('modal').onclick=()=>{alert('Must not cover native chat');const answer=prompt('Must not solicit input');const yes=confirm('Must not cover native chat');status.textContent=answer===null&&!yes?'Modal suppressed':'Boundary failure: modal';};
+document.getElementById('navigate').onclick=()=>{status.textContent='App navigation attempted';location.href='pi://preview/settings';};
+</script></body></html>

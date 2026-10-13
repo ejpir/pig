@@ -1,0 +1,362 @@
+diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+index c03653ed94..6a2f104aee 100644
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -1133,6 +1133,12 @@ pub trait PlatformDispatcher: Send + Sync {
+     fn dispatch_on_main_thread(&self, runnable: RunnableVariant, priority: Priority);
+     fn dispatch_after(&self, duration: Duration, runnable: RunnableVariant);
+ 
++    /// Make progress destroying retired Send tasks during a scoped-future wait.
++    /// Defaults to no work; must never execute ordinary foreground tasks.
++    fn poll_background_cleanup(&self) -> bool {
++        false
++    }
++
+     fn dispatch_on_main_thread_when_idle(
+         &self,
+         runnable: RunnableVariant,
+diff --git a/crates/gpui/src/platform_scheduler.rs b/crates/gpui/src/platform_scheduler.rs
+index a555a5a36a..6da81ffe4c 100644
+--- a/crates/gpui/src/platform_scheduler.rs
++++ b/crates/gpui/src/platform_scheduler.rs
+@@ -49,6 +49,17 @@ impl PlatformScheduler {
+         LocalExecutor::new(session_id, self.clone(), move |runnable| {
+             if let Some(scheduler) = scheduler.upgrade() {
+                 scheduler.schedule_local(session_id, runnable);
++            } else {
++                #[cfg(target_os = "android")]
++                {
++                    // The native local executor is gone. Dropping here can
++                    // violate affinity OR reenter a channel's notification
++                    // lock, including on its old owner. No safe owner queue
++                    // remains, so preserve an inert terminal residue.
++                    std::mem::forget(runnable);
++                }
++                #[cfg(not(target_os = "android"))]
++                drop(runnable);
+             }
+         })
+     }
+@@ -93,6 +104,15 @@ impl Scheduler for PlatformScheduler {
+         };
+ 
+         loop {
++            // Scope::drop may synchronously wait for queued child futures to
++            // be destroyed. Let retiring platforms cancel those Send children
++            // here, including recursively nested scopes, before parking.
++            if self.dispatcher.poll_background_cleanup() {
++                if let Poll::Ready(()) = future.as_mut().poll(&mut cx) {
++                    return true;
++                }
++                continue;
++            }
+             match deadline {
+                 Some(deadline) if !park_deadline(deadline) && deadline <= Instant::now() => {
+                     return false;
+diff --git a/crates/gpui_wgpu/src/gpui_wgpu.rs b/crates/gpui_wgpu/src/gpui_wgpu.rs
+index 29a79afc6e..d4b179d1b2 100644
+--- a/crates/gpui_wgpu/src/gpui_wgpu.rs
++++ b/crates/gpui_wgpu/src/gpui_wgpu.rs
+@@ -1,9 +1,11 @@
+ mod cosmic_text_system;
++mod draw_diagnostics;
+ mod wgpu_atlas;
+ mod wgpu_context;
+ mod wgpu_renderer;
+ 
+ pub use cosmic_text_system::*;
++pub use draw_diagnostics::{DrawPhase, DrawPhaseHooks};
+ pub use wgpu;
+ pub use wgpu_atlas::*;
+ pub use wgpu_context::*;
+@@ -12,4 +14,4 @@ pub use wgpu_context::*;
+     any(test, feature = "bench-support", feature = "test-support")
+ ))]
+ pub use wgpu_renderer::WgpuHeadlessRenderer;
+-pub use wgpu_renderer::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
++pub use wgpu_renderer::{DrawCpuTimings, GpuContext, WgpuRenderer, WgpuSurfaceConfig};
+diff --git a/crates/gpui_wgpu/src/wgpu_renderer.rs b/crates/gpui_wgpu/src/wgpu_renderer.rs
+index 0f120bbad0..6b6a1cc402 100644
+--- a/crates/gpui_wgpu/src/wgpu_renderer.rs
++++ b/crates/gpui_wgpu/src/wgpu_renderer.rs
+@@ -1,3 +1,4 @@
++use crate::draw_diagnostics::{DrawPhase, DrawPhaseGuard, DrawPhaseHooks};
+ use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
+ use anyhow::{Context as _, Result};
+ use bytemuck::{Pod, Zeroable};
+@@ -243,6 +244,14 @@ enum RendererState {
+     Released,
+ }
+ 
++/// Host CPU durations only: none of these is GPU execution or actual presentation.
++#[derive(Default, Clone, Debug)]
++pub struct DrawCpuTimings {
++    pub acquire: Option<std::time::Duration>,
++    pub render_and_submit: Option<std::time::Duration>,
++    pub present_call: Option<std::time::Duration>,
++}
++
+ pub struct WgpuRenderer {
+     /// Shared GPU context for device recovery coordination (unused on WASM).
+     #[allow(dead_code)]
+@@ -1121,6 +1130,35 @@ impl WgpuRenderer {
+     }
+ 
+     pub fn draw(&mut self, scene: &Scene) -> bool {
++        self.draw_impl(scene, None, None)
++    }
++
++    /// Opt-in diagnostics; the ordinary draw path does not read the clock.
++    pub fn draw_with_cpu_timings(&mut self, scene: &Scene) -> (bool, DrawCpuTimings) {
++        let mut timings = DrawCpuTimings::default();
++        let drawn = self.draw_impl(scene, Some(&mut timings), None);
++        (drawn, timings)
++    }
++
++    /// Independent opt-in CPU timing and trace hooks. No new submissions/waits.
++    pub fn draw_with_diagnostics(
++        &mut self,
++        scene: &Scene,
++        timings: Option<&mut DrawCpuTimings>,
++        hooks: Option<DrawPhaseHooks>,
++    ) -> bool {
++        self.draw_impl(scene, timings, hooks)
++    }
++
++    fn draw_impl(
++        &mut self,
++        scene: &Scene,
++        mut timings: Option<&mut DrawCpuTimings>,
++        hooks: Option<DrawPhaseHooks>,
++    ) -> bool {
++        if let Some(sink) = timings.as_deref_mut() {
++            *sink = DrawCpuTimings::default();
++        }
+         #[cfg(target_family = "wasm")]
+         if self.device_lost() {
+             if matches!(self.state, RendererState::Ready { .. }) {
+@@ -1164,7 +1202,15 @@ impl WgpuRenderer {
+             self.failed_frame_count = 0;
+         }
+ 
+-        let frame = match surface.get_current_texture() {
++        let acquire_start = timings.as_ref().map(|_| std::time::Instant::now());
++        let acquired = {
++            let _phase = DrawPhaseGuard::new(hooks, DrawPhase::Acquire);
++            surface.get_current_texture()
++        };
++        if let Some(timings) = timings.as_deref_mut() {
++            timings.acquire = acquire_start.map(|start| start.elapsed());
++        }
++        let frame = match acquired {
+             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                 // Textures must be destroyed before the surface can be reconfigured.
+@@ -1196,18 +1242,33 @@ impl WgpuRenderer {
+             .create_view(&wgpu::TextureViewDescriptor::default());
+         let premultiplied_alpha =
+             self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+-        if let Err(error) = core.render_frame(
+-            scene,
+-            &frame_view,
+-            size,
+-            premultiplied_alpha,
+-            wgpu::Color::TRANSPARENT,
+-        ) {
++        let render_start = timings.as_ref().map(|_| std::time::Instant::now());
++        let rendered = {
++            let _phase = DrawPhaseGuard::new(hooks, DrawPhase::EncodeSubmit);
++            core.render_frame(
++                scene,
++                &frame_view,
++                size,
++                premultiplied_alpha,
++                wgpu::Color::TRANSPARENT,
++            )
++        };
++        if let Some(timings) = timings.as_deref_mut() {
++            timings.render_and_submit = render_start.map(|start| start.elapsed());
++        }
++        if let Err(error) = rendered {
+             log::error!("{error:#}");
+             return false;
+         }
+ 
+-        frame.present();
++        let present_start = timings.as_ref().map(|_| std::time::Instant::now());
++        {
++            let _phase = DrawPhaseGuard::new(hooks, DrawPhase::PresentCall);
++            frame.present();
++        }
++        if let Some(timings) = timings {
++            timings.present_call = present_start.map(|start| start.elapsed());
++        }
+         true
+     }
+ }
+diff --git a/crates/scheduler/src/executor.rs b/crates/scheduler/src/executor.rs
+index ad2ea929dc..bdbb0f9822 100644
+--- a/crates/scheduler/src/executor.rs
++++ b/crates/scheduler/src/executor.rs
+@@ -319,6 +319,14 @@ impl BackgroundExecutor {
+         move |runnable| {
+             if let Some(scheduler) = scheduler.upgrade() {
+                 scheduler.schedule_background_with_priority(runnable, priority);
++            } else {
++                // Activity retirement can race a channel notification under
++                // its listener lock. No cleanup owner remains; cancellation
++                // here can deadlock that notification, so leave inert residue.
++                #[cfg(target_os = "android")]
++                std::mem::forget(runnable);
++                #[cfg(not(target_os = "android"))]
++                drop(runnable);
+             }
+         }
+     }
+diff --git a/crates/gpui_wgpu/src/draw_diagnostics.rs b/crates/gpui_wgpu/src/draw_diagnostics.rs
+new file mode 100644
+index 0000000000..a37d065cc8
+--- /dev/null
++++ b/crates/gpui_wgpu/src/draw_diagnostics.rs
+@@ -0,0 +1,141 @@
++//! Optional synchronous CPU trace boundaries. No platform dependency or clocks.
++use std::{marker::PhantomData, rc::Rc};
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum DrawPhase {
++    Acquire,
++    EncodeSubmit,
++    PresentCall,
++}
++
++/// Hooks must not panic or re-enter the renderer. `begin` returns true exactly
++/// when a section was started; its captured `end` is called on that same thread
++/// even if tracing is subsequently disabled. These describe CPU calls, not GPU
++/// execution or actual presentation acknowledgements.
++#[derive(Clone, Copy)]
++pub struct DrawPhaseHooks {
++    pub begin: fn(DrawPhase) -> bool,
++    pub end: fn(DrawPhase),
++}
++
++#[must_use]
++pub(crate) struct DrawPhaseGuard {
++    end: Option<(DrawPhase, fn(DrawPhase))>,
++    _thread: PhantomData<Rc<()>>,
++}
++impl DrawPhaseGuard {
++    pub(crate) fn new(hooks: Option<DrawPhaseHooks>, phase: DrawPhase) -> Self {
++        let end = hooks
++            .filter(|hook| (hook.begin)(phase))
++            .map(|hook| (phase, hook.end));
++        Self {
++            end,
++            _thread: PhantomData,
++        }
++    }
++}
++impl Drop for DrawPhaseGuard {
++    fn drop(&mut self) {
++        if let Some((phase, end)) = self.end.take() {
++            end(phase);
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::cell::{Cell, RefCell};
++    thread_local! {
++        static ENABLED: Cell<bool> = const { Cell::new(true) };
++        static EVENTS: RefCell<Vec<(DrawPhase,bool)>> = const { RefCell::new(Vec::new()) };
++    }
++    fn begin(phase: DrawPhase) -> bool {
++        let active = ENABLED.get();
++        if active {
++            EVENTS.with_borrow_mut(|events| events.push((phase, true)));
++        }
++        active
++    }
++    fn end(phase: DrawPhase) {
++        EVENTS.with_borrow_mut(|events| events.push((phase, false)));
++    }
++    fn hooks() -> Option<DrawPhaseHooks> {
++        EVENTS.with_borrow_mut(Vec::clear);
++        ENABLED.set(true);
++        Some(DrawPhaseHooks { begin, end })
++    }
++    #[test]
++    fn enabled_phases_are_balanced_in_order() {
++        let hooks = hooks();
++        for phase in [
++            DrawPhase::Acquire,
++            DrawPhase::EncodeSubmit,
++            DrawPhase::PresentCall,
++        ] {
++            let _guard = DrawPhaseGuard::new(hooks, phase);
++        }
++        EVENTS.with_borrow(|events| {
++            assert_eq!(
++                *events,
++                vec![
++                    (DrawPhase::Acquire, true),
++                    (DrawPhase::Acquire, false),
++                    (DrawPhase::EncodeSubmit, true),
++                    (DrawPhase::EncodeSubmit, false),
++                    (DrawPhase::PresentCall, true),
++                    (DrawPhase::PresentCall, false)
++                ]
++            )
++        });
++    }
++    #[test]
++    fn disabled_or_absent_hooks_do_not_emit_end() {
++        let hooks = hooks();
++        ENABLED.set(false);
++        drop(DrawPhaseGuard::new(hooks, DrawPhase::Acquire));
++        drop(DrawPhaseGuard::new(None, DrawPhase::PresentCall));
++        EVENTS.with_borrow(|events| assert!(events.is_empty()));
++    }
++    #[test]
++    fn enabled_to_disabled_transition_still_ends_the_started_section() {
++        let hooks = hooks();
++        let guard = DrawPhaseGuard::new(hooks, DrawPhase::PresentCall);
++        ENABLED.set(false);
++        drop(guard);
++        EVENTS.with_borrow(|events| {
++            assert_eq!(
++                *events,
++                vec![
++                    (DrawPhase::PresentCall, true),
++                    (DrawPhase::PresentCall, false)
++                ]
++            )
++        });
++    }
++    #[test]
++    fn return_and_rust_unwind_end_the_section() {
++        fn fail(hooks: Option<DrawPhaseHooks>) -> Result<(), ()> {
++            let _guard = DrawPhaseGuard::new(hooks, DrawPhase::Acquire);
++            Err(())
++        }
++        let hooks = hooks();
++        assert!(fail(hooks).is_err());
++        let result = std::panic::catch_unwind(|| {
++            let _guard = DrawPhaseGuard::new(hooks, DrawPhase::EncodeSubmit);
++            panic!("simulated operation panic");
++        });
++        assert!(result.is_err());
++        EVENTS.with_borrow(|events| {
++            assert_eq!(
++                *events,
++                vec![
++                    (DrawPhase::Acquire, true),
++                    (DrawPhase::Acquire, false),
++                    (DrawPhase::EncodeSubmit, true),
++                    (DrawPhase::EncodeSubmit, false)
++                ]
++            )
++        });
++    }
++}

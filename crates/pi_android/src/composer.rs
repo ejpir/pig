@@ -1,6 +1,7 @@
 //! The composer: the draft, what is attached to it, suggestions for the `@`
 //! file or `/` command being typed, the model, and Send. Choosing a
-//! suggestion or a model only edits the draft; only Send sends.
+//! suggestion or a model only edits the draft; only Send sends. Direct
+//! subagent input uses the same layout without the optional selection controls.
 
 use crate::{
     prefs::{Prefs, SavedCommand},
@@ -375,7 +376,7 @@ impl Composer {
                 Some(files) => files.iter().map(String::as_str).collect(),
                 None => FILES.to_vec(),
             };
-            let files: Vec<_> = offered
+            let mut files: Vec<_> = offered
                 .into_iter()
                 .filter(|file| file.to_lowercase().contains(&word))
                 .take(6)
@@ -385,7 +386,9 @@ impl Composer {
                     } else {
                         "file"
                     };
-                    let mention = if file.chars().any(char::is_whitespace) {
+                    let mention = if file.chars().any(char::is_whitespace)
+                        || file.eq_ignore_ascii_case("Visualize")
+                    {
                         format!("@\"{file}\" ")
                     } else {
                         format!("@{file} ")
@@ -393,7 +396,7 @@ impl Composer {
                     (file.to_string(), mention, glyph)
                 })
                 .collect();
-            let title = if self.files_loading {
+            let mut title = if self.files_loading {
                 "Loading project files…".into()
             } else if self.files_error.is_some() {
                 "Project files unavailable".into()
@@ -406,6 +409,24 @@ impl Composer {
             } else {
                 format!("Files matching “{word}”").into()
             };
+            if "visualize".starts_with(&word) {
+                files.insert(
+                    0,
+                    (
+                        "@Visualize · Native mini-app".into(),
+                        "@Visualize ".into(),
+                        "spark",
+                    ),
+                );
+                files.truncate(6);
+                if !self.files_loading && self.files_error.is_none() {
+                    title = if word.is_empty() {
+                        "Visualize & files".into()
+                    } else {
+                        "Native mini-app".into()
+                    };
+                }
+            }
             let _ = range;
             return (self.files.is_some() || !files.is_empty()).then_some((title, files));
         }
@@ -479,19 +500,14 @@ impl Render for Composer {
         let lines = (f32::from(window.fully_visible_bounds().size.height) * 0.3 / 22.) as usize;
         area.update(cx, |area, _| {
             area.set_max_lines(lines.clamp(2, 8));
-            // Message-only input has no toolbar: the entire padded editor
-            // column is interactive, stopping exactly before its Send target.
-            // Normal composers must leave their attachment/model controls alone.
+            // The padded editor is interactive, stopping at the action row
+            // so Send and the optional selection controls keep their own targets.
             area.set_touch_target(
-                px(if self.message_only {
-                    32.
-                } else {
-                    self.draft_height
-                }),
+                px(self.draft_height),
                 Edges {
                     top: px(12.),
-                    right: px(if self.message_only { 8. } else { 16. }),
-                    bottom: px(if self.message_only { 12. } else { 0. }),
+                    right: px(16.),
+                    bottom: px(4.),
                     left: px(16.),
                 },
             );
@@ -536,6 +552,7 @@ impl Render for Composer {
                     .on_click(cx.listener(|this, _, _, cx| this.send(cx)))
             });
         let clip = ui::tap("attach", "clip", &colors)
+            .debug_selector(|| "composer-attach".into())
             .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Attach)));
         let model = div()
             .id("model")
@@ -750,73 +767,53 @@ impl Render for Composer {
                 )
         });
         let attached = strip.is_some() || lines_strip.is_some() || self.joined;
-        let body = if self.message_only {
-            div()
-                .flex()
-                .items_end()
-                .pl(px(16.))
-                .pr(px(4.))
-                .py(px(4.))
-                .child(
-                    div()
-                        .id("draft-box")
-                        .debug_selector(|| "composer-draft".into())
-                        .relative()
-                        .child(crate::testing::probe("draft"))
-                        .flex_1()
-                        .min_w_0()
-                        .pr(px(8.))
-                        .py(px(8.))
-                        .child(area),
-                )
-                .when(self.sending, |row| row.child(ui::hint("Sending…", &colors)))
-                .child(send)
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .pl(px(16.))
-                .pr(px(8.))
-                .pt(px(12.))
-                .pb(px(4.))
-                .children(attachments)
-                .child(
-                    div()
-                        .id("draft-box")
-                        .debug_selector(|| "composer-draft".into())
-                        .relative()
-                        .child(crate::testing::probe("draft"))
-                        .pr(px(8.))
-                        .child(area),
-                )
-                .child(
-                    div()
-                        .mt(px(4.))
-                        .ml(px(-12.))
-                        .flex()
-                        .items_center()
-                        .when(!self.message_only, |row| {
-                            row.child(clip)
-                                .when(self.command_button && self.has_commands(), |row| {
-                                    row.child(
-                                        ui::tap("command", "slash", &colors).w(px(40.)).on_click(
-                                            cx.listener(|this, _, window, cx| {
-                                                this.start_command(window, cx)
-                                            }),
-                                        ),
-                                    )
-                                })
-                                .child(model)
-                                .child(thinking)
-                        })
-                        .child(div().flex_1())
-                        .when(self.sending, |row| row.child(ui::hint("Sending…", &colors)))
-                        .when(self.imports > 0, |row| {
-                            row.child(ui::hint("Preparing…", &colors))
-                        })
-                        .child(send),
-                )
-        };
+        // Child input is the regular composer minus its selection controls,
+        // not a separate compact editor. Keep spacing and Send placement shared.
+        let body = div()
+            .flex()
+            .flex_col()
+            .pl(px(16.))
+            .pr(px(8.))
+            .pt(px(12.))
+            .pb(px(4.))
+            .children(attachments)
+            .child(
+                div()
+                    .id("draft-box")
+                    .debug_selector(|| "composer-draft".into())
+                    .relative()
+                    .child(crate::testing::probe("draft"))
+                    .pr(px(8.))
+                    .child(area),
+            )
+            .child(
+                div()
+                    .mt(px(4.))
+                    .ml(px(-12.))
+                    .flex()
+                    .items_center()
+                    .when(!self.message_only, |row| {
+                        row.child(clip)
+                            .when(self.command_button && self.has_commands(), |row| {
+                                row.child(
+                                    ui::tap("command", "slash", &colors)
+                                        .debug_selector(|| "composer-command".into())
+                                        .w(px(40.))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.start_command(window, cx)
+                                        })),
+                                )
+                            })
+                            .child(model)
+                            .child(thinking)
+                    })
+                    .child(div().flex_1())
+                    .when(self.sending, |row| row.child(ui::hint("Sending…", &colors)))
+                    .when(self.imports > 0, |row| {
+                        row.child(ui::hint("Preparing…", &colors))
+                    })
+                    .child(send),
+            );
         div()
             .flex()
             .flex_col()
@@ -825,6 +822,9 @@ impl Render for Composer {
             .child(
                 div()
                     .id("composer")
+                    .debug_selector(|| "composer".into())
+                    .relative()
+                    .child(crate::testing::probe("composer"))
                     .occlude()
                     .mx(px(12.))
                     .bg(colors.composer)
@@ -852,10 +852,86 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
+    fn message_only_uses_regular_layout_without_selection_controls(cx: &mut TestAppContext) {
+        use gpui::size;
+        let long_draft = (0..20).map(|_| "A line\n").collect::<String>();
+        for (width, height) in [(320., 640.), (412., 915.), (640., 360.), (320., 400.)] {
+            for text in ["", "Two\nlines", long_draft.as_str()] {
+                let mut regular_bounds = None;
+                for message_only in [false, true] {
+                    let (app, cx) = cx
+                        .add_window_view(|window, cx| crate::app::PhoneApp::new(None, window, cx));
+                    cx.simulate_resize(size(px(width), px(height)));
+                    cx.update(|window, cx| {
+                        app.update(cx, |app, cx| {
+                            app.preview("start", window, cx);
+                            app.start.update(cx, |composer, cx| {
+                                composer.draft_height = 24.;
+                                if message_only {
+                                    composer.set_message_only();
+                                }
+                                composer.set_text(text, cx);
+                            });
+                        });
+                    });
+                    cx.run_until_parked();
+                    let bounds = (
+                        cx.debug_bounds("composer").unwrap(),
+                        cx.debug_bounds("composer-draft").unwrap(),
+                        cx.debug_bounds("send").unwrap(),
+                    );
+                    assert!(bounds.1.bottom() <= bounds.2.top());
+                    for control in [
+                        "composer-attach",
+                        "composer-command",
+                        "composer-model",
+                        "composer-thinking",
+                    ] {
+                        assert_eq!(
+                            cx.debug_bounds(control).is_some(),
+                            !message_only,
+                            "{control}"
+                        );
+                    }
+                    if message_only {
+                        assert_eq!(Some(bounds), regular_bounds, "layout at {width}×{height}");
+                    } else {
+                        regular_bounds = Some(bounds);
+                    }
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn message_only_keeps_text_only_and_pending_send_behavior(cx: &mut TestAppContext) {
+        let composer = cx.new(|cx| Composer::new("Steer…", cx));
+        composer.update(cx, |composer, cx| {
+            composer.set_message_only();
+            for text in ["@README", "@Visualize", "/review"] {
+                composer.set_text(text, cx);
+                assert!(composer.suggestions(cx).is_none());
+            }
+            assert!(!composer.has_commands());
+            assert!(composer.attachments().is_empty());
+            assert!(composer.can_send(cx));
+            composer.set_sending(true);
+            assert!(!composer.can_send(cx));
+            assert_eq!(composer.area.read(cx).text(), "/review");
+            composer.clear_if_text("a different draft", cx);
+            assert_eq!(composer.area.read(cx).text(), "/review");
+            composer.set_sending(false);
+            assert!(composer.can_send(cx));
+            composer.clear_if_text("/review", cx);
+            assert!(!composer.can_send(cx));
+        });
+    }
+
+    #[gpui::test]
     fn message_only_first_touch_covers_the_editor_but_not_send(cx: &mut TestAppContext) {
         use gpui::{InputEvent, TouchPhase, point, size};
         for width in [320., 412.] {
-            for target in ["center", "left", "top", "bottom", "next-to-send", "send"] {
+            for target in ["center", "left", "top", "bottom", "right", "send"] {
                 let (app, cx) =
                     cx.add_window_view(|window, cx| crate::app::PhoneApp::new(None, window, cx));
                 cx.simulate_resize(size(px(width), px(640.)));
@@ -864,6 +940,7 @@ mod tests {
                         app.preview("start", window, cx);
                         app.start.update(cx, |composer, cx| {
                             composer.set_message_only();
+                            composer.draft_height = 24.;
                             composer
                                 .area
                                 .update(cx, |area, _| area.set_placeholder("Steer this subagent…"));
@@ -873,17 +950,16 @@ mod tests {
                 cx.run_until_parked();
                 let draft = cx.debug_bounds("composer-draft").unwrap();
                 let send = cx.debug_bounds("send").unwrap();
-                assert_eq!(
-                    draft.bottom(),
-                    send.bottom(),
-                    "Send sits beside the editor, not in a blank second row"
+                assert!(
+                    draft.bottom() <= send.top(),
+                    "Send sits below the full-width editor, as in the regular composer"
                 );
-                assert!(draft.right() <= send.left());
+                assert!(draft.right() >= send.right());
                 let position = match target {
                     "left" => point(draft.left() - px(8.), draft.center().y),
                     "top" => point(draft.center().x, draft.top() - px(2.)),
                     "bottom" => point(draft.center().x, draft.bottom() + px(2.)),
-                    "next-to-send" => point(draft.right() - px(2.), draft.center().y),
+                    "right" => point(draft.right() + px(2.), draft.center().y),
                     "send" => send.center(),
                     _ => draft.center(),
                 };
@@ -964,14 +1040,33 @@ mod tests {
         composer.read_with(cx, |composer, cx| {
             let (title, items) = composer.suggestions(cx).expect("loading state");
             assert_eq!(title, "Loading project files…");
-            assert!(items.is_empty());
+            assert_eq!(items[0].1, "@Visualize ");
         });
 
         composer.update(cx, |composer, _| composer.fail_files("offline".into()));
         composer.read_with(cx, |composer, cx| {
             let (title, items) = composer.suggestions(cx).expect("error state");
             assert_eq!(title, "Project files unavailable");
-            assert!(items.is_empty());
+            assert_eq!(items[0].1, "@Visualize ");
+        });
+    }
+
+    #[gpui::test]
+    fn visualize_is_available_without_files_and_acceptance_only_edits_the_token(
+        cx: &mut TestAppContext,
+    ) {
+        let composer = cx.new(|cx| Composer::new("", cx));
+        composer.update(cx, |composer, cx| {
+            composer.use_files(Some(vec!["Visualize".into()]));
+            composer.set_text("Build @vis", cx);
+            let (_, items) = composer.suggestions(cx).unwrap();
+            assert_eq!(items[0].1, "@Visualize ");
+            assert_eq!(items[1].1, "@\"Visualize\" ");
+            composer.accept(items[0].1.clone(), cx);
+            assert_eq!(composer.area.read(cx).text(), "Build @Visualize ");
+            composer.use_files(Some(vec![]));
+            composer.set_text("@V", cx);
+            assert_eq!(composer.suggestions(cx).unwrap().1[0].1, "@Visualize ");
         });
     }
 

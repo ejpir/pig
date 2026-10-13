@@ -134,6 +134,13 @@ public final class PageActivity extends Activity {
         String poster = getIntent().getStringExtra(POSTER);
         preview.setWebViewClient(new WebViewClient() {
             @Override
+            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                content.removeView(view);
+                view.destroy();
+                finish(); // Return to the surviving native chat, not a dead browser.
+                return true;
+            }
+            @Override
             public void onPageFinished(WebView view, String url) {
                 // Give scripts a moment to draw, then keep how the page looks.
                 if (poster != null && !poster.isEmpty() && !new File(poster).exists()) {

@@ -4,7 +4,7 @@ import type { Context } from "@earendil-works/chord";
 /** Conversation-owned settings. Omitted optional fields retain older sessions' defaults. */
 export const Metadata = defineDoc<{ name: string; autoCompaction: boolean; initialized: boolean; swarmEnabled?: boolean; compactionThresholdPercent?: number }>({
   kind: "app.desktop", version: 1, scope: "conversation", history: "latest", fork: "initial",
-  initial: () => ({ name: "", autoCompaction: true, initialized: false, swarmEnabled: true }),
+  initial: () => ({ name: "", autoCompaction: true, initialized: false, swarmEnabled: false }),
 });
 
 /** Resolve a background-start percentage while preserving summary/output headroom.
@@ -35,7 +35,7 @@ export async function setCompactionThreshold(root: Conversation, percent: unknow
   return { percent };
 }
 
-export const swarmEnabled = (metadata: { swarmEnabled?: boolean } | null | undefined): boolean => metadata?.swarmEnabled !== false;
+export const swarmEnabled = (metadata: { swarmEnabled?: boolean } | null | undefined): boolean => metadata?.swarmEnabled === true;
 
 export async function setSwarmEnabled(root: Conversation, enabled: unknown, context: Context): Promise<{ enabled: boolean }> {
   if (typeof enabled !== "boolean") throw new Error("enabled must be a boolean");

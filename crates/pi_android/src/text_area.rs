@@ -237,6 +237,17 @@ impl TextArea {
         self.menu
     }
 
+    /// Numeric readback only, for paused sample-fixture input checks.
+    #[cfg(feature = "ui-test")]
+    pub(crate) fn test_input_state(&self) -> serde_json::Value {
+        let selection = self.range_to_utf16(&self.selection);
+        let marked = self.marked.as_ref().map(|range| {
+            let range = self.range_to_utf16(range);
+            [range.start, range.end]
+        });
+        serde_json::json!({ "selection": [selection.start, selection.end], "marked": marked })
+    }
+
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>) {
         self.placeholder = placeholder.into();
     }

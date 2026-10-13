@@ -22,8 +22,8 @@ describe("reading images", () => {
   test("an image comes back as image content, named by its path", async () => {
     writeFileSync(join(cwd, "shot.png"), PNG);
     const result = await readImage("shot.png", api, BACKGROUND_CONTEXT);
-    expect(result?.content[0]).toEqual({ type: "text", text: "shot.png [image/png]" });
-    expect(result?.content[1]).toEqual({ type: "image", data: PNG.toString("base64"), mimeType: "image/png" });
+    expect(result?.output[0]).toEqual({ type: "text", text: "shot.png [image/png]" });
+    expect(result?.output[1]).toEqual({ type: "image", data: PNG.toString("base64"), mimeType: "image/png" });
   });
 
   test("text is left to the stock tool, and huge images are refused", async () => {

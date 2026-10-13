@@ -12,6 +12,7 @@ mod assets;
 mod attachments;
 mod composer;
 mod demo;
+mod inline_page;
 mod live;
 mod message;
 mod model;
@@ -33,6 +34,10 @@ mod text_area;
 mod theme;
 mod threshold_slider;
 mod ui;
+mod visual_apps;
+mod visual_controls;
+mod visual_profile;
+mod visualize_prompt;
 
 pub use app::{GoBack, PhoneApp};
 pub use assets::Assets;
@@ -110,7 +115,8 @@ fn android_main(app: gpui_android::AndroidApp) {
             return;
         }
     };
-    let application = Application::with_platform(Rc::new(platform)).with_assets(Assets);
+    let platform = Rc::new(platform);
+    let application = Application::with_platform(platform.clone()).with_assets(Assets);
     let (sender, urls) = async_channel::unbounded();
     application.on_open_urls(move |opened| {
         for url in opened {
@@ -121,7 +127,12 @@ fn android_main(app: gpui_android::AndroidApp) {
         init(cx);
         open(cx, data_dir, urls);
     });
-    // The activity is gone. Android may call `android_main` again in this
-    // process for the next launch; start that from a fresh process instead.
-    std::process::exit(0);
+    platform.finish();
+    drop(platform);
+    // This native thread does not own Android's process. Returning lets
+    // android-activity finish its Stopped/onDestroy handshake; process::exit
+    // would run C++ exit handlers concurrently with live JVM/HWUI workers.
+    // A later activity may start a new android_main in this same process.
+    let _return_trace = gpui_android::trace::scope(c"pi.activity.native.return");
+    log::info!("Native activity loop returned; returning to Android glue");
 }

@@ -217,6 +217,15 @@ impl WindowState {
         )
     }
 
+    pub fn inline_page_failed(&self) {
+        with_callback!(self, request_frame, |callback| callback(
+            RequestFrameOptions {
+                require_presentation: true,
+                force_render: true,
+            }
+        ));
+    }
+
     pub fn scale(&self) -> f32 {
         self.scale.get()
     }
@@ -349,6 +358,7 @@ impl WindowState {
     /// Lets GPUI draw a frame, if one can be shown. `present` repaints the last
     /// frame even when nothing changed, for a new or damaged surface.
     pub fn frame(&self, present: bool) {
+        let _trace = crate::trace::scope(c"pi.window.frame");
         if !self.visibility.get().is_visible() || self.surface.borrow().is_none() {
             log::debug!(
                 "frame skipped: {:?}, surface: {}",
@@ -376,7 +386,30 @@ impl WindowState {
         }));
     }
 
+    pub fn inline_page_touch(&self, action: i32, x: f32, y: f32) {
+        let phase = match action {
+            0 => gpui::TouchPhase::Started,
+            1 => gpui::TouchPhase::Ended,
+            2 => gpui::TouchPhase::Moved,
+            3 => gpui::TouchPhase::Cancelled,
+            _ => return,
+        };
+        self.touch(vec![TouchEvent {
+            id: gpui::TouchId(u64::MAX - 1),
+            phase,
+            position: gpui::point(px(x / self.scale.get()), px(y / self.scale.get())),
+            predicted_position: None,
+            force: None,
+        }]);
+    }
+
     pub fn touch(&self, events: Vec<TouchEvent>) {
+        if events
+            .iter()
+            .any(|event| event.phase == gpui::TouchPhase::Started)
+        {
+            self.java.release_inline_page_focus();
+        }
         for event in events {
             self.last_touch.set(event.position);
             if self.dispatch(PlatformInput::Touch(event)).is_none() {
@@ -424,8 +457,16 @@ impl WindowState {
             && result.propagate
             && let Some(text) = text
         {
-            self.with_input_handler(|handler| handler.replace_text_in_range(None, &text))
-                .is_some()
+            self.with_input_handler(|handler| {
+                // A printable key is an insertion at the current selection,
+                // not an IME commit of the entire composing/correction word.
+                let range = handler
+                    .selected_text_range(false)
+                    .map(|selection| selection.range);
+                handler.unmark_text();
+                handler.replace_text_in_range(range, &text);
+            })
+            .is_some()
         } else {
             !result.propagate
         };
@@ -703,6 +744,7 @@ impl PlatformWindow for AndroidWindow {
     }
 
     fn draw(&self, scene: &Scene) {
+        let _trace = crate::trace::scope(c"pi.gpu.backend");
         let mut renderer = self.0.renderer.borrow_mut();
         if renderer.device_lost() {
             if let Some(surface) = self.0.surface.borrow().as_ref()
@@ -713,7 +755,34 @@ impl PlatformWindow for AndroidWindow {
             self.0.clock.request();
             return;
         }
-        renderer.draw(scene);
+        let profiling = crate::frame_profile::enabled();
+        let tracing = crate::trace::enabled();
+        if profiling || tracing {
+            use crate::frame_profile::{self, Stage};
+            let start = profiling.then(std::time::Instant::now);
+            let mut timing = gpui_wgpu::DrawCpuTimings::default();
+            let hooks = tracing.then_some(gpui_wgpu::DrawPhaseHooks {
+                begin: begin_gpu_phase,
+                end: end_gpu_phase,
+            });
+            let present_requested =
+                renderer.draw_with_diagnostics(scene, profiling.then_some(&mut timing), hooks);
+            if let Some(start) = start {
+                frame_profile::record(Stage::Backend, start.elapsed());
+            }
+            if let Some(elapsed) = timing.acquire {
+                frame_profile::record(Stage::Acquire, elapsed);
+            }
+            if let Some(elapsed) = timing.render_and_submit {
+                frame_profile::record(Stage::EncodeSubmit, elapsed);
+            }
+            if let Some(elapsed) = timing.present_call {
+                frame_profile::record(Stage::PresentCall, elapsed);
+            }
+            frame_profile::draw(present_requested);
+        } else {
+            renderer.draw(scene);
+        }
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -779,4 +848,22 @@ impl PlatformWindow for AndroidWindow {
         let (input_type, ime_options) = ime::editor_info(&configuration);
         self.0.java.configure_keyboard(input_type, ime_options);
     }
+}
+
+fn gpu_phase_name(phase: gpui_wgpu::DrawPhase) -> &'static std::ffi::CStr {
+    match phase {
+        gpui_wgpu::DrawPhase::Acquire => c"pi.gpu.acquire",
+        gpui_wgpu::DrawPhase::EncodeSubmit => c"pi.gpu.encode_submit",
+        gpui_wgpu::DrawPhase::PresentCall => c"pi.gpu.present_call",
+    }
+}
+fn begin_gpu_phase(phase: gpui_wgpu::DrawPhase) -> bool {
+    let enabled = crate::trace::enabled();
+    if enabled {
+        crate::trace::section(gpu_phase_name(phase), true);
+    }
+    enabled
+}
+fn end_gpu_phase(phase: gpui_wgpu::DrawPhase) {
+    crate::trace::section(gpu_phase_name(phase), false);
 }

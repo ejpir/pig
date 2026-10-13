@@ -13,7 +13,13 @@ pub mod activity;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod dispatcher;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub mod frame_profile;
+#[cfg(any(target_os = "android", test))]
+mod frame_tick;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod ime;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod java_inbox;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod keys;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -22,6 +28,8 @@ mod lifecycle;
 mod qr;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod touch;
+
+pub mod trace;
 
 #[cfg(target_os = "android")]
 mod display;
