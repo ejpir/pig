@@ -1,0 +1,22 @@
+{
+  "name": "pi-quickjs-backend-poc",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run build.ts",
+    "test": "bun run build && cargo test --locked"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "1.2.0",
+    "@earendil-works/pi-ai": "1.2.0",
+    "@ungap/structured-clone": "1.3.2",
+    "abort-controller": "3.0.0",
+    "headers-polyfill": "4.0.3",
+    "text-encoding": "0.7.0",
+    "web-streams-polyfill": "4.2.0",
+    "whatwg-url": "14.2.0"
+  },
+  "engines": {
+    "bun": "1.4.2"
+  }
+}

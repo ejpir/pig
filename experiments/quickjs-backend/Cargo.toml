@@ -1,0 +1,33 @@
+[package]
+name = "pi-quickjs-backend-poc"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+# Deliberately independent of the desktop/GPUI workspace and its sibling Zed checkout.
+[workspace]
+
+[dependencies]
+anyhow = "1.0"
+libc = "0.2"
+getrandom = "0.3"
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+serde_json = "1.0"
+tempfile = "3.23"
+
+[target.'cfg(target_os = "android")'.dependencies]
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "bindgen"] }
+
+[build-dependencies]
+serde_json = "1.0"
+sha2 = "0.10"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+strip = true
+lto = "thin"
