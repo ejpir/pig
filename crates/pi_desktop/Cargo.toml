@@ -24,6 +24,8 @@ language.workspace = true
 markdown.workspace = true
 menu.workspace = true
 pi_core = { path = "../pi_core" }
+pi_visual = { path = "../pi_visual" }
+pi_visual_ui = { path = "../pi_visual_ui" }
 pi_jj = { path = "../pi_jj" }
 pi_editor = { path = "../pi_editor" }
 pi_lsp_bridge = { path = "../pi_lsp_bridge" }

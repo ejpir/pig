@@ -183,3 +183,32 @@ Confirmations default to Cancel and recheck the originating owner and readiness 
 Session diagnostics retain at most 128 entries / 48 KiB, including an 8 KiB stderr tail. They omit request bodies and tool/model payloads, apply best-effort redaction and warn before copying. Diagnostics are local, in-memory and never uploaded automatically.
 
 Remaining limitations include native authentication/setup UI, complete resource manifests, editor-selection mentions, terminal search and idle process/document eviction. Large-repository snapshot costs and cross-platform live behavior need broader validation. See [Validation](validation.md) for tested scope and release limitations.
+
+## Native Visualize (desktop and Android)
+
+`pi_visual` owns the portable QuickJS-NG runtime, validated scenes/input, bounded SVG
+compiler, exact historical prompt contracts and shared samples. `pi_visual_ui` owns
+GPUI cards, controls, drawing, HiDPI tessellation, local state and lifecycle/frame
+scheduling. Neither frontend duplicates the renderer or runtime. Android supplies
+raw-touch/tracing and navigation adapters; desktop supplies transcript, history and
+window adapters. This feature is separate from browser-backed inline HTML pages.
+
+Desktop expands explicit `@Visualize` prose before appending mention contents.
+Generated labels/paths, quoted guides, recovered attachments and incomplete fences
+do not grant execution permission. The reserved menu action inserts without sending.
+Displayed requests omit the admitted guide; original wire/history data is retained.
+
+Only completed assistant text in an opted-in user turn is considered. Native cards
+require exact, unique message matches on a validated active history ancestry. Keys
+include local/SSH session scope, user and assistant entry IDs, candidate ordinal,
+original prompt and exact source—not row position, title or surrounding prose.
+Missing/ambiguous/stale identities fail closed to Markdown. Entries are fetched for
+admitted histories, including SSH attachments, without making their availability a
+prerequisite for ordinary chat. Eight running programs share the host cache; each
+transcript also bounds retained reply projections to eight rows / 256 KiB. Native
+source is not unnecessarily materialized as a hidden Markdown document.
+
+Navigation, blur, prompts and unmount suspend activity and cancel held input.
+Generation/route/visibility checks reject stale mutations. Legacy slider/pointer
+cancellation rolls back its draft; phased events release physical state without
+undoing unrelated gameplay. Local interactions do not call the agent or its tools.

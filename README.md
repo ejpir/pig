@@ -54,6 +54,16 @@ Real sessions use your provider credentials and can edit files, just like pi. To
 
 To record the tour above again, run `scripts/macos-demo/record.sh` after a release build.
 
+## Native Visualize
+
+Type **`@Visualize`** in desktop or Android chat to request an interactive native app.
+Buttons, sliders, vector canvases, keyboard/held controls, animation and a bounded
+SVG subset run locally, without model calls or a WebView. Both apps share the same
+runtime and HiDPI renderer. Images and arbitrary browser SVG are not supported.
+
+Execution is opt-in and experimental: limits are cooperative in-process safeguards,
+not an OS sandbox. See the [API and limitations](crates/pi_visual/README.md).
+
 ## Durable sessions (experimental)
 
 Pi Desktop can also run sessions with a durable engine built on pi-durable. A session's state lives in SQLite on the computer that runs it, so the session survives disconnects and crashes and resumes where it was. Use it for SSH sessions (**New session → SSH → Durable · experimental**). [Pi for Android](crates/pi_android/README.md) always uses it: every session the phone starts is a durable one on your computer.

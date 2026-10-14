@@ -1,7 +1,9 @@
 mod activity;
 mod media;
+use super::visualize::{self, Binding};
 use activity::{Activity, Block, Group};
 pub(super) use activity::{call_kinds, stages_ahead};
+use pi_visual_ui::HostExt;
 use serde_json::Value;
 use std::borrow::Cow;
 
@@ -16,6 +18,13 @@ use ui::{ContextMenu, right_click_menu};
 use crate::markdown_view::{self, Source};
 
 pub struct TranscriptView {
+    pub(super) visuals: std::rc::Rc<std::cell::RefCell<pi_visual_ui::VisualApps<gpui::EntityId>>>,
+    pub(super) visual_route: gpui::EntityId,
+    pub(super) visual_persist: bool,
+    pub(super) visual_focus: gpui::FocusHandle,
+    visual_bindings: HashMap<usize, Binding>,
+    visual_order: std::collections::VecDeque<usize>,
+    visual_lifecycle: Vec<Subscription>,
     controller: Entity<SessionController>,
     pub documents: markdown_view::Documents,
     pub list: ListState,
@@ -45,6 +54,9 @@ pub struct TranscriptView {
     pub rows_synced: usize,
 }
 impl TranscriptView {
+    pub(super) fn cancel_visuals(&self) {
+        self.visuals.borrow_mut().cancel_route(self.visual_route);
+    }
     pub fn new(controller: Entity<SessionController>, cx: &mut Context<Self>) -> Self {
         let count = controller.read(cx).model().messages.len();
         let list = ListState::new(count.max(1) + 1, ListAlignment::Top, px(180.));
@@ -53,6 +65,12 @@ impl TranscriptView {
         }
         let subscription = cx.subscribe(&controller, |this, _, event, cx| match event {
             SessionEvent::Content(change) => this.content_changed(change, cx),
+            SessionEvent::Changed(changes) if changes.intersects(Changes::HISTORY) => {
+                this.dirty
+                    .extend(0..this.controller.read(cx).model().messages.len());
+                this.list.remeasure();
+                cx.notify();
+            }
             SessionEvent::Changed(changes)
                 if changes.intersects(
                     Changes::RUN | Changes::METADATA | Changes::JJ | Changes::QUEUE,
@@ -98,6 +116,13 @@ impl TranscriptView {
             _ => {}
         });
         let mut view = Self {
+            visuals: visualize::store(cx),
+            visual_route: cx.entity_id(),
+            visual_persist: !controller.read(cx).is_demo(),
+            visual_focus: cx.focus_handle(),
+            visual_bindings: HashMap::new(),
+            visual_order: Default::default(),
+            visual_lifecycle: Vec::new(),
             controller: controller.clone(),
             documents: Default::default(),
             list,
@@ -142,6 +167,9 @@ impl TranscriptView {
         let model = self.controller.read(cx).model();
         let count = model.messages.len();
         if matches!(change, ContentChange::Reset) {
+            self.visuals.borrow_mut().cancel_route(self.visual_route);
+            self.visual_bindings.clear();
+            self.visual_order.clear();
             self.documents.sync(vec![], cx);
             self.row_keys.clear();
             self.document_subscriptions.clear();
@@ -316,12 +344,53 @@ impl TranscriptView {
         // An entity loan lets us borrow sources while updating separate Markdown entities.
         // No controller mutation or notification is needed for this projection.
         let keys: HashSet<_> = self.controller.clone().update(cx, |controller, cx| {
+            let binding = Binding::project(controller, row, &mut self.visuals.borrow_mut());
+            if let Some(old) = self.visual_bindings.remove(&row) {
+                for key in old.keys.values().filter(|key| {
+                    binding
+                        .as_ref()
+                        .is_none_or(|b| !b.keys.values().any(|v| v == *key))
+                }) {
+                    if let Some(instance) = self.visuals.borrow_mut().running.get_mut(key) {
+                        instance.cancel_manipulation();
+                    }
+                }
+            }
+            if let Some(binding) = binding {
+                self.visual_bindings.insert(row, binding);
+                self.visual_order.retain(|old| *old != row);
+                self.visual_order.push_back(row);
+                while self.visual_order.len() > 8
+                    || self
+                        .visual_bindings
+                        .values()
+                        .map(Binding::retained_bytes)
+                        .sum::<usize>()
+                        > 256 * 1024
+                {
+                    let old = self.visual_order.pop_front().unwrap();
+                    self.visual_bindings.remove(&old);
+                    self.dirty.insert(old);
+                    if let Some(keys) = self.row_keys.remove(&old) {
+                        for key in keys {
+                            self.documents.remove(&key);
+                            self.document_subscriptions.remove(&key);
+                        }
+                    }
+                }
+            }
             let visible = |block: usize| {
                 self.activity
                     .group(Block { row, index: block })
                     .is_none_or(|g| self.activity_open(g))
             };
-            let sources = markdown_sources(controller.model(), row, &self.expanded, visible);
+            let sources = markdown_sources_visual(
+                controller.model(),
+                row,
+                &self.expanded,
+                visible,
+                self.visual_bindings.get(&row),
+            );
             let keys = sources.iter().map(|(key, _)| key.clone()).collect();
             self.documents.update(sources, cx);
             keys
@@ -1160,6 +1229,54 @@ impl TranscriptView {
         )
     }
 
+    fn visual_text(
+        &self,
+        row: usize,
+        block: usize,
+        fallback: &str,
+        style: &MarkdownStyle,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let Some(binding) = self.visual_bindings.get(&row) else {
+            return self.markdown(doc_key(row, &format!("text-{block}")), fallback, style);
+        };
+        let Some(parsed) = binding.texts.get(&block) else {
+            return self.markdown(doc_key(row, &format!("text-{block}")), fallback, style);
+        };
+        let mut column = v_flex().w_full().gap(px(10.));
+        for (i, part) in parsed.parts().enumerate() {
+            let body = match part {
+                pi_visual::reply::Part::App {
+                    source,
+                    raw,
+                    ordinal,
+                } => {
+                    if let Some(key) = binding.keys.get(&(block, i))
+                        && let Some(card) = self.render_visual_card(
+                            key,
+                            source,
+                            ordinal,
+                            row,
+                            &visualize::palette(theme),
+                            cx,
+                        )
+                    {
+                        column = column.child(card);
+                        continue;
+                    }
+                    raw
+                }
+                pi_visual::reply::Part::Markdown(body) => body,
+            };
+            column = column.child(self.markdown(
+                doc_key(row, &format!("visual-{block}-{i}")),
+                body,
+                style,
+            ));
+        }
+        column.into_any_element()
+    }
     fn markdown(&self, key: SharedString, fallback: &str, style: &MarkdownStyle) -> AnyElement {
         self.document(key, fallback, style, "Copy Message", None)
     }
@@ -1203,6 +1320,8 @@ impl TranscriptView {
         cx: &Context<Self>,
         theme: Theme,
     ) -> Div {
+        let clean = pi_visual::prompt::label(request);
+        let request = clean.as_str();
         let group = SharedString::from(format!("user-message-{index}"));
         let sent = mentions::parse_sent(request);
         let view = cx.entity().downgrade();
@@ -1427,6 +1546,10 @@ impl TranscriptView {
         {
             self.rows_rendered += 1;
         }
+        if self.visual_bindings.contains_key(&index) {
+            self.visual_order.retain(|row| *row != index);
+            self.visual_order.push_back(index);
+        }
         self.sync_row(index, cx);
         let model = self.controller.read(cx).model();
         let theme = theme(cx);
@@ -1642,10 +1765,13 @@ impl TranscriptView {
                                                 }),
                                             )
                                         })
-                                        .child(self.markdown(
-                                            doc_key(index, &format!("text-{block_index}")),
+                                        .child(self.visual_text(
+                                            index,
+                                            block_index,
                                             &text(block, "text"),
                                             &prose,
+                                            theme,
+                                            cx,
                                         )),
                                 )
                             }
@@ -2085,7 +2211,8 @@ impl TranscriptView {
         } else {
             ("Next", model.follow_up.first()?, model.follow_up.len())
         };
-        let first = first.lines().next().unwrap_or_default().to_owned();
+        let clean = pi_visual::prompt::label(first);
+        let first = clean.lines().next().unwrap_or_default().to_owned();
         Some(
             div()
                 .debug_selector(|| "rail-queued".into())
@@ -2164,6 +2291,29 @@ impl Render for TranscriptView {
         {
             self.renders += 1;
         }
+        if self.visual_lifecycle.is_empty() {
+            self.visual_lifecycle
+                .push(cx.observe_window_activation(window, |this, window, cx| {
+                    if !window.is_window_active() {
+                        this.visuals.borrow_mut().cancel_route(this.visual_route);
+                    }
+                    cx.notify();
+                }));
+            self.visual_lifecycle.push(cx.observe_window_visibility(
+                window,
+                |this, visibility, _, cx| {
+                    if !visibility.is_visible() {
+                        this.visuals.borrow_mut().cancel_route(this.visual_route);
+                    }
+                    cx.notify();
+                },
+            ));
+        }
+        if window.is_window_active() && window.visibility().is_visible() {
+            self.visuals
+                .borrow_mut()
+                .projection_deferred(self.visual_route, true);
+        }
         let view = cx.entity().downgrade();
         let content = list(self.list.clone(), move |index, window, cx| {
             view.update(cx, |this, cx| this.render_row(index, window, cx))
@@ -2201,11 +2351,12 @@ fn project_activity(controller: &SessionController) -> Activity {
 
 /// Documents the transcript shows, keyed like `transcript` looks them up. Text is
 /// borrowed from the session so unchanged blocks cost no copies.
-fn markdown_sources<'a>(
+fn markdown_sources_visual<'a>(
     model: &'a Session,
     row: usize,
     expanded: &HashSet<String>,
     visible: impl Fn(usize) -> bool,
+    visual: Option<&'a Binding>,
 ) -> Vec<(SharedString, Source<'a>)> {
     let mut sources = Vec::new();
     for (index, message) in model.messages.iter().enumerate().skip(row).take(1) {
@@ -2233,6 +2384,28 @@ fn markdown_sources<'a>(
                         }
                         _ => continue,
                     };
+                    if part == "text"
+                        && let Some(parsed) = visual.and_then(|v| v.texts.get(&block_index))
+                    {
+                        for (i, part) in parsed.parts().enumerate() {
+                            let body = match part {
+                                pi_visual::reply::Part::Markdown(body) => body,
+                                pi_visual::reply::Part::App { .. }
+                                    if visual.is_some_and(|v| {
+                                        v.keys.contains_key(&(block_index, i))
+                                    }) =>
+                                {
+                                    continue;
+                                }
+                                pi_visual::reply::Part::App { raw, .. } => raw,
+                            };
+                            sources.push((
+                                doc_key(index, &format!("visual-{block_index}-{i}")),
+                                Source::Markdown(Cow::Borrowed(body)),
+                            ));
+                        }
+                        continue;
+                    }
                     sources.push((
                         doc_key(index, &format!("{part}-{block_index}")),
                         Source::Markdown(Cow::Borrowed(block[field].as_str().unwrap_or(""))),
@@ -2316,6 +2489,10 @@ fn user_sources<'a, 'b>(
 
 /// A sent message's Markdown, with its mentions as chip links.
 fn user_text<'a, 'b>(body: &'b str, to_source: impl Fn(&'b str) -> Cow<'a, str>) -> Cow<'a, str> {
+    let clean = pi_visual::prompt::label(body);
+    if clean != body {
+        return Cow::Owned(mentions::parse_sent(&clean).map_or(clean, |sent| sent.markdown));
+    }
     match mentions::parse_sent(body) {
         Some(sent) => Cow::Owned(sent.markdown),
         None => to_source(body),

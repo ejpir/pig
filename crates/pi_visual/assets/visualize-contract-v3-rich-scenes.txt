@@ -1,0 +1,35 @@
+
+
+[Pi native visual app request — JavaScript version 3 — rich scenes]
+@Visualize requests a device-local, interactive native GPUI app. Return brief prose and exactly one fully closed code fence with info `javascript pi-visual`. Write plain JavaScript, not JSON, HTML, JSX, imports, or a Rust program. No WebView is used. Call app({title, state, view, animation?}) exactly once. Source <=64 KiB.
+UI helpers:
+ui.column([children], {gap:8,width:null}); ui.row([children], {gap:8});
+ui.text('literal' OR s=>string, {style:'muted'|'display'|'expression'|'heading'|'history'});
+ui.button('label', s=>{...}, {tone:'normal'|'accent'|'utility'|'operator'});
+ui.holdButton('Left','left',{tone:'normal'}); read input.buttons.includes('left') during animation ticks. Holds are transient, not saved state.
+ui.slider('label','stateField',{min,max,step:1,onChange:(s,value)=>{...}});
+ui.canvas({label,height:240,viewBox:[x,y,width,height],draw:(g,s)=>{...},onPointer:(s,x,y)=>{...}}).
+Helpers construct native widgets, not DOM nodes. Prefer a single flexible phone column, short labels, gaps 0..24, <=4 buttons per row. Canvas height 120..480; <=4 canvases. Native buttons/sliders have 48dp touch targets. Dynamic text getters MUST return strings; use toFixed or String for formatted numeric readouts. They do not add fields to saved state.
+State: flat object with <=64 fields, finite Number, boolean, or strings <=256 UTF-8 bytes. Keep keys/types fixed; sliders bind numeric fields initially inside their range. Event handlers mutate a transactional draft `s`; return values are ignored. Sliders set/quantize their field before onChange. Exceptions/invalid state/timeouts roll back; cancelled legacy onPointer/slider drags restore their pre-drag state. New onInput callbacks are individual transactions: cancellation releases contacts without rolling back unrelated gameplay or other contacts. Text getters and draw receive frozen state snapshots and are pure. Globals/closures do not persist: initialization is reevaluated for isolated callbacks; all changing data belongs in state. Use no async/Promise/timers. No filesystem, network, processes, DOM, native/agent APIs, or modules are provided. Local array operations are bounded to8192 elements. Execution/memory/stack are bounded (20ms cooperative invocation including initialization, 16MiB guest heap, 256KiB guest stack); this is in-process protection, not an OS sandbox.
+Drawing records bounded native shapes in viewBox units, uniformly fitted and clipped:
+g.line(x1,y1,x2,y2,{color:'#RRGGBB',width:1.5});
+g.circle(x,y,r,{color,width,fill:'#RRGGBB'}); g.rect(x,y,w,h,{color,width,fill});
+g.polyline([[x,y],...],{color,width}); long polylines are automatically segmented.
+Colors: #RRGGBB/#RRGGBBAA. Finite geometry abs<=1e6, nonnegative sizes/radii, stroke widths 0.5..8 dp. <=64 recorded shapes and <=2048 vertices per scene (circles count64); budget the FULL completed trace. Use modest sampling; no drawing arrays in persisted state. Additional native drawing (no images/sprites, blur/glow filters, blend modes or gamepads):
+const logo=ui.path([['M',0,0],['L',10,0],['Q',20,0,20,10],['C',20,20,0,20,0,10],['Z']]);
+g.path(logo,{fill:'#70B8FF',color:'#FFFFFF',width:1.5,fillRule:'nonzero'|'evenodd'}); stroke and fill are optional but at least one is required. Each contour starts M; after Z start another M. Q takes control/end, C takes two controls/end. Define reusable immutable paths outside draw; native tessellation is cached separately from placement and color. <=256 commands/path; each curve uses 32 segments and counts32 vertices.
+const sky=ui.linearGradient(180,'#102030','#406080'); use as color/fill on geometry. Two stops, angle in degrees clockwise from top, relative to final painted bounds; alpha hex works too.
+g.group({translate:[x,y],rotate:degrees,scale:1 OR [sx,sy]},g=>{...}); nested local transforms compose scale then rotation then translation; depth<=8, groups count toward64 shapes. Geometry strokes remain dp under viewBox fitting, but group transforms also transform the stroke.
+g.text('Score '+String(s.score),x,y,{size:18,color:'#FFFFFF',align:'left'|'center'|'right',font:'sans'|'mono'}); x/y anchor the top of one line, size in dp (4..128). Solid text paint only. Text may be translated/uniformly positively scaled, not rotated/reflected/nonuniformly scaled; final font size4..256. <=2048 UTF-8 bytes/line and2048 characters/scene.
+For caching: ui.canvas({...,layers:[{deps:[],draw(g,s){...}},{deps:['x'],draw(g,s){...}}]}) replaces draw. <=8 layers/canvas, ordered back-to-front. deps:[] is static; omitted deps depends on all state. Only listed state fields are provided to a dependency-scoped layer. All layers share the same scene shape/vertex/text budgets. Changing unrelated state does not rerun cached layers.
+Better input: use onInput(s,event,input) INSTEAD OF onPointer. event={kind:'pointer',id,phase:'down'|'move'|'up'|'cancel',x,y}, {kind:'key',key,down,repeat}, {kind:'blur'} (keys cleared) or {kind:'cancel'} (surface released). Up is delivered even without movement. <=10 contacts; moves coalesce per contact/display frame. Keyboard goes only to the focused canvas/held button; tapping focuses, Tab moves focus. Tab/Escape/Ctrl/platform shortcuts are not captured.
+input is a frozen transient snapshot: {pointers:[{target,id,x,y}],keys:['left',...],buttons:['left',...]}. Native key names use left/right/up/down/space/enter and lowercase letters. Use it in tick(s,dt,input) for held controls. Do not save held keys/buttons in state; background/navigation/unmount clears them. onInput retains normal per-callback rollback on failure; releases still clear physical held state.
+Optional animation:{running:'playing',tick(s,dt,input){...}} binds a boolean and native display-driven frames. dt is elapsed seconds capped0.1. Omit fps: it follows this phone's actual display, not a universal120Hz. Only specify fps:1..240 when the user explicitly asks for a cap. Include Play/Pause and Restart, start paused. Hidden/unfocused/background/sheet/reduced-motion suspends animation. Local input/ticks do not call the model; state is saved device-locally on user interactions.
+Example:
+app({title:'Moving dot',state:{x:10,speed:20,playing:false},view:ui.column([
+  ui.text(s=>`Position ${s.x.toFixed(1)}`,{style:'heading'}),
+  ui.canvas({label:'Blue moving dot',viewBox:[0,0,100,100],draw(g,s){g.circle(s.x,50,4,{fill:'#70B8FF'});},onPointer(s,x){s.x=x;}}),
+  ui.slider('Speed','speed',{min:1,max:50,step:1}),
+  ui.row([ui.button('Play / Pause',s=>{s.playing=!s.playing;},{tone:'accent'}),ui.button('Restart',s=>{s.x=10;})])
+]),animation:{running:'playing',tick(s,dt){s.x=(s.x+dt*s.speed)%100;}}});
+[End Pi native visual app request]

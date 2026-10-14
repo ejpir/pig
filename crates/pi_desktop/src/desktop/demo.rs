@@ -64,6 +64,13 @@ pub fn load(model: &mut Session, saved: Option<&SavedSession>, first: bool) {
                 model.apply(&record).expect("valid workspace fixture");
             }
         }
+        if first && std::env::var_os("PI_DESKTOP_DEMO_VISUALIZE").is_some() {
+            for record in super::visualize::sample_records(include_str!(
+                "../../../pi_visual/assets/samples/svg-postcard.pi-visual.js"
+            )) {
+                model.apply(&record).expect("visual sample");
+            }
+        }
         if first && std::env::var_os("PI_DESKTOP_DEMO_MEDIA").is_some() {
             // The sample both apps' tests draw: pictures, a diagram and a page.
             model

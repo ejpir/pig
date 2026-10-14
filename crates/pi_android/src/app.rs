@@ -420,7 +420,7 @@ pub struct PhoneApp {
     pub(crate) thread_list_offsets: HashMap<SessionId, Pixels>,
     pub(crate) prefs_path: Option<PathBuf>,
     pub(crate) visible: bool,
-    window_active: bool,
+    pub(crate) window_active: bool,
     /// The text of the working notification, while one is shown.
     working_posted: Option<String>,
     /// Live transcript changes held until scrolling/direct manipulation settles.

@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use gpui::{App, Context, EventEmitter, Task};
 use pi_core::{
     protocol::{Command, ImageContent, SavedSession},
-    session::{RunState, Session, Tool, text},
+    session::{RunState, Session, Tool, content_text, text},
     transport::{Launch, RpcClient, TransportEvent},
 };
 use pi_jj::{ObjectId as _, Project, Vcs};
@@ -551,7 +551,7 @@ impl SessionController {
     ) -> Summary {
         Summary {
             cwd: model.cwd.clone(),
-            title: model.title().to_owned(),
+            title: pi_visual::prompt::label(model.title()),
             file: remote
                 .map(|target| format!("ssh-session://{}/{}", target.host, target.key))
                 .or_else(|| model.state.session_file.clone()),
@@ -1961,6 +1961,12 @@ impl SessionController {
                                 | Changes::SUMMARY,
                             cx,
                         );
+                        if self.model.messages.iter().any(|m| {
+                            m["role"] == "user"
+                                && pi_visual::prompt::admitted(&content_text(&m["content"]))
+                        }) {
+                            self.command(Command::GetEntries, cx);
+                        }
                         if !was_connected {
                             self.command(Command::GetCommands, cx);
                             self.command(Command::GetBackendInfo, cx);
@@ -2235,6 +2241,14 @@ impl SessionController {
                         Some("get_state") => {
                             self.command(Command::GetActiveTools, cx);
                         }
+                        Some("get_messages")
+                            if self.model.messages.iter().any(|m| {
+                                m["role"] == "user"
+                                    && pi_visual::prompt::admitted(&content_text(&m["content"]))
+                            }) =>
+                        {
+                            self.command(Command::GetEntries, cx);
+                        }
                         Some("set_model" | "set_scoped_models" | "set_model_thinking_level") => {
                             self.command(Command::GetSettings, cx);
                             self.command(Command::GetAvailableThinkingLevels, cx);
@@ -2316,7 +2330,12 @@ impl SessionController {
                     self.command(Command::GetState, cx);
                 }
                 if record["type"] == "agent_settled" {
-                    if self.views_loaded {
+                    if self.views_loaded
+                        || self.model.messages.iter().any(|m| {
+                            m["role"] == "user"
+                                && pi_visual::prompt::admitted(&content_text(&m["content"]))
+                        })
+                    {
                         self.command(Command::GetEntries, cx);
                     }
                     if !self.demo {

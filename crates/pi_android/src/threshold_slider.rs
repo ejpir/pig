@@ -182,6 +182,9 @@ impl RenderOnce for ContextSlider {
                                 );
                                 window.on_mouse_event(
                                     move |event: &TouchDragEvent, phase, window, cx| {
+                                        if gpui_android::raw_touch::current().is_some() {
+                                            return;
+                                        }
                                         if phase != DispatchPhase::Capture {
                                             return;
                                         }

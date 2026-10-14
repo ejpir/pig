@@ -53,9 +53,9 @@ fn project_entry(e: &Value, h: &History, active: bool) -> EntryRow {
                     .into_owned()
             })
             .or_else(|| args["command"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| history::preview(e))
+            .unwrap_or_else(|| entry_preview(e))
     } else {
-        let text = history::preview(e);
+        let text = entry_preview(e);
         tool.as_ref()
             .and_then(|name| text.strip_prefix(&format!("{name} ")))
             .unwrap_or(&text)
@@ -186,7 +186,7 @@ impl TreeView {
         if let Some(h) = &self.history {
             if let Some(e) = h.entry(&id) {
                 self.document
-                    .update(cx, |d, cx| d.set(history::entry_text(e), None, cx));
+                    .update(cx, |d, cx| d.set(entry_text(e), None, cx));
             }
             let label = h.labels.get(&id).cloned().unwrap_or_default();
             self.label_input
@@ -512,4 +512,22 @@ impl Render for TreeView {
             .child(gpui::uniform_list("tree-list",self.rows.len(),move|range,_,cx|weak.update(cx,|this,cx|range.map(|i|this.row(i,cx,theme)).collect::<Vec<_>>()).unwrap_or_default()).track_scroll(&self.scroll).mt(px(18.)).flex_1().min_h_0().w_full())
             .child(v_flex().mx(px(24.)).pt(px(12.)).pb(px(8.)).gap(px(8.)).child(legend.ml(px(-4.5))).child(note("Select a message to continue from it. Branches you leave stay in the file.",theme)))
     }
+}
+
+fn entry_text(entry: &Value) -> String {
+    let text = history::entry_text(entry);
+    if entry["message"]["role"] == "user" {
+        pi_visual::prompt::label(&text)
+    } else {
+        text
+    }
+}
+fn entry_preview(entry: &Value) -> String {
+    entry_text(entry)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(180)
+        .collect()
 }

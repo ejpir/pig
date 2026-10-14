@@ -1680,3 +1680,6 @@ fn forking_before_later_turns_asks_which_files_to_start_with(cx: &mut TestAppCon
         "{notice}"
     );
 }
+
+#[path = "desktop/visualize_tests.rs"]
+mod visualize_tests;

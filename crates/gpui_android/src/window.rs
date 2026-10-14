@@ -122,6 +122,9 @@ pub(crate) struct WindowState {
     visibility: Cell<WindowVisibility>,
     last_touch: Cell<Point<Pixels>>,
     touches: RefCell<Touches>,
+    raw_touches: RefCell<crate::raw_touch::Router>,
+    pinch_active: Cell<bool>,
+    pinch_position: Cell<Point<Pixels>>,
     /// Whether a text input has focus.
     text_focus: Cell<bool>,
     /// Fulfilled after drawing and synchronizing the newly focused field.
@@ -172,6 +175,9 @@ impl WindowState {
             visibility: Cell::new(visibility),
             last_touch: Cell::default(),
             touches: RefCell::default(),
+            raw_touches: RefCell::default(),
+            pinch_active: Cell::new(false),
+            pinch_position: Cell::new(Point::default()),
             text_focus: Cell::new(false),
             keyboard_requested: Cell::new(false),
             keyed: Cell::new(false),
@@ -377,7 +383,26 @@ impl WindowState {
         self.settle_after_frame();
     }
 
+    fn cancel_pinch(&self) {
+        if self.pinch_active.replace(false) {
+            self.dispatch(PlatformInput::Pinch(gpui::PinchEvent {
+                position: self.pinch_position.get(),
+                delta: 0.,
+                modifiers: Default::default(),
+                phase: gpui::TouchPhase::Cancelled,
+            }));
+        }
+    }
     pub fn pinch(&self, pinch: crate::touch::Pinch) {
+        if self.raw_touches.borrow().blocks_pinch() {
+            self.cancel_pinch();
+            return;
+        }
+        self.pinch_active.set(!matches!(
+            pinch.phase,
+            gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled
+        ));
+        self.pinch_position.set(pinch.center);
         self.dispatch(PlatformInput::Pinch(gpui::PinchEvent {
             position: pinch.center,
             delta: pinch.delta,
@@ -412,8 +437,12 @@ impl WindowState {
         }
         for event in events {
             self.last_touch.set(event.position);
-            if self.dispatch(PlatformInput::Touch(event)).is_none() {
-                log::warn!("touch dropped: GPUI has not registered for input");
+            let owned = self
+                .raw_touches
+                .borrow_mut()
+                .dispatch(event, |input| self.dispatch(input));
+            if owned {
+                self.cancel_pinch();
             }
         }
     }

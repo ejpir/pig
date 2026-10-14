@@ -53,7 +53,7 @@ jobs:
           key: checks
       # Do not traverse/format the sibling Zed checkout.
       - name: Format
-        run: cargo fmt -p pi_visual -p pi_markdown -p pi_core -p pi_remote -p pi_android -p gpui_android -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
+        run: cargo fmt -p pi_visual -p pi_visual_ui -p pi_markdown -p pi_core -p pi_remote -p pi_android -p gpui_android -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
       - name: Rust tests
         run: cargo test --locked --workspace
       - name: Android scheduling UI tests (sample only)
@@ -68,6 +68,7 @@ jobs:
       - name: Lints
         run: |
           cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p pi_visual_ui --all-targets --no-deps -- -D warnings
           cargo clippy --locked -p pi_android --features ui-test --all-targets --no-deps -- -D warnings
           cargo clippy --locked -p pi_lsp_bridge --features fake-lsp --all-targets --no-deps -- -D warnings
       # The pi that release builds embed: the desktop extension against it (no
@@ -89,6 +90,7 @@ jobs:
           python scripts/compare-thread-study.py
           xvfb-run -a -s '-screen 0 1440x900x24' bash scripts/capture-tool-selection.sh
           xvfb-run -a -s '-screen 0 1440x900x24' bash scripts/capture-process-scrollbar.sh
+          xvfb-run -a -s '-screen 0 1440x1200x24' bash scripts/capture-visualize.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

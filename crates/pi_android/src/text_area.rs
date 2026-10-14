@@ -1669,6 +1669,9 @@ impl TextBody {
         let area = self.area.clone();
         let text = prepaint.hitbox.clone();
         window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
+            if gpui_android::raw_touch::current().is_some() {
+                return;
+            }
             if phase == DispatchPhase::Bubble && event.phase == TouchPhase::Started {
                 area.update(cx, |area, _| {
                     if text.is_hovered(window) && !window.default_prevented() {
@@ -1709,6 +1712,9 @@ impl TextBody {
         let area = self.area.clone();
         let handles = prepaint.handles.clone();
         window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
+            if gpui_android::raw_touch::current().is_some() {
+                return;
+            }
             if phase != DispatchPhase::Bubble {
                 return;
             }

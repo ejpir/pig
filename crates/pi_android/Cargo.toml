@@ -7,7 +7,7 @@ description = "Pi on an Android phone: follow sessions, answer questions, review
 
 [features]
 # Deterministic sample screens for the separate device-test APK.
-ui-test = []
+ui-test = ["pi_visual_ui/ui-test"]
 
 # The cdylib is what GpuiActivity loads (`libpi_android.so`); build the APK with
 # scripts/build_apk.py. The views compile on any host for tests and previews.
@@ -33,6 +33,7 @@ log = "0.4"
 pi_core = { path = "../pi_core" }
 pi_markdown = { path = "../pi_markdown" }
 pi_visual = { path = "../pi_visual" }
+pi_visual_ui = { path = "../pi_visual_ui", features = ["android"] }
 # The SSH key; the same rand as russh's ssh-key.
 rand = "0.10"
 # SSH in pure Rust, with ring for its crypto: it builds for Android with the NDK alone.
@@ -45,6 +46,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
 unicode-segmentation = "1.12"
 
 [dev-dependencies]
+pi_visual_ui = { path = "../pi_visual_ui", features = ["android", "test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 
 # The preview window. Runtime shaders, as in pi_desktop: a Mac needs no Xcode `metal` tool.

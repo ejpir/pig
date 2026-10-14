@@ -1,6 +1,6 @@
 //! Regression: work grows with trace length, rather than only testing startup frames.
 use pi_visual::Runtime;
-const SOURCE: &str = include_str!("../../pi_android/assets/samples/spirograph-trace.pi-visual.js");
+const SOURCE: &str = include_str!("../../pi_visual/assets/samples/spirograph-trace.pi-visual.js");
 
 #[test]
 fn growing_spirograph_draws_through_completion() {

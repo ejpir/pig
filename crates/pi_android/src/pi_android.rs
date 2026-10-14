@@ -35,9 +35,8 @@ mod theme;
 mod threshold_slider;
 mod ui;
 mod visual_apps;
-mod visual_controls;
-mod visual_profile;
-mod visualize_prompt;
+pub(crate) use pi_visual::prompt as visualize_prompt;
+pub(crate) use pi_visual_ui::visual_profile;
 
 pub use app::{GoBack, PhoneApp};
 pub use assets::Assets;
@@ -49,7 +48,24 @@ use std::path::PathBuf;
 /// Fonts and key bindings; call once before opening the window.
 pub fn init(cx: &mut App) {
     #[cfg(feature = "ui-test")]
-    cx.set_global(testing::State::default());
+    {
+        cx.set_global(testing::State::default());
+        cx.set_global(pi_visual_ui::hooks::Probe(std::rc::Rc::new(
+            |name, bounds, cx| {
+                if cx.has_global::<testing::State>() {
+                    cx.global_mut::<testing::State>().bounds.insert(
+                        name.to_owned(),
+                        [
+                            bounds.left().into(),
+                            bounds.top().into(),
+                            bounds.size.width.into(),
+                            bounds.size.height.into(),
+                        ],
+                    );
+                }
+            },
+        )));
+    }
     if let Err(error) = assets::load_fonts(cx) {
         log::error!("Could not load the fonts: {error:#}");
     }

@@ -93,6 +93,10 @@ pub const SCREENS: &[&str] = &[
     "visual-spirograph",
     "visual-spirograph-evening",
     "visual-spirograph-trace",
+    "visual-svg",
+    "visual-svg-evening",
+    "visual-rich-scenes",
+    "visual-rich-scenes-evening",
     "visual-calculator-evening",
     "visual-calculator-partial",
     "visual-calculator-invalid",
@@ -402,20 +406,36 @@ impl PhoneApp {
             | "visual-calculator-unrequested"
             | "visual-spirograph"
             | "visual-spirograph-evening"
-            | "visual-spirograph-trace" => {
+            | "visual-spirograph-trace"
+            | "visual-rich-scenes"
+            | "visual-rich-scenes-evening"
+            | "visual-svg"
+            | "visual-svg-evening" => {
+                let svg = name.starts_with("visual-svg");
+                let rich = name.starts_with("visual-rich-scenes");
                 let spirograph = name.starts_with("visual-spirograph");
-                let bundle = if name == "visual-spirograph-trace" {
-                    include_str!("../assets/samples/spirograph-trace.pi-visual.js")
+                let bundle = if svg {
+                    include_str!("../../pi_visual/assets/samples/svg-postcard.pi-visual.js")
+                } else if rich {
+                    include_str!("../../pi_visual/assets/samples/rich-scenes.pi-visual.js")
+                } else if name == "visual-spirograph-trace" {
+                    include_str!("../../pi_visual/assets/samples/spirograph-trace.pi-visual.js")
                 } else if spirograph {
-                    include_str!("../assets/samples/spirograph.pi-visual.js")
+                    include_str!("../../pi_visual/assets/samples/spirograph.pi-visual.js")
                 } else {
-                    include_str!("../assets/samples/calculator.pi-visual.js")
+                    include_str!("../../pi_visual/assets/samples/calculator.pi-visual.js")
                 };
                 let source = match name {
                     "visual-calculator-partial" => format!("```javascript pi-visual\n{bundle}"),
                     "visual-calculator-invalid" => {
                         "```javascript pi-visual\napp({ broken JavaScript\n```".into()
                     }
+                    _ if svg => format!(
+                        "An SVG postcard rendered as native vector geometry.\n\n```javascript pi-visual\n{bundle}\n```"
+                    ),
+                    _ if rich => format!(
+                        "Native paths, layers, gradients and held controls.\n\n```javascript pi-visual\n{bundle}\n```"
+                    ),
                     _ if spirograph => format!(
                         "A native spirograph lab. Drag the controls, then tap Play.\n\n```javascript pi-visual\n{bundle}\n```"
                     ),
@@ -428,7 +448,11 @@ impl PhoneApp {
                     .as_mut()
                     .and_then(|s| s.sessions.iter_mut().find(|s| s.id == QWEN))
                 {
-                    session.title = if spirograph {
+                    session.title = if svg {
+                        "SVG postcard"
+                    } else if rich {
+                        "Native flight"
+                    } else if spirograph {
                         "A spirograph, please"
                     } else {
                         "A calculator, please"
@@ -446,6 +470,10 @@ impl PhoneApp {
                     let mut turn = Turn::new(
                         if name.ends_with("unrequested") {
                             "Show me source."
+                        } else if svg {
+                            "@Visualize make an interactive SVG postcard."
+                        } else if rich {
+                            "@Visualize make a native flight scene with reusable paths and held controls."
                         } else if spirograph {
                             "@Visualize create an interactive spirograph."
                         } else {

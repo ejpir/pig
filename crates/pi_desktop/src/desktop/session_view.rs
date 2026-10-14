@@ -186,6 +186,7 @@ impl SessionView {
             match event {
                 // A file on stage; its details wait in the inspector until asked for.
                 super::files::FileEvent::Selected => {
+                    this.transcript.read(cx).cancel_visuals();
                     this.files_visible = true;
                     this.inspector.update(cx, |view, cx| {
                         view.show(
@@ -195,6 +196,7 @@ impl SessionView {
                     });
                 }
                 super::files::FileEvent::Confirming => {
+                    this.transcript.read(cx).cancel_visuals();
                     this.files_visible = true;
                     cx.notify();
                 }
@@ -322,6 +324,7 @@ impl SessionView {
             });
             return;
         }
+        self.transcript.read(cx).cancel_visuals();
         self.page = page;
         self.tools_open = false;
         self.files_visible = false;
@@ -532,6 +535,13 @@ impl Render for SessionView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.show_extension_dialog(window, cx);
         let waiting = self.active_extension.is_some();
+        if waiting
+            || window.has_active_prompt()
+            || self.files_visible
+            || self.page != super::panels::SessionPage::Thread
+        {
+            self.transcript.read(cx).cancel_visuals();
+        }
         let contextual_issue = {
             let controller = self.controller.read(cx);
             self.page == super::panels::SessionPage::Thread

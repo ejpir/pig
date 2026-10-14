@@ -767,6 +767,7 @@ mod transcript;
 mod tree;
 mod tree_graph;
 mod turn_links;
+mod visualize;
 mod welcome;
 mod workspace;
 
