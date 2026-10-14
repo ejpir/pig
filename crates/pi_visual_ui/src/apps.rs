@@ -38,6 +38,12 @@ pub struct Instance<R: Copy + Eq> {
     pub route: Option<R>,
     pub painted: RefCell<HashMap<String, Weak<Cell<bool>>>>,
     pub next_due: Option<Instant>,
+    /// Shown full screen by a host that offers it; see `Host::visual_expandable`.
+    pub expanded: bool,
+    /// The bundle it runs, so a host can draw it away from its message.
+    pub source: Arc<str>,
+    /// Canvas height multiplier while expanded; drawings scale to fit.
+    pub zoom: f32,
 }
 impl<R: Copy + Eq> Instance<R> {
     pub fn cancel_manipulation(&mut self) {
@@ -237,6 +243,9 @@ impl<R: Copy + Eq> VisualApps<R> {
                 route: None,
                 painted: RefCell::new(HashMap::new()),
                 next_due: None,
+                expanded: false,
+                zoom: 1.0,
+                source: Arc::from(source),
             },
         );
     }
@@ -289,6 +298,15 @@ impl<R: Copy + Eq> VisualApps<R> {
 
 // Keep fractional explicit caps in phase with vsync rather than rounding down
 // to half-refresh rates. A delayed frame skips old deadlines (no catch-up burst).
+/// The card's own padding and border around a canvas.
+const CARD_INSET: f32 = 26.;
+fn expanded_zoom(height: f32, view_box: [f32; 4], space: gpui::Size<gpui::Pixels>) -> f32 {
+    let width = (f32::from(space.width) - CARD_INSET).max(1.);
+    let fill_width = width * view_box[3] / view_box[2];
+    let wanted = fill_width.min(f32::from(space.height) * 0.8);
+    (wanted / height).clamp(1., 12.)
+}
+
 fn advance_cap(due: &mut Option<Instant>, fps: u32, now: Instant) -> bool {
     let period = Duration::from_secs_f64(1.0 / f64::from(fps));
     let deadline = due.unwrap_or(now);
@@ -354,6 +372,39 @@ pub trait Host: Sized + 'static {
     fn visual_persist(&self) -> bool;
     fn visual_changed(&mut self, target: Self::Target, cx: &mut Context<Self>);
     fn visual_refocus(&self, window: &mut Window, cx: &mut Context<Self>);
+    /// Whether cards offer a full-screen button. The host then draws the
+    /// expanded app itself, and sets its `zoom`.
+    fn visual_expandable(&self) -> bool {
+        false
+    }
+    fn visual_toggle_expanded(
+        &mut self,
+        key: &str,
+        target: Self::Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut apps = self.visual_apps().borrow_mut();
+        let route = self.visual_route();
+        let expand = !apps.running.get(key).is_some_and(|i| i.expanded);
+        // One app full screen at a time.
+        for (other, instance) in apps.running.iter_mut() {
+            if instance.route == Some(route) {
+                instance.expanded = expand && other == key;
+                if !instance.expanded {
+                    instance.zoom = 1.0;
+                }
+            }
+        }
+        drop(apps);
+        self.visual_expanded_changed(expand.then_some(target));
+        self.visual_changed(target, cx);
+        self.visual_refocus(window, cx);
+        cx.notify();
+    }
+    /// Where the full-screen app came from, or `None` once it is closed; the
+    /// host passes it back to `render_expanded_visual`.
+    fn visual_expanded_changed(&mut self, _target: Option<Self::Target>) {}
     fn visual_show_source(
         &mut self,
         key: &str,
@@ -696,6 +747,37 @@ pub trait HostExt: Host {
         })
     }
 
+    /// The app this route shows full screen in `space`: its tallest drawing
+    /// as wide as the card if the height allows, else most of the height, so
+    /// the drawing is as large as its aspect ratio permits. Controls keep their
+    /// size below it.
+    fn render_expanded_visual(
+        &self,
+        target: Self::Target,
+        colors: &Theme,
+        space: gpui::Size<gpui::Pixels>,
+        cx: &Context<Self>,
+    ) -> Option<gpui::Stateful<Div>> {
+        let route = self.visual_route();
+        let (key, source) = {
+            let mut apps = self.visual_apps().borrow_mut();
+            let (key, instance) = apps
+                .running
+                .iter_mut()
+                .find(|(_, i)| i.expanded && i.route == Some(route))?;
+            let canvas = instance
+                .runtime
+                .as_ref()
+                .ok()
+                .and_then(|r| r.definition.view.tallest_canvas());
+            instance.zoom = canvas.map_or(1., |(height, view_box)| {
+                expanded_zoom(height, view_box, space)
+            });
+            (key.clone(), instance.source.clone())
+        };
+        self.render_visual_card(&key, &source, 0, target, colors, cx)
+    }
+
     fn render_visual_card(
         &self,
         key: &str,
@@ -784,6 +866,33 @@ pub trait HostExt: Host {
                                 .min_w_0()
                                 .truncate(),
                         )
+                        .when(self.visual_expandable(), |header| {
+                            let expand_key = key.clone();
+                            let expanded = instance.expanded;
+                            header.child(
+                                ui::tap(
+                                    ("visual-expand", ordinal),
+                                    if expanded { "minimize" } else { "maximize" },
+                                    colors,
+                                )
+                                .aria_label(if expanded {
+                                    "Exit full screen"
+                                } else {
+                                    "Show full screen"
+                                })
+                                .debug_selector(|| "visual-expand".into())
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.visual_toggle_expanded(
+                                            &expand_key,
+                                            target,
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            )
+                        })
                         .child(
                             ui::tap(("visual-copy", ordinal), "copy", colors)
                                 .aria_label("Copy visual app source")
@@ -800,6 +909,9 @@ pub trait HostExt: Host {
                         .id(SharedString::from(format!("visual-code-{key}")))
                         .max_h(px(240.))
                         .overflow_y_scroll()
+                        // Wheel and trackpad scrolling stay here instead of also
+                        // moving the thread the card sits in.
+                        .occlude()
                         .p(px(12.))
                         .font_family(MONO)
                         .text_size(px(12.))
@@ -1120,7 +1232,7 @@ pub trait HostExt: Host {
                     )),
                     label: label.clone(),
                     probe: format!("visual-canvas-{path}"),
-                    height: *height,
+                    height: *height * instance.zoom,
                     slider: None,
                     barrier: instance.barrier.clone(),
                     coordinates: Rc::new(move |position, bounds| {
@@ -1314,6 +1426,21 @@ impl<T: Host> HostExt for T {}
 mod tests {
     use super::*;
     type VisualApps = super::VisualApps<u8>;
+    #[test]
+    fn expanded_drawings_fill_the_width_unless_the_height_runs_out() {
+        let space = |w: f32, h: f32| gpui::size(gpui::px(w), gpui::px(h));
+        // 4:3 drawing in a tall space: as wide as the card.
+        let zoom = expanded_zoom(120., [0., 0., 400., 300.], space(826., 2000.));
+        assert!((120. * zoom - 600.).abs() < 0.01, "{zoom}");
+        // The same drawing in a wide, short window: 80% of the height.
+        let zoom = expanded_zoom(120., [0., 0., 400., 300.], space(2000., 600.));
+        assert!((120. * zoom - 480.).abs() < 0.01, "{zoom}");
+        // Never smaller than in the card.
+        assert_eq!(
+            expanded_zoom(480., [0., 0., 400., 300.], space(300., 300.)),
+            1.
+        );
+    }
     #[test]
     fn invalid_route_or_sheet_rolls_back_before_unblocking_projection() {
         let route = 1u8;

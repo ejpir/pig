@@ -156,3 +156,24 @@ fn text_only_animation_has_a_mount_lease_and_stops_on_blur(cx: &mut TestAppConte
     cx.run_until_parked();
     assert_eq!(number(&tab, "Timer", "n", &cx), before);
 }
+#[gpui::test]
+fn full_screen_scales_the_drawing_and_escape_returns_to_the_thread(cx: &mut TestAppContext) {
+    const SCENE: &str = "app({title:'Scene',state:{},view:ui.column([ui.canvas({id:'scene',label:'Scene',height:120,viewBox:[0,0,100,100],draw(g,s){}})])});";
+    let (desktop, mut cx) = setup(cx);
+    let tab = tab(&desktop, 0, &cx);
+    load(&tab, SCENE, &mut cx);
+    let inline = cx.debug_bounds("visual-canvas-root-0").unwrap();
+    assert!(cx.debug_bounds("visual-full-screen").is_none());
+    click("visual-expand", &mut cx);
+    let full = cx.debug_bounds("visual-canvas-root-0").unwrap();
+    assert!(cx.debug_bounds("visual-full-screen").is_some());
+    // About two thirds of the 1100px window, not the card's 120px.
+    assert!(full.size.height > inline.size.height * 4., "{full:?}");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("visual-full-screen").is_none());
+    assert_eq!(
+        cx.debug_bounds("visual-canvas-root-0").unwrap().size.height,
+        inline.size.height
+    );
+}

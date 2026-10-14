@@ -285,6 +285,9 @@ pub enum Flow {
     /// Pi's context was summarized here, to make room: the summary. What came
     /// before stays in the thread.
     Compacted(String),
+    /// The model's reasoning before what it said or called next, folded until
+    /// tapped.
+    Thinking(String),
     /// A tool Pi called: `stages[stage].tools[index]` of the stage of that kind.
     Tool(StageKind, usize),
 }
@@ -294,7 +297,7 @@ impl Turn {
     pub fn interleaved(&self) -> bool {
         self.flow
             .iter()
-            .any(|step| !matches!(step, Flow::Text(_) | Flow::Tool(..)))
+            .any(|step| !matches!(step, Flow::Text(_) | Flow::Tool(..) | Flow::Thinking(_)))
     }
 
     /// Whether the order of Pi's tool calls is known, so they can stream into

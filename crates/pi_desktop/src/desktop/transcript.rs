@@ -3,7 +3,7 @@ mod media;
 use super::visualize::{self, Binding};
 use activity::{Activity, Block, Group};
 pub(super) use activity::{call_kinds, stages_ahead};
-use pi_visual_ui::HostExt;
+use pi_visual_ui::{Host as _, HostExt};
 use serde_json::Value;
 use std::borrow::Cow;
 
@@ -25,6 +25,8 @@ pub struct TranscriptView {
     visual_bindings: HashMap<usize, Binding>,
     visual_order: std::collections::VecDeque<usize>,
     visual_lifecycle: Vec<Subscription>,
+    /// The row whose Visualize app is shown full screen.
+    pub(super) expanded_visual: Option<usize>,
     controller: Entity<SessionController>,
     pub documents: markdown_view::Documents,
     pub list: ListState,
@@ -123,6 +125,7 @@ impl TranscriptView {
             visual_bindings: HashMap::new(),
             visual_order: Default::default(),
             visual_lifecycle: Vec::new(),
+            expanded_visual: None,
             controller: controller.clone(),
             documents: Default::default(),
             list,
@@ -1253,6 +1256,13 @@ impl TranscriptView {
                     ordinal,
                 } => {
                     if let Some(key) = binding.keys.get(&(block, i))
+                        && self.visual_expanded(key)
+                    {
+                        column =
+                            column.child(self.expanded_placeholder(key, ordinal, row, theme, cx));
+                        continue;
+                    }
+                    if let Some(key) = binding.keys.get(&(block, i))
                         && let Some(card) = self.render_visual_card(
                             key,
                             source,
@@ -1277,6 +1287,97 @@ impl TranscriptView {
         }
         column.into_any_element()
     }
+    fn visual_expanded(&self, key: &str) -> bool {
+        self.visuals
+            .borrow()
+            .running
+            .get(key)
+            .is_some_and(|i| i.expanded && i.route == Some(self.visual_route))
+    }
+
+    /// Where a full-screen app sits in the thread while it is shown.
+    fn expanded_placeholder(
+        &self,
+        key: &str,
+        ordinal: usize,
+        row: usize,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let key = key.to_owned();
+        h_flex()
+            .id(SharedString::from(format!("visual-expanded-{key}")))
+            .w_full()
+            .min_h(px(48.))
+            .px(px(14.))
+            .gap(px(8.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(theme.line)
+            .bg(theme.panel)
+            .text_color(theme.muted)
+            .child(div().flex_1().child("Shown full screen"))
+            .child(
+                div()
+                    .id(("visual-exit-full-screen", ordinal))
+                    .cursor_pointer()
+                    .text_color(theme.accent)
+                    .child("Exit full screen")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.visual_toggle_expanded(&key, row, window, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The app shown full screen, over the whole window, its drawings scaled up.
+    fn expanded_visual(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let row = self.expanded_visual?;
+        let theme = theme(cx);
+        let viewport = window.viewport_size();
+        // Inside the overlay's 24px padding.
+        let space = gpui::size(viewport.width - px(48.), viewport.height - px(48.));
+        let card = self.render_expanded_visual(row, &visualize::palette(theme), space, cx);
+        let Some(card) = card else {
+            self.expanded_visual = None;
+            return None;
+        };
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .position(gpui::point(px(0.), px(0.)))
+                    .child(
+                        div()
+                            .id("visual-full-screen")
+                            .debug_selector(|| "visual-full-screen".into())
+                            .track_focus(&self.visual_focus)
+                            .w(viewport.width)
+                            .h(viewport.height)
+                            .bg(theme.canvas)
+                            .occlude()
+                            .overflow_y_scroll()
+                            .p(px(24.))
+                            .on_action(cx.listener(move |this, _: &super::Stop, window, cx| {
+                                let key =
+                                    this.visuals.borrow().running.iter().find_map(|(k, i)| {
+                                        (i.expanded && i.route == Some(this.visual_route))
+                                            .then(|| k.clone())
+                                    });
+                                if let Some(key) = key {
+                                    this.visual_toggle_expanded(&key, row, window, cx);
+                                }
+                            }))
+                            .child(card),
+                    ),
+            )
+            .into_any_element(),
+        )
+    }
+
     fn markdown(&self, key: SharedString, fallback: &str, style: &MarkdownStyle) -> AnyElement {
         self.document(key, fallback, style, "Copy Message", None)
     }
@@ -1546,6 +1647,7 @@ impl TranscriptView {
         {
             self.rows_rendered += 1;
         }
+        super::render_stats::row_built();
         if self.visual_bindings.contains_key(&index) {
             self.visual_order.retain(|row| *row != index);
             self.visual_order.push_back(index);
@@ -2291,6 +2393,7 @@ impl Render for TranscriptView {
         {
             self.renders += 1;
         }
+        super::render_stats::transcript_render();
         if self.visual_lifecycle.is_empty() {
             self.visual_lifecycle
                 .push(cx.observe_window_activation(window, |this, window, cx| {
@@ -2314,6 +2417,8 @@ impl Render for TranscriptView {
                 .borrow_mut()
                 .projection_deferred(self.visual_route, true);
         }
+        super::render_stats::scroll_bench(&self.list, window, cx);
+        let expanded = self.expanded_visual(window, cx);
         let view = cx.entity().downgrade();
         let content = list(self.list.clone(), move |index, window, cx| {
             view.update(cx, |this, cx| this.render_row(index, window, cx))
@@ -2327,7 +2432,9 @@ impl Render for TranscriptView {
             .size_full()
             .pl(px(24.))
             .pr(WORK_GUTTER)
-            .child(content)
+            // Covered by a full-screen app: its frames need not rebuild the thread.
+            .when(expanded.is_none(), |root| root.child(content))
+            .children(expanded)
             .custom_scrollbars(
                 Scrollbars::new(ScrollAxes::Vertical)
                     .id("transcript-scrollbar")

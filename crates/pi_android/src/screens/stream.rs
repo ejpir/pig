@@ -460,6 +460,18 @@ impl PhoneApp {
                                 self.compacted(id, index, n, summary, colors, cx)
                                     .into_any_element(),
                             ),
+                            Flow::Thinking(text) => Some(
+                                self.thinking(
+                                    id,
+                                    index,
+                                    n,
+                                    text,
+                                    live && n + 1 == turn.flow.len(),
+                                    colors,
+                                    cx,
+                                )
+                                .into_any_element(),
+                            ),
                             Flow::Tool(..) => None,
                         };
                         column = column.children(element);

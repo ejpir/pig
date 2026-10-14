@@ -6,6 +6,7 @@ pub mod profile;
 mod program;
 pub mod prompt;
 pub mod reply;
+pub mod scene3d;
 mod svg;
 mod svg_path;
 pub mod trace;
@@ -244,6 +245,21 @@ impl Node {
         match self {
             Self::Column { children, .. } | Self::Row { children, .. } => children,
             _ => &[],
+        }
+    }
+
+    /// The tallest canvas anywhere in this view, as its height and viewBox,
+    /// for hosts that scale drawings.
+    pub fn tallest_canvas(&self) -> Option<(f32, [f32; 4])> {
+        match self {
+            Self::Canvas {
+                height, view_box, ..
+            } => Some((*height, *view_box)),
+            _ => self
+                .children()
+                .iter()
+                .filter_map(Node::tallest_canvas)
+                .max_by(|a, b| a.0.total_cmp(&b.0)),
         }
     }
 

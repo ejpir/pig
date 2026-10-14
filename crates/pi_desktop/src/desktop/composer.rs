@@ -355,8 +355,10 @@ impl ComposerView {
                 .absolute()
                 .size_full(),
             )
+            // Grows with the message until the input's eight lines, then the
+            // input scrolls; a fixed height let long drafts cover the toolbar.
             .when(!self.expanded, |composer| {
-                composer.h(px(if compact { 112. } else { 142. }))
+                composer.min_h(px(if compact { 112. } else { 142. }))
             })
             .when(self.expanded, |composer| composer.flex_1().min_h_0())
             .mx(WORK_GUTTER)

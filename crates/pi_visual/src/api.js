@@ -91,7 +91,36 @@
     }
     return {type:'text',text:textString(value),bind:null,style};
   }
+  // 3D meshes are small descriptors; the host builds primitive triangles.
+  const meshNumber = n => { if (!finite(n) || abs(n) > 1e4) fail('Invalid 3D geometry'); return n; };
+  const triple = (v, what) => {
+    if (!isArray(v) || v.length !== 3) fail(what + ' must be [x,y,z]');
+    return [meshNumber(data(v,'0')),meshNumber(data(v,'1')),meshNumber(data(v,'2'))];
+  };
+  const segmentCount = o => { const n = data(o,'segments',24); if (!Number.isInteger(n) || n < 3 || n > 64) fail('Mesh segments must be 3..64'); return n; };
+  const meshes = []; // Identity of trusted descriptors; no Map/Set intrinsics exist.
+  const mesh = value => { if (meshes.length >= 256) fail('At most 256 meshes'); meshes.push(value); return freeze(value); };
   const ui = freeze({
+    box(w,h,d) { return mesh({kind:'box',size:[meshNumber(w),meshNumber(h),meshNumber(d)]}); },
+    sphere(radius,o={}) { return mesh({kind:'sphere',radius:meshNumber(radius),segments:segmentCount(o)}); },
+    cylinder(radius,height,o={}) { return mesh({kind:'cylinder',radius:meshNumber(radius),height:meshNumber(height),segments:segmentCount(o)}); },
+    cone(radius,height,o={}) { return mesh({kind:'cone',radius:meshNumber(radius),height:meshNumber(height),segments:segmentCount(o)}); },
+    torus(radius,tube,o={}) { return mesh({kind:'torus',radius:meshNumber(radius),tube:meshNumber(tube),segments:segmentCount(o)}); },
+    mesh(o) {
+      const vertices = data(o,'vertices'), faces = data(o,'faces');
+      if (!isArray(vertices) || vertices.length < 1 || vertices.length > 2048) fail('Mesh needs 1..2048 vertices');
+      if (!isArray(faces) || faces.length < 1 || faces.length > 4096) fail('Mesh needs 1..4096 faces');
+      const v = [], f = [];
+      for (let i = 0; i < vertices.length; i++) v.push(freeze(triple(data(vertices,textString(i)),'Mesh vertex')));
+      for (let i = 0; i < faces.length; i++) {
+        const face = data(faces,textString(i));
+        if (!isArray(face) || face.length !== 3) fail('Mesh faces must be [a,b,c] vertex indices');
+        const t = [data(face,'0'),data(face,'1'),data(face,'2')];
+        for (const n of t) if (!Number.isInteger(n) || n < 0 || n >= v.length) fail('Mesh face index out of range');
+        f.push(freeze(t));
+      }
+      return mesh({kind:'custom',vertices:freeze(v),faces:freeze(f)});
+    },
     column(children,o={}) { return {type:'column',children,gap:data(o,'gap',8),width:data(o,'width',null)}; },
     row(children,o={}) { return {type:'row',children,gap:data(o,'gap',8)}; },
     text,
@@ -204,6 +233,33 @@
         add({type:'group',transform:[c*sx,s*sx,-s*sy,c*sy,x,y],children},0);
         const parent=target;target=children;depth++;
         try {sync(draw(g));} finally {target=parent;depth--;}
+      },
+      scene3d(o,build) {
+        if(typeof build!=='function')fail('scene3d needs a build function');
+        const x=data(o,'x'), viewport = x===undefined ? null : [number(x),number(data(o,'y',0)),number(data(o,'width')),number(data(o,'height'))];
+        const c=data(o,'camera',{});
+        const camera={fov:data(c,'fov',50),distance:data(c,'distance',5),yaw:data(c,'yaw',30),pitch:data(c,'pitch',20),target:triple(data(c,'target',[0,0,0]),'Camera target')};
+        const lightValue=data(o,'light'), light=lightValue===undefined?null:triple(lightValue,'Light');
+        const objects=[];
+        const d=freeze({
+          mesh(m,p={}) {
+            if(!meshes.includes(m))fail('Use ui.box, ui.sphere, ui.cylinder, ui.cone, ui.torus or ui.mesh to define meshes');
+            if(objects.length>=64)fail('3D scene exceeds 64 objects');
+            const size=data(p,'scale',1);
+            objects.push({type:'mesh',mesh:m,position:triple(data(p,'position',[0,0,0]),'Position'),
+              rotate:triple(data(p,'rotate',[0,0,0]),'Rotation'),
+              scale:typeof size==='number'?[meshNumber(size),meshNumber(size),meshNumber(size)]:triple(size,'Scale'),
+              color:data(p,'color','#70B8FF')});
+          },
+          line(points,p={}) {
+            if(!isArray(points)||points.length<2||points.length>2048)fail('3D line must have 2..2048 points');
+            if(objects.length>=64)fail('3D scene exceeds 64 objects');
+            const copied=[];for(let i=0;i<points.length;i++)copied.push(triple(data(points,textString(i)),'3D point'));
+            objects.push({type:'line',points:copied,color:data(p,'color','#70B8FF'),width:data(p,'width',1.5)});
+          }
+        });
+        sync(build(d));
+        add({type:'scene3d',viewport,camera,light,objects},0);
       },
       line(x1,y1,x2,y2,o={}) { add({type:'line',from:[number(x1),number(y1)],to:[number(x2),number(y2)],...style(o)},2); },
       circle(x,y,r,o={}) { add({type:'circle',center:[number(x),number(y)],radius:number(r),fill:data(o,'fill',null),...style(o)},64); },

@@ -87,6 +87,16 @@ pub enum Shape {
         #[serde(default)]
         fill: Option<Paint>,
     },
+    /// Projected natively into `viewport` (viewBox units), or the whole viewBox.
+    Scene3d {
+        #[serde(default)]
+        viewport: Option<[f32; 4]>,
+        camera: crate::scene3d::Camera,
+        /// Direction toward the light, in scene space.
+        #[serde(default)]
+        light: Option<[f32; 3]>,
+        objects: Vec<crate::scene3d::Object>,
+    },
 }
 
 fn stroke_width() -> f32 {
@@ -189,6 +199,8 @@ struct Budget {
     shapes: usize,
     vertices: usize,
     glyphs: usize,
+    scenes3d: usize,
+    space: crate::scene3d::Budget,
 }
 
 pub fn multiply(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
@@ -225,6 +237,17 @@ fn validate_shapes(
                     "Invalid transform"
                 );
                 validate_shapes(children, depth + 1, next, budget)?;
+                continue;
+            }
+            Shape::Scene3d {
+                viewport,
+                camera,
+                light,
+                objects,
+            } => {
+                budget.scenes3d += 1;
+                ensure!(budget.scenes3d <= 4, "Scene has more than 4 3D scenes");
+                crate::scene3d::validate(viewport, camera, light, objects, &mut budget.space)?;
                 continue;
             }
             Shape::Text {

@@ -354,8 +354,10 @@ fn polyline(points: &[[f32; 2]]) -> Vec<PathCommand> {
         })
         .collect()
 }
+#[allow(clippy::too_many_arguments)] // Recursion state plus native window/app contexts.
 fn shapes(
     scene: &Scene,
+    view_box: [f32; 4],
     matrix: [f32; 6],
     scale: f32,
     cache: &mut SceneCache,
@@ -374,6 +376,7 @@ fn shapes(
                 t[5] *= scale;
                 shapes(
                     children,
+                    view_box,
                     multiply(matrix, t),
                     scale,
                     cache,
@@ -381,6 +384,20 @@ fn shapes(
                     window,
                     cx,
                 )?;
+            }
+            Shape::Scene3d {
+                viewport,
+                camera,
+                light,
+                objects,
+            } => {
+                let items = pi_visual::scene3d::project(
+                    viewport.unwrap_or(view_box),
+                    camera,
+                    *light,
+                    objects,
+                );
+                paint_3d(&items, scale, matrix, budget, window)?;
             }
             Shape::Text {
                 origin,
@@ -507,6 +524,76 @@ fn shapes(
     }
     Ok(())
 }
+/// Paints projected 3D items in their back-to-front order. Consecutive items
+/// of one (quantized) shade share a path, so flat faces and lines batch.
+fn paint_3d(
+    items: &[pi_visual::scene3d::Item],
+    scale: f32,
+    matrix: [f32; 6],
+    budget: &mut Budget,
+    window: &mut Window,
+) -> anyhow::Result<()> {
+    use pi_visual::scene3d::Item;
+    // 64 levels per channel: invisible banding, far fewer path breaks.
+    let key = |rgba: [f32; 4]| rgba.map(|c| (c.clamp(0., 1.) * 63.).round() as u8);
+    let px_at = |p: [f32; 2]| point(px(p[0] * scale), px(p[1] * scale));
+    let st = (point(0., 1.), point(0., 1.), point(0., 1.));
+    let mut run: Option<([u8; 4], gpui::Path<Pixels>, usize)> = None;
+    let mut flush = |run: Option<([u8; 4], gpui::Path<Pixels>, usize)>,
+                     window: &mut Window|
+     -> anyhow::Result<()> {
+        let Some((key, path, vertices)) = run else {
+            return Ok(());
+        };
+        budget.mesh(vertices)?;
+        let path = place(path, matrix);
+        let clip = path.bounds.intersect(&window.content_mask().bounds);
+        if clip.size.width > px(0.) && clip.size.height > px(0.) {
+            let [r, g, b, a] = key.map(|c| f32::from(c) / 63.);
+            window.paint_path(path, Hsla::from(gpui::Rgba { r, g, b, a }));
+        }
+        Ok(())
+    };
+    for item in items {
+        let (rgba, triangles): ([f32; 4], Vec<[Point<Pixels>; 3]>) = match item {
+            Item::Triangle { points, rgba } => (*rgba, vec![points.map(px_at)]),
+            Item::Segment {
+                from,
+                to,
+                rgba,
+                width,
+            } => {
+                // A dp-wide quad, like the other canvas strokes.
+                let (a, b) = (px_at(*from), px_at(*to));
+                let d = [f32::from(b.x - a.x), f32::from(b.y - a.y)];
+                let length = d[0].hypot(d[1]);
+                if length <= f32::EPSILON {
+                    continue;
+                }
+                let n = point(
+                    px(-d[1] / length * width / 2.),
+                    px(d[0] / length * width / 2.),
+                );
+                (*rgba, vec![[a + n, b + n, b - n], [a + n, b - n, a - n]])
+            }
+        };
+        let key = key(rgba);
+        if run
+            .as_ref()
+            .is_none_or(|(current, _, n)| *current != key || *n > 60_000)
+        {
+            flush(run.take(), window)?;
+            run = Some((key, gpui::Path::new(triangles[0][0]), 0));
+        }
+        let (_, path, vertices) = run.as_mut().expect("run started above");
+        for [a, b, c] in triangles {
+            path.push_triangle((a, b, c), st);
+            *vertices += 3;
+        }
+    }
+    flush(run.take(), window)
+}
+
 pub fn paint_scene(
     scene: &Scene,
     view_box: [f32; 4],
@@ -527,9 +614,17 @@ pub fn paint_scene(
         *used = false;
     }
     let mut budget = Budget::default();
-    let result = window.with_content_mask(Some(ContentMask { bounds }), |window| {
+    // Like an SVG, nothing outside the viewBox shows, even where the canvas
+    // is wider or taller than the drawing's aspect ratio.
+    let view = Bounds::new(
+        origin + point(px(view_box[0] * scale), px(view_box[1] * scale)),
+        size(px(view_box[2] * scale), px(view_box[3] * scale)),
+    )
+    .intersect(&bounds);
+    let result = window.with_content_mask(Some(ContentMask { bounds: view }), |window| {
         shapes(
             scene,
+            view_box,
             [1., 0., 0., 1., origin.x.into(), origin.y.into()],
             scale,
             cache,

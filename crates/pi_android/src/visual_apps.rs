@@ -45,6 +45,12 @@ impl Host for PhoneApp {
     fn visual_refocus(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
     }
+    fn visual_expandable(&self) -> bool {
+        true
+    }
+    fn visual_expanded_changed(&mut self, target: Option<Self::Target>) {
+        self.expanded_visual = target;
+    }
     fn visual_show_source(
         &mut self,
         _: &str,
@@ -57,6 +63,86 @@ impl Host for PhoneApp {
     }
 }
 impl PhoneApp {
+    /// The Visualize app shown full screen in place of the route's screen.
+    pub(crate) fn visual_expanded_screen(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let target = self.expanded_visual?;
+        let colors = crate::theme::theme(cx);
+        let screen = window.fully_visible_bounds().size;
+        let height = screen.height;
+        // Below the app bar, inside the body's 12px padding.
+        let space = gpui::size(screen.width - px(24.), screen.height - px(80.));
+        let Some(card) = self.render_expanded_visual(target, &palette(&colors), space, cx) else {
+            self.expanded_visual = None;
+            return None;
+        };
+        let title = self
+            .visual_apps
+            .borrow()
+            .running
+            .values()
+            .find(|i| i.expanded && i.route == Some(self.route()))
+            .and_then(|i| i.runtime.as_ref().ok())
+            .map(|r| r.definition.title.clone())
+            .unwrap_or_default();
+        Some(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(crate::ui::appbar(
+                    crate::ui::tap("visual-back", "back", &colors).on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.close_expanded_visual(window, cx);
+                        },
+                    )),
+                    title,
+                    Some("Full screen · on this phone".into()),
+                    &colors,
+                ))
+                .child(
+                    div()
+                        .id("visual-full-screen")
+                        .debug_selector(|| "visual-full-screen".into())
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p(px(12.))
+                        .child(card),
+                )
+                .max_h(height),
+        )
+    }
+
+    /// Leaves full screen, if an app is shown that way.
+    pub(crate) fn close_expanded_visual(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target) = self.expanded_visual else {
+            return false;
+        };
+        let key = self
+            .visual_apps
+            .borrow()
+            .running
+            .iter()
+            .find(|(_, i)| i.expanded && i.route == Some(self.route()))
+            .map(|(k, _)| k.clone());
+        match key {
+            Some(key) => self.visual_toggle_expanded(&key, target, window, cx),
+            None => {
+                self.expanded_visual = None;
+                cx.notify();
+            }
+        }
+        true
+    }
+
     pub(crate) fn visual_has_app(&self, source: &str) -> bool {
         self.visual_apps.borrow_mut().parsed_reply(source).has_app()
     }

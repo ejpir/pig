@@ -539,6 +539,12 @@ fn qwen(id: SessionId) -> Session {
         Stage::planned(HandOff),
     ];
     // The calls in the order Pi made them, between what it said.
+    turn.flow.push(Flow::Thinking(
+        "The user wants empty signatures accepted for OpenCode but kept strict for \
+         Anthropic. The validation probably lives in a shared thinking helper rather \
+         than in each provider, so I'll read the providers and grep for the check."
+            .into(),
+    ));
     turn.flow.push(Flow::Text(
         "I'll find where thinking signatures are checked.".into(),
     ));

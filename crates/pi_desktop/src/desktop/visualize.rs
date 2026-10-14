@@ -51,6 +51,12 @@ impl Host for TranscriptView {
     fn visual_refocus(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.visual_focus, cx);
     }
+    fn visual_expandable(&self) -> bool {
+        true
+    }
+    fn visual_expanded_changed(&mut self, row: Option<usize>) {
+        self.expanded_visual = row;
+    }
 }
 
 pub(super) fn palette(c: crate::theme::Theme) -> pi_visual_ui::theme::Theme {

@@ -3,7 +3,7 @@
 
 pub const CONTRACT: &str = r##"
 
-[Pi native visual app request — JavaScript version 3 — native SVG, HiDPI]
+[Pi native visual app request — JavaScript version 3 — native SVG, HiDPI, 3D]
 @Visualize requests a device-local, interactive native GPUI app. Return brief prose and exactly one fully closed code fence with info `javascript pi-visual`. Write plain JavaScript, not JSON, HTML, JSX, imports, or a Rust program. No WebView is used. Call app({title, state, view, animation?}) exactly once. Source <=64 KiB.
 UI helpers:
 ui.column([children], {gap:8,width:null}); ui.row([children], {gap:8});
@@ -31,6 +31,9 @@ g.text('Score '+String(s.score),x,y,{size:18,color:'#FFFFFF',align:'left'|'cente
 For caching: ui.canvas({...,layers:[{deps:[],draw(g,s){...}},{deps:['x'],draw(g,s){...}}]}) replaces draw. <=8 layers/canvas, ordered back-to-front. deps:[] is static; omitted deps depends on all state. Only listed state fields are provided to a dependency-scoped layer. All layers share the same scene shape/vertex/text budgets. Changing unrelated state does not rerun cached layers.
 Better input: use onInput(s,event,input) INSTEAD OF onPointer. event={kind:'pointer',id,phase:'down'|'move'|'up'|'cancel',x,y}, {kind:'key',key,down,repeat}, {kind:'blur'} (keys cleared) or {kind:'cancel'} (surface released). Up is delivered even without movement. <=10 contacts; moves coalesce per contact/display frame. Keyboard goes only to the focused canvas/held button; tapping focuses, Tab moves focus. Tab/Escape/Ctrl/platform shortcuts are not captured.
 input is a frozen transient snapshot: {pointers:[{target,id,x,y}],keys:['left',...],buttons:['left',...]}. Native key names use left/right/up/down/space/enter and lowercase letters. Use it in tick(s,dt,input) for held controls. Do not save held keys/buttons in state; background/navigation/unmount clears them. onInput retains normal per-callback rollback on failure; releases still clear physical held state.
+3D: const cube=ui.box(1,1,1); also ui.sphere(r,{segments:24}), ui.cylinder(r,h,{segments}), ui.cone(r,h,{segments}), ui.torus(R,tube,{segments}) (segments3..64), or ui.mesh({vertices:[[x,y,z],...],faces:[[a,b,c],...]}) for custom geometry (drawn double-sided). Define meshes outside draw; they are small descriptors, and the host builds, projects, culls, flat-shades and depth-sorts their triangles natively.
+g.scene3d({x,y,width,height,camera:{fov:50,distance:5,yaw:30,pitch:20,target:[0,0,0]},light:[x,y,z]},d=>{d.mesh(cube,{position:[x,y,z],rotate:[rx,ry,rz],scale:1 OR [sx,sy,sz],color:'#RRGGBB'}); d.line([[x,y,z],...],{color,width});}); x/y/width/height are viewBox units (omit for the whole canvas); light is the direction toward the light (omit for upper left); rotate is degrees about x, then y, then z. Right-handed, y up; yaw0 looks from +z toward target; pitch -89.9..89.9; fov10..120.
+Triangles are depth-sorted, not depth-tested: closed solids look right, but avoid intersecting or interpenetrating meshes. <=4 scene3d per canvas, each one shape; per canvas <=64 objects, <=8192 triangles (box12, sphere ~segments^2, cylinder 4*segments, line segment2), custom meshes <=2048 vertices/4096 faces total, 3D lines <=2048 points, coordinates abs<=1e4. Orbit by keeping yaw/pitch in state and changing them in onPointer/onInput; spin by advancing a state angle in tick.
 Optional animation:{running:'playing',tick(s,dt,input){...}} binds a boolean and native display-driven frames. dt is elapsed seconds capped0.1. Omit fps: it follows the active window's actual display, not a universal120Hz. Only specify fps:1..240 when the user explicitly asks for a cap. Include Play/Pause and Restart, start paused. Hidden/unfocused/background/sheet/reduced-motion suspends animation. Local input/ticks do not call the model; state is saved device-locally on user interactions.
 Example:
 app({title:'Moving dot',state:{x:10,speed:20,playing:false},view:ui.column([
@@ -41,6 +44,8 @@ app({title:'Moving dot',state:{x:10,speed:20,playing:false},view:ui.column([
 ]),animation:{running:'playing',tick(s,dt){s.x=(s.x+dt*s.speed)%100;}}});
 [End Pi native visual app request]
 "##;
+
+const NATIVE_SVG_V3_CONTRACT: &str = include_str!("../assets/visualize-contract-v3-native-svg.txt");
 
 const SVG_V3_CONTRACT: &str = include_str!("../assets/visualize-contract-v3-svg.txt");
 
@@ -91,6 +96,7 @@ pub fn admitted(text: &str) -> bool {
     let draft = draft.split("\n\n<mention ").next().unwrap_or(draft);
     [
         CONTRACT,
+        NATIVE_SVG_V3_CONTRACT,
         SVG_V3_CONTRACT,
         HIDPI_V3_CONTRACT,
         RICH_SCENES_V3_CONTRACT,
@@ -126,21 +132,64 @@ pub fn expand_if(text: &str, opted_in: bool) -> String {
     }
 }
 
+/// Hosts call this while rendering, so it must be cheap: every guide contains
+/// this marker, and searching for a multi-kilobyte guide is not free.
+const GUIDE_MARKER: &str = "[Pi native visual app ";
+
 pub fn label(text: &str) -> String {
-    text.replace(NOT_REQUESTED, "")
-        .replace(CONTRACT, "")
-        .replace(SVG_V3_CONTRACT, "")
-        .replace(HIDPI_V3_CONTRACT, "")
-        .replace(RICH_SCENES_V3_CONTRACT, "")
-        .replace(PREVIOUS_V3_CONTRACT, "")
-        .replace(PERFORMANCE_V2_CONTRACT, "")
-        .replace(PREVIOUS_V2_CONTRACT, "")
-        .replace(LEGACY_CONTRACT, "")
+    if !text.contains(GUIDE_MARKER) {
+        return text.to_owned();
+    }
+    let mut label = text.to_owned();
+    for guide in [
+        NOT_REQUESTED,
+        CONTRACT,
+        NATIVE_SVG_V3_CONTRACT,
+        SVG_V3_CONTRACT,
+        HIDPI_V3_CONTRACT,
+        RICH_SCENES_V3_CONTRACT,
+        PREVIOUS_V3_CONTRACT,
+        PERFORMANCE_V2_CONTRACT,
+        PREVIOUS_V2_CONTRACT,
+        LEGACY_CONTRACT,
+    ] {
+        // A guide's heading is a short test for the whole guide.
+        let heading = guide.trim_start().lines().next().unwrap_or(guide);
+        if label.contains(heading) {
+            label = label.replace(guide, "");
+        }
+    }
+    label
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_guide_carries_the_marker_and_labels_strip_each() {
+        for guide in [
+            NOT_REQUESTED,
+            CONTRACT,
+            NATIVE_SVG_V3_CONTRACT,
+            SVG_V3_CONTRACT,
+            HIDPI_V3_CONTRACT,
+            RICH_SCENES_V3_CONTRACT,
+            PREVIOUS_V3_CONTRACT,
+            PERFORMANCE_V2_CONTRACT,
+            PREVIOUS_V2_CONTRACT,
+            LEGACY_CONTRACT,
+        ] {
+            assert!(guide.contains(GUIDE_MARKER));
+            assert_eq!(
+                label(&format!("@Visualize a clock{guide}")),
+                "@Visualize a clock"
+            );
+        }
+        assert_eq!(
+            label("plain [Pi native visual app text"),
+            "plain [Pi native visual app text"
+        );
+    }
     #[test]
     fn javascript_example_is_executable_and_old_guides_keep_labels() {
         let source = CONTRACT
@@ -161,6 +210,7 @@ mod tests {
         runtime.scene(&draw).unwrap();
         runtime.slide("speed", 25.).unwrap();
         for guide in [
+            NATIVE_SVG_V3_CONTRACT,
             SVG_V3_CONTRACT,
             HIDPI_V3_CONTRACT,
             RICH_SCENES_V3_CONTRACT,

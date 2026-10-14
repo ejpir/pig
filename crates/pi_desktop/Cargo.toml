@@ -47,6 +47,10 @@ env_logger = "0.11"
 flate2 = "1.1"
 tar = { version = "0.4.46", default-features = false }
 
+# Process CPU time for the rendering stats overlay.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # The Dock icon for unbundled runs; the same bindings gpui_macos uses.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"

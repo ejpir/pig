@@ -1990,6 +1990,31 @@ mod tests {
         });
     }
 
+    /// Reasoning rests on one line and opens to the reasoning itself.
+    #[gpui::test]
+    fn thinking_opens_to_the_reasoning(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("working", window, cx)));
+        cx.run_until_parked();
+        // A live thread follows its tail; the reasoning opens the turn.
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.thread_lists[&QWEN].scroll_to(gpui::ListOffset::default());
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let row = cx.debug_bounds("thinking").expect("a thinking row");
+        assert!(cx.debug_bounds("thinking-text").is_none());
+        cx.simulate_click(row.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("thinking-text").is_some());
+        cx.simulate_click(row.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("thinking-text").is_none());
+    }
+
     /// A big crew shows its first few, all on request, or just its header.
     #[gpui::test]
     fn a_crew_folds(cx: &mut TestAppContext) {
@@ -3421,7 +3446,8 @@ mod tests {
         app.read_with(cx, |app, _| {
             let opened: Vec<_> = app.expanded_calls.iter().copied().collect();
             assert!(
-                matches!(opened.as_slice(), [(QWEN, 0, 1 | 6)]),
+                // Steps after the opening reasoning and words.
+                matches!(opened.as_slice(), [(QWEN, 0, 2 | 7)]),
                 "{opened:?}"
             );
         });

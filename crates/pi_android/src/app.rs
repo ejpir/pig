@@ -282,6 +282,8 @@ impl RenderStats {
 pub struct PhoneApp {
     pub(crate) inline_pages: std::cell::RefCell<crate::inline_page::InlinePages>,
     pub(crate) visual_apps: std::cell::RefCell<crate::visual_apps::VisualApps>,
+    /// The turn whose Visualize app is shown full screen.
+    pub(crate) expanded_visual: Option<(SessionId, usize)>,
     pub(crate) schedules: crate::schedules::Schedules,
     pub(crate) store: Option<Store>,
     pub(crate) routes: Vec<Route>,
@@ -307,6 +309,8 @@ pub struct PhoneApp {
     pub(crate) expanded_prompts: HashSet<(SessionId, usize)>,
     /// Compaction summaries opened in the thread: session, turn, step of its flow.
     pub(crate) expanded_compactions: HashSet<(SessionId, usize, usize)>,
+    /// Reasoning opened in the thread: session, turn, step of its flow.
+    pub(crate) expanded_thinking: HashSet<(SessionId, usize, usize)>,
     /// Finished turns whose calls are shown in the thread again.
     pub(crate) expanded_streams: HashSet<(SessionId, usize)>,
     /// Folded runs of calls opened in the thread: session, turn, first step.
@@ -600,6 +604,7 @@ impl PhoneApp {
             expanded_turns: HashMap::new(),
             expanded_prompts: HashSet::new(),
             expanded_compactions: HashSet::new(),
+            expanded_thinking: HashSet::new(),
             expanded_streams: HashSet::new(),
             expanded_calls: HashSet::new(),
             subagent_ids: HashMap::new(),
@@ -653,6 +658,7 @@ impl PhoneApp {
             visual_apps: std::cell::RefCell::new(crate::visual_apps::VisualApps::load(
                 prefs_path.as_deref(),
             )),
+            expanded_visual: None,
             posters_drawing: Default::default(),
             file_generation: 0,
             project_files_generation: 0,
@@ -1080,6 +1086,9 @@ impl PhoneApp {
             window.dismiss_virtual_keyboard();
             window.focus(&self.focus, cx);
             cx.notify();
+            return true;
+        }
+        if self.close_expanded_visual(window, cx) {
             return true;
         }
         if self.inline_pages.borrow_mut().expanded.take().is_some() {
@@ -3453,11 +3462,14 @@ impl Render for PhoneApp {
             && self.sheet.is_none()
             && self.closing_sheet.is_none()
             && self.notice.is_none();
+        let expanded_visual = self.visual_expanded_screen(window, cx);
         let expanded_page = self.inline_expanded_screen(window, cx);
         if expanded_page.is_none() {
             self.inline_pages.borrow_mut().expanded = None;
         }
-        let screen = if let Some(expanded) = expanded_page {
+        let screen = if let Some(expanded) = expanded_visual {
+            expanded.into_any_element()
+        } else if let Some(expanded) = expanded_page {
             expanded.into_any_element()
         } else {
             match self.route() {

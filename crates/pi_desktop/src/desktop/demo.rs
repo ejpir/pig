@@ -64,10 +64,23 @@ pub fn load(model: &mut Session, saved: Option<&SavedSession>, first: bool) {
                 model.apply(&record).expect("valid workspace fixture");
             }
         }
-        if first && std::env::var_os("PI_DESKTOP_DEMO_VISUALIZE").is_some() {
-            for record in super::visualize::sample_records(include_str!(
-                "../../../pi_visual/assets/samples/svg-postcard.pi-visual.js"
-            )) {
+        if first && let Some(sample) = std::env::var_os("PI_DESKTOP_DEMO_VISUALIZE") {
+            // Any value shows the still postcard; `spirograph` or `solids` (3D)
+            // an animated app, `-playing` the same already moving, to profile frames.
+            let spirograph =
+                include_str!("../../../pi_visual/assets/samples/spirograph.pi-visual.js");
+            let solids = include_str!("../../../pi_visual/assets/samples/solids-3d.pi-visual.js");
+            let source = match sample.to_str() {
+                Some("spirograph") => spirograph.into(),
+                Some("solids") => solids.into(),
+                Some("solids-playing") => solids.replace("playing: false", "playing: true"),
+                Some("spirograph-playing") => {
+                    spirograph.replace("\"playing\": false", "\"playing\": true")
+                }
+                _ => include_str!("../../../pi_visual/assets/samples/svg-postcard.pi-visual.js")
+                    .into(),
+            };
+            for record in super::visualize::sample_records(&source) {
                 model.apply(&record).expect("visual sample");
             }
         }
