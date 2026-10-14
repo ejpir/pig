@@ -1,3 +1,4 @@
+pub mod app_fixture;
 pub mod fixture;
 mod http;
 mod workspace;
@@ -36,13 +37,25 @@ pub struct Options {
     pub timeout: Duration,
 }
 
+/// A cloneable stop request, usable while another thread owns `Run::join`.
+#[derive(Clone, Default)]
+pub struct Cancellation(Arc<AtomicBool>);
+impl Cancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 pub struct Run {
-    cancel: Arc<AtomicBool>,
+    cancel: Cancellation,
     worker: Option<thread::JoinHandle<Result<Value>>>,
 }
 impl Run {
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
     pub fn join(mut self) -> Result<Value> {
         self.worker
@@ -55,15 +68,24 @@ impl Run {
 impl Drop for Run {
     fn drop(&mut self) {
         // Never silently detach a paid, file-writing agent when a screen abandons it.
-        self.cancel();
+        if self.worker.is_some() {
+            self.cancel();
+        }
     }
 }
 
 /// Owns a fresh QuickJS VM on its own worker, never on an Android/GPUI UI thread.
 /// `emit` runs on that worker; a UI should forward events to its own event queue.
 pub fn spawn(options: Options, emit: impl FnMut(Value) + Send + 'static) -> Run {
-    let cancel = Arc::new(AtomicBool::new(false));
-    let worker_cancel = cancel.clone();
+    spawn_with_cancel(options, Cancellation::default(), emit)
+}
+
+pub fn spawn_with_cancel(
+    options: Options,
+    cancel: Cancellation,
+    emit: impl FnMut(Value) + Send + 'static,
+) -> Run {
+    let worker_cancel = cancel.0.clone();
     let worker = thread::spawn(move || run(options, worker_cancel, emit));
     Run {
         cancel,

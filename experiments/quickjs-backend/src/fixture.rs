@@ -35,7 +35,13 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn start(scenario: Scenario) -> Result<Self> {
-        let workspace = tempfile::tempdir()?;
+        Self::with_workspace(scenario, tempfile::tempdir()?)
+    }
+    /// Android has no writable /tmp. Keep every fixture file in the caller's private cache.
+    pub fn start_in(scenario: Scenario, parent: &std::path::Path) -> Result<Self> {
+        Self::with_workspace(scenario, tempfile::tempdir_in(parent)?)
+    }
+    fn with_workspace(scenario: Scenario, workspace: tempfile::TempDir) -> Result<Self> {
         std::fs::write(workspace.path().join("seed.txt"), "hello 🐷\n")?;
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let base_url = format!("http://{}/v1", listener.local_addr()?);
@@ -66,6 +72,25 @@ impl Fixture {
             timeout: Duration::from_secs(15),
         }
     }
+    pub fn received_request(&self) -> bool {
+        self.request_seen.load(Ordering::Relaxed)
+    }
+    pub fn verify_result(&self, result: &Value) -> Result<()> {
+        ensure!(
+            std::fs::read_to_string(self.workspace.path().join("result.txt"))? == "hello 🐷\n",
+            "file round trip failed"
+        );
+        let last = result["messages"]
+            .as_array()
+            .context("missing messages")?
+            .last()
+            .context("empty messages")?;
+        ensure!(
+            last["content"][0]["text"] == "Saved 🐷",
+            "wrong final message: {last}"
+        );
+        Ok(())
+    }
     pub fn wait_for_request(&self) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !self.request_seen.load(Ordering::Relaxed) {
@@ -95,19 +120,7 @@ pub fn demo(emit: impl FnMut(Value) + Send + 'static) -> Result<Value> {
     let mut fixture = Fixture::start(Scenario::Normal)?;
     let result = spawn(fixture.options(), emit).join()?;
     fixture.finish()?;
-    ensure!(
-        std::fs::read_to_string(fixture.workspace.path().join("result.txt"))? == "hello 🐷\n",
-        "file round trip failed"
-    );
-    let last = result["messages"]
-        .as_array()
-        .context("missing messages")?
-        .last()
-        .context("empty messages")?;
-    ensure!(
-        last["content"][0]["text"] == "Saved 🐷",
-        "wrong final message: {last}"
-    );
+    fixture.verify_result(&result)?;
     Ok(result)
 }
 
@@ -142,7 +155,7 @@ fn serve(
         };
         socket.set_read_timeout(Some(Duration::from_secs(3)))?;
         socket.set_write_timeout(Some(Duration::from_secs(3)))?;
-        let request = read_request(&mut socket)?;
+        let request = read_request(&mut socket, &stop)?;
         seen.store(true, Ordering::Relaxed);
         ensure!(
             request["model"] == "fixture-model" && request["stream"] == true,
@@ -158,7 +171,7 @@ fn serve(
                 socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: waiting\n\n")?;
             }
             socket.set_read_timeout(Some(Duration::from_millis(20)))?;
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(60);
             while !stop.load(Ordering::Relaxed) {
                 ensure!(
                     Instant::now() < deadline,
@@ -294,19 +307,60 @@ fn sse(socket: &mut TcpStream, delta: Value, finish: Option<&str>) -> Result<()>
     thread::sleep(Duration::from_millis(5));
     Ok(())
 }
-fn read_request(socket: &mut TcpStream) -> Result<Value> {
-    let mut reader = BufReader::new(socket);
+/// Loopback is not UID-private on Android: bound even a hostile peer's partial request.
+struct RequestReader<'a> {
+    socket: &'a mut TcpStream,
+    stop: &'a AtomicBool,
+    deadline: Instant,
+}
+impl Read for RequestReader<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return Err(std::io::Error::other("fixture stopped"));
+            }
+            if Instant::now() >= self.deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "fixture request deadline",
+                ));
+            }
+            match self.socket.read(bytes) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) => {}
+                result => return result,
+            }
+        }
+    }
+}
+fn read_request(socket: &mut TcpStream, stop: &AtomicBool) -> Result<Value> {
+    socket.set_read_timeout(Some(Duration::from_millis(20)))?;
+    let mut reader = BufReader::new(RequestReader {
+        socket,
+        stop,
+        deadline: Instant::now() + Duration::from_secs(2),
+    });
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    reader.by_ref().take(4097).read_line(&mut line)?;
+    ensure!(
+        line.len() <= 4096 && line.ends_with("\r\n"),
+        "fixture request line too long or incomplete"
+    );
     ensure!(
         line.starts_with("POST /v1/chat/completions HTTP/1.1"),
         "unexpected request path"
     );
     let mut length = 0;
     let mut authorized = false;
+    let mut header_bytes = line.len();
     loop {
         line.clear();
         reader.by_ref().take(8193).read_line(&mut line)?;
+        header_bytes += line.len();
+        ensure!(header_bytes <= 16 * 1024, "fixture headers exceed 16 KiB");
         ensure!(
             line.len() <= 8192 && !line.is_empty(),
             "bad fixture request header"
@@ -336,6 +390,43 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    #[test]
+    fn hostile_loopback_requests_are_bounded_and_cancellable() -> Result<()> {
+        for mode in ["long-line", "many-headers", "cancel", "deadline"] {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let mut peer = TcpStream::connect(listener.local_addr()?)?;
+            let (mut socket, _) = listener.accept()?;
+            let stop = Arc::new(AtomicBool::new(false));
+            let server_stop = stop.clone();
+            let reader = thread::spawn(move || read_request(&mut socket, &server_stop));
+            let started = Instant::now();
+            match mode {
+                "long-line" => {
+                    let _ = peer.write_all(&vec![b'x'; 5000]);
+                }
+                "many-headers" => {
+                    let _ = peer.write_all(
+                        format!(
+                            "POST /v1/chat/completions HTTP/1.1\r\n{}",
+                            "x: y\r\n".repeat(4000)
+                        )
+                        .as_bytes(),
+                    );
+                }
+                "cancel" => {
+                    peer.write_all(b"POST /partial")?;
+                    stop.store(true, Ordering::Relaxed);
+                }
+                "deadline" => {
+                    peer.write_all(b"POST /partial")?;
+                }
+                _ => unreachable!(),
+            }
+            assert!(reader.join().unwrap().is_err(), "{mode}");
+            assert!(started.elapsed() < Duration::from_secs(3), "{mode}");
+        }
+        Ok(())
+    }
     #[test]
     fn upstream_streaming_agent_reads_writes_and_reads_back() -> Result<()> {
         let events = Arc::new(Mutex::new(Vec::new()));

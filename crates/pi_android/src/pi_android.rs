@@ -23,6 +23,8 @@ mod preview;
 mod projection;
 mod projects;
 mod prompt;
+#[cfg(feature = "quickjs-backend-test")]
+mod quickjs_backend_test;
 mod remote;
 mod schedules;
 mod screens;

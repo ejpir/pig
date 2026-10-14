@@ -2,7 +2,7 @@
 
 **Yes: upstream Pi's agent loop and provider implementation run in QuickJS without source patches.** This experiment runs their published JavaScript (built from their TypeScript), not a rewritten agent or a replacement SSE parser.
 
-It lives in its own Cargo workspace so it can be tested without GPUI, a sibling Zed checkout, or changes to the existing Android app. No production app integration is included.
+It lives in its own Cargo workspace so the standalone backend can be tested without GPUI or a sibling Zed checkout. An opt-in, separately packaged build of the existing Android app now embeds this library and provides an offline test screen. Production builds and SSH sessions are unchanged.
 
 ## What is reused unchanged
 
@@ -64,7 +64,25 @@ cargo run --locked -- --live /tmp/pi-quickjs-playground \
 
 This can incur provider charges and overwrite files in the chosen workspace. Use a disposable directory. Choose a model supporting Chat Completions and function tools. No live provider call was made during validation.
 
-## Build and test on Android
+## Embedded Android app test (recommended)
+
+From the repository root, after installing the experiment's npm dependencies:
+
+```sh
+python3 crates/pi_android/scripts/build_apk.py --quickjs-backend-test \
+  --target x86_64-linux-android --out dist/pi-quickjs-test.apk
+adb -s emulator-5554 install -r dist/pi-quickjs-test.apk
+python3 crates/pi_android/scripts/test_quickjs_backend.py \
+  --serial emulator-5554 --output artifacts/quickjs-apk-emulator
+```
+
+Package **`dev.pi.android.quickjstest`**, label **Pi local backend tests**. On Connect, tap **Try the local QuickJS backend**. This links QuickJS into `libpi_android.so` and runs under the app UID, not adb shell. There is no executable extraction. The device test covers the streamed tool cycle, duplicate admission, Stop, background/Back cancellation, and restart. Use `--target aarch64-linux-android` for a phone APK.
+
+See [APK verification](../../crates/pi_android/scripts/QUICKJS_BACKEND_VERIFICATION.md). Provider login and paid local sessions are not exposed yet; see the [provider-auth plan](PROVIDER_AUTH_PLAN.md).
+
+## Standalone Android shell probe
+
+The earlier shell-only proof is still available:
 
 ```sh
 rustup target add aarch64-linux-android x86_64-linux-android
@@ -79,9 +97,9 @@ python3 test-android.py --serial DEVICE --target aarch64-linux-android
 
 The script creates a unique `/data/local/tmp/pi-quickjs-poc.*` directory, pushes only the native test executable, runs the offline fixture, saves evidence under `generated/`, then removes its executable and empty directory. It does not install an APK or change app settings, keys, sessions, or device services. If interrupted, inspect the printed directory before retrying; cleanup does not recursively delete unknown files.
 
-**Verified:** all nine host tests and Clippy; Android x86_64 emulator fixture (50 upstream events); arm64 Android compilation. An attempted physical-device run lost responsive adb-shell access and was not counted as a pass; its temporary directory could not yet be inspected/cleaned. No repeated execution was attempted.
+**Verified:** standalone host tests and Clippy; Android x86_64 emulator shell and APK fixtures (50 upstream events); arm64 Android executable and APK compilation; 349 Android host tests passed (2 ignored). An attempted physical-device run lost responsive adb-shell access and was not counted as a pass; its temporary directory could not yet be inspected/cleaned. No repeated execution was attempted.
 
-**Important boundary:** execution as `adb shell` proves the Android/Bionic runtime and loopback/file bridge, **not** execution under an APK's UID/SELinux domain. The eventual app should link this as a Rust library (QuickJS is in-process), not extract and execute a backend binary. App lifecycle/background service, app-private storage, UI transport, release packaging/notices, and app-UID testing are still required.
+**Important boundary:** the shell probe alone does not prove APK-UID behavior. That boundary is now exercised separately by the embedded app test above. It remains an offline fixture: production local-session UI, provider credentials, background services, durability, and release readiness are still outstanding.
 
 ## Compatibility layer and upgrade path
 
@@ -91,7 +109,8 @@ The script creates a unique `/data/local/tmp/pi-quickjs-poc.*` directory, pushes
 - `src/lib.rs`: a separate VM per run, promise-job pumping, typed host callbacks, events, cancellation and deadline handling. Never reuse the privileged backend VM for model-generated `@Visualize` programs.
 - `src/http.rs`: transport bytes only; fixed destination, Rust-owned credential, TLS, request/response limits, cancellable I/O. No SSE or provider protocol implementation.
 - `src/workspace.rs`: descriptor-relative UTF-8 read/write; rejects symlink traversal and hardlinked/non-regular files.
-- `src/fixture.rs`: synthetic provider for reproducible compatibility tests.
+- `src/fixture.rs`: synthetic provider for reproducible compatibility tests, with bounded/cancellable request parsing because loopback is not UID-private.
+- `src/app_fixture.rs`: offline app-view owner, bounded snapshots, cancellation/cleanup admission, private telemetry, and terminal failure supervision.
 
 To upgrade, update both Pi package versions together, regenerate `package-lock.json`, then:
 

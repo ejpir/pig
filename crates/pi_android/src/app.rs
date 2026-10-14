@@ -364,6 +364,8 @@ pub struct PhoneApp {
     _retry: Option<Task<()>>,
     /// Where the key and settings live.
     pub(crate) data_dir: PathBuf,
+    #[cfg(feature = "quickjs-backend-test")]
+    pub(crate) quickjs_backend_test: crate::quickjs_backend_test::Panel,
     /// Finds a folder or file in the project browser, or goes to a path.
     pub(crate) folder: Entity<TextArea>,
     reconnecting: bool,
@@ -637,6 +639,8 @@ impl PhoneApp {
             resuming: None,
             _retry: None,
             data_dir,
+            #[cfg(feature = "quickjs-backend-test")]
+            quickjs_backend_test: Default::default(),
             folder,
             reconnecting: false,
             last_listed: Instant::now(),
@@ -1081,6 +1085,14 @@ impl PhoneApp {
 
     /// One step back; false when there is nothing to go back to.
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        #[cfg(feature = "quickjs-backend-test")]
+        if self.quickjs_backend_test.visible {
+            self.quickjs_backend_test.cancel("back");
+            self.quickjs_backend_test.visible = false;
+            self.tick_quickjs_backend_test(cx);
+            cx.notify();
+            return true;
+        }
         if self.sheet.is_some() {
             self.close_sheet(cx);
             window.dismiss_virtual_keyboard();
@@ -1958,6 +1970,8 @@ impl PhoneApp {
 
     fn tick(&mut self, cx: &mut Context<Self>) {
         let _trace = gpui_android::trace::scope(c"pi.app.tick");
+        #[cfg(feature = "quickjs-backend-test")]
+        self.tick_quickjs_backend_test(cx);
         // Framework duration-scale updates can arrive while we stay visible.
         // Poll at the existing low-frequency ticker, never on animation frames.
         #[cfg(target_os = "android")]
@@ -2126,7 +2140,11 @@ impl PhoneApp {
         let visible = visibility.is_visible();
         let changed = self.visible != visible;
         self.visible = visible;
+        #[cfg(feature = "quickjs-backend-test")]
+        self.tick_quickjs_backend_test(cx);
         if !visible {
+            #[cfg(feature = "quickjs-backend-test")]
+            self.quickjs_backend_test.cancel("background");
             // Cancel synchronously even if Hidden→Visible happens between ticks.
             self.visual_apps
                 .borrow_mut()
@@ -2160,6 +2178,15 @@ impl PhoneApp {
 
     /// A `pi://` link from a notification.
     pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "quickjs-backend-test")]
+        {
+            if self.quickjs_backend_url(url, window, cx) {
+                return;
+            }
+            self.quickjs_backend_test.cancel("navigation");
+            self.quickjs_backend_test.visible = false;
+            self.tick_quickjs_backend_test(cx);
+        }
         if url == "pi://helper-update" {
             self.close_sheet(cx);
             self.routes = vec![Route::Sessions];
@@ -3416,11 +3443,16 @@ pub(crate) fn size_label(bytes: u64) -> String {
 impl Render for PhoneApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _trace = gpui_android::trace::scope(c"pi.root.build");
+        #[cfg(feature = "quickjs-backend-test")]
+        let backend_visible = self.quickjs_backend_test.visible;
+        #[cfg(not(feature = "quickjs-backend-test"))]
+        let backend_visible = false;
         // Route/sheet transitions cancel before a retained old surface can run
         // another callback. Do not wait for the next ticker or remote record.
         self.visual_apps.borrow_mut().projection_deferred(
             self.route(),
             self.visible
+                && !backend_visible
                 && self.window_active
                 && self.sheet.is_none()
                 && self.closing_sheet.is_none(),
@@ -3459,6 +3491,7 @@ impl Render for PhoneApp {
         let inline_slot = self.inline_pages.borrow().slot.clone();
         inline_slot.borrow_mut().take();
         let native_page_visible = self.visible
+            && !backend_visible
             && self.sheet.is_none()
             && self.closing_sheet.is_none()
             && self.notice.is_none();
@@ -3467,7 +3500,14 @@ impl Render for PhoneApp {
         if expanded_page.is_none() {
             self.inline_pages.borrow_mut().expanded = None;
         }
-        let screen = if let Some(expanded) = expanded_visual {
+        #[cfg(feature = "quickjs-backend-test")]
+        let backend_screen =
+            backend_visible.then(|| self.quickjs_backend_screen(cx).into_any_element());
+        #[cfg(not(feature = "quickjs-backend-test"))]
+        let backend_screen: Option<gpui::AnyElement> = None;
+        let screen = if let Some(screen) = backend_screen {
+            screen
+        } else if let Some(expanded) = expanded_visual {
             expanded.into_any_element()
         } else if let Some(expanded) = expanded_page {
             expanded.into_any_element()

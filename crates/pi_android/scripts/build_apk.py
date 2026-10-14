@@ -8,6 +8,7 @@ lists what it needs: a JDK and the Android SDK with the NDK.
 """
 
 import sys
+import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "gpui_android" / "scripts"))
@@ -37,7 +38,21 @@ PI = build_apk.App(
 )
 
 if __name__ == "__main__":
-    if "--ui-test" in sys.argv:
+    if "--quickjs-backend-test" in sys.argv:
+        sys.argv.remove("--quickjs-backend-test")
+        if "--ui-test" in sys.argv:
+            sys.argv.remove("--ui-test")
+        experiment = build_apk.WORKSPACE / "experiments" / "quickjs-backend"
+        if not (experiment / "node_modules").is_dir():
+            raise SystemExit("First run: cd experiments/quickjs-backend && npm ci --ignore-scripts")
+        subprocess.run(["bun", "run", "build"], cwd=experiment, check=True)
+        PI.package = "dev.pi.android.quickjstest"
+        PI.label = "Pi local backend tests"
+        PI.debuggable = True
+        PI.cargo += ["--features", "quickjs-backend-test"]
+        PI.licenses += (experiment / "generated" / "QUICKJS-BACKEND-NPM-NOTICES.txt",)
+        build_apk.main(PI, "pi-quickjs-test.apk")
+    elif "--ui-test" in sys.argv:
         sys.argv.remove("--ui-test")
         PI.package = "dev.pi.android.uitest"
         PI.label = "Pi UI tests"

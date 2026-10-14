@@ -18,6 +18,7 @@ fn main() {
         "generated/encoding.js",
         "generated/platform.js",
         "generated/agent.js",
+        "generated/QUICKJS-BACKEND-NPM-NOTICES.txt",
     ] {
         println!("cargo:rerun-if-changed={path}");
         let bytes =

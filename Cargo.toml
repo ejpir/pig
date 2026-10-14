@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/pi_core", "crates/pi_desktop", "crates/pi_jj", "crates/pi_editor", "crates/pi_lsp_bridge", "crates/pi_settings", "crates/pi_terminal", "crates/pi_remote", "crates/gpui_android", "crates/pi_android", "crates/pi_markdown", "crates/pi_visual", "crates/pi_visual_ui"]
+exclude = ["experiments/quickjs-backend"]
 resolver = "3"
 
 [workspace.package]

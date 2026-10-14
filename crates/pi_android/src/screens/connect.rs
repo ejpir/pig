@@ -362,6 +362,16 @@ impl PhoneApp {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
+                    .map(|panel| {
+                        #[cfg(feature = "quickjs-backend-test")]
+                        let panel = panel.child(
+                            ui::button("open-quickjs-backend", Button::Plain, None, "Try the local QuickJS backend", false, &colors)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.quickjs_backend_url("pi://test/quickjs-backend", window, cx);
+                                })),
+                        );
+                        panel
+                    })
                     .child(note)
                     .child(scan)
                     .child(

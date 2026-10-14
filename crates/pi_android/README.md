@@ -239,6 +239,12 @@ adb logcat -s pi GpuiActivity
 
 The script is gpui_android's, which lists what it needs.
 
+## Experimental on-device backend proof
+
+`build_apk.py --quickjs-backend-test` builds a separate **Pi local backend tests** APK (`dev.pi.android.quickjstest`). Tap **Try the local QuickJS backend** on Connect to run the unmodified upstream agent/provider code inside this app, with an offline read/write fixture. No Bun/Node executable, computer, API key, or paid provider is used. The normal release remains SSH-based.
+
+This is not yet a local-session or provider-login feature. See [build/device verification](scripts/QUICKJS_BACKEND_VERIFICATION.md) and the [provider sign-in plan](../../experiments/quickjs-backend/PROVIDER_AUTH_PLAN.md).
+
 ## On the desktop
 
 The views compile on any host, so a phone-sized window shows them without a
