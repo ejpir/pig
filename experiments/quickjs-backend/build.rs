@@ -15,9 +15,16 @@ fn main() {
         "js/encoding.js",
         "js/platform.js",
         "js/agent.js",
+        "js/auth.js",
+        "js/chat.js",
+        "js/no-node-http.js",
+        "js/no-node-crypto.js",
         "generated/encoding.js",
         "generated/platform.js",
         "generated/agent.js",
+        "generated/auth.js",
+        "generated/chat.js",
+        "generated/chat-models.json",
         "generated/QUICKJS-BACKEND-NPM-NOTICES.txt",
     ] {
         println!("cargo:rerun-if-changed={path}");

@@ -1,10 +1,35 @@
 // Standards polyfills, not copies/patches of Pi or provider code.
 import { URL, URLSearchParams } from 'whatwg-url';
-import { AbortController, AbortSignal } from 'abort-controller/dist/abort-controller.mjs';
+import { AbortController as BaseAbortController, AbortSignal } from 'abort-controller/dist/abort-controller.mjs';
 import { ReadableStream, WritableStream, TransformStream } from 'web-streams-polyfill';
 import { Headers } from 'headers-polyfill';
 import structuredClone from '@ungap/structured-clone';
 
+const abortReasons = new WeakMap();
+class AbortController extends BaseAbortController {
+  abort(reason = abortError()) {
+    if (!this.signal.aborted) abortReasons.set(this.signal, reason);
+    super.abort();
+  }
+}
+Object.defineProperty(AbortSignal.prototype, 'reason', { get() { return abortReasons.get(this); } });
+AbortSignal.prototype.throwIfAborted = function () { if (this.aborted) throw this.reason ?? abortError(); };
+AbortSignal.abort = (reason) => { const c = new AbortController(); c.abort(reason); return c.signal; };
+AbortSignal.timeout = (ms) => {
+  const c = new AbortController();
+  setTimeout(() => { const e = new Error('Timed out'); e.name = 'TimeoutError'; c.abort(e); }, ms);
+  return c.signal;
+};
+AbortSignal.any = (signals) => {
+  const c = new AbortController(); const subscriptions = [];
+  const clean = () => { for (const [signal, fn] of subscriptions) signal.removeEventListener('abort', fn); subscriptions.length = 0; };
+  for (const signal of signals) {
+    if (signal.aborted) { c.abort(signal.reason); clean(); break; }
+    const fn = () => { c.abort(signal.reason); clean(); };
+    subscriptions.push([signal, fn]); signal.addEventListener('abort', fn, { once: true });
+  }
+  return c.signal;
+};
 Object.assign(globalThis, { URL, URLSearchParams, AbortController, AbortSignal,
   ReadableStream, WritableStream, TransformStream, Headers, structuredClone });
 URL.canParse ??= (url, base) => { try { new URL(url, base); return true; } catch { return false; } };
@@ -30,6 +55,14 @@ globalThis.crypto = {
     new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set(__random(array.byteLength));
     return array;
   },
+  subtle: {
+    async digest(algorithm, data) {
+      if (String(typeof algorithm === 'string' ? algorithm : algorithm.name).toUpperCase() !== 'SHA-256')
+        throw new Error('Only SHA-256 is supported');
+      const bytes = ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
+      return new Uint8Array(__sha256(Array.from(bytes))).buffer;
+    },
+  },
   randomUUID() {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
     bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
@@ -38,14 +71,26 @@ globalThis.crypto = {
   },
 };
 
-// Narrow fetch/Response adapter: JSON POST and streaming response bodies only.
+globalThis.btoa = (text) => {
+  const bytes = Array.from(String(text), char => char.charCodeAt(0));
+  if (bytes.some(byte => byte > 255)) throw new TypeError('btoa expects Latin-1');
+  return __btoa(bytes);
+};
+globalThis.atob = text => __atob(String(text).replace(/[\t\n\f\r ]/g, '')).map(byte => String.fromCharCode(byte)).join('');
+
+// Narrow fetch/Response adapter: JSON/form requests and streaming response bodies.
 // URL policy, credentials, TLS, byte limits and actual I/O belong to Rust.
 // This is not a complete browser fetch implementation (no uploads, clone, blobs, etc.).
 class HostResponse {
-  constructor(body, { status, headers, url }) {
+  constructor(body, { status = 200, headers, url = '', statusText = '' } = {}) {
+    // Upstream Codex constructs Response(errorText, init) when handling non-2xx.
+    if (typeof body === 'string') {
+      const bytes = new TextEncoder().encode(body);
+      body = new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } });
+    }
     this.body = body; this.status = status; this.headers = new Headers(headers);
     this.url = url; this.ok = status >= 200 && status < 300;
-    this.statusText = ''; this.bodyUsed = false;
+    this.statusText = statusText; this.bodyUsed = false;
   }
   async text() {
     if (this.bodyUsed) throw new TypeError('response body already used');
@@ -66,7 +111,13 @@ const requests = new Map();
 function abortError() { const error = new Error('Request aborted'); error.name = 'AbortError'; return error; }
 globalThis.fetch = (url, init = {}) => new Promise((resolve, reject) => {
   if (init.signal?.aborted) { reject(abortError()); return; }
-  if (typeof init.body !== 'string') { reject(new TypeError('only JSON string bodies supported')); return; }
+  const headers = new Headers(init.headers);
+  let requestBody = init.body;
+  if (requestBody instanceof URLSearchParams) {
+    requestBody = requestBody.toString();
+    if (!headers.has('content-type')) headers.set('content-type', 'application/x-www-form-urlencoded;charset=UTF-8');
+  }
+  if (requestBody != null && typeof requestBody !== 'string') { reject(new TypeError('only text/form bodies supported')); return; }
   const id = nextId++;
   let controller;
   const clean = () => { requests.delete(id); init.signal?.removeEventListener('abort', abort); };
@@ -89,7 +140,7 @@ globalThis.fetch = (url, init = {}) => new Promise((resolve, reject) => {
   init.signal?.addEventListener('abort', abort, { once: true });
   try {
     __http(id, JSON.stringify({ url: String(url), method: init.method || 'GET',
-      headers: Object.fromEntries(new Headers(init.headers)), body: init.body }));
+      headers: Object.fromEntries(headers), body: requestBody ?? null }));
   } catch (error) {
     clean(); controller.error(error); reject(error);
   }
@@ -98,6 +149,8 @@ globalThis.hostDispatch = (json) => {
   const event = JSON.parse(json);
   if (event.kind === 'timer') {
     const fn = timers.get(event.id); timers.delete(event.id); fn?.();
+  } else if (event.kind === 'input') {
+    globalThis.hostInput?.(event);
   } else {
     requests.get(event.id)?.[event.kind]?.(event);
   }

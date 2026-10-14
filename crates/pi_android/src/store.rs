@@ -41,6 +41,9 @@ impl Project {
 }
 
 pub struct Store {
+    pub(crate) generation: u64,
+    #[cfg(feature = "quickjs-backend-test")]
+    pub(crate) local: Option<crate::local_chat::Local>,
     pub computer: Computer,
     /// Every computer the phone knows, the connected one first.
     pub computers: Vec<Computer>,
@@ -59,9 +62,16 @@ pub struct Store {
     pub(crate) sample_subagents: HashMap<String, pi_core::session::Session>,
 }
 
+fn generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 impl Store {
     pub fn sample(computer: Computer) -> Self {
         Self {
+            generation: generation(),
+            #[cfg(feature = "quickjs-backend-test")]
+            local: None,
             computers: demo::computers(computer.clone()),
             computer,
             sessions: demo::sessions(),
@@ -84,6 +94,9 @@ impl Store {
 
     pub fn live(computer: Computer, live: Live) -> Self {
         let mut store = Self {
+            generation: generation(),
+            #[cfg(feature = "quickjs-backend-test")]
+            local: None,
             computers: vec![computer.clone()],
             computer,
             sessions: Vec::new(),
@@ -99,8 +112,116 @@ impl Store {
         store
     }
 
+    /// Shared UI contract. Local catalogs are authoritative; None retains the
+    /// existing SSH legacy/default or sample presentation behavior.
+    pub fn models(&self) -> Option<&[pi_core::protocol::Model]> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &self.local {
+            return Some(local.models());
+        }
+        self.live.as_ref().map(|live| live.models.as_slice())
+    }
+    pub fn current_model(&self, id: Option<SessionId>) -> Option<&pi_core::protocol::Model> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &self.local {
+            return local.current_model(id);
+        }
+        self.live.as_ref()?.current_model(id?)
+    }
+    pub fn model_settings(&self, id: Option<SessionId>) -> Option<(String, String)> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &self.local {
+            return Some(local.model_settings(id));
+        }
+        self.live.as_ref()?.model_settings(id?)
+    }
+    pub fn thinking_levels(&self, id: Option<SessionId>) -> Option<Vec<String>> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &self.local {
+            return Some(local.thinking_levels(id));
+        }
+        self.live.as_ref()?.thinking_levels(id?)
+    }
+    pub fn set_model(
+        &mut self,
+        id: Option<SessionId>,
+        provider: &str,
+        model: &str,
+    ) -> Result<(), String> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &mut self.local {
+            return local.set_model(id, provider, model);
+        }
+        let live = self.live.as_mut().ok_or("No execution backend")?;
+        if let Some(id) = id {
+            live.set_model(id, provider, model)
+        } else {
+            live.model = format!("{provider}/{model}");
+            Ok(())
+        }
+    }
+    pub fn set_thinking(&mut self, id: Option<SessionId>, level: &str) -> Result<(), String> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &mut self.local {
+            return local.set_thinking(id, level);
+        }
+        let live = self.live.as_mut().ok_or("No execution backend")?;
+        if let Some(id) = id {
+            live.set_thinking(id, level)
+        } else {
+            live.thinking = level.into();
+            Ok(())
+        }
+    }
+
     pub fn is_sample(&self) -> bool {
-        self.live.is_none()
+        self.live.is_none() && !self.is_local()
+    }
+    pub fn is_local(&self) -> bool {
+        #[cfg(feature = "quickjs-backend-test")]
+        {
+            self.local.is_some()
+        }
+        #[cfg(not(feature = "quickjs-backend-test"))]
+        {
+            false
+        }
+    }
+    pub fn is_stopping(&self, id: SessionId) -> bool {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &self.local {
+            return local.stopping(id);
+        }
+        self.live.as_ref().is_some_and(|live| live.is_stopping(id))
+    }
+    pub fn cancel_local(&self) {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &self.local {
+            local.cancel();
+        }
+    }
+    #[cfg(feature = "quickjs-backend-test")]
+    pub fn local(local: crate::local_chat::Local) -> Self {
+        let computer = Computer {
+            name: "This phone".into(),
+            address: "local-quickjs".into(),
+            pi_version: None,
+            connected: true,
+        };
+        Self {
+            generation: generation(),
+            computer: computer.clone(),
+            computers: vec![computer],
+            sessions: Vec::new(),
+            earlier: 0,
+            projects: Vec::new(),
+            next_id: 1,
+            live: None,
+            local: Some(local),
+            recency: HashMap::new(),
+            observed_at: HashMap::new(),
+            sample_subagents: HashMap::new(),
+        }
     }
 
     pub fn session(&self, id: SessionId) -> Option<&Session> {
@@ -108,6 +229,10 @@ impl Store {
     }
 
     pub fn remove(&mut self, id: SessionId) {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &mut self.local {
+            local.remove(id);
+        }
         if let Some(live) = &mut self.live {
             live.remove(id);
         }
@@ -152,6 +277,10 @@ impl Store {
 
     /// Moves time on: sample runs advance; live timers count up.
     pub fn tick(&mut self, elapsed: Duration) -> Vec<Event> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &mut self.local {
+            return local.tick(&mut self.sessions, elapsed);
+        }
         if self.live.is_some() {
             let running: Vec<SessionId> = self.running().map(|session| session.id).collect();
             let mut events = Vec::new();
@@ -280,6 +409,9 @@ impl Store {
     }
 
     pub fn answer(&mut self, id: SessionId, answer: Answer) {
+        if self.is_local() {
+            return;
+        }
         if let Some(live) = &mut self.live {
             live.answer(id, answer);
             self.reproject(id);
@@ -298,6 +430,10 @@ impl Store {
     }
 
     pub fn stop(&mut self, id: SessionId) -> Result<(), String> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &self.local {
+            return local.stop(id);
+        }
         if let Some(live) = &mut self.live {
             return live.stop(id);
         }
@@ -345,6 +481,15 @@ impl Store {
         prompt: crate::prompt::Prompt,
         attachments: Vec<String>,
     ) -> Result<(), String> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &mut self.local {
+            let session = self
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == id)
+                .ok_or("Chat no longer available")?;
+            return local.send(session, prompt, attachments);
+        }
         if let Some(live) = &mut self.live {
             live.prompt(id, prompt)?;
             self.reproject(id);
@@ -406,6 +551,9 @@ impl Store {
     }
 
     fn start_queued(&mut self, id: SessionId) {
+        if !self.is_sample() {
+            return;
+        }
         if let Some(session) = self.session_mut(id)
             && session.state == State::Done
             && !session.queued.is_empty()
@@ -425,6 +573,17 @@ impl Store {
         prompt: crate::prompt::Prompt,
         attachments: Vec<String>,
     ) -> Result<SessionId, String> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &mut self.local {
+            let mut session = local.create()?;
+            let id = session.id;
+            if let Err(error) = local.send(&mut session, prompt, attachments) {
+                local.remove(id);
+                return Err(error);
+            }
+            self.sessions.push(session);
+            return Ok(id);
+        }
         if let Some(live) = &mut self.live {
             let Some(project) = self.projects.get(project) else {
                 return Err("Choose a project folder on the computer first.".into());

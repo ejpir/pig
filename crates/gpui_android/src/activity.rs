@@ -317,3 +317,59 @@ pub fn device_name() -> Option<String> {
         None
     }
 }
+
+/// Sensitive native provider-code interaction. All calls are on the GPUI main thread.
+pub fn show_provider_code(request: &str) {
+    #[cfg(target_os = "android")]
+    if let Some(java) = crate::java::current() {
+        java.show_provider_code(request);
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = request;
+}
+pub fn dismiss_provider_code(request: &str) {
+    #[cfg(target_os = "android")]
+    if let Some(java) = crate::java::current() {
+        java.dismiss_provider_code(request);
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = request;
+}
+pub fn take_provider_code(request: &str) -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current()?.take_provider_code(request)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = request;
+        None
+    }
+}
+
+/// Explicitly copy a short sign-in code with Android's sensitive-clipboard marker.
+/// Returns false if the platform/clipboard is unavailable. Never logs the code.
+pub fn copy_provider_code(code: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current().is_some_and(|java| java.copy_provider_code(code))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = code;
+        false
+    }
+}
+
+/// APK debuggability, independent of Rust optimization. Missing Android bridges fail
+/// closed; host previews use the Rust build profile.
+pub fn is_debug_build() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::java::current().is_some_and(|java| java.is_debug_build())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        cfg!(debug_assertions)
+    }
+}

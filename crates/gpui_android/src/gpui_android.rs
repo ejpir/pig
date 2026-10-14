@@ -43,6 +43,8 @@ mod java;
 #[cfg(target_os = "android")]
 mod platform;
 #[cfg(target_os = "android")]
+pub mod secure_storage;
+#[cfg(target_os = "android")]
 mod window;
 
 #[cfg(target_os = "android")]

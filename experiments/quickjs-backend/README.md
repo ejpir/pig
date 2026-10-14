@@ -2,21 +2,21 @@
 
 **Yes: upstream Pi's agent loop and provider implementation run in QuickJS without source patches.** This experiment runs their published JavaScript (built from their TypeScript), not a rewritten agent or a replacement SSE parser.
 
-It lives in its own Cargo workspace so the standalone backend can be tested without GPUI or a sibling Zed checkout. An opt-in, separately packaged build of the existing Android app now embeds this library and provides an offline test screen. Production builds and SSH sessions are unchanged.
+It lives in its own Cargo workspace so the standalone backend can be tested without GPUI or a sibling Zed checkout. An opt-in, separately packaged build of the existing Android app now embeds this library and provides shared local sessions with Claude/Codex subscription accounts, plus a separate offline agent test screen. Production builds and SSH sessions are unchanged.
 
 ## What is reused unchanged
 
 | Component | Pinned dependency | Responsibility |
 | --- | --- | --- |
 | Agent loop | `@earendil-works/pi-agent-core@1.2.0` | turns, tool execution, events, follow-up requests |
-| Pi AI | `@earendil-works/pi-ai@1.2.0` | transcript conversion, schema validation, streaming provider adapter |
+| Pi AI | `@earendil-works/pi-ai@1.2.0` | transcript conversion, schema validation, streaming provider adapter, OAuth login/refresh |
 | Provider SDK | `openai@7.19.0` (through Pi AI) | HTTP requests, SSE parsing, streamed tool arguments, provider errors |
 | JS runtime | `rquickjs@0.14.0` | QuickJS embedded in the Rust process |
 
 Only public package exports are imported. No copied upstream source, dependency patches, provider aliases, or replacement `pi-ai` implementation. npm's lockfile pins the complete dependency tree.
 
 ```text
-Rust worker / future Android UI event channel
+Rust worker / Android UI event channel
     ↕ JSON events and host callbacks
 QuickJS
     ├── unmodified Pi agent loop
@@ -27,7 +27,7 @@ QuickJS
 Rust: HTTPS + cancellation, file access, monotonic clock, OS randomness
 ```
 
-The tools are deliberately small host-provided tools, **not** the full stock coding-agent tool set. `pi-coding-agent`/`pi-durable`, their sessions/extensions, and other providers have not been ported or validated.
+The tools are deliberately small host-provided tools, **not** the full stock coding-agent tool set. `pi-coding-agent`/`pi-durable`, their sessions/extensions, and other inference providers have not been ported or validated. The separate tool-free Claude/Codex subscription path now drives the existing Android session screens.
 
 ## Run locally
 
@@ -78,7 +78,16 @@ python3 crates/pi_android/scripts/test_quickjs_backend.py \
 
 Package **`dev.pi.android.quickjstest`**, label **Pi local backend tests**. On Connect, tap **Try the local QuickJS backend**. This links QuickJS into `libpi_android.so` and runs under the app UID, not adb shell. There is no executable extraction. The device test covers the streamed tool cycle, duplicate admission, Stop, background/Back cancellation, and restart. Use `--target aarch64-linux-android` for a phone APK.
 
-See [APK verification](../../crates/pi_android/scripts/QUICKJS_BACKEND_VERIFICATION.md). Provider login and paid local sessions are not exposed yet; see the [provider-auth plan](PROVIDER_AUTH_PLAN.md).
+For phone sign-in, tap **Local providers · Claude + Codex** on Connect. Claude uses browser/copy-code login; Codex uses a device code. Credentials are encrypted with Android Keystore, outside workspaces. Only explicit sign-in/refresh actions contact providers; opening this page does not. This is a debuggable experimental APK, not production credential isolation.
+
+Synthetic-only phone auth verification:
+
+```sh
+python3 crates/pi_android/scripts/test_provider_accounts.py \
+  --serial emulator-5554 --output artifacts/provider-auth-emulator
+```
+
+See [APK verification](../../crates/pi_android/scripts/QUICKJS_BACKEND_VERIFICATION.md) and [provider accounts](PROVIDER_AUTH_PLAN.md). Subscription inference is wired through the unchanged Agent, core session reducer and existing Android screens, including model-supported thinking and native attachments. **Live-account interoperability is not yet validated.**
 
 ## Standalone Android shell probe
 
@@ -97,17 +106,18 @@ python3 test-android.py --serial DEVICE --target aarch64-linux-android
 
 The script creates a unique `/data/local/tmp/pi-quickjs-poc.*` directory, pushes only the native test executable, runs the offline fixture, saves evidence under `generated/`, then removes its executable and empty directory. It does not install an APK or change app settings, keys, sessions, or device services. If interrupted, inspect the printed directory before retrying; cleanup does not recursively delete unknown files.
 
-**Verified:** standalone host tests and Clippy; Android x86_64 emulator shell and APK fixtures (50 upstream events); arm64 Android executable and APK compilation; 349 Android host tests passed (2 ignored). An attempted physical-device run lost responsive adb-shell access and was not counted as a pass; its temporary directory could not yet be inspected/cleaned. No repeated execution was attempted.
+**Verified:** 23 standalone host tests and Clippy; Android x86_64 emulator synthetic auth/chat/offline-agent fixtures; 354 Android host tests passed (2 ignored). ARM64 compilation/installation is not a physical-device execution or live-account test. An attempted physical-device run lost responsive adb-shell access and was not counted as a pass; its temporary directory could not yet be inspected/cleaned. No repeated execution was attempted.
 
-**Important boundary:** the shell probe alone does not prove APK-UID behavior. That boundary is now exercised separately by the embedded app test above. It remains an offline fixture: production local-session UI, provider credentials, background services, durability, and release readiness are still outstanding.
+**Important boundary:** the shell probe alone does not prove APK-UID behavior. That boundary is now exercised separately by the embedded app test above. Agent execution remains an offline APK fixture; provider-account setup is a separate opt-in screen. Production local-session UI, provider-aware inference, background services, durability, and release readiness remain outstanding.
 
 ## Compatibility layer and upgrade path
 
 - `js/agent.js`: application wiring, explicit model descriptor and two tool registrations. No agent loop or provider parsing code.
 - `js/encoding.js`: standard encoding polyfill loaded first.
 - `js/platform.js`: existing URL, Headers, AbortController, streams and structured-clone packages, plus host-backed timers/fetch/random/clock. `Response` is a narrow JSON/stream adapter. `FormData` intentionally throws: uploads are unsupported.
-- `src/lib.rs`: a separate VM per run, promise-job pumping, typed host callbacks, events, cancellation and deadline handling. Never reuse the privileged backend VM for model-generated `@Visualize` programs.
-- `src/http.rs`: transport bytes only; fixed destination, Rust-owned credential, TLS, request/response limits, cancellable I/O. No SSE or provider protocol implementation.
+- `src/lib.rs` / `src/vm.rs`: a separate VM per run, promise-job pumping, typed host callbacks, events, cancellation and deadline handling. Never reuse the privileged backend VM for model-generated `@Visualize` programs.
+- `src/http.rs`: transport bytes only; scoped destinations, TLS, request/response limits, cancellable I/O. No SSE or OAuth protocol implementation. `src/dns.rs` bounds uncancellable OS lookups without changing the device resolver.
+- `js/auth.js` / `src/auth.rs`: unmodified upstream Claude/Codex mobile login and refresh, native credential-store adapter, supervised lifetime and coordinated logout. `src/auth_fixture.rs` exercises this against synthetic endpoints.
 - `src/workspace.rs`: descriptor-relative UTF-8 read/write; rejects symlink traversal and hardlinked/non-regular files.
 - `src/fixture.rs`: synthetic provider for reproducible compatibility tests, with bounded/cancellable request parsing because loopback is not UID-private.
 - `src/app_fixture.rs`: offline app-view owner, bounded snapshots, cancellation/cleanup admission, private telemetry, and terminal failure supervision.
@@ -127,11 +137,11 @@ No patches to rebase. Upstream API/runtime changes can still require shim change
 
 ## Limits and safeguards
 
-- Text-only Chat Completions with API-key auth; no OAuth, discovery, images, uploads, shell, Git, extensions, subagents, swarm, or durable history.
-- In-memory transcript, one prompt/run, at most eight model requests, default 90-second live deadline. File writes are not transactional and cancellation does not roll back completed effects or guarantee a provider stops billing.
+- The original workspace PoC uses text-only Chat Completions/API-key auth. The separate subscription path uses Claude/Codex OAuth and the unchanged Agent, with model/thinking catalogs, streaming, Stop, images and text attachments in the existing Android screens. Local shell, Git, extensions, tools, subagents, swarm and durable history are not implemented.
+- Original workspace PoC: in-memory transcript, one prompt/run, at most eight model requests, default 90-second live deadline. File writes are not transactional and cancellation does not roll back completed effects or guarantee a provider stops billing.
 - Backend JS is **trusted packaged code**. Host functions are capabilities, not an OS sandbox. This is not a safe executor for arbitrary generated JS. Same-UID malicious filesystem races are outside the file boundary.
-- Existing workspace directory and parent directories required; files limited to 256 KiB. Absolute paths and parent traversal rejected. Rust credentials are not exposed to JS or model events; callers must not store credentials inside the model-readable workspace.
-- HTTPS only for live calls; no redirects/proxies, exact configured endpoint only. Loopback HTTP is fixture-only. Credentials are injected by Rust rather than forwarded from JS.
-- 96 MiB JS heap, 1 MiB JS stack, 1 MiB request body, 4 MiB response body, bounded host message channel. JS stream buffering is bounded by response/heap limits, **not** demand-driven end-to-end backpressure.
+- Existing workspace directory and parent directories required; files limited to 256 KiB. Absolute paths and parent traversal rejected. The completion fixture uses a Rust-only placeholder key. OAuth credentials must be available inside its separate trusted auth VM, never in model events or a model-readable workspace.
+- HTTPS only for live calls; no redirects/proxies, exact configured/scoped endpoints only. Loopback HTTP is fixture-only. Rust injects the completion fixture key; auth forwards the trusted upstream flow without global bearer injection.
+- 96 MiB JS heap, 1 MiB JS stack, 1 MiB workspace/auth request body (10 MiB subscription inference), 4 MiB response body, bounded host message channel. JS stream buffering is bounded by response/heap limits, **not** demand-driven end-to-end backpressure.
 - Dropping a run requests cancellation; joining waits for its worker and HTTP cleanup. The callback runs on the worker and must not block indefinitely. A UI must marshal events onto its own event queue.
 - Polyfills cover the exercised path, not every Web/Node/Bun API. The legacy `text-encoding` package is a convenient PoC dependency; reassess polyfills and dependency notices before shipping.

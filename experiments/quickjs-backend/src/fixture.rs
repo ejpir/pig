@@ -337,6 +337,26 @@ impl Read for RequestReader<'_> {
     }
 }
 fn read_request(socket: &mut TcpStream, stop: &AtomicBool) -> Result<Value> {
+    let (path, headers, body) = read_http_request(socket, stop)?;
+    ensure!(
+        path == "/v1/chat/completions"
+            && headers["authorization"] == "Bearer fixture-secret-rust-only",
+        "unexpected fixture request"
+    );
+    Ok(serde_json::from_slice(&body)?)
+}
+
+pub(crate) fn read_http_request(
+    socket: &mut TcpStream,
+    stop: &AtomicBool,
+) -> Result<(String, Value, Vec<u8>)> {
+    read_http_request_limit(socket, stop, 1024 * 1024)
+}
+pub(crate) fn read_http_request_limit(
+    socket: &mut TcpStream,
+    stop: &AtomicBool,
+    limit: usize,
+) -> Result<(String, Value, Vec<u8>)> {
     socket.set_read_timeout(Some(Duration::from_millis(20)))?;
     let mut reader = BufReader::new(RequestReader {
         socket,
@@ -349,12 +369,14 @@ fn read_request(socket: &mut TcpStream, stop: &AtomicBool) -> Result<Value> {
         line.len() <= 4096 && line.ends_with("\r\n"),
         "fixture request line too long or incomplete"
     );
+    let parts: Vec<_> = line.split_whitespace().collect();
     ensure!(
-        line.starts_with("POST /v1/chat/completions HTTP/1.1"),
-        "unexpected request path"
+        parts.len() == 3 && parts[0] == "POST" && parts[2] == "HTTP/1.1",
+        "unexpected request line"
     );
+    let path = parts[1].to_owned();
     let mut length = 0;
-    let mut authorized = false;
+    let mut headers = json!({});
     let mut header_bytes = line.len();
     loop {
         line.clear();
@@ -372,17 +394,19 @@ fn read_request(socket: &mut TcpStream, stop: &AtomicBool) -> Result<Value> {
         if name.eq_ignore_ascii_case("content-length") {
             length = value.trim().parse::<usize>()?;
         }
-        if name.eq_ignore_ascii_case("authorization") {
-            authorized = value.trim() == "Bearer fixture-secret-rust-only";
-        }
+        ensure!(
+            headers.get(name.to_ascii_lowercase()).is_none(),
+            "duplicate fixture header"
+        );
+        headers[name.to_ascii_lowercase()] = json!(value.trim());
     }
     ensure!(
-        authorized && length > 0 && length <= 1024 * 1024,
-        "bad fixture request authorization/length"
+        headers.get("transfer-encoding").is_none() && length > 0 && length <= limit,
+        "bad fixture request length"
     );
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
-    Ok(serde_json::from_slice(&body)?)
+    Ok((path, headers, body))
 }
 
 #[cfg(test)]

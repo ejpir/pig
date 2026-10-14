@@ -147,6 +147,7 @@ pub fn project_queue_keys(
         .unwrap_or(facts.cwd)
         .to_owned();
     Session {
+        local: false,
         id: facts.id,
         title: title(pi, facts.outbox),
         project,
@@ -183,6 +184,7 @@ pub fn listed(id: SessionId, listed: &crate::remote::Listed, folder: String) -> 
     };
     let cwd = listed.cwd.trim_end_matches('/');
     Session {
+        local: false,
         id,
         title: listed
             .title
@@ -594,6 +596,11 @@ fn one_line(text: &str, limit: usize) -> String {
 
 /// Marks the last turn's stages for how the session stands now.
 fn settle(turn: &mut Turn, state: State, pi: &Pi, cwd: &str, inherit_running_tools: bool) {
+    // An authoritative empty tool catalog is not a coding workflow waiting
+    // for its first tool. Text/thinking use the existing message flow instead.
+    if pi.state.active_tools.as_ref().is_some_and(Vec::is_empty) && turn.stages.is_empty() {
+        return;
+    }
     if state.is_running()
         && inherit_running_tools
         && let Some(tool) =

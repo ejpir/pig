@@ -14,6 +14,8 @@ mod composer;
 mod demo;
 mod inline_page;
 mod live;
+#[cfg(feature = "quickjs-backend-test")]
+mod local_chat;
 mod message;
 mod model;
 mod motion;
@@ -23,6 +25,8 @@ mod preview;
 mod projection;
 mod projects;
 mod prompt;
+#[cfg(feature = "quickjs-backend-test")]
+mod provider_accounts;
 #[cfg(feature = "quickjs-backend-test")]
 mod quickjs_backend_test;
 mod remote;

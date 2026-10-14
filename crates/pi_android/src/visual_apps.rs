@@ -148,6 +148,9 @@ impl PhoneApp {
     }
 
     pub(crate) fn visual_enabled(&self, session: &Session, turn: usize) -> bool {
+        if session.local {
+            return false;
+        }
         session
             .turns
             .iter()

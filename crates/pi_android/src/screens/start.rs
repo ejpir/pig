@@ -23,6 +23,17 @@ impl PhoneApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = theme(cx);
+        let local = self.is_local();
+        let blocked = local
+            && self
+                .store
+                .as_ref()
+                .is_some_and(|store| store.running().next().is_some());
+        let (model, thinking) = self.model_settings(cx);
+        self.start.update(cx, |composer, _| {
+            composer.set_send_blocked(blocked);
+            composer.set_model_label(model, thinking);
+        });
         let keyboard =
             window.viewport_size().height - window.fully_visible_bounds().bottom() > px(120.);
         let scroll = self.scroll(Route::Start);
@@ -143,7 +154,15 @@ impl PhoneApp {
             )
             .child(
                 scroll_area("start", &scroll)
-                    .child(div().px(px(20.)).child(project_picker))
+                    .when(!local, |body| {
+                        body.child(div().px(px(20.)).child(project_picker))
+                    })
+                    .when(local, |body| {
+                        body.child(
+                            ui::hint("Pi on this phone · chats are lost on restart", &colors)
+                                .px(px(20.)),
+                        )
+                    })
                     .child(div().mt(px(12.)).child(self.start.clone()))
                     .child(
                         div()
@@ -155,7 +174,7 @@ impl PhoneApp {
                             .flex()
                             .gap(px(8.))
                             .overflow_x_scroll()
-                            .children(starters),
+                            .when(!local, |row| row.children(starters)),
                     ),
             )
             .child(self.start_drag_gesture(&scroll, cx));

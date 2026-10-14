@@ -39,6 +39,15 @@ impl PhoneApp {
             "pi://test/quickjs-backend/cancel" => "cancel",
             _ => return false,
         };
+        // Defense in depth: a release APK must not expose this fixture even if its
+        // optional Cargo feature was accidentally linked. Check links as well as UI.
+        if !gpui_android::activity::is_debug_build() {
+            self.notify_user(
+                "The local backend fixture is available only in debug builds",
+                cx,
+            );
+            return true;
+        }
         if self.connecting
             || self.resuming.is_some()
             || self.store.as_ref().is_some_and(|store| !store.is_sample())
@@ -66,7 +75,9 @@ impl PhoneApp {
     }
 
     fn start_quickjs_backend_test(&mut self, mode: Mode, cx: &mut Context<Self>) {
-        if !self.visible || !self.window_active {
+        if !gpui_android::activity::is_debug_build() {
+            self.quickjs_backend_test.error = Some("Available only in debug builds".into());
+        } else if !self.visible || !self.window_active {
             self.quickjs_backend_test.error = Some("Bring the app to the foreground first".into());
         } else if self
             .quickjs_backend_test
@@ -90,7 +101,7 @@ impl PhoneApp {
     }
 
     pub(crate) fn tick_quickjs_backend_test(&self, cx: &mut Context<Self>) {
-        if !self.quickjs_backend_test.opened {
+        if !self.quickjs_backend_test.opened || self.local_private {
             return;
         }
         let state = cx.global::<crate::testing::State>();

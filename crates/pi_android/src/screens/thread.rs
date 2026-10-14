@@ -41,7 +41,10 @@ fn thread_running(session: &Session, compacting: bool) -> bool {
     session.state.is_running() || compacting
 }
 
-fn composer_status(session: &Session, compacting: bool) -> &'static str {
+fn composer_status(session: &Session, compacting: bool) -> &str {
+    if session.local {
+        return &session.activity;
+    }
     if compacting {
         "Compacting"
     } else if session.state == State::NeedsYou {
@@ -81,6 +84,9 @@ fn agents_at_work(count: usize) -> String {
 }
 
 fn thread_subtitle(session: &Session, computer_name: &str, compacting: bool) -> String {
+    if session.local {
+        return format!("{} · on this phone · not saved", session.project);
+    }
     if compacting {
         return format!("{} · {}", session.project, computer_name);
     }
@@ -374,6 +380,7 @@ impl PhoneApp {
                     cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
                 ),
             )
+            .children(self.backend_button(cx))
     }
 
     pub(crate) fn thread_screen(
@@ -469,7 +476,11 @@ impl PhoneApp {
             return div().into_any_element();
         };
         let computer_name = store.computer.name.clone();
-        let stopping = store.live.as_ref().is_some_and(|live| live.is_stopping(id));
+        let stopping = store.is_stopping(id);
+        let local = store.is_local();
+        composer.update(cx, |composer, _| {
+            composer.set_send_blocked(local && session.state.is_running());
+        });
         let compacting = self.compact_pending(id)
             || store
                 .live
@@ -505,7 +516,9 @@ impl PhoneApp {
         let pages = session.turn().is_some_and(|turn| !turn.pages.is_empty());
         let area = composer.read(cx).area.clone();
         area.update(cx, |area, _| {
-            area.set_placeholder(if running {
+            area.set_placeholder(if local && running {
+                "Draft your next message…"
+            } else if running {
                 "Steer this run…"
             } else if pages {
                 "Ask for a change…"
@@ -764,8 +777,8 @@ impl PhoneApp {
         let live = index == last && running;
         let many = session.turns.len() > 1;
         // Review and the report card belong to the session the user runs.
-        let ending =
-            (index == last && !running && !read_only).then(|| self.ending(session, index, cx));
+        let ending = (index == last && !running && !read_only && !session.local)
+            .then(|| self.ending(session, index, cx));
         // While Pi works its calls stream in between its words; a finished
         // run folds them under its line until Show brings them back.
         let streamed = turn.streams() && (live || self.expanded_streams.contains(&(id, index)));
@@ -779,6 +792,11 @@ impl PhoneApp {
                 turn.pt(px(24.)).border_t_1().border_color(colors.line)
             })
             .child(self.prompt(id, index, turn, live, many, colors, cx))
+            .children(
+                turn.excluded
+                    .as_ref()
+                    .map(|warning| ui::hint(warning.clone(), colors)),
+            )
             .when(live || !turn.stages.is_empty(), |column| {
                 column.child(if live && turn.streams() {
                     div()
@@ -1493,7 +1511,7 @@ impl PhoneApp {
                         .text_size(px(14.))
                         .child(capitalized(&session.status_line()))
                         .child(ui::hint(
-                            "The run failed. Any changes already made remain on the computer. Ask again to retry.",
+                            if session.local {"The reply failed. This partial turn will not be included in later requests. Send again to retry."} else {"The run failed. Any changes already made remain on the computer. Ask again to retry."},
                             &colors,
                         )),
                 )
@@ -1505,7 +1523,11 @@ impl PhoneApp {
             .children(failure)
             .when(session.state == State::Stopped, |ending| {
                 ending.child(ui::hint(
-                    "Stopped by you. Changes made before stopping stay on the computer.",
+                    if session.local {
+                        "Stopped. This partial turn will not be included in later requests."
+                    } else {
+                        "Stopped by you. Changes made before stopping stay on the computer."
+                    },
                     &colors,
                 ))
             })
@@ -2229,7 +2251,7 @@ fn working_strip(
                         .line_height(px(20.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(hue)
-                        .child(label),
+                        .child(label.to_owned()),
                 )
                 .child(details),
         )

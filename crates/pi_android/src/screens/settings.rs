@@ -202,13 +202,17 @@ impl PhoneApp {
                     .child(icon("chev_r", 16., colors.muted))
                     .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Models, cx))),
             )
-            .child(
-                ui::row("resources", false, &colors)
-                    .child(icon("layers", 20., colors.muted))
-                    .child(div().flex_1().child("Resources"))
-                    .child(icon("chev_r", 16., colors.muted))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Resources, cx))),
-            )
+            .when(!self.is_local(), |body| {
+                body.child(
+                    ui::row("resources", false, &colors)
+                        .child(icon("layers", 20., colors.muted))
+                        .child(div().flex_1().child("Resources"))
+                        .child(icon("chev_r", 16., colors.muted))
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Resources, cx)),
+                        ),
+                )
+            })
             .child(
                 ui::row("debug-log", false, &colors)
                     .child(icon("term", 20., colors.muted))
@@ -239,7 +243,7 @@ impl PhoneApp {
                             ui::card(&colors)
                                 .children(computers)
                                 .child(add)
-                                .when(live, |card| {
+                                .when(live && !self.is_local(), |card| {
                                     card.child(
                                         ui::row("forget", false, &colors)
                                             .text_color(colors.coral)
@@ -270,6 +274,7 @@ impl PhoneApp {
                                     (Some(fingerprint), true) => format!(
                                         "Connected over SSH with this phone's own key. {computer}'s host key is {fingerprint}; a different one is refused."
                                     ),
+                                    _ if self.is_local() => "Subscription inference runs on this phone. Conversations are held in memory only and are lost on restart.".to_owned(),
                                     _ => "These are sample sessions: nothing runs on a computer. Add one above to follow its sessions."
                                         .to_owned(),
                                 },

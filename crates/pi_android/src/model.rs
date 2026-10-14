@@ -345,6 +345,8 @@ pub use pi_markdown::ToolImage;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Turn {
+    /// Local partial/failed turns stay visible but never enter future inference context.
+    pub excluded: Option<String>,
     pub prompt: String,
     /// The local time it was sent: "09:41".
     pub at: String,
@@ -372,6 +374,7 @@ pub struct Turn {
 impl Turn {
     pub fn new(prompt: impl Into<String>, at: impl Into<String>) -> Self {
         Self {
+            excluded: None,
             prompt: prompt.into(),
             at: at.into(),
             attachments: Vec::new(),
@@ -594,6 +597,8 @@ pub struct Details {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {
+    /// An in-memory on-device chat, not a durable remote workspace.
+    pub local: bool,
     pub id: SessionId,
     pub title: String,
     pub project: String,
@@ -636,6 +641,12 @@ impl Session {
 
     /// The line under the title in lists: what it is doing, or how it ended.
     pub fn status_line(&self) -> String {
+        if self.local {
+            return self
+                .failure
+                .clone()
+                .unwrap_or_else(|| self.activity.clone());
+        }
         match self.state {
             State::NeedsYou => self.question.as_ref().map_or_else(
                 || "Waiting for you".into(),

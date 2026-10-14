@@ -190,6 +190,9 @@ pub(crate) fn status(status: RunStatus) -> (&'static str, &'static str) {
 
 impl PhoneApp {
     pub(crate) fn schedule_host(&self) -> Option<String> {
+        if self.is_local() {
+            return None;
+        }
         self.store.as_ref().map(|store| {
             format!(
                 "{}:{}",
@@ -213,6 +216,9 @@ impl PhoneApp {
         }) && self.schedules.sample_mode != Some("offline")
     }
     pub(crate) fn schedule_supported(&self) -> bool {
+        if self.is_local() {
+            return false;
+        }
         self.store.as_ref().is_some_and(|store| {
             store
                 .live

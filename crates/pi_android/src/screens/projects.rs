@@ -33,6 +33,7 @@ impl PhoneApp {
             .min_h_0()
             .flex()
             .flex_col()
+            .children(self.backend_button(cx).map(|button|div().flex().justify_end().px(px(20.)).pt(px(8.)).child(button)))
             .child(
                 scroll_area("choose-project", &scroll).child(
                     div()

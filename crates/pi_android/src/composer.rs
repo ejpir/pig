@@ -119,6 +119,7 @@ pub struct Composer {
     session_commands: bool,
     /// A child-conversation composer exposes only text and Send.
     message_only: bool,
+    send_blocked: bool,
     /// The exact child payload remains visible but cannot be sent twice in flight.
     sending: bool,
     /// The draft's least height: taller for a new task.
@@ -128,6 +129,7 @@ pub struct Composer {
     /// What `@` offers: the files a session touched; `None` for the sample's
     /// built-in files.
     files: Option<Vec<String>>,
+    workspace: bool,
     files_loading: bool,
     files_error: Option<String>,
     /// What `/` offers. `None` selects the deterministic sample catalog;
@@ -154,11 +156,13 @@ impl Composer {
             command_button: false,
             session_commands: false,
             message_only: false,
+            send_blocked: false,
             sending: false,
             draft_height: 24.,
             imports: 0,
             import_generation: 0,
             files: None,
+            workspace: true,
             files_loading: false,
             files_error: None,
             commands: None,
@@ -167,6 +171,13 @@ impl Composer {
     }
 
     /// The files `@` offers, or `None` for the sample's files and commands.
+    pub fn set_workspace(&mut self, enabled: bool) {
+        self.workspace = enabled;
+        if !enabled {
+            self.use_files(Some(Vec::new()));
+            self.use_commands(Some(Vec::new()));
+        }
+    }
     pub fn use_files(&mut self, files: Option<Vec<String>>) {
         self.files = files;
         self.files_loading = false;
@@ -228,6 +239,9 @@ impl Composer {
         self.commands = Some(Vec::new());
     }
 
+    pub fn set_send_blocked(&mut self, blocked: bool) {
+        self.send_blocked = blocked;
+    }
     pub fn set_sending(&mut self, sending: bool) {
         self.sending = sending;
     }
@@ -341,6 +355,7 @@ impl Composer {
 
     pub fn can_send(&self, cx: &App) -> bool {
         !self.sending
+            && !self.send_blocked
             && self.imports == 0
             && (!self.area.read(cx).is_empty() || !self.attachments.is_empty())
     }
@@ -370,7 +385,9 @@ impl Composer {
             return None;
         }
         let area = self.area.read(cx);
-        if let Some((range, word)) = area.token_before_caret('@') {
+        if self.workspace
+            && let Some((range, word)) = area.token_before_caret('@')
+        {
             let word = word.to_lowercase();
             let offered: Vec<&str> = match &self.files {
                 Some(files) => files.iter().map(String::as_str).collect(),

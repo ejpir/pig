@@ -158,6 +158,7 @@ impl PhoneApp {
                 .child(ui::tap("settings", "settings", &colors).on_click(
                     cx.listener(|this, _, window, cx| this.push(Route::Settings, window, cx)),
                 ))
+                .children(self.backend_button(cx))
         };
         let Some(store) = &self.store else {
             return div().flex_1().child(appbar);
@@ -297,6 +298,9 @@ impl PhoneApp {
                 list.child(
                     ui::hint(
                         match found {
+                            _ if store.is_local() => {
+                                "On-device text chats · in memory only, lost on restart".into()
+                            }
                             true => format!(
                                 "Sessions on {} that Pi Desktop or this phone started over SSH",
                                 store.computer.name
@@ -359,7 +363,11 @@ impl PhoneApp {
                         .min_w_0()
                         .truncate()
                         .text_color(colors.faint)
-                        .child("What should we change?"),
+                        .child(if self.is_local() {
+                            "Start a new conversation…"
+                        } else {
+                            "What should we change?"
+                        }),
                 )
                 .children(project.map(|project| {
                     div()

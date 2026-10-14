@@ -243,7 +243,7 @@ The script is gpui_android's, which lists what it needs.
 
 `build_apk.py --quickjs-backend-test` builds a separate **Pi local backend tests** APK (`dev.pi.android.quickjstest`). Tap **Try the local QuickJS backend** on Connect to run the unmodified upstream agent/provider code inside this app, with an offline read/write fixture. No Bun/Node executable, computer, API key, or paid provider is used. The normal release remains SSH-based.
 
-This is not yet a local-session or provider-login feature. See [build/device verification](scripts/QUICKJS_BACKEND_VERIFICATION.md) and the [provider sign-in plan](../../experiments/quickjs-backend/PROVIDER_AUTH_PLAN.md).
+The same opt-in APK offers **Local providers · Claude + Codex** with browser/device-code login, Keystore-encrypted credentials, refresh and local logout. The top-right Pi selector chooses Local or a remote computer. Local uses the existing session/thread/composer screens, with model-supported thinking, image/text attachments, streaming and Stop. Synthetic auth/storage/inference tests pass; live-account interoperability is not yet validated. Conversations are memory-only; saved accounts survive upgrades/restarts. This debuggable build is not production credential isolation. See [build/device verification](scripts/QUICKJS_BACKEND_VERIFICATION.md) and [provider account details](../../experiments/quickjs-backend/PROVIDER_AUTH_PLAN.md).
 
 ## On the desktop
 
