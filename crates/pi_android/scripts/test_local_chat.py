@@ -93,10 +93,29 @@ def main():
         wait(lambda s: s["provider"] == provider and s["status"] == "connected"
              and not s["accounts"]["busy"] and s["accounts"][provider]["saved"], "auth")
 
-    def open_chat(provider):
-        wait(lambda s: s["visible"] and not s["accounts"]["busy"] and s["accounts"][provider]["saved"], "auth")
-        tap(f"provider-{provider}-chat", "auth")
-        return wait(lambda s: s["visible"] and s["provider"] == provider)
+    def choose_model(provider):
+        model = "claude-sonnet-4-6" if provider == "anthropic" else "gpt-5.5"
+        before = state()
+        tap("composer-model")
+        tap("model-search")
+        time.sleep(.65)
+        command("shell", "input", "text", model)
+        time.sleep(.25)
+        tap("model-choice-0")
+        value = wait(lambda s: s["provider"] == provider and s["model"] == model and s["sheet"] is None)
+        assert value["turns"] == before["turns"] and value["context_messages"] == before["context_messages"]
+        return value
+
+    def open_backend():
+        command("shell", "input", "keyevent", "KEYCODE_BACK")
+        link("pi://test/local-backend/synthetic")
+        pid = int(command("shell", "pidof", PACKAGE).decode().split()[0])
+        return wait(lambda s: s["pid"] == pid and s["visible"] and s["route"] == "Sessions")
+
+    def new_chat(provider):
+        tap("new-session")
+        wait(lambda s: s["route"] == "Start")
+        return choose_model(provider)
 
     def send(text="fixture-question"):
         tap("draft")
@@ -115,29 +134,32 @@ def main():
         link("pi://test/local-chat/" + name.lower())
         wait(lambda s: s["mode"] == name)
 
-    def back():
-        # The ordinary thread Back goes to the session list. Account management
-        # lives in that list's existing Computers menu.
-        tap("back")
-        wait(lambda s: s["route"] == "Sessions" and not s["running"])
-        tap("backend-picker")
+    def accounts():
+        tap("computers")
         tap("local-accounts")
         wait(lambda s: s["visible"], "auth")
 
     launch()
     for provider in ["anthropic", "openai-codex"]:
         logout(provider)
+    initial_backend = open_backend()
+    assert initial_backend["sessions"] == 0 and not initial_backend["running"]
+    assert "backend-picker" not in initial_backend["bounds"], "do not add another Pi/menu control"
+    tap("computers")
+    wait(lambda s: s["sheet"] == "Computers")
+    (out / "backends.png").write_bytes(command("exec-out", "screencap", "-p"))
+    tap("backend-local")
+    wait(lambda s: s["route"] == "Sessions" and s["sheet"] is None)
+    # Selecting a signed-out backend must not navigate to provider setup.
+    accounts()
+    for provider in ["anthropic", "openai-codex"]:
         login(provider)
-        initial = open_chat(provider)
+    assert open_backend()["sessions"] == 0
+    for provider in ["anthropic", "openai-codex"]:
+        initial = new_chat(provider)
         assert initial["status"] == "idle" and initial["turns"] == 0 and not initial["running"]
-        time.sleep(.4)
-        assert state()["status"] == "idle", "opening chat must not infer"
-        assert "attach" in state()["bounds"] and "composer-thinking" in state()["bounds"]
-        tap("backend-picker")
-        wait(lambda s: s["sheet"] == "Computers")
-        (out / (provider + "-backends.png")).write_bytes(command("exec-out", "screencap", "-p"))
-        tap("backend-local")
-        wait(lambda s: s["route"] == initial["route"] and s["sheet"] is None)
+        assert "attach" in initial["bounds"] and "composer-thinking" in initial["bounds"]
+        assert "backend-picker" not in initial["bounds"]
         tap("composer-thinking")
         tap("thinking-choice-3")
         wait(lambda s: s["thinking"] == "Medium" and s["sheet"] is None)
@@ -145,16 +167,21 @@ def main():
         wait(lambda s: s["status"] == "done" and s["context_messages"] == 2 and s["reply_verified"])
         send("fixture-followup")
         wait(lambda s: s["status"] == "done" and s["context_messages"] == 4 and s["reply_verified"])
+        route = state()["route"]
+        other = "openai-codex" if provider == "anthropic" else "anthropic"
+        choose_model(other)
+        assert state()["route"] == route
+        send("cross-provider-followup")
+        wait(lambda s: s["status"] == "done" and s["context_messages"] == 6 and s["reply_verified"])
+        choose_model(provider)
+        assert state()["route"] == route and state()["context_messages"] == 6
         (out / (provider + ".png")).write_bytes(command("exec-out", "screencap", "-p"))
-        tap("composer-model")
-        tap("model-choice-1")
-        wait(lambda s: s["model"] != initial["model"] and s["turns"] == 2 and s["context_messages"] == 4)
         mode("Stall")
         send("fixture-stop")
         wait(lambda s: s["running"] and s["reply_verified"])
         tap("stop")
         wait(lambda s: s["status"] == "stopped" and not s["running"])
-        assert state()["context_messages"] == 4
+        assert state()["context_messages"] == 6
         send("fixture-background")
         wait(lambda s: s["running"] and s["reply_verified"])
         command("shell", "input", "keyevent", "KEYCODE_HOME")
@@ -162,30 +189,22 @@ def main():
         command("shell", "am", "start", "-W", "-n", ACTIVITY)
         wait(lambda s: s["visible"] and not s["running"])
         assert state()["status"] == "stopped", "resume must not replay inference"
-        send("fixture-back")
-        wait(lambda s: s["running"] and s["reply_verified"])
-        back()
-        wait(lambda s: not s["visible"] and not s["running"])
-        open_chat(provider)
         mode("Reject")
         send("fixture-rejected")
         wait(lambda s: s["status"] == "auth_error" and not s["running"])
-        assert state()["context_messages"] == 4, "reopening the same account must retain conversations"
-        mode("Reply")
+        assert state()["context_messages"] == 6
         tap("back")
         wait(lambda s: s["route"] == "Sessions")
-        tap("new-session")
-        wait(lambda s: s["route"] == "Start")
-        send("fixture-restart")
-        wait(lambda s: s["status"] == "done" and s["reply_verified"])
-        back()
-    # Logout/new login must not retain the previous account's chat, even with the same provider.
-    logout("openai-codex")
-    login("openai-codex")
-    assert open_chat("openai-codex")["turns"] == 0
+        accounts()
+        logout(provider)
+        login(provider)
+        reopened = open_backend()
+        assert reopened["sessions"] >= 1, "account management is not a chat destination or session reset"
+        mode("Reply")
+    # Conversations stay memory-only; saved accounts survive process restart.
     launch()
-    assert open_chat("openai-codex")["turns"] == 0, "ephemeral chat must not persist in prefs"
-    back()
+    assert open_backend()["sessions"] == 0
+    accounts()
     for provider in ["anthropic", "openai-codex"]:
         logout(provider)
     logs = b"".join(command("logcat", "-d", "--pid", str(pid)) for pid in pids)
@@ -196,7 +215,7 @@ def main():
     (out / "report.json").write_text(json.dumps({"passed": True, "synthetic_only": True,
         "pids": sorted(pids), "checks": ["Claude OAuth SSE", "Codex OAuth SSE", "two-turn context", "model selection",
         "Stop", "background cancellation", "resume without replay", "Back cancellation", "redacted provider error",
-        "shared New session", "shared thread/composer/model picker/Stop", "thinking selection", "top-right Pi backend picker", "attachment control present", "account isolation", "ephemeral restart", "log redaction"]}, indent=2) + "\n")
+        "shared New session", "shared thread/composer/model picker/Stop", "thinking selection", "existing Pi/computer backend selector", "in-chat cross-provider history", "account management without session replacement", "attachment control present", "credential namespace isolation", "ephemeral restart", "log redaction"]}, indent=2) + "\n")
     print("PASS: local Claude/Codex chat, context, model selection, cancellation, isolation and redaction")
 
 

@@ -23,8 +23,9 @@ impl PhoneApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = theme(cx);
-        let local = self.is_local();
-        let blocked = local
+        let workspace = self.backend_supports("workspace_browse");
+        let queues = self.backend_supports("prompt_queue");
+        let blocked = !queues
             && self
                 .store
                 .as_ref()
@@ -154,10 +155,10 @@ impl PhoneApp {
             )
             .child(
                 scroll_area("start", &scroll)
-                    .when(!local, |body| {
+                    .when(workspace, |body| {
                         body.child(div().px(px(20.)).child(project_picker))
                     })
-                    .when(local, |body| {
+                    .when(!workspace, |body| {
                         body.child(
                             ui::hint("Pi on this phone · chats are lost on restart", &colors)
                                 .px(px(20.)),
@@ -174,7 +175,7 @@ impl PhoneApp {
                             .flex()
                             .gap(px(8.))
                             .overflow_x_scroll()
-                            .when(!local, |row| row.children(starters)),
+                            .when(workspace, |row| row.children(starters)),
                     ),
             )
             .child(self.start_drag_gesture(&scroll, cx));

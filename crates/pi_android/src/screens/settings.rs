@@ -202,7 +202,7 @@ impl PhoneApp {
                     .child(icon("chev_r", 16., colors.muted))
                     .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Models, cx))),
             )
-            .when(!self.is_local(), |body| {
+            .when(self.backend_supports("resources"), |body| {
                 body.child(
                     ui::row("resources", false, &colors)
                         .child(icon("layers", 20., colors.muted))

@@ -1,11 +1,8 @@
 //! On-device execution adapter for the ordinary Store/session/thread UI.
 //! Session history is memory-only; no SSH transport, sample scripts, tools or files.
-use crate::{
-    app::{PhoneApp, Route},
-    model::*,
-    prompt::Prompt,
-    store::{Event, Store},
-};
+use crate::{app::PhoneApp, model::*, prompt::Prompt, store::Event};
+#[cfg(test)]
+use crate::{app::Route, store::Store};
 use gpui::{Context, Window};
 use pi_quickjs_backend_poc::{
     auth::{Provider, Vault},
@@ -24,6 +21,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+const FEATURES: &[&str] = &[
+    "models",
+    "thinking",
+    "attachments",
+    "streaming",
+    "stop",
+    "visualize",
+];
 struct TurnMeta {
     attachments: Vec<String>,
     excluded: Option<String>,
@@ -39,7 +44,7 @@ struct Conversation {
     record_error: bool,
 }
 pub(crate) struct Local {
-    pub provider: Provider,
+    default_provider: Provider,
     pub synthetic: bool,
     vault: Arc<dyn Vault>,
     default_model: String,
@@ -52,6 +57,13 @@ pub(crate) struct Local {
 fn response(pi: &mut pi_core::session::Session, command: &str, data: Value) -> Result<(), String> {
     pi.apply(&json!({"type":"response","command":command,"success":true,"data":data}))
         .map_err(|_| "Invalid local backend record".into())
+}
+fn provider_id(id: &str) -> Option<Provider> {
+    match id {
+        "anthropic" => Some(Provider::Claude),
+        "openai-codex" => Some(Provider::Codex),
+        _ => None,
+    }
 }
 fn thinking_label(level: &str) -> &str {
     match level {
@@ -67,12 +79,23 @@ fn thinking_label(level: &str) -> &str {
 }
 impl Local {
     pub fn new(provider: Provider, vault: Arc<dyn Vault>, synthetic: bool) -> Self {
-        let metadata = chat::catalog(provider).as_array().unwrap().clone();
-        let mut catalog: Vec<pi_core::protocol::Model> =
-            serde_json::from_value(json!(metadata)).expect("pinned model catalog");
-        catalog.sort_by_key(|m| m.id != chat::models(provider)[0].0);
-        Self {
+        let mut metadata = Vec::new();
+        for p in [
             provider,
+            if provider == Provider::Claude {
+                Provider::Codex
+            } else {
+                Provider::Claude
+            },
+        ] {
+            let mut models = chat::catalog(p).as_array().unwrap().clone();
+            models.sort_by_key(|m| m["id"] != chat::models(p)[0].0);
+            metadata.extend(models);
+        }
+        let catalog: Vec<pi_core::protocol::Model> =
+            serde_json::from_value(json!(metadata)).expect("pinned model catalog");
+        Self {
+            default_provider: provider,
             synthetic,
             vault,
             default_model: chat::models(provider)[0].0.clone(),
@@ -83,20 +106,20 @@ impl Local {
             mode: Mode::Reply,
         }
     }
-    fn metadata(&self, model: &str) -> &Value {
+    fn metadata(&self, provider: Provider, model: &str) -> &Value {
         self.metadata
             .iter()
-            .find(|m| m["id"] == model)
+            .find(|m| m["provider"] == provider.id() && m["id"] == model)
             .expect("validated model")
     }
-    fn clamp(&self, model: &str, level: &str) -> String {
-        self.metadata(model)["clampedThinkingLevels"][level]
+    fn clamp(&self, provider: Provider, model: &str, level: &str) -> String {
+        self.metadata(provider, model)["clampedThinkingLevels"][level]
             .as_str()
             .expect("known thinking level")
             .into()
     }
-    fn raw_levels(&self, model: &str) -> Vec<String> {
-        self.metadata(model)["supportedThinkingLevels"]
+    fn raw_levels(&self, provider: Provider, model: &str) -> Vec<String> {
+        self.metadata(provider, model)["supportedThinkingLevels"]
             .as_array()
             .unwrap()
             .iter()
@@ -120,7 +143,7 @@ impl Local {
             &mut pi,
             "get_state",
             json!({"sessionId":format!("phone-{}",id.0),"sessionFile":null,
-            "model":self.current_model(None),"thinkingLevel":self.clamp(&self.default_model,&self.default_thinking),
+            "model":self.current_model(None),"thinkingLevel":self.clamp(self.default_provider,&self.default_model,&self.default_thinking),
             "isStreaming":false,"isCompacting":false,"isBashRunning":false,"autoCompactionEnabled":false}),
         )?;
         response(&mut pi, "get_messages", json!({"messages":[]}))?;
@@ -132,14 +155,14 @@ impl Local {
         response(
             &mut pi,
             "get_available_thinking_levels",
-            json!({"levels":self.raw_levels(&self.default_model)}),
+            json!({"levels":self.raw_levels(self.default_provider,&self.default_model)}),
         )?;
         response(&mut pi, "get_active_tools", json!({"activeTools":[]}))?;
         response(&mut pi, "get_commands", json!({"commands":[]}))?;
         response(
             &mut pi,
             "get_backend_info",
-            json!({"backend":"quickjs","commands":["prompt","abort","set_model","set_thinking_level","get_messages","get_state","get_available_models","get_available_thinking_levels"],"features":[]}),
+            json!({"backend":"quickjs","commands":["prompt","abort","set_model","set_thinking_level","get_messages","get_state","get_available_models","get_available_thinking_levels"],"features":FEATURES,"uiCapabilities":FEATURES}),
         )?;
         self.conversations.insert(
             id,
@@ -159,7 +182,14 @@ impl Local {
         if let Some(id) = id {
             return self.conversations.get(&id)?.pi.state.model.as_ref();
         }
-        self.catalog.iter().find(|m| m.id == self.default_model)
+        self.catalog
+            .iter()
+            .find(|m| m.provider == self.default_provider.id() && m.id == self.default_model)
+    }
+    pub fn provider(&self, id: Option<SessionId>) -> Provider {
+        self.current_model(id).map_or(self.default_provider, |m| {
+            provider_id(&m.provider).expect("known provider")
+        })
     }
     pub fn model(&self, id: Option<SessionId>) -> String {
         self.current_model(id)
@@ -181,14 +211,14 @@ impl Local {
         &self.catalog
     }
     pub fn thinking_levels(&self, id: Option<SessionId>) -> Vec<String> {
-        self.raw_levels(&self.model(id))
+        self.raw_levels(self.provider(id), &self.model(id))
             .iter()
             .map(|l| thinking_label(l).to_owned())
             .collect()
     }
     pub fn set_thinking(&mut self, id: Option<SessionId>, label: &str) -> Result<(), String> {
         let level = self
-            .raw_levels(&self.model(id))
+            .raw_levels(self.provider(id), &self.model(id))
             .into_iter()
             .find(|l| thinking_label(l) == label)
             .ok_or("Thinking level is not supported by this model")?;
@@ -222,8 +252,9 @@ impl Local {
         let old = id
             .and_then(|id| self.conversations.get(&id))
             .map_or(&self.default_thinking, |c| &c.pi.state.thinking_level);
-        let level = self.clamp(model, old);
-        let levels = self.raw_levels(model);
+        let chosen_provider = provider_id(provider).ok_or("Unknown provider")?;
+        let level = self.clamp(chosen_provider, model, old);
+        let levels = self.raw_levels(chosen_provider, model);
         if let Some(id) = id {
             let c = self
                 .conversations
@@ -251,10 +282,17 @@ impl Local {
                 json!({"levels":levels}),
             )?;
         } else {
+            self.default_provider = chosen_provider;
             self.default_model = model.into();
             self.default_thinking = level;
         }
         Ok(())
+    }
+    pub fn supports(&self, feature: &str) -> bool {
+        FEATURES.contains(&feature)
+    }
+    pub fn commands(&self, id: SessionId) -> Option<&[pi_core::protocol::SlashCommand]> {
+        Some(self.conversations.get(&id)?.pi.commands.as_slice())
     }
     pub fn running(&self) -> bool {
         self.conversations.values().any(|c| c.task.is_some())
@@ -336,7 +374,8 @@ impl Local {
             return Err("Session attachment/context limit reached. Start a new session; your draft was kept.".into());
         }
         let request = Request {
-            provider: self.provider,
+            provider: provider_id(&c.pi.state.model.as_ref().unwrap().provider)
+                .expect("known provider"),
             model: c.pi.state.model.as_ref().unwrap().id.clone(),
             thinking_level: c.pi.state.thinking_level.clone(),
             messages,
@@ -373,7 +412,7 @@ impl Local {
             },
         );
         session.local = true;
-        session.project = self.provider.label().into();
+        session.project = "Local".into();
         session.details.session_file = "In memory only · lost on restart".into();
         session.activity = status_text(c.status).into();
         for (turn, meta) in session.turns.iter_mut().zip(&c.turns) {
@@ -508,6 +547,7 @@ fn publish(path: PathBuf, value: Option<Value>) {
 }
 
 impl PhoneApp {
+    #[cfg(test)]
     pub(crate) fn open_local_chat(
         &mut self,
         provider: Provider,
@@ -519,7 +559,6 @@ impl PhoneApp {
         self.cancel_connection_attempt();
         if let Some(store) = &self.store
             && let Some(local) = &store.local
-            && local.provider == provider
             && local.synthetic == synthetic
         {
             if let Some(id) = store.sessions.first().map(|s| s.id) {
@@ -555,35 +594,51 @@ impl PhoneApp {
         }
         self.start.update(cx, |composer, cx| {
             composer.clear(cx);
-            composer.set_workspace(false);
+            composer.set_workspace(true);
+            composer.use_files(Some(Vec::new()));
+            composer.use_commands(Some(Vec::new()));
         });
         self.show_session(id, window, cx);
         true
     }
-    pub(crate) fn forget_local_chat(
+    pub(crate) fn invalidate_local_account(
         &mut self,
         provider: Provider,
         synthetic: bool,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .store
-            .as_ref()
-            .and_then(|s| s.local.as_ref())
-            .is_some_and(|l| l.provider == provider && l.synthetic == synthetic)
-        {
-            self.store = None;
-            self.start.update(cx, |start, cx| start.clear(cx));
-            self.threads.clear();
-            self.thread_snapshots.clear();
-            self.thread_lists.clear();
-            self.thread_list_shapes.clear();
-            self.routes = vec![Route::Connect];
-            publish(self.data_dir.join("quickjs-chat-test"), None);
+        // Account changes invalidate authorization, not the conversation. Workers
+        // admitted under this account are cancelled; lease revocation still owns
+        // logout/refresh coordination. An explicit Send is needed after re-login.
+        for store in self.store.iter_mut().chain(self.parked_local.iter_mut()) {
+            if let Some(backend) = store.local.as_mut().filter(|b| b.synthetic == synthetic) {
+                for c in backend.conversations.values_mut() {
+                    if provider_id(&c.pi.state.model.as_ref().unwrap().provider) == Some(provider)
+                        && let Some(task) = &c.task
+                    {
+                        task.cancel();
+                    }
+                }
+            }
         }
+        cx.notify();
     }
     /// Shared UI test controls are intentionally synthetic-only; no input/credentials in links.
-    pub(crate) fn local_fixture_url(&mut self, url: &str, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn local_fixture_url(
+        &mut self,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if url == "pi://test/local-backend/synthetic" {
+            if gpui_android::activity::is_debug_build()
+                && !self.local_private
+                && self.local_providers.is_synthetic()
+            {
+                self.select_local_backend(window, cx);
+            }
+            return true;
+        }
         let mode = match url {
             "pi://test/local-chat/reply" => Mode::Reply,
             "pi://test/local-chat/stall" => Mode::Stall,
@@ -631,7 +686,7 @@ impl PhoneApp {
                     "composer",
                     "composer-model",
                     "composer-thinking",
-                    "backend-picker",
+                    "model-search",
                     "backend-local",
                     "composer-attach",
                     "attach",
@@ -655,8 +710,8 @@ impl PhoneApp {
             Some(
                 json!({"synthetic":true,"visible":visible,"pid":std::process::id(),
             "frame":self.local_frame,"route":format!("{:?}",self.route()),"sheet":self.sheet.map(|s|format!("{s:?}")),
-            "provider":local.provider.id(),"model":local.model(self.model_session()),"thinking":local.model_settings(self.model_session()).1,"status":current.map_or("idle",|c|c.status),
-            "running":local.running(),"turns":session.map_or(0,|s|s.turns.len()),"context_messages":current.map_or(0,|c|c.history.len()),
+            "provider":local.provider(self.model_session()).id(),"model":local.model(self.model_session()),"thinking":local.model_settings(self.model_session()).1,"status":current.map_or("idle",|c|c.status),
+            "running":local.running(),"sessions":store.sessions.len(),"turns":session.map_or(0,|s|s.turns.len()),"context_messages":current.map_or(0,|c|c.history.len()),
             "reply_verified":session.and_then(|s|s.turn()).and_then(|t|t.summary.as_ref()).is_some_and(|s|s.text()=="Hello from the phone 🌍"),
             "bounds":if visible {json!(bounds)} else {json!({})},"scale":geometry.scale,"mode":format!("{:?}",local.mode)}),
             ),
@@ -672,23 +727,29 @@ mod tests {
     use super::*;
     use gpui::{Modifiers, px};
     use pi_quickjs_backend_poc::auth::VaultScope;
-    struct Memory(Mutex<Value>);
+    struct Memory(Mutex<std::collections::BTreeMap<String, Value>>);
     impl Memory {
         fn new() -> Arc<Self> {
-            Arc::new(Self(Mutex::new(json!({"generation":"0","credential":{
+            Arc::new(Self(Mutex::new([Provider::Claude,Provider::Codex].into_iter().map(|p|(p.id().to_owned(),json!({"generation":"0","credential":{
                 "type":"oauth","access":"expired","refresh":"synthetic-chat-old","expires":0,"accountId":"acct_test_123"
-            }}))))
+            }}))).collect())))
         }
     }
     impl Vault for Memory {
         fn scope(&self) -> VaultScope {
             VaultScope::Synthetic
         }
-        fn read(&self, _: Provider) -> anyhow::Result<Value> {
-            Ok(self.0.lock().unwrap().clone())
+        fn read(&self, provider: Provider) -> anyhow::Result<Value> {
+            Ok(self.0.lock().unwrap()[provider.id()].clone())
         }
-        fn write(&self, _: Provider, expected: &str, data: &str) -> anyhow::Result<Option<String>> {
-            let mut v = self.0.lock().unwrap();
+        fn write(
+            &self,
+            provider: Provider,
+            expected: &str,
+            data: &str,
+        ) -> anyhow::Result<Option<String>> {
+            let mut records = self.0.lock().unwrap();
+            let v = records.get_mut(provider.id()).unwrap();
             if v["generation"] != expected {
                 return Ok(None);
             }
@@ -696,8 +757,8 @@ mod tests {
             *v = json!({"generation":next,"credential":serde_json::from_str::<Value>(data)?});
             Ok(Some(next))
         }
-        fn clear(&self, _: Provider) -> anyhow::Result<()> {
-            self.0.lock().unwrap()["credential"] = Value::Null;
+        fn clear(&self, provider: Provider) -> anyhow::Result<()> {
+            self.0.lock().unwrap().get_mut(provider.id()).unwrap()["credential"] = Value::Null;
             Ok(())
         }
     }
@@ -787,6 +848,33 @@ mod tests {
             }
             assert_eq!(canonical[1]["role"], "assistant");
             assert!(canonical[1]["usage"].is_object());
+            let other = if provider == Provider::Claude {
+                Provider::Codex
+            } else {
+                Provider::Claude
+            };
+            let generation = store.generation;
+            store
+                .set_model(Some(id), other.id(), &chat::models(other)[0].0)
+                .unwrap();
+            assert_eq!(store.generation, generation);
+            assert_eq!(
+                store.local.as_ref().unwrap().conversations[&id].history,
+                canonical
+            );
+            assert_eq!(store.session(id).unwrap().turns.len(), 3);
+            store
+                .send(id, "follow up using the other provider".into(), vec![])
+                .unwrap();
+            drain(&mut store);
+            assert_eq!(store.session(id).unwrap().state, State::Done);
+            assert_eq!(
+                store.local.as_ref().unwrap().conversations[&id].history[7]["provider"],
+                other.id()
+            );
+            let canonical = store.local.as_ref().unwrap().conversations[&id]
+                .history
+                .clone();
             store.local.as_mut().unwrap().mode = Mode::Stall;
             store.send(id, "stop fixture".into(), vec![]).unwrap();
             store.stop(id).unwrap();
@@ -831,10 +919,10 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("composer-model").is_some());
-        for name in ["composer-attach", "composer-thinking", "backend-picker"] {
+        for name in ["composer-attach", "composer-thinking"] {
             assert!(cx.debug_bounds(name).is_some(), "{name}");
         }
-        for name in ["composer-command", "local-chat-composer"] {
+        for name in ["composer-command", "local-chat-composer", "backend-picker"] {
             assert!(cx.debug_bounds(name).is_none(), "{name}");
         }
         let point = cx.debug_bounds("composer-model").unwrap().center();
@@ -868,15 +956,60 @@ mod tests {
                 app.select_local_backend(window, cx);
                 assert_eq!(app.route(), Route::Thread(id));
                 assert!(app.open_local_chat(Provider::Codex, Memory::new(), true, window, cx));
-                assert_ne!(app.store.as_ref().unwrap().generation, old);
-                assert_ne!(app.model_session(), Some(id));
-                assert!(!app.threads.contains_key(&id));
-                app.forget_local_chat(Provider::Claude, true, cx);
+                assert_eq!(app.store.as_ref().unwrap().generation, old);
+                assert_eq!(app.model_session(), Some(id));
+                assert_eq!(composer.read(cx).area.read(cx).text(), "private draft");
+                app.choose_model(
+                    "GPT".into(),
+                    Provider::Codex.id().into(),
+                    chat::models(Provider::Codex)[0].0.clone(),
+                    cx,
+                );
+                assert_eq!(app.model_session(), Some(id));
+                assert_eq!(app.store.as_ref().unwrap().generation, old);
+                assert_eq!(
+                    app.store.as_ref().unwrap().session(id).unwrap().project,
+                    "Local"
+                );
+                assert_eq!(composer.read(cx).area.read(cx).text(), "private draft");
+                app.invalidate_local_account(Provider::Claude, true, cx);
+                assert!(app.store.as_ref().unwrap().session(id).is_some());
+                app.invalidate_local_account(Provider::Codex, false, cx);
                 assert!(app.store.is_some());
-                app.forget_local_chat(Provider::Codex, false, cx);
-                assert!(app.store.is_some());
-                app.forget_local_chat(Provider::Codex, true, cx);
-                assert!(app.store.is_none());
+                app.invalidate_local_account(Provider::Codex, true, cx);
+                assert!(app.store.as_ref().unwrap().session(id).is_some());
+                assert_eq!(composer.read(cx).area.read(cx).text(), "private draft");
+                assert!(!<PhoneApp as pi_visual_ui::Host>::visual_persist(app));
+                let import = composer.update(cx, |c, cx| c.begin_import(cx));
+                assert!(!composer.read(cx).can_send(cx));
+                app.start.update(cx, |c, cx| {
+                    c.set_text("new session draft", cx);
+                    c.attach(
+                        crate::composer::Attachment::File {
+                            name: "note.txt".into(),
+                            size: "4 bytes".into(),
+                            contents: "note".into(),
+                        },
+                        cx,
+                    );
+                });
+                app.open_sample(window, cx);
+                assert!(app.parked_local.as_ref().unwrap().session(id).is_some());
+                app.select_local_backend(window, cx);
+                assert!(app.store.as_ref().unwrap().session(id).is_some());
+                assert_ne!(
+                    app.store.as_ref().unwrap().generation,
+                    old,
+                    "retire callbacks admitted before parking"
+                );
+                assert!(composer.read(cx).can_send(cx));
+                assert!(!composer.update(cx, |c, cx| c.finish_import(import, cx)));
+                assert_eq!(app.start.read(cx).area.read(cx).text(), "new session draft");
+                assert_eq!(app.start.read(cx).attachments().len(), 1);
+                assert_eq!(
+                    app.threads[&id].read(cx).area.read(cx).text(),
+                    "private draft"
+                );
             })
         });
     }

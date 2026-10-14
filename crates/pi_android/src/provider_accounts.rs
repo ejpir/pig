@@ -77,7 +77,7 @@ impl Vault for AndroidVault {
         self.0.clear(provider.id()).map_err(anyhow::Error::msg)
     }
 }
-fn vault(synthetic: bool) -> Option<Arc<dyn Vault>> {
+pub(crate) fn vault(synthetic: bool) -> Option<Arc<dyn Vault>> {
     #[cfg(target_os = "android")]
     {
         Some(Arc::new(AndroidVault(
@@ -128,6 +128,9 @@ pub(crate) struct Panel {
     error: Option<String>,
 }
 impl Panel {
+    pub(crate) fn is_synthetic(&self) -> bool {
+        self.synthetic
+    }
     fn running(&self) -> bool {
         self.task.as_ref().is_some_and(|t| !t.is_finished())
     }
@@ -181,10 +184,7 @@ impl PhoneApp {
             "pi://test/local-providers/synthetic" => true,
             _ => return false,
         };
-        if self.connecting
-            || self.resuming.is_some()
-            || self.store.as_ref().is_some_and(|s| s.live.is_some())
-        {
+        if self.connecting || self.resuming.is_some() {
             self.notify_user("Open local providers without an active remote session", cx);
             return true;
         }
@@ -242,33 +242,6 @@ impl PhoneApp {
                     self.local_providers.revision,
                 )
     }
-    fn provider_chat(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.local_providers.visible
-            || !self.visible
-            || !self.window_active
-            || self.local_providers.running()
-            || self.connecting
-            || self.resuming.is_some()
-            || self.store.as_ref().is_some_and(|s| s.live.is_some())
-        {
-            return;
-        }
-        let saved = self
-            .local_providers
-            .saved
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if saved["busy"] == true || saved[provider.id()]["saved"] != true {
-            return;
-        }
-        let Some(vault) = self.local_providers.vault.clone() else {
-            return;
-        };
-        if self.open_local_chat(provider, vault, self.local_providers.synthetic, window, cx) {
-            self.local_providers.visible = false;
-        }
-    }
     fn provider_login(&mut self, provider: Provider, operation: Operation, cx: &mut Context<Self>) {
         if !self.local_providers.visible
             || !self.visible
@@ -287,7 +260,7 @@ impl PhoneApp {
             return;
         };
         if operation == Operation::Login {
-            self.forget_local_chat(provider, self.local_providers.synthetic, cx);
+            self.invalidate_local_account(provider, self.local_providers.synthetic, cx);
         }
         let result = if self.local_providers.synthetic {
             pi_quickjs_backend_poc::auth_fixture::start(provider, operation, vault)
@@ -347,7 +320,7 @@ impl PhoneApp {
     }
     fn provider_logout(&mut self, provider: Provider, cx: &mut Context<Self>) {
         self.local_providers.revision = self.local_providers.revision.wrapping_add(1);
-        self.forget_local_chat(provider, self.local_providers.synthetic, cx);
+        self.invalidate_local_account(provider, self.local_providers.synthetic, cx);
         if self.local_providers.task_provider == Some(provider) {
             if let Some(task) = &self.local_providers.task {
                 task.cancel();
@@ -458,26 +431,6 @@ impl PhoneApp {
                     .p(px(14.))
                     .child(ui::serif(provider.label(), 23.))
                     .child(ui::hint(message, &colors))
-                    .when(connected, |card| {
-                        card.child(
-                            ui::button(
-                                format!("provider-{}-chat", provider.id()),
-                                Button::Primary,
-                                None,
-                                "Chat on this phone",
-                                false,
-                                &colors,
-                            )
-                            .opacity(if available && !running { 1. } else { 0.5 })
-                            .when(available && !running, |button| {
-                                button.on_click(cx.listener(move |this, _, window, cx| {
-                                    if this.provider_action(stamp) {
-                                        this.provider_chat(provider, window, cx);
-                                    }
-                                }))
-                            }),
-                        )
-                    })
                     .child(
                         div()
                             .flex()

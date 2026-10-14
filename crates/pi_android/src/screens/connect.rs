@@ -157,7 +157,7 @@ impl PhoneApp {
                     "Set up with an SSH key",
                     None,
                     &colors,
-                ).children(self.backend_button(cx)))
+                ))
                 .child(
                     scroll_area("connect", &scroll).child(
                         div()
@@ -316,7 +316,7 @@ impl PhoneApp {
             .min_h_0()
             .flex()
             .flex_col()
-            .when(cfg!(feature="quickjs-backend-test"),|screen|screen.child(div().h(px(56.)).flex().justify_end().px(px(4.)).children(self.backend_button(cx))))
+
             .child(
                 scroll_area("connect", &scroll).child(
                     div()
@@ -326,8 +326,9 @@ impl PhoneApp {
                         .flex()
                         .flex_col()
                         .child(
-                            ui::tile_box(48., 14., colors.accent, &colors)
-                                .child(icon("pi", 24., colors.accent)),
+                            ui::tile_box(48., 14., colors.accent, &colors).id("computers")
+                                .child(icon("pi", 24., colors.accent))
+                                .on_click(cx.listener(|this,_,_,cx|this.open_sheet(crate::app::Sheet::Computers,cx))),
                         )
                         .child(
                             ui::serif("Where does Pi run?", 31.)
@@ -570,14 +571,6 @@ impl PhoneApp {
             .min_h_0()
             .flex()
             .flex_col()
-            .children(self.backend_button(cx).map(|button| {
-                div()
-                    .flex()
-                    .justify_end()
-                    .px(px(20.))
-                    .pt(px(8.))
-                    .child(button)
-            }))
             .child(
                 scroll_area("connect", &scroll).child(
                     div()

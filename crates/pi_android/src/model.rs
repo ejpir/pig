@@ -597,8 +597,10 @@ pub struct Details {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {
-    /// An in-memory on-device chat, not a durable remote workspace.
+    /// Execution origin only. Feature availability comes from backend metadata.
     pub local: bool,
+    /// Optional authoritative UI capabilities; absent retains legacy-backend behavior.
+    pub backend_features: Option<Vec<String>>,
     pub id: SessionId,
     pub title: String,
     pub project: String,
@@ -627,6 +629,11 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn supports(&self, feature: &str) -> bool {
+        self.backend_features
+            .as_ref()
+            .is_none_or(|features| features.iter().any(|f| f == feature))
+    }
     pub fn turn(&self) -> Option<&Turn> {
         self.turns.last()
     }

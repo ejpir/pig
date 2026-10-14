@@ -156,6 +156,7 @@ pub(crate) fn new_session(
     let (name, folder) = PROJECTS[project.min(PROJECTS.len() - 1)];
     let mut session = Session {
         local: false,
+        backend_features: None,
         id,
         title: title_for(&prompt),
         project: name.into(),
@@ -458,6 +459,7 @@ fn session(id: u32, title: &str, project: usize, state: State, turn: Turn) -> Se
     let (name, folder) = PROJECTS[project];
     Session {
         local: false,
+        backend_features: None,
         id: SessionId(id),
         title: title.into(),
         project: name.into(),

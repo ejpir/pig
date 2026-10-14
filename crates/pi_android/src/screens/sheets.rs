@@ -497,6 +497,7 @@ impl PhoneApp {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.close_sheet(cx);
                             this.cancel_connection_attempt();
+                            this.preserve_local_drafts(cx);
                             if this.is_local() {
                                 this.start.update(cx, |c, cx| c.clear(cx));
                                 this.replace_store(None);
@@ -1952,7 +1953,7 @@ impl PhoneApp {
                     })),
                 )
             })
-            .when(!session.local, |body| {
+            .when(session.supports("file_history"), |body| {
                 body.child(
                     row(
                         "open-jj-history",
@@ -2274,7 +2275,7 @@ impl PhoneApp {
                 Box::new(move |this, window, cx| this.open_review(id, 0, window, cx)),
             ));
         }
-        if !self.is_local() {
+        if session.supports("file_history") {
             rows.push((
                 "clock",
                 "File history",
@@ -2311,7 +2312,7 @@ impl PhoneApp {
         ));
         div()
             .pb(px(8.))
-            .when(!self.is_local(), |body| {
+            .when(session.supports("swarm"), |body| {
                 body.child(
                     ui::card(colors)
                         .mt(px(8.))

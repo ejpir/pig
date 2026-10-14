@@ -67,6 +67,10 @@ fn generation() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 impl Store {
+    #[cfg(feature = "quickjs-backend-test")]
+    pub(crate) fn retire_generation(&mut self) {
+        self.generation = generation();
+    }
     pub fn sample(computer: Computer) -> Self {
         Self {
             generation: generation(),
@@ -114,6 +118,20 @@ impl Store {
 
     /// Shared UI contract. Local catalogs are authoritative; None retains the
     /// existing SSH legacy/default or sample presentation behavior.
+    pub fn supports(&self, _feature: &str) -> bool {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(backend) = &self.local {
+            return backend.supports(_feature);
+        }
+        true
+    }
+    pub fn commands(&self, id: SessionId) -> Option<&[pi_core::protocol::SlashCommand]> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(backend) = &self.local {
+            return backend.commands(id);
+        }
+        self.live.as_ref()?.commands(id)
+    }
     pub fn models(&self) -> Option<&[pi_core::protocol::Model]> {
         #[cfg(feature = "quickjs-backend-test")]
         if let Some(local) = &self.local {
@@ -150,7 +168,13 @@ impl Store {
     ) -> Result<(), String> {
         #[cfg(feature = "quickjs-backend-test")]
         if let Some(local) = &mut self.local {
-            return local.set_model(id, provider, model);
+            local.set_model(id, provider, model)?;
+            if let Some(id) = id
+                && let Some(session) = self.sessions.iter_mut().find(|s| s.id == id)
+            {
+                *session = local.project(id);
+            }
+            return Ok(());
         }
         let live = self.live.as_mut().ok_or("No execution backend")?;
         if let Some(id) = id {
@@ -163,7 +187,13 @@ impl Store {
     pub fn set_thinking(&mut self, id: Option<SessionId>, level: &str) -> Result<(), String> {
         #[cfg(feature = "quickjs-backend-test")]
         if let Some(local) = &mut self.local {
-            return local.set_thinking(id, level);
+            local.set_thinking(id, level)?;
+            if let Some(id) = id
+                && let Some(session) = self.sessions.iter_mut().find(|s| s.id == id)
+            {
+                *session = local.project(id);
+            }
+            return Ok(());
         }
         let live = self.live.as_mut().ok_or("No execution backend")?;
         if let Some(id) = id {

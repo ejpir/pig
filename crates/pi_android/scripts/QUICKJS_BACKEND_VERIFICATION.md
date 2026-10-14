@@ -63,7 +63,7 @@ python3 crates/pi_android/scripts/test_provider_accounts.py \
 
 This script opens **only synthetic mode**, uses a separate `no_backup/local-providers/synthetic` namespace, and never contacts real auth/provider endpoints. It tests masked native code entry, device polling, explicit sign-in-code copying with synthetic-only clipboard read-back, background/return, process restart, encrypted persistence/refresh, tampered ciphertext/AAD, missing keys, failed-write preservation, logout/reset and cancellation. It never clears the production or real-account namespace. Synthetic native-dialog accessibility dumps are transient and deleted; no real-code dumping is supported.
 
-See [provider accounts](../../../experiments/quickjs-backend/PROVIDER_AUTH_PLAN.md) for security boundaries and limitations. Real-account interoperability, physical ARM64 execution and hardware-specific Keystore behavior are not validated. Not implemented locally: durable sessions, workspace/tools/shell, generated Visualize execution, queues, compaction, or a background service.
+See [provider accounts](../../../experiments/quickjs-backend/PROVIDER_AUTH_PLAN.md) for security boundaries and limitations. Real-account interoperability, physical ARM64 execution and hardware-specific Keystore behavior are not validated. Not implemented locally: durable sessions, workspace/tools/shell, queues, compaction, or a background service.
 
 ### Copy control and debug-only fixture verification
 
@@ -83,15 +83,17 @@ evidence, not a live-account or physical-phone execution test.
 
 ## Shared local UI validation
 
-Use the top-right **Pi** logo to select **Local** or a saved remote computer. Sign in or choose **Chat on this phone**; the ordinary composer supports model selection, supported thinking levels, text files/images and Stop. Reselecting Local or reopening the same account must not erase conversation/drafts. Switching accounts/backends or signing out clears local chat state.
+Use the original **Pi/computer** selector and existing Computers sheet to select **Local** or a saved remote. There is no additional toolbar logo or provider-specific chat button. Local can be selected while signed out; accounts manage credentials only. The ordinary composer picker contains both Claude and Codex, and provider/model changes retain conversation identity, history and draft. Sign-out cancels/invalidate affected authorization without deleting conversations. In-memory Local sessions/thread drafts survive visits to another backend; process restart still loses them. Supported thinking, attachments, streaming, Stop and sandboxed Visualize use the common UI. Stock tools and safe shell hosting remain unfinished.
 
 ```sh
 python3 crates/pi_android/scripts/test_local_chat.py \
   --serial emulator-5554 --output artifacts/local-chat-emulator
 ```
 
-The emulator suite uses synthetic accounts only: shared screens, Pi selector, thinking selection, multi-turn canonical history, model changes, cancellation, background/return, account isolation and no automatic inference. Host tests additionally verify actual image/text payloads and thinking events for both upstream providers, four 1-MiB image bodies, full-block/signature limits and failed-turn exclusion. The native importer has separate image/file tests. Synthetic results do **not** establish live provider acceptance.
+The emulator suite uses synthetic accounts only: shared screens, original Pi/computer selector, thinking selection, multi-turn canonical history, in-thread cross-provider model changes, cancellation, background/return, credential namespace isolation and account-management retention and no automatic inference. Host tests additionally verify actual image/text payloads and thinking events for both upstream providers, four 1-MiB image bodies, full-block/signature limits and failed-turn exclusion. The native importer has separate image/file tests. Synthetic results do **not** establish live provider acceptance.
 
 Always update a phone with `adb install --no-incremental -r`; never uninstall or clear its account data. Screenshots are intentionally enabled, including account/code screens; native code entry remains masked. Do not capture/share real credentials in test evidence.
 
-Latest verification: 23 experiment host tests and Clippy passed; 354 Android host tests passed (2 ignored), and the default feature-disabled Android library checks cleanly. All three emulator suites (accounts, shared local chat, offline agent) passed. The ARM64 APK was rebuilt and installed on the 25019PNF3C with `install --no-incremental -r`, without uninstalling or clearing app data. No live-account request or physical-phone execution test was performed by the assistant.
+Prior validated commit (`a1f071a`, before the backend contract correction): 23 experiment host tests and Clippy passed; 354 Android host tests passed (2 ignored), and the default feature-disabled Android library checks cleanly. All three emulator suites (accounts, shared local chat, offline agent) passed. The ARM64 APK was rebuilt and installed on the 25019PNF3C with `install --no-incremental -r`, without uninstalling or clearing app data. No live-account request or physical-phone execution test was performed by the assistant.
+
+Backend contract correction verification: **355 Android host tests passed, 2 ignored**, default-feature library check clean, and all three x86_64 emulator suites passed (shared backend/chat, provider accounts, offline agent fixture). The x86_64 and ARM64 test APKs were rebuilt. ARM64 was installed on 25019PNF3C using `install --no-incremental -r`; no uninstall or app-data clearing. No real credential inspection, live provider request or physical-phone execution test was performed. This verifies the backend/UI correction, **not stock-tool integration**: subscription execution still has no stock tools/Bash. APKs and evidence are retained; generated Rust target caches are cleaned after the builds.

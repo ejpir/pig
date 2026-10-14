@@ -287,9 +287,14 @@ impl Composer {
         Ok(())
     }
 
-    pub fn clear(&mut self, cx: &mut Context<Self>) {
-        self.import_generation += 1;
+    pub(crate) fn cancel_imports(&mut self, cx: &mut Context<Self>) {
+        self.import_generation = self.import_generation.wrapping_add(1);
         self.imports = 0;
+        cx.notify();
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.cancel_imports(cx);
         self.area.update(cx, |area, cx| {
             area.take(cx);
         });

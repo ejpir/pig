@@ -2,7 +2,7 @@
 
 ## Implemented in the opt-in APK
 
-The **Pi local backend tests** APK (`dev.pi.android.quickjstest`) has a top-right **Pi → Local / remote computer** selector, with **Local providers · Claude + Codex** account management. This is separate from SSH-computer settings and the offline agent fixture. Normal production builds remain SSH-based and do not expose provider accounts.
+The **Pi local backend tests** APK (`dev.pi.android.quickjstest`) uses the original **Pi/computer → Computers** selector, with Local alongside remote computers, with **Local providers · Claude + Codex** account management. This is separate from SSH-computer settings and the offline agent fixture. Normal production builds remain SSH-based and do not expose provider accounts.
 
 | Account | Upstream provider ID | Phone flow |
 | --- | --- | --- |
@@ -67,14 +67,14 @@ Still unverified: real provider interoperability, physical ARM64 execution, hard
 
 ## Next increment
 
-Connect the stored accounts to upstream provider-aware streaming (`models.streamSimple`, `anthropic-messages`, `openai-codex-responses` with SSE), not the PoC's fixed Chat Completions adapter. Keep refresh ownership independent of agent cancellation, add explicit inference destination policies, then integrate a local-session UI. Durable sessions, a shell/development environment, background services and release hardening remain separate work.
+Provider-aware streaming (`models.streamSimple`, `anthropic-messages`, `openai-codex-responses` with SSE), independent refresh ownership and the existing session UI are wired. The backend/UI contract correction is implemented and synthetically tested; stock tool execution, durable sessions, background services and release hardening remain unfinished. See [tool-host boundary](TOOL_HOST_PLAN.md).
 
 ## Shared local sessions
 
-**Chat on this phone** opens the ordinary thread/composer. Reopening the same provider preserves its in-memory sessions/drafts; selecting the already-active Local backend only dismisses the picker. Changing provider/backend or signing out clears local state. Process restart loses conversations, not saved encrypted accounts. No provider calls start on launch/resume or model/thinking selection; Send is explicit.
+**Local is an execution backend, not a chat mode.** Select it through the original Computers sheet, including while signed out. New session and the composer are unchanged. The existing model picker contains both Claude and Codex; switching provider/model preserves conversation identity, canonical context and draft. Account panels only manage credentials: signing out invalidates authorization and cancels affected work without deleting sessions/drafts. Local sessions and thread drafts are retained in memory during visits to another backend. Process restart loses conversations, not saved encrypted accounts. No inference starts on launch/resume, account management, backend selection or model/thinking selection; Send is explicit.
 
 The unchanged upstream `Agent` emits normalized message/thinking records through `pi_core::session::Session::apply` and the same Android projection as SSH. Model and supported thinking catalogs are bundled from upstream; they do not establish subscription entitlement. Native text-file and image attachments use the existing importer (eight attachments, four images, each image ≤1 MiB, each text file ≤256 KiB). Text-only models reject image context rather than silently losing it. Only successful canonical upstream turns enter later inference; stopped/failed turns remain visibly excluded.
 
-Local execution has no workspace/tools, command queue, compaction, generated Visualize execution, durable history, or background execution service. These unsupported capabilities are gated individually; thinking, attachments, models and Stop use the normal screens. Stop/navigation/background requests cancellation; the worker keeps draining through credential/socket teardown before another run is admitted.
+Local execution still has no workspace/tools, command queue, compaction, durable history or background execution service. This is **unfinished backend work**, not a separate reduced UI design. Unsupported functions are gated individually through backend capabilities; thinking, attachments, models, Stop and the existing sandboxed Visualize use the common screens. Stop/navigation/background requests cancellation; the worker keeps draining through credential/socket teardown before another run is admitted.
 
 Bounds: eight chats, 32 turns/chat, 64 context messages, 8 MiB serialized context, 10 MiB inference HTTP body; auth/workspace PoC bodies remain 1 MiB. The VM envelope accommodates JSON escaping. Output text+thinking is capped at 256 KiB, canonical assistant messages at 512 KiB, presentation records at 20,000 / 4 MiB. The 185-second VM deadline does not interrupt a stalled native Keystore call. Model thinking budgets/provider behavior mean `maxTokens:4096` is not a universal output-token cap.

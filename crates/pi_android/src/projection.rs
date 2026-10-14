@@ -148,6 +148,12 @@ pub fn project_queue_keys(
         .to_owned();
     Session {
         local: false,
+        backend_features: match &pi.backend {
+            pi_core::session::BackendInfo::Found(info) => {
+                serde_json::from_value(info["uiCapabilities"].clone()).ok()
+            }
+            _ => None,
+        },
         id: facts.id,
         title: title(pi, facts.outbox),
         project,
@@ -185,6 +191,7 @@ pub fn listed(id: SessionId, listed: &crate::remote::Listed, folder: String) -> 
     let cwd = listed.cwd.trim_end_matches('/');
     Session {
         local: false,
+        backend_features: None,
         id,
         title: listed
             .title

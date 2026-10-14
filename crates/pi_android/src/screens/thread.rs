@@ -380,7 +380,6 @@ impl PhoneApp {
                     cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
                 ),
             )
-            .children(self.backend_button(cx))
     }
 
     pub(crate) fn thread_screen(
@@ -477,9 +476,9 @@ impl PhoneApp {
         };
         let computer_name = store.computer.name.clone();
         let stopping = store.is_stopping(id);
-        let local = store.is_local();
+        let queues = store.supports("prompt_queue");
         composer.update(cx, |composer, _| {
-            composer.set_send_blocked(local && session.state.is_running());
+            composer.set_send_blocked(!queues && session.state.is_running());
         });
         let compacting = self.compact_pending(id)
             || store
@@ -516,7 +515,7 @@ impl PhoneApp {
         let pages = session.turn().is_some_and(|turn| !turn.pages.is_empty());
         let area = composer.read(cx).area.clone();
         area.update(cx, |area, _| {
-            area.set_placeholder(if local && running {
+            area.set_placeholder(if !queues && running {
                 "Draft your next message…"
             } else if running {
                 "Steer this run…"
@@ -777,7 +776,7 @@ impl PhoneApp {
         let live = index == last && running;
         let many = session.turns.len() > 1;
         // Review and the report card belong to the session the user runs.
-        let ending = (index == last && !running && !read_only && !session.local)
+        let ending = (index == last && !running && !read_only && session.supports("file_review"))
             .then(|| self.ending(session, index, cx));
         // While Pi works its calls stream in between its words; a finished
         // run folds them under its line until Show brings them back.

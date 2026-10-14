@@ -98,6 +98,14 @@ pub enum Target {
     Review,
 }
 
+fn composer_target_active(target: Target, route: Route) -> bool {
+    match (target, route) {
+        (Target::Start, Route::Start) | (Target::Review, Route::Review(_)) => true,
+        (Target::Thread(id), Route::Thread(shown)) => id == shown,
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sheet {
     Details(SessionId),
@@ -372,6 +380,12 @@ pub struct PhoneApp {
     pub(crate) local_frame: u64,
     #[cfg(feature = "quickjs-backend-test")]
     pub(crate) local_private: bool,
+    #[cfg(feature = "quickjs-backend-test")]
+    pub(crate) parked_local: Option<Store>,
+    #[cfg(feature = "quickjs-backend-test")]
+    parked_local_threads: HashMap<SessionId, Entity<Composer>>,
+    #[cfg(feature = "quickjs-backend-test")]
+    parked_local_start: Option<(String, Vec<crate::composer::Attachment>)>,
     /// Finds a folder or file in the project browser, or goes to a path.
     pub(crate) folder: Entity<TextArea>,
     reconnecting: bool,
@@ -653,6 +667,12 @@ impl PhoneApp {
             local_frame: 0,
             #[cfg(feature = "quickjs-backend-test")]
             local_private: false,
+            #[cfg(feature = "quickjs-backend-test")]
+            parked_local: None,
+            #[cfg(feature = "quickjs-backend-test")]
+            parked_local_threads: HashMap::new(),
+            #[cfg(feature = "quickjs-backend-test")]
+            parked_local_start: None,
             folder,
             reconnecting: false,
             last_listed: Instant::now(),
@@ -796,7 +816,7 @@ impl PhoneApp {
         project: usize,
         cx: &App,
     ) -> Option<Vec<SavedCommand>> {
-        if self.is_local() {
+        if !self.backend_supports("workspace_browse") {
             return Some(Vec::new());
         }
         let path = self.store.as_ref()?.projects.get(project)?.path.clone();
@@ -808,14 +828,11 @@ impl PhoneApp {
         id: SessionId,
         cx: &App,
     ) -> Option<Vec<SavedCommand>> {
-        if self.is_local() {
-            return Some(Vec::new());
-        }
         let store = self.store.as_ref()?;
-        let live = store.live.as_ref()?;
-        if let Some(commands) = live.commands(id) {
+        if let Some(commands) = store.commands(id) {
             return Some(commands.iter().map(SavedCommand::from).collect());
         }
+        let live = store.live.as_ref()?;
         let path = live.session_cwd(id)?.to_owned();
         self.command_catalog_for_path(&path, cx)
     }
@@ -969,23 +986,15 @@ impl PhoneApp {
     }
 
     pub(crate) fn open_sheet(&mut self, sheet: Sheet, cx: &mut Context<Self>) {
-        if self.is_local()
-            && !matches!(
-                sheet,
-                Sheet::Model
-                    | Sheet::More(_)
-                    | Sheet::Details(_)
-                    | Sheet::Delete(_)
-                    | Sheet::Computers
-                    | Sheet::Models
-                    | Sheet::Thinking
-                    | Sheet::Attach(_)
-                    | Sheet::Image(_, _)
-                    | Sheet::Logs
-                    | Sheet::SelectText
-            )
-        {
-            self.notify_user("This local session has no workspace tools.", cx);
+        const RESOURCES: &str = "resources";
+        let required = match sheet {
+            Sheet::Resources => Some(RESOURCES),
+            Sheet::Project => Some("workspace_browse"),
+            Sheet::RestoreHistory(_, _) | Sheet::EnableJj(_) => Some("file_history"),
+            _ => None,
+        };
+        if required.is_some_and(|feature| !self.backend_supports(feature)) {
+            self.notify_user("This backend does not support that feature", cx);
             return;
         }
         self.closing_sheet = None;
@@ -1249,7 +1258,34 @@ impl PhoneApp {
     pub(crate) fn install_store(&mut self, store: Store) {
         self.replace_store(Some(store));
     }
+    pub(crate) fn preserve_local_drafts(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "quickjs-backend-test")]
+        if self.is_local() {
+            self.parked_local_start = Some(self.start.update(cx, |c, cx| {
+                c.cancel_imports(cx);
+                (c.area.read(cx).text().to_owned(), c.attachments().to_vec())
+            }));
+            for composer in self.threads.values() {
+                composer.update(cx, |c, cx| c.cancel_imports(cx));
+            }
+        }
+        #[cfg(not(feature = "quickjs-backend-test"))]
+        let _ = cx;
+    }
     pub(crate) fn replace_store(&mut self, store: Option<Store>) {
+        #[cfg(feature = "quickjs-backend-test")]
+        if self.is_local()
+            && let Some(mut previous) = self.store.take()
+        {
+            previous.cancel_local();
+            previous.retire_generation();
+            let ids: Vec<_> = previous.sessions.iter().map(|s| s.id).collect();
+            self.parked_local_threads = ids
+                .into_iter()
+                .filter_map(|id| self.threads.remove(&id).map(|c| (id, c)))
+                .collect();
+            self.parked_local = Some(previous);
+        }
         self.reconnecting = false;
         self.reset_inline_pages();
         self.reset_swarm_views();
@@ -1286,6 +1322,7 @@ impl PhoneApp {
     }
 
     pub(crate) fn open_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.preserve_local_drafts(cx);
         if self.is_local() {
             self.start.update(cx, |start, cx| start.clear(cx));
         }
@@ -1584,7 +1621,7 @@ impl PhoneApp {
         computer.pi_version = helper_release;
         let mut store = Store::live(computer, live);
         store.apply(vec![(None, Update::Listed(Ok(listed)))]);
-        self.project = prefs
+        let project = prefs
             .projects
             .get(&address.to_string())
             .map(|path| store.add_project(path))
@@ -1601,10 +1638,12 @@ impl PhoneApp {
         self.thread_list_offsets.clear();
         self.reset_swarm_views();
         self.reset_inline_pages();
+        self.preserve_local_drafts(cx);
         if self.is_local() {
             self.start.update(cx, |start, cx| start.clear(cx));
         }
-        self.store = Some(store);
+        self.install_store(store);
+        self.project = project;
         self.routes = vec![Route::Sessions, Route::Projects];
         self.threads.clear();
         self.pending_compacts.clear();
@@ -1871,39 +1910,68 @@ impl PhoneApp {
         .detach();
     }
 
-    /// One backend selector, independent of which session is currently displayed.
-    pub(crate) fn backend_button(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
-        #[cfg(feature = "quickjs-backend-test")]
-        {
-            Some(
-                crate::ui::tap("backend-picker", "pi", &theme(cx))
-                    .aria_label("Choose where Pi runs")
-                    .debug_selector(|| "backend-picker".into())
-                    .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Computers, cx)))
-                    .into_any_element(),
-            )
-        }
-        #[cfg(not(feature = "quickjs-backend-test"))]
-        {
-            let _ = cx;
-            None
-        }
-    }
     #[cfg(feature = "quickjs-backend-test")]
     pub(crate) fn select_local_backend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_sheet(cx);
         self.closing_sheet = None;
         self.cancel_connection_attempt();
         if self.is_local() {
-            cx.notify();
+            self.close_provider_accounts();
+            self.paused = false;
+            self.entered(window, cx);
             return;
         }
+        self.close_provider_accounts();
         self.start.update(cx, |c, cx| c.clear(cx));
-        self.review.update(cx, |c, cx| c.clear(cx));
-        self.replace_store(None);
-        self.provider_accounts_url("pi://test/local-providers", window, cx);
+        if let Some(backend) = self.parked_local.take() {
+            self.install_store(backend);
+        } else {
+            let synthetic = self.local_providers.is_synthetic();
+            let Some(vault) = crate::provider_accounts::vault(synthetic) else {
+                self.notify_user("Android credential storage is unavailable", cx);
+                return;
+            };
+            self.install_store(Store::local(crate::local_chat::Local::new(
+                pi_quickjs_backend_poc::auth::Provider::Claude,
+                vault,
+                synthetic,
+            )));
+        }
+        if let Some((text, attachments)) = self.parked_local_start.take() {
+            self.start.update(cx, |c, cx| {
+                c.set_text(&text, cx);
+                for attachment in attachments {
+                    c.attach(attachment, cx);
+                }
+            });
+        }
+        self.threads
+            .extend(std::mem::take(&mut self.parked_local_threads));
+        self.paused = false;
+        self.start.update(cx, |c, _| {
+            c.set_workspace(true);
+            c.use_files(Some(Vec::new()));
+            c.use_commands(Some(Vec::new()));
+        });
+        if !self
+            .store
+            .as_ref()
+            .unwrap()
+            .local
+            .as_ref()
+            .unwrap()
+            .synthetic
+        {
+            self.local_private = true;
+        }
+        self.entered(window, cx);
     }
 
+    pub(crate) fn backend_supports(&self, feature: &str) -> bool {
+        self.store
+            .as_ref()
+            .is_some_and(|backend| backend.supports(feature))
+    }
     pub(crate) fn is_local(&self) -> bool {
         self.store.as_ref().is_some_and(Store::is_local)
     }
@@ -2091,6 +2159,10 @@ impl PhoneApp {
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(backend) = &mut self.parked_local {
+            let _ = backend.tick(Duration::ZERO);
+        }
         let _trace = gpui_android::trace::scope(c"pi.app.tick");
         #[cfg(feature = "quickjs-backend-test")]
         self.tick_local_chat(cx);
@@ -2332,7 +2404,7 @@ impl PhoneApp {
                 || url
                     .strip_prefix("pi://preview/")
                     .is_some_and(|name| crate::SCREENS.contains(&name));
-            if self.local_fixture_url(url, cx) {
+            if self.local_fixture_url(url, window, cx) {
                 return;
             }
             if (self.is_local() || self.local_providers.visible) && !navigation {
@@ -2790,7 +2862,7 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_local() {
+        if !self.backend_supports("file_review") {
             return;
         }
         self.review_file = file;
@@ -2806,7 +2878,7 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_local() {
+        if !self.backend_supports("file_history") {
             return;
         }
         self.push(Route::History(id), window, cx);
@@ -2826,7 +2898,7 @@ impl PhoneApp {
     }
 
     pub(crate) fn load_jj_history(&mut self, id: SessionId, cx: &mut Context<Self>) {
-        if self.is_local() {
+        if !self.backend_supports("file_history") {
             return;
         }
         let Some((connection, helper, path)) = self.store.as_ref().and_then(|store| {
@@ -3148,11 +3220,14 @@ impl PhoneApp {
             return composer.clone();
         }
         let compact = self.compact_available_for_session(id);
-        let workspace = !self.is_local();
+        let workspace = self.backend_supports("workspace_browse");
         let composer = cx.new(|cx| {
             let mut composer = Composer::new("Ask a follow-up…", cx);
             composer.set_session_commands(compact);
-            composer.set_workspace(workspace);
+            composer.set_workspace(true);
+            if !workspace {
+                composer.use_files(Some(Vec::new()));
+            }
             composer
         });
         let commands = self.command_catalog_for_session(id, cx);
@@ -3289,9 +3364,8 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_local() {
-            let active = matches!((target, self.route()), (Target::Start, Route::Start))
-                || matches!((target,self.route()),(Target::Thread(id),Route::Thread(shown)) if id==shown);
+        if self.store.as_ref().is_some_and(|s| !s.is_sample()) {
+            let active = composer_target_active(target, self.route());
             #[cfg(feature = "quickjs-backend-test")]
             let active =
                 active && !self.local_providers.visible && !self.quickjs_backend_test.visible;
@@ -3357,7 +3431,7 @@ impl PhoneApp {
                     text,
                     attachments,
                     file.as_deref(),
-                    !store.is_local(),
+                    store.supports("visualize"),
                 ) {
                     Ok(prompt) => prompt,
                     Err(error) => {
@@ -4088,6 +4162,29 @@ impl PhoneApp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn active_composer_contract_includes_review_and_rejects_stale_targets() {
+        use super::{Route, Target, composer_target_active};
+        use crate::model::SessionId;
+        assert!(composer_target_active(Target::Start, Route::Start));
+        assert!(composer_target_active(
+            Target::Review,
+            Route::Review(SessionId(1))
+        ));
+        assert!(composer_target_active(
+            Target::Thread(SessionId(1)),
+            Route::Thread(SessionId(1))
+        ));
+        assert!(!composer_target_active(
+            Target::Thread(SessionId(1)),
+            Route::Thread(SessionId(2))
+        ));
+        assert!(!composer_target_active(
+            Target::Review,
+            Route::Thread(SessionId(1))
+        ));
+        assert!(!composer_target_active(Target::Start, Route::Sessions));
+    }
     use super::{PhoneApp, RenderStats, sheet_scrim_opacity};
     use crate::{live::Update, model::SessionId};
     use gpui::{AppContext, TestAppContext};

@@ -27,7 +27,7 @@ QuickJS
 Rust: HTTPS + cancellation, file access, monotonic clock, OS randomness
 ```
 
-The tools are deliberately small host-provided tools, **not** the full stock coding-agent tool set. `pi-coding-agent`/`pi-durable`, their sessions/extensions, and other inference providers have not been ported or validated. The separate tool-free Claude/Codex subscription path now drives the existing Android session screens.
+The tools are deliberately small host-provided tools, **not** the full stock coding-agent tool set. `pi-coding-agent`/`pi-durable`, their sessions/extensions, and other inference providers have not been ported or validated. Claude/Codex subscription execution drives the existing Android session screens, but its stock coding tools are still missing. This is unfinished backend integration, not an intended tool-free chat mode. See [tool-host boundary](TOOL_HOST_PLAN.md).
 
 ## Run locally
 
@@ -108,7 +108,7 @@ The script creates a unique `/data/local/tmp/pi-quickjs-poc.*` directory, pushes
 
 **Verified:** 23 standalone host tests and Clippy; Android x86_64 emulator synthetic auth/chat/offline-agent fixtures; 354 Android host tests passed (2 ignored). ARM64 compilation/installation is not a physical-device execution or live-account test. An attempted physical-device run lost responsive adb-shell access and was not counted as a pass; its temporary directory could not yet be inspected/cleaned. No repeated execution was attempted.
 
-**Important boundary:** the shell probe alone does not prove APK-UID behavior. That boundary is now exercised separately by the embedded app test above. Agent execution remains an offline APK fixture; provider-account setup is a separate opt-in screen. Production local-session UI, provider-aware inference, background services, durability, and release readiness remain outstanding.
+**Important boundary:** the shell probe alone does not prove APK-UID behavior. That boundary is now exercised separately by the embedded app test above. The offline agent fixture remains separate from subscription execution in the normal session UI. Production release readiness, stock tools, background services and durability remain outstanding. Synthetic coverage does not validate live-provider acceptance.
 
 ## Compatibility layer and upgrade path
 
