@@ -32,6 +32,7 @@ PI = build_apk.App(
     launcher=(Path(__file__).resolve().parents[1] / "assets" / "launcher", 0xFF161D27),
     licenses=tuple(build_apk.WORKSPACE / "licenses" / name for name in (
         "IBM-PLEX-OFL.txt", "COMMIT-MONO-OFL.txt", "RQUICKJS-MIT.txt", "QUICKJS-NG-MIT.txt",
+        "ROXMLTREE-MIT.txt", "SVGTYPES-MIT.txt", "KURBO-MIT.txt", "LYON-MIT.txt",
     )),
 )
 

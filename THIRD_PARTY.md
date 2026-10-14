@@ -21,6 +21,8 @@ The native-input workarounds do not require changing sibling Zed code. The later
 `pi_visual` embeds rquickjs 0.14.0 (MIT, https://github.com/DelSkayn/rquickjs), which bundles QuickJS-NG 0.16.2 (MIT, https://github.com/quickjs-ng/quickjs), for explicitly requested JavaScript-native mini-apps. Full upstream notices are in `licenses/RQUICKJS-MIT.txt` and `licenses/QUICKJS-NG-MIT.txt` and included in Android APK assets. No filesystem, network, process, DOM or agent capabilities/module loader are registered. App widgets/drawing are native GPUI, not HTML/WebView. Rhai has been removed from runtime dependencies; historical sources and state files are not deleted. Guest resource limits are cooperative in-process safeguards, not OS sandboxing.
 
 
+The shared native SVG frontend uses roxmltree 0.21.1 and svgtypes 0.16.1 (Yevhenii Reizner), and kurbo 0.13.1 (Raph Levien / Linebender). `pi_visual_ui` uses Lyon 1.0.16 (Nicolas Silva and contributors) for bounded native tessellation. Their MIT notices are preserved in `licenses/{ROXMLTREE,SVGTYPES,KURBO,LYON}-MIT.txt` and packaged with both desktop and Android. The local Lyon output adapter enforces scene budgets before GPUI mesh expansion; no sibling renderer/shader modifications are needed for Visualize.
+
 ## Fonts
 
 Copied, unmodified, from Zed's `assets/fonts/`:

@@ -43,15 +43,17 @@ struct Item {
 
 #[derive(Clone)]
 enum Choice {
+    Visualize,
     Ready(Mention),
     /// The problems' text is read from the buffer when chosen.
     Problems(pi_editor::ProblemFile, Mention),
 }
 
 impl Choice {
-    fn mention(&self) -> &Mention {
+    fn mention(&self) -> Option<&Mention> {
         match self {
-            Self::Ready(mention) | Self::Problems(_, mention) => mention,
+            Self::Visualize => None,
+            Self::Ready(mention) | Self::Problems(_, mention) => Some(mention),
         }
     }
 }
@@ -219,6 +221,9 @@ impl ComposerView {
             self.problem_items(cx),
         ]);
         self.mention.cancel_matching();
+        let directive = visualize_item(&query);
+        self.mention.items = directive.clone().into_iter().collect();
+        self.mention.index = 0;
         self.mention.searching = true;
         let generation = self.mention.match_generation;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -237,7 +242,7 @@ impl ComposerView {
                     return;
                 }
                 this.mention.searching = false;
-                this.mention.items = items;
+                this.mention.items = directive.into_iter().chain(items).collect();
                 this.mention.index = this
                     .mention
                     .index
@@ -415,7 +420,10 @@ impl ComposerView {
                     .map(|then| short_age(then, now));
                 let mut text = format!("pi session “{title}”, saved in {}", saved.path);
                 if !saved.first_message.is_empty() {
-                    text.push_str(&format!("\nIt began: {}", saved.first_message.trim()));
+                    text.push_str(&format!(
+                        "\nIt began: {}",
+                        pi_visual::prompt::label(&saved.first_message).trim()
+                    ));
                 }
                 Item {
                     kind: Kind::Session,
@@ -549,9 +557,21 @@ impl ComposerView {
         ) else {
             return;
         };
+        if matches!(item.choice, Choice::Visualize) {
+            self.input
+                .update(cx, |input, cx| input.replace(range, "@Visualize ", cx));
+            self.mention.open = None;
+            self.mention.cancel_matching();
+            self.mention.items.clear();
+            self.input.focus_handle(cx).focus(window, cx);
+            cx.notify();
+            return;
+        }
         let id = self.next_mention;
         self.next_mention += 1;
-        let mention = item.choice.mention().clone();
+        let Some(mention) = item.choice.mention().cloned() else {
+            return;
+        };
         self.input.update(cx, |input, cx| {
             input.insert_chip(range, &mention.label, mention.kind.icon(), id, cx)
         });
@@ -819,8 +839,8 @@ impl ComposerView {
                             .text_color(theme.faint)
                             .child(if self.mention.searching {
                                 "Searching…".to_owned()
-                            } else if let Some(status) = file_status {
-                                status
+                            } else if let Some(status) = &file_status {
+                                status.clone()
                             } else if query.is_empty() {
                                 "Nothing to mention yet: open the project's files first.".to_owned()
                             } else {
@@ -830,6 +850,15 @@ impl ComposerView {
                     } else {
                         list.into_any_element()
                     })
+                    .children((!empty).then_some(file_status).flatten().map(|status| {
+                        div()
+                            .debug_selector(|| "mention-file-status".into())
+                            .px(px(14.))
+                            .py(px(9.))
+                            .text_size(px(12.))
+                            .text_color(theme.faint)
+                            .child(status)
+                    }))
                     .child(
                         div()
                             .border_t_1()
@@ -980,3 +1009,16 @@ fn language_name(path: &str) -> String {
 #[cfg(test)]
 #[path = "mention_remote_tests.rs"]
 mod remote_tests;
+
+fn visualize_item(query: &str) -> Option<Item> {
+    "visualize"
+        .starts_with(&query.to_ascii_lowercase())
+        .then(|| Item {
+            kind: Kind::Visualize,
+            name: "Visualize".into(),
+            matched: (0..query.len()).collect(),
+            detail: "Native interactive app · runs locally".into(),
+            filter: None,
+            choice: Choice::Visualize,
+        })
+}

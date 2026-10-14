@@ -42,6 +42,7 @@ actions!(
         Complete,
         ToggleTerminal,
         ToggleFollow,
+        ToggleRenderStats,
         Quit
     ]
 );
@@ -72,6 +73,7 @@ pub fn init(cx: &mut App) {
         // VS Code's panel shortcut; backtick is a dead key on many layouts.
         KeyBinding::new("secondary-j", ToggleTerminal, Some("Desktop")),
         KeyBinding::new("ctrl-shift-f", ToggleFollow, Some("Desktop")),
+        KeyBinding::new("ctrl-shift-r", ToggleRenderStats, Some("Desktop")),
         KeyBinding::new("secondary-q", Quit, None),
     ]);
     new_session::init(cx);
@@ -124,6 +126,11 @@ pub struct Desktop {
     /// `appearance.theme` as last applied, so other changes keep a Ctrl+Shift+T switch.
     theme_setting: String,
     appearance: gpui::WindowAppearance,
+    /// `developer.renderStats` as last applied, so other changes keep a Ctrl+Shift+R switch.
+    render_stats_setting: bool,
+    render_stats: render_stats::RenderStats,
+    /// A settings change to the overlay, applied where there is a window.
+    render_stats_pending: Option<bool>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 impl Desktop {
@@ -219,7 +226,7 @@ impl Desktop {
                 ShellEvent::Inspector => this.toggle_inspector(cx),
             }),
         ];
-        let this = Self {
+        let mut this = Self {
             workspace,
             sidebar,
             header,
@@ -238,8 +245,17 @@ impl Desktop {
             resources_view: None,
             theme_setting: crate::prefs::choice(cx, "appearance.theme", None),
             appearance: window.appearance(),
+            render_stats_setting: false,
+            render_stats: Default::default(),
+            render_stats_pending: None,
             _subscriptions: subscriptions,
         };
+        if crate::prefs::flag(cx, "developer.renderStats", None)
+            || std::env::var_os("PI_DESKTOP_RENDER_STATS").is_some()
+        {
+            this.render_stats_setting = true;
+            this.set_render_stats(true, window, cx);
+        }
         this.apply_editor_prefs(cx);
         this.focus_composer(window, cx);
         this
@@ -251,7 +267,24 @@ impl Desktop {
             self.theme_setting = theme;
             self.set_theme(crate::prefs::light(cx), cx);
         }
+        let render_stats = crate::prefs::flag(cx, "developer.renderStats", None);
+        if render_stats != self.render_stats_setting {
+            self.render_stats_setting = render_stats;
+            self.render_stats_pending = Some(render_stats);
+            cx.notify();
+        }
         self.apply_editor_prefs(cx);
+    }
+    fn set_render_stats(&mut self, visible: bool, window: &Window, cx: &mut Context<Self>) {
+        if self.render_stats.visible == visible {
+            return;
+        }
+        self.render_stats.set_visible(visible);
+        pi_visual_ui::visual_profile::enable(cx, visible);
+        if visible {
+            render_stats::sampler(window, cx);
+        }
+        cx.notify();
     }
     fn apply_editor_prefs(&self, cx: &mut App) {
         let problem_card = crate::prefs::flag(cx, "editor.problemCard", None);
@@ -407,6 +440,12 @@ impl Desktop {
 }
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(visible) = self.render_stats_pending.take() {
+            self.set_render_stats(visible, window, cx);
+        }
+        if self.render_stats.visible {
+            self.render_stats.observe(std::time::Instant::now());
+        }
         if !window.has_active_prompt() && std::mem::take(&mut self.new_session_requested) {
             new_session::show(self.workspace.clone(), window, cx);
         }
@@ -531,7 +570,7 @@ impl Render for Desktop {
                 search.focus_handle(cx).focus(window, cx);
             }
         }
-        v_flex()
+        let root = v_flex()
             .id("desktop")
             .key_context("Desktop")
             .size_full()
@@ -598,6 +637,10 @@ impl Render for Desktop {
                     let composer = tab.view.read(cx).composer.clone();
                     composer.update(cx, |composer, cx| composer.toggle_composer(window, cx));
                 }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRenderStats, window, cx| {
+                let visible = !this.render_stats.visible;
+                this.set_render_stats(visible, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleFollow, _, cx| {
                 if let Some(tab) = this.workspace.read(cx).active_tab_opt() {
@@ -718,6 +761,12 @@ impl Render for Desktop {
                         .flex_shrink_0(),
                 ),
             )
+            .when(self.render_stats.visible, |root| {
+                // Above a full-screen Visualize app, which is deferred too.
+                root.child(gpui::deferred(self.render_stats.render(cx)).priority(1))
+            });
+        // Times the whole window's layout and paint while the overlay shows.
+        pi_visual_ui::visual_profile::root(root)
     }
 }
 /// An auto-hiding vertical scrollbar. Attach it to a non-scrolling wrapper around
@@ -758,6 +807,7 @@ mod panels;
 mod parallel;
 mod poster;
 mod prompts;
+mod render_stats;
 mod session;
 mod session_view;
 mod sidebar;
@@ -767,6 +817,7 @@ mod transcript;
 mod tree;
 mod tree_graph;
 mod turn_links;
+mod visualize;
 mod welcome;
 mod workspace;
 

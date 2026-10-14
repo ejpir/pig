@@ -390,6 +390,9 @@ impl RenderOnce for ScrollArea {
                         // A scrollbar owns the finger from touch-down. It is a direct
                         // manipulation, not a content pan or a reconstructed fling.
                         window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
+                            if gpui_android::raw_touch::current().is_some() {
+                                return;
+                            }
                             if phase != DispatchPhase::Capture {
                                 return;
                             }
@@ -600,6 +603,9 @@ impl RenderOnce for ListScrollArea {
                         }
                     });
                     window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
+                        if gpui_android::raw_touch::current().is_some() {
+                            return;
+                        }
                         if phase != DispatchPhase::Capture {
                             return;
                         }

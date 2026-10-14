@@ -144,4 +144,14 @@ pub const DESKTOP: &[Setting] = &[
         description: "The program new terminals run. Automatic uses your login shell.",
         scope: Scope::UserOnly,
     },
+    Setting {
+        key: "developer.renderStats",
+        category: "Developer",
+        title: "Show rendering stats",
+        kind: Kind::Bool,
+        default: Some("false"),
+        default_text: "false",
+        description: "An overlay with frame pacing, layout and paint time, transcript rebuilds, Visualize timings and the app's CPU use. Ctrl+Shift+R switches it until the next launch.",
+        scope: Scope::UserOnly,
+    },
 ];

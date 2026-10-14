@@ -1,6 +1,9 @@
 // Trusted bootstrap, evaluated before guest source; its bridge stays in Rust.
 (() => {
   'use strict';
+  const parseVector = globalThis.__visualParseVector;
+  delete globalThis.__visualParseVector;
+  const svgAssets = []; // At most 32 imports per isolated invocation.
   const parse = JSON.parse, stringify = JSON.stringify;
   const keys = Object.keys, own = Object.getOwnPropertyDescriptor;
   const proto = Object.getPrototypeOf, create = Object.create, freeze = Object.freeze;
@@ -35,6 +38,10 @@
   }
   const isArray = Array.isArray, finite = Number.isFinite;
   const PromiseType = Promise;
+  // Iterators are intrinsics too: a poisoned next() must not inspect or alter
+  // trusted command arrays while a recorder traverses them.
+  const arrayIteratorPrototype=proto([].values());
+  freeze(arrayIteratorPrototype);freeze(proto(arrayIteratorPrototype));
   // Keep serialization/reflection intrinsics immutable. No modules/host APIs exist.
   for (const value of [Object.prototype, Array.prototype, Function.prototype, String.prototype,
     Number.prototype, Boolean.prototype, Object, Array, Function, String, Number, Boolean, Math, JSON, PromiseType, PromiseType.prototype]) freeze(value);
@@ -43,6 +50,14 @@
     if (!d) return fallback;
     if (!('value' in d)) fail('Accessors are not allowed in app data');
     return d.value;
+  }
+  function frozenData(value) {
+    if(value && typeof value==='object') {
+      const fields=keys(value);
+      for(let i=0;i<fields.length;i++)frozenData(value[fields[i]]);
+      freeze(value);
+    }
+    return value;
   }
   function flat(value) {
     if (!value || typeof value !== 'object' || isArray(value)) fail('State must be a flat object');
@@ -76,15 +91,75 @@
     }
     return {type:'text',text:textString(value),bind:null,style};
   }
+  // 3D meshes are small descriptors; the host builds primitive triangles.
+  const meshNumber = n => { if (!finite(n) || abs(n) > 1e4) fail('Invalid 3D geometry'); return n; };
+  const triple = (v, what) => {
+    if (!isArray(v) || v.length !== 3) fail(what + ' must be [x,y,z]');
+    return [meshNumber(data(v,'0')),meshNumber(data(v,'1')),meshNumber(data(v,'2'))];
+  };
+  const segmentCount = o => { const n = data(o,'segments',24); if (!Number.isInteger(n) || n < 3 || n > 64) fail('Mesh segments must be 3..64'); return n; };
+  const meshes = []; // Identity of trusted descriptors; no Map/Set intrinsics exist.
+  const mesh = value => { if (meshes.length >= 256) fail('At most 256 meshes'); meshes.push(value); return freeze(value); };
   const ui = freeze({
+    box(w,h,d) { return mesh({kind:'box',size:[meshNumber(w),meshNumber(h),meshNumber(d)]}); },
+    sphere(radius,o={}) { return mesh({kind:'sphere',radius:meshNumber(radius),segments:segmentCount(o)}); },
+    cylinder(radius,height,o={}) { return mesh({kind:'cylinder',radius:meshNumber(radius),height:meshNumber(height),segments:segmentCount(o)}); },
+    cone(radius,height,o={}) { return mesh({kind:'cone',radius:meshNumber(radius),height:meshNumber(height),segments:segmentCount(o)}); },
+    torus(radius,tube,o={}) { return mesh({kind:'torus',radius:meshNumber(radius),tube:meshNumber(tube),segments:segmentCount(o)}); },
+    mesh(o) {
+      const vertices = data(o,'vertices'), faces = data(o,'faces');
+      if (!isArray(vertices) || vertices.length < 1 || vertices.length > 2048) fail('Mesh needs 1..2048 vertices');
+      if (!isArray(faces) || faces.length < 1 || faces.length > 4096) fail('Mesh needs 1..4096 faces');
+      const v = [], f = [];
+      for (let i = 0; i < vertices.length; i++) v.push(freeze(triple(data(vertices,textString(i)),'Mesh vertex')));
+      for (let i = 0; i < faces.length; i++) {
+        const face = data(faces,textString(i));
+        if (!isArray(face) || face.length !== 3) fail('Mesh faces must be [a,b,c] vertex indices');
+        const t = [data(face,'0'),data(face,'1'),data(face,'2')];
+        for (const n of t) if (!Number.isInteger(n) || n < 0 || n >= v.length) fail('Mesh face index out of range');
+        f.push(freeze(t));
+      }
+      return mesh({kind:'custom',vertices:freeze(v),faces:freeze(f)});
+    },
     column(children,o={}) { return {type:'column',children,gap:data(o,'gap',8),width:data(o,'width',null)}; },
     row(children,o={}) { return {type:'row',children,gap:data(o,'gap',8)}; },
     text,
+    svg(source) {
+      if(typeof source!=='string'||source.length>16384)fail('SVG source must be a string <=16KiB');
+      const value=frozenData(parse(parseVector('svg',source)));
+      const asset=freeze({width:value.width,height:value.height,viewBox:freeze(value.view_box)});
+      svgAssets.push([asset,value]);return asset;
+    },
+    path(commands) {
+      if(typeof commands==='string') {
+        if(commands.length>16384)fail('SVG path exceeds 16KiB');
+        const value=parse(parseVector('path',commands));
+        if(!value.length)fail('Path needs 1..256 commands');
+        for(const c of value){for(const k of keys(c))if(isArray(c[k]))freeze(c[k]);freeze(c);}return freeze(value);
+      }
+      if (!isArray(commands) || commands.length < 1 || commands.length > 256) fail('Path needs 1..256 commands');
+      return freeze(commands.map(c => {
+        if (!isArray(c)) fail('Expected path command array');
+        const op=data(c,'0'), values=[];
+        const lengths={M:3,L:3,Q:5,C:7,Z:1};
+        if (!own(lengths,op) || c.length!==lengths[op]) fail('Invalid path command');
+        for(let i=1;i<c.length;i++){const n=data(c,textString(i));if(!finite(n)||abs(n)>1e6)fail('Invalid path coordinate');values.push(n);}
+        const p=i=>freeze([values[i],values[i+1]]);
+        return freeze(op==='M'?{op:'move',to:p(0)}:op==='L'?{op:'line',to:p(0)}:op==='Q'?{op:'quad',control:p(0),to:p(2)}:op==='C'?{op:'cubic',control1:p(0),control2:p(2),to:p(4)}:{op:'close'});
+      }));
+    },
+    linearGradient(angle,from,to) { return freeze({angle,from,to}); },
     button(label,fn,o={}) { return {type:'button',label,action:register(fn,'button',data(o,'id')),tone:data(o,'tone','normal')}; },
+    holdButton(label,name,o={}) { return {type:'button',label,hold:name,action:register(()=>{},'hold',data(o,'id')),tone:data(o,'tone','normal')}; },
     slider(label,bind,o) { return {type:'slider',label,bind,min:data(o,'min'),max:data(o,'max'),step:data(o,'step',1),
       action:register(data(o,'onChange',()=>{}),'slider',data(o,'id'))}; },
     canvas(o) { return {type:'canvas',label:data(o,'label','Canvas'),height:data(o,'height',240),view_box:data(o,'viewBox',[0,0,100,100]),
-      draw:register(data(o,'draw'),'scene',data(o,'id')),
+      draw:register(data(o,'draw',()=>{}),'scene',data(o,'id')),
+      layers:(()=>{const layers=data(o,'layers',[]);if(!isArray(layers)||layers.length>8)fail('At most 8 layers');
+        if(layers.length && data(o,'draw'))fail('Use draw or layers, not both');
+        if(!layers.length && !data(o,'draw'))fail('Canvas needs draw or layers');
+        return layers.map(l=>({draw:register(data(l,'draw'),'layer',data(l,'id')),deps:data(l,'deps',null)}));})(),
+      input_action:data(o,'onInput') ? register(data(o,'onInput'),'input',data(o,'inputId')) : null,
       pointer_action:data(o,'onPointer') ? register(data(o,'onPointer'),'pointer',data(o,'pointerId')) : null}; }
   });
   function app(value) {
@@ -103,7 +178,7 @@
   function ready() { if (!root) fail('Call app({...}) exactly once'); }
   function sync(result) { if (result instanceof PromiseType) fail('Async callbacks are not supported'); }
   function shapes() {
-    const output = []; let vertices = 0;
+    const output = []; let target=output, vertices = 0, count=0, depth=0;
     function number(n) { if (!finite(n) || abs(n)>1e6) fail('Invalid geometry'); return n; }
     function pair(p) {
       if (!isArray(p) || p.length!==2) fail('Expected [x,y]');
@@ -112,10 +187,80 @@
     function style(o) { return {color:data(o,'color','#70B8FF'),width:data(o,'width',1.5)}; }
     function add(shape,n) {
       vertices += n;
-      if (vertices>2048 || output.length>=64) fail('Drawing exceeds geometry limit');
-      output.push(shape);
+      if (vertices>2048 || count++>=64) fail('Drawing exceeds geometry limit');
+      target.push(shape);
+    }
+    function appendSvg(scene) {
+      for(let i=0;i<scene.length;i++) {
+        const shape=scene[i];
+        if(shape.type==='group') {
+          if(depth>=8)fail('Invalid SVG group depth');
+          const children=[];add({type:'group',transform:shape.transform,children},0);
+          const parent=target;target=children;depth++;
+          try {appendSvg(shape.children);} finally {target=parent;depth--;}
+        } else {
+          let n=0;for(let j=0;j<shape.commands.length;j++){const op=shape.commands[j].op;n+=(op==='quad'||op==='cubic')?32:1;}
+          add(shape,n);
+        }
+      }
     }
     const g = freeze({
+      svg(asset,o={}) {
+        const v=svgAssets.find(entry=>entry[0]===asset)?.[1];if(!v)fail('Use ui.svg to import SVG');
+        if(depth>=8)fail('Invalid SVG group depth');
+        const x=number(data(o,'x',0)),y=number(data(o,'y',0)),w=number(data(o,'width',v.width)),h=number(data(o,'height',v.height));
+        if(w<=0||h<=0)fail('SVG draw size must be positive');
+        const b=v.view_box;let sx=w/b[2],sy=h/b[3];if(!v.stretch)sx=sy=min(sx,sy);
+        const tx=x+(w-b[2]*sx)/2-b[0]*sx,ty=y+(h-b[3]*sy)/2-b[1]*sy;
+        const children=[];add({type:'group',transform:[number(sx),0,0,number(sy),number(tx),number(ty)],children},0);
+        const parent=target;target=children;depth++;
+        try {appendSvg(v.shapes);}finally{target=parent;depth--;}
+      },
+      path(commands,o={}) {
+        if(!isArray(commands)||commands.length<1||commands.length>256)fail('Use ui.path to define geometry');
+        let n=0;for(const c of commands)n+=(data(c,'op')==='quad'||data(c,'op')==='cubic')?32:1;
+        const rule=data(o,'fillRule','nonzero');if(rule!=='nonzero'&&rule!=='evenodd')fail('Unknown fill rule');
+        add({type:'path',commands,color:data(o,'color',null),width:data(o,'width',1.5),fill:data(o,'fill',null),even_odd:rule==='evenodd'},n);
+      },
+      text(text,x,y,o={}) { if(typeof text!=='string'||text.length>2048)fail('Invalid canvas text');
+        if(!['sans','mono'].includes(data(o,'font','sans')))fail('Unknown canvas font');
+        add({type:'text',text,origin:[number(x),number(y)],size:data(o,'size',16),color:data(o,'color','#70B8FF'),align:data(o,'align','left'),mono:data(o,'font','sans')==='mono'},0); },
+      group(o,draw) {
+        if(typeof draw!=='function'||depth>=8)fail('Invalid drawing group');
+        const t=data(o,'translate',[0,0]), scale=data(o,'scale',1), r=number(data(o,'rotate',0))*Math.PI/180;
+        const [x,y]=pair(t), [sx,sy]=typeof scale==='number'?[number(scale),number(scale)]:pair(scale);
+        const c=Math.cos(r), s=Math.sin(r), children=[];
+        add({type:'group',transform:[c*sx,s*sx,-s*sy,c*sy,x,y],children},0);
+        const parent=target;target=children;depth++;
+        try {sync(draw(g));} finally {target=parent;depth--;}
+      },
+      scene3d(o,build) {
+        if(typeof build!=='function')fail('scene3d needs a build function');
+        const x=data(o,'x'), viewport = x===undefined ? null : [number(x),number(data(o,'y',0)),number(data(o,'width')),number(data(o,'height'))];
+        const c=data(o,'camera',{});
+        const camera={fov:data(c,'fov',50),distance:data(c,'distance',5),yaw:data(c,'yaw',30),pitch:data(c,'pitch',20),target:triple(data(c,'target',[0,0,0]),'Camera target')};
+        const lightValue=data(o,'light'), light=lightValue===undefined?null:triple(lightValue,'Light');
+        const objects=[];
+        const d=freeze({
+          mesh(m,p={}) {
+            if(!meshes.includes(m))fail('Use ui.box, ui.sphere, ui.cylinder, ui.cone, ui.torus or ui.mesh to define meshes');
+            if(objects.length>=64)fail('3D scene exceeds 64 objects');
+            const size=data(p,'scale',1);
+            objects.push({type:'mesh',mesh:m,position:triple(data(p,'position',[0,0,0]),'Position'),
+              rotate:triple(data(p,'rotate',[0,0,0]),'Rotation'),
+              scale:typeof size==='number'?[meshNumber(size),meshNumber(size),meshNumber(size)]:triple(size,'Scale'),
+              color:data(p,'color','#70B8FF')});
+          },
+          line(points,p={}) {
+            if(!isArray(points)||points.length<2||points.length>2048)fail('3D line must have 2..2048 points');
+            if(objects.length>=64)fail('3D scene exceeds 64 objects');
+            const copied=[];for(let i=0;i<points.length;i++)copied.push(triple(data(points,textString(i)),'3D point'));
+            objects.push({type:'line',points:copied,color:data(p,'color','#70B8FF'),width:data(p,'width',1.5)});
+          }
+        });
+        sync(build(d));
+        add({type:'scene3d',viewport,camera,light,objects},0);
+      },
       line(x1,y1,x2,y2,o={}) { add({type:'line',from:[number(x1),number(y1)],to:[number(x2),number(y2)],...style(o)},2); },
       circle(x,y,r,o={}) { add({type:'circle',center:[number(x),number(y)],radius:number(r),fill:data(o,'fill',null),...style(o)},64); },
       rect(x,y,w,h,o={}) { add({type:'rect',origin:[number(x),number(y)],size:[number(w),number(h)],fill:data(o,'fill',null),...style(o)},4); },
@@ -154,6 +299,8 @@
         const {g,output} = shapes();sync(apply(handlers[id],undefined,[g,freeze(state)]));
         return stringify(output);
       }
+      function immutable(v){if(v && typeof v==='object'){for(const k of keys(v))immutable(v[k]);freeze(v);}return v;}
+      immutable(args);
       sync(apply(handlers[id],undefined,[state,...args]));
       return stringify(flat(state));
     }

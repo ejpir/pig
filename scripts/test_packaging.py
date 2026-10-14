@@ -58,6 +58,9 @@ class PackagingTests(unittest.TestCase):
             "COMMIT-MONO-OFL.txt": root / "licenses/COMMIT-MONO-OFL.txt",
             "QUICKJS-NG-MIT.txt": root / "licenses/QUICKJS-NG-MIT.txt",
             "RQUICKJS-MIT.txt": root / "licenses/RQUICKJS-MIT.txt",
+            **{name: root / "licenses" / name for name in (
+                "ROXMLTREE-MIT.txt", "SVGTYPES-MIT.txt", "KURBO-MIT.txt", "LYON-MIT.txt",
+            )},
         }
         with zipfile.ZipFile(output) as apk:
             self.assertEqual(set(apk.namelist()), {f"assets/licenses/{name}" for name in sources})

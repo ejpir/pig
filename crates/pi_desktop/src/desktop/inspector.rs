@@ -182,7 +182,7 @@ impl InspectorView {
                     .text_size(px(22.))
                     .line_height(px(30.))
                     .truncate()
-                    .child(model.title().to_owned()),
+                    .child(pi_visual::prompt::label(model.title())),
             )
             .child(
                 h_flex()

@@ -402,6 +402,21 @@ fn full_catalog_is_virtualized_and_row_height_matches_filtered_results(cx: &mut 
 }
 
 #[gpui::test]
+fn long_drafts_grow_the_composer_instead_of_covering_its_toolbar(cx: &mut TestAppContext) {
+    let (desktop, mut cx) = setup(cx);
+    let a = tab(&desktop, 0, &cx);
+    let short = cx.debug_bounds("composer").unwrap();
+    set_draft(&a, "one\ntwo\nthree\nfour\nfive\nsix\nseven", &mut cx);
+    let composer = cx.debug_bounds("composer").unwrap();
+    let attach = cx.debug_bounds("attach").unwrap();
+    assert!(composer.size.height > short.size.height, "{composer:?}");
+    assert!(
+        attach.bottom() <= composer.bottom(),
+        "{attach:?} in {composer:?}"
+    );
+}
+
+#[gpui::test]
 fn menu_hover_search_and_typing_do_not_rebuild_transcript_or_inspector(cx: &mut TestAppContext) {
     let (desktop, mut cx) = setup(cx);
     let a = tab(&desktop, 0, &cx);
@@ -1680,3 +1695,6 @@ fn forking_before_later_turns_asks_which_files_to_start_with(cx: &mut TestAppCon
         "{notice}"
     );
 }
+
+#[path = "desktop/visualize_tests.rs"]
+mod visualize_tests;

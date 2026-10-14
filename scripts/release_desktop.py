@@ -18,6 +18,9 @@ ANDROID_LICENSES = {
     "COMMIT-MONO-OFL.txt": ROOT / "licenses/COMMIT-MONO-OFL.txt",
     "QUICKJS-NG-MIT.txt": ROOT / "licenses/QUICKJS-NG-MIT.txt",
     "RQUICKJS-MIT.txt": ROOT / "licenses/RQUICKJS-MIT.txt",
+    **{name: ROOT / "licenses" / name for name in (
+        "ROXMLTREE-MIT.txt", "SVGTYPES-MIT.txt", "KURBO-MIT.txt", "LYON-MIT.txt",
+    )},
 }
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?")
 

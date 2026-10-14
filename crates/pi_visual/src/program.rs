@@ -124,6 +124,7 @@ impl Bytecode {
 pub(super) struct Program {
     bootstrap: Arc<Bytecode>,
     source: Bytecode,
+    vectors: Arc<std::sync::Mutex<crate::svg::Cache>>,
 }
 impl Program {
     pub(super) fn compile(ctx: &Ctx<'_>, source: &str) -> rquickjs::Result<Self> {
@@ -140,9 +141,15 @@ impl Program {
         Ok(Self {
             bootstrap,
             source: Bytecode::compile(ctx, source)?,
+            vectors: Arc::default(),
         })
     }
-    pub(super) fn register<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+    pub(super) fn register<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        deadline: std::time::Instant,
+    ) -> rquickjs::Result<Object<'js>> {
+        crate::svg::install(ctx, self.vectors.clone(), deadline)?;
         let bootstrap_trace = crate::trace::scope(crate::trace::Phase::Bootstrap);
         let bridge = Object::from_js(ctx, self.bootstrap.eval(ctx)?)?;
         drop(bootstrap_trace);

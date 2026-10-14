@@ -108,6 +108,11 @@ impl ComposerView {
                     cx.notify();
                 }
                 SessionEvent::RecoverDraft(text) => {
+                    let text = if pi_visual::prompt::admitted(text) {
+                        pi_visual::prompt::label(text)
+                    } else {
+                        text.clone()
+                    };
                     this.input.update(cx, |input, cx| {
                         let content = if input.content().is_empty() {
                             text.clone()
@@ -276,6 +281,10 @@ impl ComposerView {
             self.run_builtin(builtin, text, cx);
             return;
         }
+        let draft = {
+            let input = self.input.read(cx);
+            mentions::visual_prompt(input.content(), input.chips(), &self.mentions)
+        };
         let content = match &self.attached {
             Some(slash::Attached::Pi(command)) if draft.is_empty() => format!("/{}", command.name),
             Some(slash::Attached::Pi(command)) => format!("/{} {draft}", command.name),
@@ -346,8 +355,10 @@ impl ComposerView {
                 .absolute()
                 .size_full(),
             )
+            // Grows with the message until the input's eight lines, then the
+            // input scrolls; a fixed height let long drafts cover the toolbar.
             .when(!self.expanded, |composer| {
-                composer.h(px(if compact { 112. } else { 142. }))
+                composer.min_h(px(if compact { 112. } else { 142. }))
             })
             .when(self.expanded, |composer| composer.flex_1().min_h_0())
             .mx(WORK_GUTTER)
@@ -407,7 +418,7 @@ impl ComposerView {
                             .overflow_hidden()
                             .text_ellipsis()
                             .text_size(px(12.))
-                            .child(message.clone()),
+                            .child(pi_visual::prompt::label(message)),
                     )
                     .when(
                         index == 0 && model.steering.len() + model.follow_up.len() > 1,

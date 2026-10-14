@@ -29,6 +29,7 @@ mod qr;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod touch;
 
+pub mod raw_touch;
 pub mod trace;
 
 #[cfg(target_os = "android")]

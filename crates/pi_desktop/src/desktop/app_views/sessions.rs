@@ -116,7 +116,9 @@ impl SessionsView {
             .filter(|saved| {
                 query.is_empty()
                     || saved.title().to_lowercase().contains(&query)
-                    || saved.first_message.to_lowercase().contains(&query)
+                    || pi_visual::prompt::label(&saved.first_message)
+                        .to_lowercase()
+                        .contains(&query)
                     || saved.cwd.to_lowercase().contains(&query)
             })
             .cloned()
@@ -597,10 +599,10 @@ impl SessionsView {
                                     .child(single_line(saved.title()))
                             })
                             .when(!named, |title| {
-                                title
-                                    .italic()
-                                    .text_color(theme.muted)
-                                    .child(format!("“{}”", single_line(&saved.first_message)))
+                                title.italic().text_color(theme.muted).child(format!(
+                                    "“{}”",
+                                    single_line(&pi_visual::prompt::label(&saved.first_message))
+                                ))
                             }),
                     )
                     .when(state == Some(true), |row| {
@@ -824,7 +826,7 @@ impl SessionsView {
                             .text_size(px(12.5))
                             .line_height(px(20.))
                             .text_color(theme.text)
-                            .child(truncated(&saved.first_message, 400)),
+                            .child(truncated(&pi_visual::prompt::label(&saved.first_message), 400)),
                     )
                     .child(label("Session file", theme).mt(px(16.)).mb(px(2.)))
                     .child(

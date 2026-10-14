@@ -355,7 +355,11 @@ pub fn spinner(id: impl Into<ElementId>, theme: Theme) -> Div {
                 .text_color(theme.accent)
                 .with_animation(
                     id,
-                    Animation::new(Duration::from_millis(900)).repeat(),
+                    // A 12px arc reads as smooth at 30 fps; at the display's
+                    // rate it kept the whole window redrawing 120 times a second.
+                    Animation::new(Duration::from_millis(900))
+                        .repeat()
+                        .with_max_fps(30.),
                     |arc, delta| arc.with_transformation(Transformation::rotate(percentage(delta))),
                 ),
         )

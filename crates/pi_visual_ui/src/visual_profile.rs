@@ -8,14 +8,14 @@ use std::{
 
 /// Trusted enum-to-literal adapter. Opaque guards contain only the native trace
 /// guard, never VM values. Disabled tracing allocates nothing and reads no clocks.
-pub(crate) fn install_trace() {
+pub fn install_trace() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {
         pi_visual::trace::install(trace_phase);
     });
 }
 fn trace_phase(phase: pi_visual::trace::Phase) -> Option<Box<dyn std::any::Any>> {
-    if !gpui_android::trace::enabled() {
+    if !crate::platform::trace::enabled() {
         return None;
     }
     use pi_visual::trace::Phase;
@@ -42,12 +42,12 @@ fn trace_phase(phase: pi_visual::trace::Phase) -> Option<Box<dyn std::any::Any>>
         Phase::TextFailure => c"pi.js.text.failure",
         Phase::DecodeTexts => c"pi.js.text.decode",
     };
-    Some(Box::new(gpui_android::trace::scope(name)))
+    Some(Box::new(crate::platform::trace::scope(name)))
 }
 
 const LIMIT: usize = 120;
 #[derive(Clone, Copy)]
-pub(crate) enum Stage {
+pub enum Stage {
     InputGap,
     QueueWait,
     Callback,
@@ -82,7 +82,7 @@ struct Recording {
     cached_label: String,
 }
 #[derive(Default)]
-pub(crate) struct Profile(RefCell<Recording>);
+pub struct Profile(RefCell<Recording>);
 impl Global for Profile {}
 impl Recording {
     fn record(&mut self, stage: Stage, elapsed: Duration) {
@@ -109,7 +109,7 @@ impl Recording {
         }
     }
 }
-pub(crate) fn enable(cx: &mut App, enabled: bool) {
+pub fn enable(cx: &mut App, enabled: bool) {
     let mut r = cx.default_global::<Profile>().0.borrow_mut();
     if r.enabled != enabled {
         *r = Recording {
@@ -118,11 +118,11 @@ pub(crate) fn enable(cx: &mut App, enabled: bool) {
         };
     }
 }
-pub(crate) fn enabled(cx: &App) -> bool {
+pub fn enabled(cx: &App) -> bool {
     cx.try_global::<Profile>()
         .is_some_and(|p| p.0.borrow().enabled)
 }
-pub(crate) fn receive(cx: &App, replaced: bool) -> Option<Instant> {
+pub fn receive(cx: &App, replaced: bool) -> Option<Instant> {
     let profile = cx.try_global::<Profile>()?;
     let mut r = profile.0.borrow_mut();
     if !r.enabled {
@@ -141,7 +141,7 @@ pub(crate) fn receive(cx: &App, replaced: bool) -> Option<Instant> {
     r.replaced += u64::from(replaced);
     Some(now)
 }
-pub(crate) fn deliver(cx: &App, receipt: Option<Instant>) {
+pub fn deliver(cx: &App, receipt: Option<Instant>) {
     if let Some(receipt) = receipt
         && let Some(p) = cx.try_global::<Profile>()
     {
@@ -153,7 +153,7 @@ pub(crate) fn deliver(cx: &App, receipt: Option<Instant>) {
         }
     }
 }
-pub(crate) fn duplicate(cx: &App) {
+pub fn duplicate(cx: &App) {
     if let Some(p) = cx.try_global::<Profile>() {
         let mut r = p.0.borrow_mut();
         if r.enabled {
@@ -162,7 +162,7 @@ pub(crate) fn duplicate(cx: &App) {
         }
     }
 }
-pub(crate) fn runtime(cx: &App, runtime: &pi_visual::Runtime) {
+pub fn runtime(cx: &App, runtime: &pi_visual::Runtime) {
     let batch = runtime.take_profile();
     if let Some(p) = cx.try_global::<Profile>() {
         let mut r = p.0.borrow_mut();
@@ -182,7 +182,7 @@ pub(crate) fn runtime(cx: &App, runtime: &pi_visual::Runtime) {
         }
     }
 }
-pub(crate) fn paths(cx: &App, start: Option<Instant>, hits: u64, builds: u64) {
+pub fn paths(cx: &App, start: Option<Instant>, hits: u64, builds: u64) {
     if let Some(start) = start
         && let Some(p) = cx.try_global::<Profile>()
     {
@@ -195,7 +195,7 @@ pub(crate) fn paths(cx: &App, start: Option<Instant>, hits: u64, builds: u64) {
         r.record(Stage::Paths, start.elapsed());
     }
 }
-pub(crate) fn label(cx: &App) -> String {
+pub fn label(cx: &App) -> String {
     let Some(p) = cx.try_global::<Profile>() else {
         return String::new();
     };
@@ -236,6 +236,7 @@ pub(crate) fn label(cx: &App) -> String {
     r.cached_label = label.clone();
     label
 }
+#[cfg(feature = "android")]
 fn native_label() -> String {
     use gpui_android::frame_profile::{self, Stage as S};
     let Some(s) = frame_profile::snapshot() else {
@@ -252,7 +253,7 @@ fn native_label() -> String {
     )
 }
 #[cfg(feature = "ui-test")]
-pub(crate) fn telemetry(cx: &App) -> serde_json::Value {
+pub fn telemetry(cx: &App) -> serde_json::Value {
     let Some(p) = cx.try_global::<Profile>() else {
         return serde_json::Value::Null;
     };
@@ -270,8 +271,8 @@ pub(crate) fn telemetry(cx: &App) -> serde_json::Value {
 // Transparent root wrapper: request-layout start through root prepaint end
 // includes Taffy layout; paint end is CPU scene construction, not presentation.
 // It adds no element id, style, clipping, focus or accessibility role.
-pub(crate) struct Root(gpui::AnyElement);
-pub(crate) fn root(element: impl gpui::IntoElement) -> Root {
+pub struct Root(gpui::AnyElement);
+pub fn root(element: impl gpui::IntoElement) -> Root {
     Root(element.into_any_element())
 }
 impl gpui::IntoElement for Root {
@@ -297,7 +298,7 @@ impl gpui::Element for Root {
         cx: &mut App,
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
         let start = enabled(cx).then(Instant::now);
-        let _trace = gpui_android::trace::scope(c"pi.root.request_layout");
+        let _trace = crate::platform::trace::scope(c"pi.root.request_layout");
         (self.0.request_layout(window, cx), start)
     }
     fn prepaint(
@@ -311,7 +312,7 @@ impl gpui::Element for Root {
     ) {
         // Do not retain a synchronous trace guard in arena-backed element
         // state: a panic between layout and prepaint must not leave it open.
-        let _trace = gpui_android::trace::scope(c"pi.root.prepaint");
+        let _trace = crate::platform::trace::scope(c"pi.root.prepaint");
         self.0.prepaint(window, cx);
         if let Some(start) = start.take()
             && let Some(p) = cx.try_global::<Profile>()
@@ -330,7 +331,7 @@ impl gpui::Element for Root {
         window: &mut gpui::Window,
         cx: &mut App,
     ) {
-        let _trace = gpui_android::trace::scope(c"pi.root.paint");
+        let _trace = crate::platform::trace::scope(c"pi.root.paint");
         let start = enabled(cx).then(Instant::now);
         self.0.paint(window, cx);
         if let Some(start) = start
@@ -345,6 +346,11 @@ impl gpui::Element for Root {
             }
         }
     }
+}
+
+#[cfg(not(feature = "android"))]
+fn native_label() -> String {
+    String::new()
 }
 
 #[cfg(test)]

@@ -1,11 +1,17 @@
 //! Portable declarative mini-app definitions and a bounded, capability-free QuickJS runtime.
 
 pub mod graphics;
+pub mod input;
 pub mod profile;
 mod program;
+pub mod prompt;
 pub mod reply;
+pub mod scene3d;
+mod svg;
+mod svg_path;
 pub mod trace;
 pub use graphics::{Animation, Scene, Shape};
+pub use input::{InputEvent, InputState};
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -26,6 +32,14 @@ pub struct Definition {
     pub view: Node,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<Animation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Layer {
+    pub draw: String,
+    /// None depends on all state; Some([]) is static. Only declared fields are supplied.
+    pub deps: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, Deserialize)]
@@ -49,6 +63,8 @@ pub enum Node {
         label: String,
         action: String,
         tone: String,
+        #[serde(default)]
+        hold: Option<String>,
     },
     Slider {
         label: String,
@@ -65,6 +81,10 @@ pub enum Node {
         draw: String,
         #[serde(default)]
         pointer_action: Option<String>,
+        #[serde(default)]
+        input_action: Option<String>,
+        #[serde(default)]
+        layers: Vec<Layer>,
     },
 }
 
@@ -144,7 +164,30 @@ impl Node {
                 view_box,
                 draw,
                 pointer_action,
+                input_action,
+                layers,
             } => {
+                ensure!(
+                    pointer_action.is_none() || input_action.is_none(),
+                    "Use onPointer or onInput, not both"
+                );
+                ensure!(
+                    input_action
+                        .as_ref()
+                        .is_none_or(|a| !a.is_empty() && a.len() <= 32),
+                    "Invalid input callback"
+                );
+                ensure!(layers.len() <= 8, "Too many canvas layers");
+                for layer in layers {
+                    ensure!(
+                        !layer.draw.is_empty() && layer.draw.len() <= 32,
+                        "Invalid layer callback"
+                    );
+                    ensure!(
+                        layer.deps.as_ref().is_none_or(|d| d.len() <= 64),
+                        "Too many layer dependencies"
+                    );
+                }
                 ensure!(
                     !label.is_empty() && label.len() <= 128,
                     "Canvas needs a short accessible label"
@@ -176,7 +219,16 @@ impl Node {
                 label,
                 action,
                 tone,
+                hold,
             } => {
+                ensure!(
+                    hold.as_ref().is_none_or(|h| !h.is_empty() && h.len() <= 32),
+                    "Invalid held button name"
+                );
+                ensure!(
+                    hold.is_none() || !label.contains(['\n', '\r']),
+                    "Held button label must be one line"
+                );
                 ensure!(label.len() <= 32 && action.len() <= 32, "Button too long");
                 ensure!(
                     ["accent", "operator", "utility", "normal"].contains(&tone.as_str()),
@@ -196,13 +248,52 @@ impl Node {
         }
     }
 
-    fn has_canvas(&self) -> bool {
-        matches!(self, Self::Canvas { .. }) || self.children().iter().any(Self::has_canvas)
+    /// The tallest canvas anywhere in this view, as its height and viewBox,
+    /// for hosts that scale drawings.
+    pub fn tallest_canvas(&self) -> Option<(f32, [f32; 4])> {
+        match self {
+            Self::Canvas {
+                height, view_box, ..
+            } => Some((*height, *view_box)),
+            _ => self
+                .children()
+                .iter()
+                .filter_map(Node::tallest_canvas)
+                .max_by(|a, b| a.0.total_cmp(&b.0)),
+        }
     }
 
     fn has_pointer(&self, action: &str) -> bool {
         matches!(self, Self::Canvas { pointer_action: Some(a), .. } if a == action)
             || self.children().iter().any(|n| n.has_pointer(action))
+    }
+
+    fn has_input(&self, action: &str) -> bool {
+        matches!(self, Self::Canvas { input_action: Some(a), .. } if a == action)
+            || matches!(self, Self::Button { action: a, hold: Some(_), .. } if a == action)
+            || self.children().iter().any(|n| n.has_input(action))
+    }
+
+    fn hold_name(&self, id: &str) -> Option<&str> {
+        if let Self::Button {
+            action,
+            hold: Some(name),
+            ..
+        } = self
+            && action == id
+        {
+            return Some(name);
+        }
+        self.children().iter().find_map(|n| n.hold_name(id))
+    }
+
+    fn layers(&self, name: &str) -> Option<&[Layer]> {
+        if let Self::Canvas { draw, layers, .. } = self
+            && draw == name
+        {
+            return Some(layers);
+        }
+        self.children().iter().find_map(|n| n.layers(name))
     }
 
     fn has_draw(&self, name: &str) -> bool {
@@ -217,7 +308,16 @@ impl Node {
         sliders: &mut std::collections::HashSet<String>,
     ) -> Result<()> {
         match self {
-            Self::Canvas { .. } => {
+            Self::Canvas { layers, .. } => {
+                for layer in layers {
+                    if let Some(deps) = &layer.deps {
+                        let mut seen = std::collections::HashSet::new();
+                        ensure!(
+                            deps.iter().all(|d| state.contains_key(d) && seen.insert(d)),
+                            "Unknown or duplicate layer dependency"
+                        );
+                    }
+                }
                 *canvases += 1;
                 ensure!(*canvases <= 4, "Too many canvases");
             }
@@ -275,6 +375,8 @@ pub struct Runtime {
     last_scenes: RefCell<HashMap<String, Arc<Scene>>>,
     texts: RefCell<HashMap<String, Result<String, String>>>,
     text_error: RefCell<Option<String>>,
+    layers: RefCell<HashMap<Layer, (Value, Arc<Scene>)>>,
+    input: InputState,
 }
 
 enum Code<'a> {
@@ -322,7 +424,7 @@ fn execute(
                             _ => unreachable!(),
                         },
                     };
-                    let bridge = program.register(&ctx)?;
+                    let bridge = program.register(&ctx, deadline)?;
                     let definition: String = {
                         let _trace = trace::scope(trace::Phase::Definition);
                         let definition: Function = bridge.get("definition")?;
@@ -401,7 +503,6 @@ impl Runtime {
             .validate_bindings(&state, &mut 0, &mut std::collections::HashSet::new())?;
         if let Some(animation) = &definition.animation {
             animation.validate()?;
-            ensure!(definition.view.has_canvas(), "Animation requires a canvas");
             ensure!(
                 state.get(&animation.running).is_some_and(Value::is_boolean),
                 "Animation running must bind a boolean"
@@ -418,6 +519,8 @@ impl Runtime {
             last_scenes: RefCell::new(HashMap::new()),
             texts: RefCell::new(HashMap::new()),
             text_error: RefCell::new(None),
+            layers: RefCell::new(HashMap::new()),
+            input: InputState::default(),
         })
     }
     pub fn load(folder: &Path) -> Result<Self> {
@@ -495,9 +598,19 @@ impl Runtime {
         )
     }
     fn invoke(&self, mode: &str, id: &str, state: &Value, args: Value) -> Result<String> {
+        self.invoke_bounded(mode, id, state, args, CALL_TIME)
+    }
+    fn invoke_bounded(
+        &self,
+        mode: &str,
+        id: &str,
+        state: &Value,
+        args: Value,
+        budget: Duration,
+    ) -> Result<String> {
         let (definition, result, _) = execute(
             Code::Cached(&self.program),
-            CALL_TIME,
+            budget,
             Some((mode, id, state, &args)),
         )?;
         ensure!(
@@ -558,11 +671,77 @@ impl Runtime {
             "Invalid tick duration"
         );
         if self.animating() {
-            self.event("__tick", self.state_json()?, serde_json::json!([dt]))
+            self.event(
+                "__tick",
+                self.state_json()?,
+                serde_json::json!([dt, self.input_snapshot()]),
+            )
         } else {
             Ok(())
         }
     }
+    /// Input state reflects the physical transition even if a guest handler fails.
+    pub fn input(&mut self, id: &str, event: InputEvent) -> Result<()> {
+        ensure!(self.definition.view.has_input(id), "Unknown input action");
+        if matches!(&event, InputEvent::Key { down: false, .. })
+            && self.input.key_target.as_deref() != Some(id)
+        {
+            return Ok(());
+        }
+        self.input.apply(id, &event)?;
+        if self.definition.view.hold_name(id).is_some() {
+            return Ok(());
+        }
+        self.event(
+            id,
+            self.state_json()?,
+            serde_json::json!([event, self.input_snapshot()]),
+        )
+    }
+    pub fn button_held(&self, id: &str) -> bool {
+        self.input.pointers.iter().any(|p| p.target == id)
+            || (self.input.key_target.as_deref() == Some(id)
+                && self.input.keys.iter().any(|k| k == "space" || k == "enter"))
+    }
+    fn input_snapshot(&self) -> Value {
+        let mut snapshot = serde_json::to_value(&self.input).expect("finite validated input");
+        let mut buttons = std::collections::BTreeSet::new();
+        for target in self
+            .input
+            .pointers
+            .iter()
+            .map(|p| p.target.as_str())
+            .chain(self.input.key_target.as_deref())
+        {
+            if self.button_held(target)
+                && let Some(name) = self.definition.view.hold_name(target)
+            {
+                buttons.insert(name);
+            }
+        }
+        snapshot["buttons"] = serde_json::json!(buttons);
+        snapshot
+    }
+    pub fn clear_input(&mut self) {
+        self.input = InputState::default();
+    }
+    pub fn cancel_input(&mut self) {
+        let mut targets: std::collections::BTreeSet<_> = self
+            .input
+            .pointers
+            .iter()
+            .map(|p| p.target.clone())
+            .collect();
+        targets.extend(self.input.key_target.clone());
+        self.clear_input();
+        for target in targets {
+            let _ = self.input(&target, InputEvent::Cancel);
+        }
+    }
+    pub fn input_state(&self) -> &InputState {
+        &self.input
+    }
+
     pub fn pointer(&mut self, id: &str, x: f64, y: f64) -> Result<()> {
         ensure!(
             self.definition.view.has_pointer(id),
@@ -628,6 +807,10 @@ impl Runtime {
         let _scene_miss_trace = trace::scope(trace::Phase::SceneMiss);
         self.profile.cache(false);
         let result = (|| -> Result<Arc<Scene>> {
+            let layers = self.definition.view.layers(id).unwrap_or_default();
+            if !layers.is_empty() {
+                return self.layered_scene(layers);
+            }
             let timing = self.profile.timer(profile::Stage::DrawScript);
             let output = self.invoke("draw", id, &self.state_json()?, serde_json::json!([]))?;
             drop(timing);
@@ -647,9 +830,84 @@ impl Runtime {
             Ok(scene)
         })()
         .map_err(|e| format!("{e:#}"));
+        if let Ok(scene) = &result {
+            self.last_scenes
+                .borrow_mut()
+                .insert(id.into(), scene.clone());
+        }
         self.scenes.borrow_mut().insert(id.into(), result.clone());
         result.map_err(anyhow::Error::msg)
     }
+    fn layered_scene(&self, layers: &[Layer]) -> Result<Arc<Scene>> {
+        let mut missing = Vec::new();
+        let mut keys = Vec::new();
+        for layer in layers {
+            let key = match &layer.deps {
+                None => self.state_json()?,
+                Some(deps) => Value::Object(
+                    deps.iter()
+                        .map(|k| (k.clone(), self.state[k].clone()))
+                        .collect(),
+                ),
+            };
+            if !self
+                .layers
+                .borrow()
+                .get(layer)
+                .is_some_and(|(cached, _)| *cached == key)
+            {
+                missing.push(layer);
+            }
+            keys.push(key);
+        }
+        let mut fresh = HashMap::new();
+        let deadline = Instant::now() + CALL_TIME;
+        for layer in missing {
+            let _timing = self.profile.timer(profile::Stage::DrawScript);
+            let snapshot = match &layer.deps {
+                None => self.state_json()?,
+                Some(deps) => Value::Object(
+                    deps.iter()
+                        .map(|k| (k.clone(), self.state[k].clone()))
+                        .collect(),
+                ),
+            };
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .context("Layer drawing time limit exceeded")?;
+            // Fresh context per layer: skipping a cached layer must not change another
+            // callback's globals/closures. All misses share one total invocation budget.
+            let output = self.invoke_bounded(
+                "draw",
+                &layer.draw,
+                &snapshot,
+                serde_json::json!([]),
+                remaining,
+            )?;
+            let part: Scene = serde_json::from_str(&output)?;
+            graphics::validate_scene(&part)?;
+            fresh.insert(layer.clone(), part);
+        }
+        let mut scene = Vec::new();
+        let mut replacements = Vec::new();
+        let cache = self.layers.borrow();
+        for (layer, key) in layers.iter().zip(keys) {
+            let part = if let Some(part) = fresh.get(layer) {
+                graphics::validate_scene(part)?;
+                let part = Arc::new(part.clone());
+                replacements.push((layer.clone(), (key, part.clone())));
+                part
+            } else {
+                cache.get(layer).context("Missing drawing layer")?.1.clone()
+            };
+            scene.extend(part.iter().cloned());
+        }
+        graphics::validate_scene(&scene)?;
+        drop(cache);
+        self.layers.borrow_mut().extend(replacements);
+        Ok(Arc::new(scene))
+    }
+
     pub fn drawing_failed(&self) -> bool {
         self.text_error.borrow().is_some() || self.scenes.borrow().values().any(Result::is_err)
     }

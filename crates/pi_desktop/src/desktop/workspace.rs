@@ -193,7 +193,7 @@ impl WorkspaceController {
             && first
             && !matches!(
                 controller.read(cx).model().state.session_id.as_deref(),
-                Some("demo-workspace" | "demo-workbench")
+                Some("demo-workspace" | "demo-workbench" | "visual-demo")
             ) {
             "Run the qwen provider tests too once check passes"
         } else {
@@ -281,6 +281,9 @@ impl WorkspaceController {
         id
     }
     pub fn show_view(&mut self, view: super::app_views::AppView, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tab(self.active) {
+            tab.view.read(cx).transcript.read(cx).cancel_visuals();
+        }
         self.view = Some(view);
         self.refresh_catalog(cx);
         cx.emit(WorkspaceEvent::View);
@@ -302,6 +305,7 @@ impl WorkspaceController {
         if id != self.active
             && let Some(old) = self.tab(self.active)
         {
+            old.view.read(cx).transcript.read(cx).cancel_visuals();
             let composer = old.view.read(cx).composer.clone();
             composer.update(cx, |composer, cx| composer.deactivate(cx));
         }

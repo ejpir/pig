@@ -117,9 +117,14 @@ fn ssh_at_menu_reports_tree_errors_instead_of_silently_hiding_files(cx: &mut Tes
     });
     fixture.composer.read_with(&fixture.visual, |composer, _| {
         assert!(composer.mention_open());
-        assert!(composer.mention.items.is_empty());
+        assert_eq!(composer.mention.items.len(), 1);
+        assert!(matches!(
+            composer.mention.items[0].choice,
+            super::Choice::Visualize
+        ));
     });
     assert!(fixture.visual.debug_bounds("mention-menu").is_some());
+    assert!(fixture.visual.debug_bounds("mention-file-status").is_some());
     assert!(
         !requests(&fixture)
             .iter()
@@ -136,7 +141,7 @@ fn ssh_at_files_load_on_first_use_preview_remote_bytes_and_insert_relative_paths
     fixture.composer.read_with(&fixture.visual, |composer, cx| {
         assert!(composer.mention_open());
         assert_eq!(
-            composer.mention.items[0].choice.mention().body,
+            composer.mention.items[0].choice.mention().unwrap().body,
             Body::Path {
                 path: "src/remote.rs".into(),
                 line: None
@@ -188,7 +193,7 @@ fn ssh_directory_mentions_and_unicode_completion_do_not_attach_contents(cx: &mut
     let mut fixture = setup(cx);
     query(&mut fixture, "Inspect @设计/");
     fixture.composer.read_with(&fixture.visual, |composer, _| {
-        let mention = composer.mention.items[0].choice.mention();
+        let mention = composer.mention.items[0].choice.mention().unwrap();
         assert_eq!(mention.kind, Kind::Directory);
         assert_eq!(
             mention.body,

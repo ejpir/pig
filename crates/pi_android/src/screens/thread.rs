@@ -797,6 +797,8 @@ impl PhoneApp {
                 } else if turn.interleaved() {
                     column.children(self.flow(session, index, turn, colors, cx))
                 } else {
+                    let column =
+                        column.children(self.thinking_steps(id, index, turn, live, colors, cx));
                     let text = turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
                     // Choose native rendering BEFORE constructing/highlighting the
                     // large script fence; the discarded ordinary reply was expensive.
@@ -936,8 +938,106 @@ impl PhoneApp {
                     self.compacted(id, index, n, summary, colors, cx)
                         .into_any_element(),
                 ),
+                Flow::Thinking(text) => Some(
+                    self.thinking(id, index, n, text, false, colors, cx)
+                        .into_any_element(),
+                ),
                 // Calls show in the thread only as a stream.
                 Flow::Tool(..) => None,
+            })
+            .collect()
+    }
+
+    /// The model's reasoning: one line, "Thinking" while it is the newest
+    /// thing in a live turn, opening to the reasoning itself when tapped.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn thinking(
+        &self,
+        id: SessionId,
+        index: usize,
+        step: usize,
+        text: &str,
+        live: bool,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let open = self.expanded_thinking.contains(&(id, index, step));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .min_w_0()
+            .child(
+                div()
+                    .id(("thinking", step))
+                    .debug_selector(|| "thinking".into())
+                    .child(crate::testing::probe(format!(
+                        "turn-{index}-thinking-{step}"
+                    )))
+                    .relative()
+                    .min_h(px(40.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(8.))
+                    .text_size(px(13.))
+                    .text_color(colors.muted)
+                    .active(|style| style.bg(colors.selected))
+                    .child(icon("spark", 14., colors.muted))
+                    .child(if live { "Thinking" } else { "Thought" })
+                    .child(icon(
+                        if open { "chev_d" } else { "chev_r" },
+                        14.,
+                        colors.faint,
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(list) = this.thread_lists.get(&id) {
+                            list.pause_following_tail();
+                        }
+                        if !this.expanded_thinking.remove(&(id, index, step)) {
+                            this.expanded_thinking.insert((id, index, step));
+                        }
+                        this.remeasure_thread_turn(id, index);
+                        cx.notify();
+                    })),
+            )
+            .when(open, |column| {
+                column.child(
+                    div()
+                        .relative()
+                        .debug_selector(|| "thinking-text".into())
+                        .child(crate::testing::probe(format!(
+                            "turn-{index}-thinking-{step}-text"
+                        )))
+                        .min_w_0()
+                        .pl(px(12.))
+                        .border_l_2()
+                        .border_color(colors.line)
+                        .text_color(colors.secondary)
+                        .child(crate::message::render(text, colors)),
+                )
+            })
+    }
+
+    /// Reasoning for a turn shown without its stream or flow: before the reply.
+    fn thinking_steps(
+        &self,
+        id: SessionId,
+        index: usize,
+        turn: &Turn,
+        live: bool,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Vec<Div> {
+        let last = turn.flow.len().saturating_sub(1);
+        turn.flow
+            .iter()
+            .enumerate()
+            .filter_map(|(n, step)| match step {
+                Flow::Thinking(text) => {
+                    Some(self.thinking(id, index, n, text, live && n == last, colors, cx))
+                }
+                _ => None,
             })
             .collect()
     }

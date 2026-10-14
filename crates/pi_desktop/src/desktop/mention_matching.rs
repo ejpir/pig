@@ -75,7 +75,7 @@ pub(super) async fn filter(
                 items
                     .iter()
                     .filter_map(|item| {
-                        let super::Body::Path { path, .. } = &item.choice.mention().body else {
+                        let super::Body::Path { path, .. } = &item.choice.mention()?.body else {
                             return None;
                         };
                         let path = RelPath::from_unix_str(path.trim_end_matches('/')).ok()?;
@@ -103,7 +103,7 @@ pub(super) async fn filter(
             .await;
             for matched in matches {
                 let path = matched.path.as_unix_str();
-                if let Some(item) = items.iter().find(|item| matches!(&item.choice.mention().body, super::Body::Path { path: candidate, .. } if candidate.trim_end_matches('/') == path)) {
+                if let Some(item) = items.iter().find(|item| item.choice.mention().is_some_and(|m|matches!(&m.body, super::Body::Path { path: candidate, .. } if candidate.trim_end_matches('/') == path))) {
                     let mut item = item.clone();
                     let basename = path.rfind('/').map_or(0, |at| at + 1);
                     item.matched = matched.positions.into_iter().filter_map(|at| at.checked_sub(basename)).collect();
@@ -184,7 +184,7 @@ mod tests {
                 .iter()
                 .all(|at| matched[0].name.is_char_boundary(*at))
         );
-        assert_eq!(matched[0].choice.mention().inline(), "@docs/设计/");
+        assert_eq!(matched[0].choice.mention().unwrap().inline(), "@docs/设计/");
         let files = vec![item(
             Kind::File,
             "openai-completions.ts",
@@ -225,7 +225,7 @@ mod tests {
             assert_eq!(matched.len(), 1);
             assert_eq!(matched[0].name, "parseSession");
             assert_eq!(
-                matched[0].choice.mention().body,
+                matched[0].choice.mention().unwrap().body,
                 Body::Text("original text".into())
             );
         }

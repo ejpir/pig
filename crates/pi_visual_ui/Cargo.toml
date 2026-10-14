@@ -1,0 +1,27 @@
+[package]
+name = "pi_visual_ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared native GPUI host for bounded Visualize apps"
+
+[features]
+android = ["dep:gpui_android"]
+ui-test = ["android"]
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+pi_visual = { path = "../pi_visual" }
+gpui_android = { path = "../gpui_android", optional = true }
+lyon = "=1.0.16"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+libc = "0.2"
+log = "0.4"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+tempfile = "3.23"

@@ -1,0 +1,26 @@
+
+
+[Pi native visual app request — JavaScript version 3]
+@Visualize requests a device-local, interactive native GPUI app. Return brief prose and exactly one fully closed code fence with info `javascript pi-visual`. Write plain JavaScript, not JSON, HTML, JSX, imports, or a Rust program. No WebView is used. Call app({title, state, view, animation?}) exactly once. Source <=64 KiB.
+UI helpers:
+ui.column([children], {gap:8,width:null}); ui.row([children], {gap:8});
+ui.text('literal' OR s=>string, {style:'muted'|'display'|'expression'|'heading'|'history'});
+ui.button('label', s=>{...}, {tone:'normal'|'accent'|'utility'|'operator'});
+ui.slider('label','stateField',{min,max,step:1,onChange:(s,value)=>{...}});
+ui.canvas({label,height:240,viewBox:[x,y,width,height],draw:(g,s)=>{...},onPointer:(s,x,y)=>{...}}).
+Helpers construct native widgets, not DOM nodes. Prefer a single flexible phone column, short labels, gaps 0..24, <=4 buttons per row. Canvas height 120..480; <=4 canvases. Native buttons/sliders have 48dp touch targets. Dynamic text getters MUST return strings; use toFixed or String for formatted numeric readouts. They do not add fields to saved state.
+State: flat object with <=64 fields, finite Number, boolean, or strings <=256 UTF-8 bytes. Keep keys/types fixed; sliders bind numeric fields initially inside their range. Event handlers mutate a transactional draft `s`; return values are ignored. Sliders set/quantize their field before onChange. Exceptions/invalid state/timeouts roll back; cancelled drags restore their pre-drag state. Text getters and draw receive frozen state snapshots and are pure. Globals/closures do not persist: initialization is reevaluated for isolated callbacks; all changing data belongs in state. Use no async/Promise/timers. No filesystem, network, processes, DOM, native/agent APIs, or modules are provided. Local array operations are bounded to8192 elements. Execution/memory/stack are bounded (20ms cooperative invocation including initialization, 16MiB guest heap, 256KiB guest stack); this is in-process protection, not an OS sandbox.
+Drawing records bounded native shapes in viewBox units, uniformly fitted and clipped:
+g.line(x1,y1,x2,y2,{color:'#RRGGBB',width:1.5});
+g.circle(x,y,r,{color,width,fill:'#RRGGBB'}); g.rect(x,y,w,h,{color,width,fill});
+g.polyline([[x,y],...],{color,width}); long polylines are automatically segmented.
+Colors: #RRGGBB/#RRGGBBAA. Finite geometry abs<=1e6, nonnegative sizes/radii, stroke widths 0.5..8 dp. <=64 recorded shapes and <=2048 vertices per scene (circles count64); budget the FULL completed trace. Use modest sampling; no drawing arrays in persisted state. No images, canvas text, transforms, gradients, arbitrary filled paths. Companion native text supplies legends/readouts.
+Optional animation:{running:'playing',tick(s,dt){...}} binds a boolean and native display-driven frames. dt is elapsed seconds capped0.1. Omit fps: it follows this phone's actual display, not a universal120Hz. Only specify fps:1..240 when the user explicitly asks for a cap. Include Play/Pause and Restart, start paused. Hidden/unfocused/background/sheet/reduced-motion suspends animation. Local input/ticks do not call the model; state is saved device-locally on user interactions.
+Example:
+app({title:'Moving dot',state:{x:10,speed:20,playing:false},view:ui.column([
+  ui.text(s=>`Position ${s.x.toFixed(1)}`,{style:'heading'}),
+  ui.canvas({label:'Blue moving dot',viewBox:[0,0,100,100],draw(g,s){g.circle(s.x,50,4,{fill:'#70B8FF'});},onPointer(s,x){s.x=x;}}),
+  ui.slider('Speed','speed',{min:1,max:50,step:1}),
+  ui.row([ui.button('Play / Pause',s=>{s.playing=!s.playing;},{tone:'accent'}),ui.button('Restart',s=>{s.x=10;})])
+]),animation:{running:'playing',tick(s,dt){s.x=(s.x+dt*s.speed)%100;}}});
+[End Pi native visual app request]

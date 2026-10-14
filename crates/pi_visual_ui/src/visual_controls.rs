@@ -1,36 +1,35 @@
 //! Native drawing and direct manipulation for portable visual apps.
+pub use crate::visual_painter::{SceneCache, paint_scene};
 use gpui::{
-    AccessibleAction, App, Bounds, ContentMask, DispatchPhase, Entity, Hsla, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point,
-    RenderOnce, Role, SharedString, TouchDragEvent, TouchPhase, Window, canvas, div, point,
-    prelude::*, px, rgba,
+    AccessibleAction, App, Bounds, DispatchPhase, Entity, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderOnce, Role, SharedString, TouchDragEvent,
+    TouchPhase, Window, canvas, div, point, prelude::*, px,
 };
-use pi_visual::{Scene, Shape};
 use std::{cell::Cell, rc::Rc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Gesture {
+pub enum Gesture {
     Start,
     Move,
     End,
     Cancel,
 }
-pub(crate) type Input = Rc<dyn Fn([f64; 2], Gesture, &mut Window, &mut App)>;
-pub(crate) type Painter = Rc<dyn Fn(Bounds<Pixels>, &mut SceneCache, &mut Window, &mut App)>;
-pub(crate) type Coordinates = Rc<dyn Fn(Point<Pixels>, Bounds<Pixels>) -> [f64; 2]>;
+pub type Input = Rc<dyn Fn([f64; 2], Gesture, &mut Window, &mut App)>;
+pub type Painter = Rc<dyn Fn(Bounds<Pixels>, &mut SceneCache, &mut Window, &mut App)>;
+pub type Coordinates = Rc<dyn Fn(Point<Pixels>, Bounds<Pixels>) -> [f64; 2]>;
 
 /// Shared only by one mounted runtime. A lease defers expensive model projection,
 /// not input/script/drawing work. Epoch invalidation makes stale releases harmless.
 #[derive(Clone, Default)]
-pub(crate) struct ProjectionBarrier(Rc<Cell<(u64, usize)>>);
+pub struct ProjectionBarrier(Rc<Cell<(u64, usize)>>);
 impl ProjectionBarrier {
-    pub(crate) fn active(&self) -> bool {
+    pub fn active(&self) -> bool {
         self.0.get().1 != 0
     }
-    pub(crate) fn invalidate(&self) {
+    pub fn invalidate(&self) {
         self.0.set((self.0.get().0.wrapping_add(1), 0));
     }
-    pub(crate) fn acquire(&self) -> Manipulation {
+    pub fn acquire(&self) -> Manipulation {
         let (epoch, active) = self.0.get();
         self.0.set((epoch, active + 1));
         Manipulation {
@@ -39,12 +38,12 @@ impl ProjectionBarrier {
         }
     }
 }
-pub(crate) struct Manipulation {
+pub struct Manipulation {
     barrier: ProjectionBarrier,
     epoch: u64,
 }
 impl Manipulation {
-    fn current(&self) -> bool {
+    pub fn current(&self) -> bool {
         self.barrier.0.get().0 == self.epoch
     }
 }
@@ -78,7 +77,7 @@ impl Drag {
 }
 
 #[derive(IntoElement)]
-pub(crate) struct Surface {
+pub struct Surface {
     pub id: SharedString,
     pub label: String,
     pub probe: String,
@@ -86,6 +85,8 @@ pub(crate) struct Surface {
     pub painter: Painter,
     pub coordinates: Coordinates,
     pub input: Option<Input>,
+    pub events: Option<crate::visual_input::SceneInput>,
+    pub held_button: bool,
     pub barrier: ProjectionBarrier,
     pub slider: Option<(f64, f64, f64, f64)>,
 }
@@ -98,12 +99,12 @@ fn queue_move(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let _trace = gpui_android::trace::scope(c"pi.visual.move.queue");
+    let _trace = crate::platform::trace::scope(c"pi.visual.move.queue");
     let queue = drag.update(cx, |state, cx| {
         let receipt = crate::visual_profile::receive(cx, state.pending.is_some());
         state.pending = Some((position, input, receipt));
         if state.queued {
-            let _trace = gpui_android::trace::scope(c"pi.visual.move.replace");
+            let _trace = crate::platform::trace::scope(c"pi.visual.move.replace");
             false
         } else {
             state.queued = true;
@@ -116,21 +117,21 @@ fn queue_move(
     let generation = drag.read(cx).generation;
     let weak = drag.downgrade();
     window.on_next_frame(move |window, cx| {
-        let _trace = gpui_android::trace::scope(c"pi.visual.move.frame");
+        let _trace = crate::platform::trace::scope(c"pi.visual.move.frame");
         let Some(drag) = weak.upgrade() else {
-            let _trace = gpui_android::trace::scope(c"pi.visual.move.discard");
+            let _trace = crate::platform::trace::scope(c"pi.visual.move.discard");
             return;
         };
         let pending = drag.update(cx, |state, _| {
             if !state.is_active() || state.generation != generation {
-                let _trace = gpui_android::trace::scope(c"pi.visual.move.discard");
+                let _trace = crate::platform::trace::scope(c"pi.visual.move.discard");
                 return None;
             }
             state.queued = false;
             state.pending.take()
         });
         if let Some((position, input, receipt)) = pending {
-            let _trace = gpui_android::trace::scope(c"pi.visual.move.deliver");
+            let _trace = crate::platform::trace::scope(c"pi.visual.move.deliver");
             crate::visual_profile::deliver(cx, receipt);
             input(position, Gesture::Move, window, cx);
         }
@@ -153,7 +154,10 @@ fn finish(state: &mut Drag) -> Option<Manipulation> {
 }
 
 impl RenderOnce for Surface {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        if let Some(input) = self.events.take() {
+            return crate::visual_input::render(self, input, window, cx);
+        }
         let cancel = self.input.clone();
         let drag = window.use_keyed_state(self.id.clone(), cx, |window, cx| {
             cx.on_release_in(window, move |state: &mut Drag, window, cx| {
@@ -172,7 +176,7 @@ impl RenderOnce for Surface {
             .id(self.id.clone())
             .debug_selector(move || self.id.to_string())
             .relative()
-            .child(crate::testing::probe(self.probe))
+            .child(crate::hooks::probe(self.probe))
             .w_full()
             .min_w_0()
             .role(if self.slider.is_some() {
@@ -218,7 +222,13 @@ impl RenderOnce for Surface {
                             .paths
                             .painted
                             .set(bounds.intersects(&window.content_mask().bounds));
-                        (self.painter)(bounds, &mut state.paths, window, cx)
+                        (self.painter)(bounds, &mut state.paths, window, cx);
+                        if !state.paths.painted.get() && state.is_active() {
+                            let _lease = finish(state);
+                            if let Some(input) = &self.input {
+                                input([0., 0.], Gesture::Cancel, window, cx);
+                            }
+                        }
                     });
                     let Some(input) = self.input else {
                         return;
@@ -280,6 +290,9 @@ impl RenderOnce for Surface {
                         cx.stop_propagation();
                     });
                     window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
+                        if crate::platform::raw_touch::current().is_some() {
+                            return;
+                        }
                         if phase != DispatchPhase::Capture {
                             return;
                         }
@@ -324,20 +337,11 @@ impl RenderOnce for Surface {
             .w_full()
             .h(px(self.height)),
         )
+        .into_any_element()
     }
 }
 
-fn color(hex: &str) -> Hsla {
-    let number = u32::from_str_radix(&hex[1..], 16).unwrap_or(0);
-    rgba(if hex.len() == 7 {
-        (number << 8) | 255
-    } else {
-        number
-    })
-    .into()
-}
-
-pub(crate) fn transform(bounds: Bounds<Pixels>, view_box: [f32; 4]) -> (Point<Pixels>, f32) {
+pub fn transform(bounds: Bounds<Pixels>, view_box: [f32; 4]) -> (Point<Pixels>, f32) {
     let scale = (f32::from(bounds.size.width) / view_box[2])
         .min(f32::from(bounds.size.height) / view_box[3]);
     let origin =
@@ -348,11 +352,7 @@ pub(crate) fn transform(bounds: Bounds<Pixels>, view_box: [f32; 4]) -> (Point<Pi
     )
 }
 
-pub(crate) fn pointer_at(
-    position: Point<Pixels>,
-    bounds: Bounds<Pixels>,
-    view_box: [f32; 4],
-) -> [f64; 2] {
+pub fn pointer_at(position: Point<Pixels>, bounds: Bounds<Pixels>, view_box: [f32; 4]) -> [f64; 2] {
     let (origin, scale) = transform(bounds, view_box);
     if scale <= 0.0 {
         return [f64::from(view_box[0]), f64::from(view_box[1])];
@@ -369,131 +369,10 @@ pub(crate) fn pointer_at(
     ]
 }
 
-pub(crate) fn slider_at(
-    position: Point<Pixels>,
-    bounds: Bounds<Pixels>,
-    min: f64,
-    max: f64,
-) -> [f64; 2] {
+pub fn slider_at(position: Point<Pixels>, bounds: Bounds<Pixels>, min: f64, max: f64) -> [f64; 2] {
     let width = f32::from(bounds.size.width - px(24.)).max(1.);
     let fraction = (f32::from(position.x - bounds.left() - px(12.)) / width).clamp(0., 1.);
     [min + f64::from(fraction) * (max - min), 0.0]
-}
-
-#[derive(Default)]
-pub(crate) struct SceneCache {
-    pub painted: Rc<Cell<bool>>,
-    viewport: Option<(Bounds<Pixels>, [f32; 4])>,
-    shapes: Vec<Option<CachedShape>>,
-    pub builds: u64,
-    pub hits: u64,
-}
-struct CachedShape {
-    shape: Shape,
-    paths: Vec<(gpui::Path<Pixels>, Hsla)>,
-}
-
-pub(crate) fn paint_scene(
-    scene: &Scene,
-    view_box: [f32; 4],
-    bounds: Bounds<Pixels>,
-    cache: &mut SceneCache,
-    window: &mut Window,
-) {
-    // Reuse static grid/candles/curves even when a moving cursor changes the scene.
-    // Only current shapes are retained (<=64); bounds changes invalidate paths.
-    if cache.viewport != Some((bounds, view_box)) {
-        cache.viewport = Some((bounds, view_box));
-        cache.shapes.clear();
-    }
-    cache.shapes.resize_with(scene.len(), || None);
-    let (origin, scale) = transform(bounds, view_box);
-    let at = |p: [f32; 2]| origin + point(px(p[0] * scale), px(p[1] * scale));
-    window.with_content_mask(Some(ContentMask { bounds }), |window| {
-        for (index, shape) in scene.iter().enumerate() {
-            if !cache.shapes[index]
-                .as_ref()
-                .is_some_and(|cached| cached.shape == *shape)
-            {
-                let (points, stroke, width, fill) = match shape {
-                    Shape::Polyline {
-                        points,
-                        color,
-                        width,
-                    } => (points.clone(), color, *width, None),
-                    Shape::Line {
-                        from,
-                        to,
-                        color,
-                        width,
-                    } => (vec![*from, *to], color, *width, None),
-                    Shape::Circle {
-                        center,
-                        radius,
-                        color,
-                        width,
-                        fill,
-                    } => {
-                        let mut points = Vec::with_capacity(65);
-                        for i in 0..=64 {
-                            let angle = i as f32 / 64. * std::f32::consts::TAU;
-                            points.push([
-                                center[0] + radius * angle.cos(),
-                                center[1] + radius * angle.sin(),
-                            ]);
-                        }
-                        (points, color, *width, fill.as_ref())
-                    }
-                    Shape::Rect {
-                        origin,
-                        size,
-                        color,
-                        width,
-                        fill,
-                    } => {
-                        let [x, y] = *origin;
-                        let [w, h] = *size;
-                        (
-                            vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]],
-                            color,
-                            *width,
-                            fill.as_ref(),
-                        )
-                    }
-                };
-                let mut paths = Vec::with_capacity(2);
-                if let Some(fill) = fill {
-                    let mut path = PathBuilder::fill();
-                    path.move_to(at(points[0]));
-                    for p in &points[1..] {
-                        path.line_to(at(*p));
-                    }
-                    path.close();
-                    if let Ok(path) = path.build() {
-                        paths.push((path, color(fill)));
-                    }
-                }
-                let mut path = PathBuilder::stroke(px(width));
-                path.move_to(at(points[0]));
-                for p in &points[1..] {
-                    path.line_to(at(*p));
-                }
-                if let Ok(path) = path.build() {
-                    paths.push((path, color(stroke)));
-                }
-                cache.shapes[index] = Some(CachedShape {
-                    shape: shape.clone(),
-                    paths,
-                });
-                cache.builds += 1;
-            } else {
-                cache.hits += 1;
-            }
-            for (path, color) in &cache.shapes[index].as_ref().unwrap().paths {
-                window.paint_path(path.clone(), *color);
-            }
-        }
-    });
 }
 
 #[cfg(test)]
@@ -528,6 +407,8 @@ mod tests {
                     assert!(barrier.active(), "lease released before {gesture:?}");
                     events.borrow_mut().push((p, gesture))
                 })),
+                events: None,
+                held_button: false,
                 slider: Some((50., 0., 100., 1.)),
             })
         }

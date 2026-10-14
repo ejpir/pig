@@ -394,6 +394,19 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                     last_kind = first_tool;
                 }
                 turn.add_time(first_tool.unwrap_or(StageKind::HandOff), spent);
+                // Redacted reasoning carries no text, so it shows nothing.
+                let thinking = message["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| block["type"] == "thinking")
+                    .filter_map(|block| block["thinking"].as_str())
+                    .filter(|text| !text.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if !thinking.is_empty() {
+                    turn.flow.push(crate::model::Flow::Thinking(thinking));
+                }
                 let text = text_of(message);
                 if !text.trim().is_empty() {
                     turn.flow.push(crate::model::Flow::Text(text.clone()));
@@ -1517,6 +1530,45 @@ mod tests {
                 .unwrap()
                 .text(),
             "I am checking the tests.\n\nAll tests passed."
+        );
+    }
+
+    #[test]
+    fn reasoning_comes_before_what_pi_said_and_redacted_reasoning_is_skipped() {
+        use crate::model::Flow;
+        let mut pi = session(&[
+            json!({"type":"agent_start"}),
+            json!({"type":"message_end","message":{"role":"user","content":"Why?"}}),
+            json!({"type":"message_end","message":{"role":"assistant","content":[
+                {"type":"thinking","thinking":"First, the cache."},
+                {"type":"redacted_thinking","data":"opaque"},
+                {"type":"thinking","thinking":"Then the index."},
+                {"type":"text","text":"Because of the cache."}
+            ],"stopReason":"stop"}}),
+        ]);
+        let flow = project(&pi, facts(&[])).turns[0].flow.clone();
+        assert_eq!(
+            flow,
+            vec![
+                Flow::Thinking("First, the cache.\n\nThen the index.".into()),
+                Flow::Text("Because of the cache.".into()),
+            ]
+        );
+        // Reasoning alone does not make a reply read as interleaved media.
+        assert!(!project(&pi, facts(&[])).turns[0].interleaved());
+        // Streaming reasoning shows before any text arrives.
+        pi.apply(&json!({"type":"message_end","message":{"role":"user","content":"And?"}}))
+            .unwrap();
+        pi.apply(
+            &json!({"type":"message_start","message":{"role":"assistant","content":[
+                {"type":"thinking","thinking":"Looking"}
+            ]}}),
+        )
+        .unwrap();
+        let shown = project(&pi, facts(&[]));
+        assert_eq!(
+            shown.turns.last().unwrap().flow,
+            vec![Flow::Thinking("Looking".into())]
         );
     }
 

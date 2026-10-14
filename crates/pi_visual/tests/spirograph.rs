@@ -1,6 +1,6 @@
 use pi_visual::Runtime;
 
-const SOURCE: &str = include_str!("../../pi_android/assets/samples/spirograph.pi-visual.js");
+const SOURCE: &str = include_str!("../../pi_visual/assets/samples/spirograph.pi-visual.js");
 
 #[test]
 fn spirograph_runs_within_budget_and_all_controls_change_the_scene() {

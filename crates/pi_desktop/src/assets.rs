@@ -25,6 +25,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     pencil,
     sparkle,
     copy,
+    refresh,
     attach,
     slash,
     box,
