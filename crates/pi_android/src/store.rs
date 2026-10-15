@@ -567,6 +567,16 @@ impl Store {
 
     #[cfg(test)]
     pub fn unqueue(&mut self, id: SessionId, index: usize) -> Result<(), String> {
+        #[cfg(feature = "local-backend")]
+        if self.local.is_some() {
+            let key = self
+                .session(id)
+                .and_then(|session| session.queued_keys.get(index))
+                .cloned()
+                .flatten()
+                .ok_or("This queued message has no confirmed durable identity")?;
+            return self.unqueue_key(id, &key);
+        }
         if let Some(live) = &mut self.live {
             live.unqueue(id, index)?;
             self.reproject(id);
@@ -585,6 +595,10 @@ impl Store {
 
     /// Cancels only the payload identified in the rendered snapshot.
     pub fn unqueue_key(&mut self, id: SessionId, key: &QueueKey) -> Result<(), String> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &mut self.local {
+            return local.unqueue_key(id, key);
+        }
         if let Some(live) = &mut self.live {
             live.unqueue_key(id, key)?;
             self.reproject(id);

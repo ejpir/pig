@@ -340,6 +340,7 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                 let mut turn =
                     Turn::new(text, timestamp(message).map(clock_at).unwrap_or_default());
                 turn.reported = reported.is_some();
+                turn.durable_entry_id = message["__piDurableEntryId"].as_u64();
                 {
                     use sha2::{Digest, Sha256};
                     // User messages are immutable; unlike turn indices this

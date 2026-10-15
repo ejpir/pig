@@ -364,6 +364,8 @@ pub struct Turn {
     pub reported: bool,
     /// Stable projected user-message identity, independent of turn position.
     pub visual_identity: Option<String>,
+    /// Committed Durable user entry; UI association only, never execution authority.
+    pub durable_entry_id: Option<u64>,
     /// What Pi said and showed, in order: words between tools, then a
     /// picture it looked at, more words, a page, the closing words.
     pub flow: Vec<Flow>,
@@ -385,6 +387,7 @@ impl Turn {
             handoffs: Vec::new(),
             reported: false,
             visual_identity: None,
+            durable_entry_id: None,
             flow: Vec::new(),
             times: [Duration::ZERO; 4],
         }

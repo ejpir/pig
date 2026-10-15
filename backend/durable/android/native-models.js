@@ -66,6 +66,38 @@ export function phoneModels(engine, bridge, synthetic, control) {
                   .join("\n");
           if (control.mode === "Reject")
             throw new Error("Synthetic provider rejection");
+          if (
+            text.includes("offline javascript tools") ||
+            text.includes("offline steering gate")
+          ) {
+            const result = messages
+              .slice(
+                messages.findLastIndex((message) => message.role === "user") +
+                  1,
+              )
+              .findLast((message) => message.role === "toolResult");
+            if (!result)
+              return fauxAssistantMessage(
+                fauxToolCall(
+                  "javascript",
+                  {
+                    file: text.includes("offline steering gate")
+                      ? "steering-gate.cjs"
+                      : "phone-script.cjs",
+                    timeout: 10,
+                  },
+                  { id: "phone-javascript" },
+                ),
+                { stopReason: "toolUse" },
+              );
+            return fauxAssistantMessage(
+              "JavaScript completed: " +
+                result.content
+                  .filter((block) => block.type === "text")
+                  .map((block) => block.text)
+                  .join(""),
+            );
+          }
           if (text.includes("offline tools")) {
             const result = messages
               .slice(

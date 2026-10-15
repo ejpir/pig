@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll, afterEach } from "bun:test";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { install } from "./local.js";
@@ -291,6 +291,147 @@ for (const provider of ["anthropic", "openai-codex"])
         await rm(root, { recursive: true, force: true });
       }
     });
+
+test("Local busy sends steer, durable cancellation targets one duplicate-text row, and scripts are real tools", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-local-steering-"));
+  for (const dir of ["workspace", "home", "tmp"]) await mkdir(join(root, dir));
+  const cwd = join(root, "workspace"),
+    engine = 301,
+    records = [];
+  await writeFile(
+    join(cwd, "steering-gate.cjs"),
+    `const fs=require('node:fs'),path=require('node:path');const cwd=process.env.PI_JAVASCRIPT_CWD;
+fs.writeFileSync(path.join(cwd,'gate-started'),'started');const timer=setInterval(()=>{if(fs.existsSync(path.join(cwd,'gate-release'))){clearInterval(timer);console.log('gate done')}},10);`,
+  );
+  let closed = false;
+  async function pump(until) {
+    const deadline = Date.now() + 10000;
+    while (!(await until())) {
+      for (const item of JSON.parse(__piPhone.drain())) {
+        if (item.channel === "host") {
+          expect(item.type).toBe("assert_owner");
+          __piPhone.deliver(item.id, true, null);
+        } else if (item.channel === "protocol") records.push(item.record);
+        else if (item.channel === "closed" && item.engine === engine)
+          closed = true;
+      }
+      if (closed || Date.now() > deadline)
+        throw Error("Local steering test deadline/closure");
+      await Bun.sleep(5);
+    }
+  }
+  const response = (id) =>
+    records.find((record) => record.type === "response" && record.id === id);
+  __piPhone.init({ home: join(root, "home"), temp: join(root, "tmp") });
+  try {
+    __piPhone.open(engine, {
+      state: join(root, "state"),
+      cwd,
+      key: "local-steer",
+      synthetic: true,
+      provider: "anthropic",
+      model: "claude-fable-5",
+      thinking: "high",
+      home: join(root, "home"),
+      temp: join(root, "tmp"),
+      shellPath: "/bin/sh",
+    });
+    await pump(() => records.some((record) => record.type === "durable_state"));
+    expect(
+      records.find((record) => record.type === "durable_state").backend
+        .uiCapabilities,
+    ).toContain("prompt_queue");
+    __piPhone.send(engine, { type: "get_active_tools", id: "tools" });
+    await pump(() => response("tools"));
+    expect(
+      response("tools").data.activeTools.map((tool) => tool.name),
+    ).toContain("javascript");
+    __piPhone.send(engine, {
+      type: "prompt",
+      id: "first",
+      requestId: "first",
+      message: "offline steering gate",
+      streamingBehavior: "steer",
+    });
+    await pump(async () => {
+      try {
+        return (
+          response("first") &&
+          (await readFile(join(cwd, "gate-started"), "utf8")) === "started"
+        );
+      } catch {
+        return false;
+      }
+    });
+    for (const id of ["queued-a", "queued-b"]) {
+      __piPhone.send(engine, {
+        type: "prompt",
+        id,
+        requestId: id,
+        message: "duplicate instruction",
+        streamingBehavior: "steer",
+      });
+      await pump(() => response(id));
+      expect(response(id).success).toBe(true);
+      expect(response(id).data.disposition).toBe("queued");
+    }
+    const a = response("queued-a").data.submissionId,
+      b = response("queued-b").data.submissionId;
+    expect(a).not.toBe(b);
+    __piPhone.send(engine, {
+      type: "cancel_submission",
+      id: "cancel-a",
+      submissionId: a,
+    });
+    await pump(() => response("cancel-a"));
+    expect(response("cancel-a").success).toBe(true);
+    __piPhone.send(engine, {
+      type: "prompt",
+      id: "duplicate-b",
+      requestId: "queued-b",
+      message: "duplicate instruction",
+      streamingBehavior: "steer",
+    });
+    await pump(() => response("duplicate-b"));
+    expect(response("duplicate-b").data.duplicate).toBe(true);
+    await writeFile(join(cwd, "gate-release"), "release");
+    await pump(() =>
+      records.some((record) =>
+        record.events?.some((event) => event.type === "run_end"),
+      ),
+    );
+    for (const [id, requestId] of [
+      ["read-a", "queued-a"],
+      ["read-b", "queued-b"],
+    ]) {
+      __piPhone.send(engine, { type: "get_submission", id, requestId });
+      await pump(() => response(id));
+    }
+    expect(response("read-a").data.submission.status).toBe("unanswered");
+    expect(response("read-a").data.submission.entry).toBeUndefined();
+    expect(response("read-b").data.submission.entry).toBeNumber();
+    expect(
+      records
+        .filter((record) => record.events)
+        .flatMap((record) => record.events)
+        .filter(
+          (event) =>
+            event.type === "message_start" &&
+            event.message?.role === "user" &&
+            event.message.content === "duplicate instruction",
+        ),
+    ).toHaveLength(1);
+    expect(closed).toBe(false);
+  } finally {
+    __piPhone.close(engine);
+    for (let i = 0; i < 100 && !closed; i++) {
+      for (const item of JSON.parse(__piPhone.drain()))
+        if (item.channel === "closed" && item.engine === engine) closed = true;
+      await Bun.sleep(5);
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 let originalFetch, originalPhone, originalHome, originalTemp;
 beforeAll(() => {

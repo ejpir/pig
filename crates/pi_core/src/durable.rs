@@ -3,6 +3,17 @@ use crate::session::{BackendInfo, RunState, Session};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
+/// Projection-only identity, never a stock message ID or SDK execution input.
+fn projected_message(message: &Value, entry: &Value) -> Value {
+    let mut message = message.clone();
+    if message["role"] == "user"
+        && let Some(id) = entry["id"].as_u64()
+    {
+        message["__piDurableEntryId"] = json!(id);
+    }
+    message
+}
+
 /// Build a disposable desktop projection from ONE committed durable view. Never use it for execution/recovery.
 pub fn project(record: &Value, previous: &Session, key: &str) -> Result<Session> {
     ensure!(record["key"] == key, "Durable snapshot identity mismatch");
@@ -70,10 +81,14 @@ pub fn project(record: &Value, previous: &Session, key: &str) -> Result<Session>
     );
     let messages: Vec<Value> = entries
         .iter()
-        .filter_map(|entry| entry["model"].as_array())
-        .flatten()
-        .filter(|message| message["role"] != "system")
-        .cloned()
+        .flat_map(|entry| {
+            entry["model"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|message| message["role"] != "system")
+                .map(|message| projected_message(message, entry))
+        })
         .collect();
     model.apply(&json!({"type":"response","command":"get_messages","success":true,"data":{"messages":messages}}))?;
     if model
@@ -331,7 +346,7 @@ pub fn events(record: &Value, previous: &Session, key: &str) -> Result<Vec<Value
                     apply_record(
                         &mut model,
                         &mut output,
-                        json!({"type":"message_end","message":message}),
+                        json!({"type":"message_end","message":projected_message(message, &event["entry"])}),
                     )?;
                     if message["role"] == "compactionSummary" {
                         // Kept assistants still carry usage for the removed prefix.
@@ -574,6 +589,33 @@ pub fn subagents(record: &Value, previous: &Session, key: &str) -> Result<Vec<Va
 mod tests {
     use super::*;
     use crate::ssh::SshTarget;
+    #[test]
+    fn committed_user_entry_identity_is_equal_in_snapshot_and_incremental_projection() {
+        let previous = Session::new("/offline".into());
+        let entry =
+            json!({"id":42,"model":[{"role":"user","content":"duplicate text","id":"stock-id"}]});
+        let snapshot = project(
+            &json!({"key":"test","data":{"entries":[entry.clone()],"docs":{}}}),
+            &previous,
+            "test",
+        )
+        .unwrap();
+        let mut incremental = previous;
+        for event in events(
+            &json!({"key":"test","events":[{"type":"message_end","entry":entry}]}),
+            &incremental,
+            "test",
+        )
+        .unwrap()
+        {
+            incremental.apply(&event).unwrap();
+        }
+        assert_eq!(snapshot.messages[0]["__piDurableEntryId"], 42);
+        assert_eq!(incremental.messages[0]["__piDurableEntryId"], 42);
+        assert_eq!(snapshot.messages[0]["id"], "stock-id");
+        assert_eq!(snapshot.messages, incremental.messages);
+    }
+
     #[test]
     fn committed_projection_preserves_partial_tools_queue_and_remote_identity() {
         let mut target = SshTarget::new("dev".into(), "/remote/work".into()).unwrap();

@@ -39,6 +39,7 @@ import {
   type UsageState,
   type WatchEnd,
 } from "@earendil-works/pi-durable";
+import { JavascriptTools } from "./javascript.ts";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -501,6 +502,7 @@ export async function run(
     let found = resources(cwd);
     const registry = createRegistry();
     registry.install(CodingTools);
+    registry.install(JavascriptTools);
     registry.install(
       defineExtension({
         name: "desktop-coding",

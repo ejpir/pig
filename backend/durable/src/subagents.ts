@@ -36,7 +36,7 @@ const MAX_SHOWN = 500;
 /** How often running subagents report, at most: each report is a commit. */
 const REPORT_MS = 1000;
 /** Tools a subagent may be given; agent files may name stock Pi's others, which durable doesn't have. */
-const TOOLS = ["read", "write", "edit", "bash"];
+const TOOLS = ["read", "write", "edit", "bash", "javascript"];
 
 export type SubagentStatus = "waiting" | "running" | "done" | "failed" | "stopped";
 
@@ -209,7 +209,7 @@ export const REPORT = "subagent_report";
 
 const AGENT = "A listed agent, or a name for a new one you describe in instructions, such as \"architecture\"";
 const INSTRUCTIONS = "Who the agent is and how it works: its role, focus and output. Defines a new agent; added to a listed agent's own";
-const AGENT_TOOLS = "Tools it may use, from read, write, edit and bash. Give an agent that reviews, researches or plans [\"read\", \"bash\"] so it can't change files. Default: a listed agent's, else all";
+const AGENT_TOOLS = "Tools it may use, from read, write, edit, bash and javascript. For review-only work use [\"read\"]; bash and javascript can modify files and are not sandboxed. Default: a listed agent's, else all";
 const Task = Type.Object({
   agent: Type.String({ description: AGENT }),
   task: Type.String({ description: "Task to delegate to the agent" }),
@@ -230,7 +230,7 @@ const Parameters = Type.Object({
   instructions: Type.Optional(Type.String({ description: `${INSTRUCTIONS} (for single mode)` })),
   tools: Type.Optional(Type.Array(Type.String(), { description: `${AGENT_TOOLS} (for single mode)` })),
   tasks: Type.Optional(Type.Array(Task, { description: "Array of {agent, task} for parallel execution" })),
-  swarm: Type.Optional(Type.Boolean({ description: "Opt-in peer mailboxes for 2–8 parallel tasks only. Peers get read + peer tools only; explicit/preset write/edit/bash/search policies are rejected (shell writes are not sandboxed). Parent remains the writer. Messages never start new turns; received means recipient tool retrieval, not agreement or guaranteed effects." })),
+  swarm: Type.Optional(Type.Boolean({ description: "Opt-in peer mailboxes for 2–8 parallel tasks only. Peers get read + peer tools only; explicit/preset write/edit/bash/javascript/search policies are rejected (shell writes are not sandboxed). Parent remains the writer. Messages never start new turns; received means recipient tool retrieval, not agreement or guaranteed effects." })),
   chain: Type.Optional(Type.Array(ChainTask, { description: "Array of {agent, task} for sequential execution" })),
   agentScope: Type.Optional(Type.String({ description: 'Which agents to use: "user", "project" or "both". Default "both"; a project\'s own agents only once Pi trusts the project.' })),
   cwd: Type.Optional(Type.String({ description: "Working directory for the agent (single mode)" })),
@@ -349,7 +349,7 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
         "Don't do a task you handed off yourself, or check on it: that fills your context with what their answers will say.",
         "Modes: single (agent + task), parallel (tasks array), chain (sequential, with a {previous} placeholder for the prior step's output).",
         "Use a listed agent, or define one: give it a short name (\"architecture\", \"code-quality\"), instructions for its role and output, and tools.",
-        "swarm:true enables bounded peer mailboxes for 2–8 parallel tasks only, with read-only peers. Explicit/preset write/edit/bash/search policies are not allowed: shell writes are not sandboxed. The coordinator remains the writer.",
+        "swarm:true enables bounded peer mailboxes for 2–8 parallel tasks only, with read-only peers. Explicit/preset write/edit/bash/javascript/search policies are not allowed: shell writes are not sandboxed. The coordinator remains the writer.",
       ].join(" "),
       parameters: Parameters,
       // A rerun after a restart finds the crew it started.
@@ -389,7 +389,7 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
             const policy = item.tools ?? agents.find((agent) => agent.name === item.agent)?.tools;
             return policy && (!policy.includes("read") || policy.some((tool) => tool !== "read"));
           });
-          if (unsafe) return failure(`Swarm peer ${unsafe.agent} must use only read. Explicit/preset write, edit, bash and search policies are not supported: current tool names do not sandbox shell writes. The parent coordinator remains the writer.`);
+          if (unsafe) return failure(`Swarm peer ${unsafe.agent} must use only read. Explicit/preset write, edit, bash, javascript and search policies are not supported: current tool names do not sandbox shell writes. The parent coordinator remains the writer.`);
           if (!((await api.agent(context)).tools.some((tool) => tool.name === "read"))) return failure("Swarm peers require the parent's read tool.");
           if (!api.registry.extension(SwarmTools.name)) return failure("Swarm peer tools are not registered in this runner.");
         }

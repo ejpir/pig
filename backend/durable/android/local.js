@@ -157,6 +157,7 @@ const phone = {
       "thinking",
       "attachments",
       "streaming",
+      "prompt_queue",
       "stop",
       "visualize",
       "manual_compaction",

@@ -63,6 +63,37 @@ provider validation is claimed. Bun changes process-wide stdio/signals and ICU
 hooks; the VM cannot be unloaded or reinitialized. Debug-derived runtime size is
 large. Completed-session recovery is not exactly-once shell/filesystem recovery.
 
+## JavaScript tool verification
+
+The shared Durable `javascript` tool runs `.js`/`.mjs`/`.cjs` files using real
+Node-compatible workers in the same embedded Bun library, not the SDK/auth realm
+or a Bun CLI. See [tool semantics and limitations](../../backend/durable/README.md#javascript-files-experimental).
+
+The offline `javascript_tool_probe.ts` bundles the actual executor and SDK tool.
+Build it with bootstrap Bun, package it with the existing JNI probe builder and
+run the emulator-only verifier (omit `--durable`, whose assertions describe the
+older fixed stock-tool probe):
+
+```sh
+bun build experiments/bun-embedding/javascript_tool_probe.ts --target=bun \
+  --outfile=/scratch/javascript-probe.mjs
+python3 experiments/bun-embedding/build_apk.py \
+  --library /scratch/x64/libbunembeddingpoc.so --abi x86_64 \
+  --sdk-bundle /scratch/javascript-probe.mjs \
+  --sdk-notices crates/pi_local/generated/BUN-DURABLE-NOTICES.txt \
+  --out /scratch/javascript-probe.apk
+python3 experiments/bun-embedding/verify_android.py \
+  --adb "$HOME/Android/Sdk/platform-tools/adb" --serial emulator-5554 \
+  --apk /scratch/javascript-probe.apk --output /scratch/javascript-evidence
+```
+
+This updates only `dev.pi.bunembedding` on the emulator, preserves its old SQLite
+state, and creates unique fixture directories. Assert every `durable.checks`
+value and `durable.results.sdk.passed` in the fresh report. Tests cover real Node
+imports, relative ESM/CJS imports, literal argv, independent globals/environment,
+worker-local exit, filesystem effects, UTF-8/output bounds, infinite-loop
+cancellation/timeout, parent liveness, and a subsequent successful worker.
+
 ## Reproduce
 
 Needs bootstrap Bun, Git/Python/JDK/npm, LLVM **23**, NASM, Android SDK/NDK, and pinned **nightly-2026-09-15** Rust with `rust-src`. Tested NDK: ONDK r29.5/r29. Use scratch storage (several GiB), not the shared application Cargo target.

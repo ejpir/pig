@@ -201,6 +201,8 @@ jobs:
           bun test
           bun run build
           bun build test/fixture.ts --compile --outfile ../../artifacts/durable/pi-desktop-durable-fixture
+          bun build test/javascript-crash-fixture.ts --compile --outfile ../../artifacts/durable/pi-desktop-javascript-fixture
+          PI_JAVASCRIPT_TEST_RUNNER=../../artifacts/durable/pi-desktop-javascript-fixture bun test test/javascript-recovery.test.ts
           bun build test/standalone-auth.ts --compile --minify --outfile ../../artifacts/durable/pi-desktop-durable-auth-probe
           cd ../..
           PI_DESKTOP_TEST_DURABLE_RUNNER="$PWD/artifacts/durable/pi-desktop-durable-fixture" \
