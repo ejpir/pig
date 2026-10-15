@@ -54,6 +54,26 @@ class PackagingTests(unittest.TestCase):
         binary.write_bytes(header)
         return binary
 
+    def test_android_apk_accepts_reproducible_epoch_runtime_inputs(self):
+        import os
+        import runpy
+        import sys
+
+        root = Path(__file__).resolve().parent.parent
+        runpy.run_path(str(root / "crates/pi_android/scripts/build_apk.py"))
+        builder = sys.modules["build_apk"]
+        library = self.root / "libbunembeddingpoc.so"
+        library.write_bytes(b"synthetic-runtime-bytes")
+        os.utime(library, (0, 0))
+        output = self.root / "epoch.apk"
+        with builder.apk_zip(output) as apk:
+            apk.write(library, "lib/arm64-v8a/" + library.name)
+        with zipfile.ZipFile(output) as apk:
+            name = "lib/arm64-v8a/" + library.name
+            self.assertEqual(apk.read(name), library.read_bytes())
+            self.assertEqual(apk.getinfo(name).date_time[:3], (1980, 1, 1))
+        self.assertEqual(library.stat().st_mtime, 0)
+
     def test_android_apk_carries_full_notices_for_every_embedded_font(self):
         import runpy
         import sys

@@ -645,6 +645,12 @@ def signing_key(keytool):
     return key
 
 
+def apk_zip(path):
+    # Reproducible runtime tarballs use epoch 0. ZIP starts in 1980, so clamp
+    # container timestamps without touching the source library or its hash.
+    return zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False)
+
+
 def write_licenses(apk, app):
     """Carry full copyright/license notices with embedded fonts, not just URLs."""
     apk.write(CRATE / "assets/fonts/OFL.txt", "assets/licenses/NotoEmoji-OFL.txt")
@@ -730,7 +736,7 @@ def build(app, debug, out, target=TARGET):
             ]
         )
         unsigned = scratch / "unsigned.apk"
-        with zipfile.ZipFile(unsigned, "w", zipfile.ZIP_DEFLATED) as apk:
+        with apk_zip(unsigned) as apk:
             apk.writestr(
                 "AndroidManifest.xml",
                 encode_xml(manifest(app, debuggable=debug or app.debuggable)),
