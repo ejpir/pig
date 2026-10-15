@@ -227,8 +227,8 @@ impl Store {
         }
         self.live.as_ref().is_some_and(|live| live.is_stopping(id))
     }
+    #[cfg(feature = "local-backend")]
     pub fn cancel_local(&self) {
-        #[cfg(feature = "local-backend")]
         if let Some(local) = &self.local {
             local.cancel();
         }
