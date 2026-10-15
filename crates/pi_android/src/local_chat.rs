@@ -539,9 +539,11 @@ impl Local {
             return Err(error);
         }
         let c = self.conversations.get_mut(&session.id).unwrap();
-        c.engine
-            .send(json!({"type":"phone_fixture_mode","mode":format!("{:?}",self.mode)}))
-            .map_err(|_| "Local command queue unavailable")?;
+        if self.synthetic {
+            c.engine
+                .send(json!({"type":"phone_fixture_mode","mode":format!("{:?}",self.mode)}))
+                .map_err(|_| "Local command queue unavailable")?;
+        }
         c.engine.send(record).map_err(
             |_| "Prompt admission uncertain; it retains the same request identity on reopen",
         )?;

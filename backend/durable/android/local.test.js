@@ -1,4 +1,4 @@
-import { test, expect, beforeAll, afterAll } from "bun:test";
+import { test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -140,6 +140,110 @@ for (const headers of [false, true])
     ).not.toThrow();
   });
 
+for (const signedIn of [false, true])
+  test(`production Local control/admission survives with account metadata ${signedIn}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-bun-production-control-"));
+    for (const dir of ["workspace", "home", "tmp"])
+      await mkdir(join(root, dir));
+    const engine = signedIn ? 202 : 201;
+    let prepares = 0;
+    const records = [];
+    let closed = false;
+    async function pump(until) {
+      const deadline = Date.now() + 5000;
+      while (!until() && !closed) {
+        for (const item of JSON.parse(__piPhone.drain())) {
+          if (item.channel === "host") {
+            if (item.type === "assert_owner")
+              __piPhone.deliver(item.id, true, null);
+            else if (item.type === "account_status")
+              __piPhone.deliver(item.id, signedIn, null);
+            else if (item.type === "prepare") {
+              prepares++;
+              __piPhone.deliver(
+                item.id,
+                null,
+                "Offline regression: native authorization intentionally unavailable",
+              );
+            } else
+              throw new Error(
+                "Unexpected HTTP/auth operation in offline production regression: " +
+                  item.type,
+              );
+          } else if (item.channel === "protocol") records.push(item.record);
+          else if (item.channel === "closed" && item.engine === engine)
+            closed = true;
+        }
+        if (Date.now() > deadline)
+          throw new Error("Production control regression timed out");
+        await Bun.sleep(5);
+      }
+    }
+    try {
+      __piPhone.open(engine, {
+        state: join(root, "session"),
+        cwd: join(root, "workspace"),
+        key: "production-control",
+        synthetic: false,
+        provider: "anthropic",
+        model: "claude-fable-5",
+        thinking: "high",
+        home: join(root, "home"),
+        temp: join(root, "tmp"),
+        shellPath: "/bin/sh",
+      });
+      await pump(() => records.some((r) => r.type === "durable_state"));
+      // This internal, deliberately uncorrelated record was sent before every
+      // Android prompt. It must never enter the public SDK command stream.
+      __piPhone.send(engine, { type: "phone_fixture_mode", mode: "Tool" });
+      __piPhone.send(engine, { type: "get_state", id: "after-control" });
+      await pump(() =>
+        records.some((r) => r.type === "response" && r.id === "after-control"),
+      );
+      expect(closed).toBe(false);
+      expect(
+        records.find((r) => r.type === "response" && r.id === "after-control")
+          ?.success,
+      ).toBe(true);
+      expect(prepares).toBe(0);
+      if (signedIn) {
+        const prompt = {
+          type: "prompt",
+          id: "production-prompt",
+          requestId: "production-offline-request",
+          message: "offline admission regression",
+        };
+        __piPhone.send(engine, prompt);
+        await pump(
+          () =>
+            prepares > 0 &&
+            records.some((r) => r.type === "response" && r.id === prompt.id),
+        );
+        expect(
+          records.find((r) => r.type === "response" && r.id === prompt.id)
+            ?.success,
+        ).toBe(true);
+        __piPhone.send(engine, { ...prompt, id: "production-retry" });
+        await pump(() =>
+          records.some(
+            (r) => r.type === "response" && r.id === "production-retry",
+          ),
+        );
+        const retry = records.find(
+          (r) => r.type === "response" && r.id === "production-retry",
+        );
+        expect(retry?.success).toBe(true);
+        expect(retry?.data.duplicate).toBe(true);
+        expect(prepares).toBe(1);
+        expect(closed).toBe(false);
+      }
+    } finally {
+      __piPhone.close(engine);
+      await pump(() => closed);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
 let originalFetch, originalPhone, originalHome, originalTemp;
 beforeAll(() => {
   originalFetch = globalThis.fetch;
@@ -147,6 +251,12 @@ beforeAll(() => {
   originalHome = process.env.HOME;
   originalTemp = process.env.TMPDIR;
   install();
+});
+afterEach(() => {
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  if (originalTemp === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = originalTemp;
 });
 afterAll(() => {
   globalThis.fetch = originalFetch;

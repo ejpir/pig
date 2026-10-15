@@ -223,9 +223,11 @@ const phone = {
     const session = sessions.get(engine);
     try {
       if (!session) throw new Error("Local session is closed");
-      if (record.type === "phone_fixture_mode" && session.synthetic)
-        session.control.mode = record.mode;
-      else session.input.put(record);
+      // This is adapter control, never an SDK command. Production must neither
+      // enable synthetic inference nor forward its uncorrelated record to run().
+      if (record.type === "phone_fixture_mode") {
+        if (session.synthetic) session.control.mode = record.mode;
+      } else session.input.put(record);
     } catch {
       emit({
         channel: "protocol",
