@@ -11,13 +11,15 @@ from build_sdk_probe import collect_notices
 ROOT = Path(__file__).resolve().parent
 WORKSPACE = ROOT.parent.parent
 OUT = WORKSPACE / "crates/pi_local/generated"
+SDK = WORKSPACE / "backend/durable"
+HOST = SDK / "android"
 
 
 def main():
-    expected = json.loads((ROOT / "package.json").read_text())["dependencies"]
+    expected = json.loads((SDK / "package.json").read_text())["dependencies"]
     for name, version in expected.items():
         if (
-            json.loads((ROOT / "node_modules" / name / "package.json").read_text())[
+            json.loads((SDK / "node_modules" / name / "package.json").read_text())[
                 "version"
             ]
             != version
@@ -28,19 +30,18 @@ def main():
         [
             "bun",
             "build",
-            str(ROOT / "local.js"),
+            str(HOST / "main.js"),
             "--target=bun",
             "--outfile=" + str(OUT / "bun-local.mjs"),
         ],
-        cwd=ROOT,
+        cwd=SDK,
         check=True,
     )
-    (OUT / "BUN-DURABLE-NOTICES.txt").write_text(collect_notices(ROOT / "node_modules"))
+    (OUT / "BUN-DURABLE-NOTICES.txt").write_text(collect_notices(SDK / "node_modules"))
     paths = [
-        ROOT / "local.js",
-        ROOT / "native-models.js",
-        ROOT / "package.json",
-        ROOT / "package-lock.json",
+        *sorted(HOST.glob("*.js")),
+        SDK / "package.json",
+        SDK / "package-lock.json",
         *sorted((WORKSPACE / "backend/durable/src").glob("*.ts")),
         ROOT / "build_local.py",
         ROOT / "build_sdk_probe.py",

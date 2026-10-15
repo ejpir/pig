@@ -19,7 +19,7 @@ python3 experiments/bun-embedding/build_runtime.py \
   --work-dir /scratch/bun-build --ndk /path/to/android-ndk-r29 \
   --llvm /usr/lib/llvm-23 --out-dir /scratch/bun-runtime --jobs 2
 (cd crates/pi_local && npm ci --ignore-scripts)
-(cd experiments/bun-embedding && npm ci --ignore-scripts)
+(cd backend/durable && npm ci --ignore-scripts)
 python3 crates/pi_android/scripts/build_apk.py \
   --bun-library /scratch/bun-runtime/libbunembeddingpoc.so --out dist/pi.apk
 ```
@@ -37,8 +37,8 @@ One permanent native thread owns one Bun VM. Its ABI exports `pi_bun_init`,
 `pi_bun_eval`, `pi_bun_pump`; actual timers/microtasks/I/O use cooperative zero-wait
 pumping. There is no patched executable, CLI subprocess, SDK fork, Node shim,
 custom tool engine, memory-storage fallback or companion APK requirement.
-`local.js` imports the desktop `backend/durable/src/run.ts` host boundary;
-`native-models.js` wraps public provider APIs with request-scoped native auth/HTTP.
+`backend/durable/android/local.js` imports the desktop `backend/durable/src/run.ts` host boundary;
+`backend/durable/android/native-models.js` wraps public provider APIs with request-scoped native auth/HTTP.
 Native Vault alone owns stored OAuth and refresh. Local/SSH share the same
 `pi_core::durable` presentation projection; SQLite owns execution/recovery.
 

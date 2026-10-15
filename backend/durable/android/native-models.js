@@ -12,7 +12,7 @@ import {
   fauxAssistantMessage,
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
-import { durableModels } from "../../backend/durable/src/model-stream.ts";
+import { durableModels } from "../src/model-stream.ts";
 
 const locks = new Map();
 async function acquire(provider, signal) {

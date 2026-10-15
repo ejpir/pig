@@ -35,11 +35,11 @@ Requires the repository Rust toolchain, npm and bootstrap **Bun 1.4.2**.
 
 ```sh
 (cd crates/pi_local && npm ci --ignore-scripts && bun run build)
-(cd experiments/bun-embedding && npm ci --ignore-scripts)
+(cd backend/durable && npm ci --ignore-scripts)
 python3 experiments/bun-embedding/build_local.py
 cargo test --locked --manifest-path crates/pi_local/Cargo.toml
 cargo clippy --locked --manifest-path crates/pi_local/Cargo.toml --all-targets -- -D warnings
-bun test experiments/bun-embedding/native-models.test.js experiments/bun-embedding/local.test.js
+bun test backend/durable/android/native-models.test.js backend/durable/android/local.test.js
 cargo test --locked -p pi_android --features bun-backend-test
 ```
 

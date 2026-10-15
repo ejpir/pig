@@ -1,6 +1,6 @@
 // Android in-process transport for the shared desktop Durable runner.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { run } from "../../backend/durable/src/run.ts";
+import { run } from "../src/run.ts";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { phoneModels, installNativeFetch } from "./native-models.js";
 
@@ -79,7 +79,6 @@ const bridge = {
     });
   },
 };
-installNativeFetch(bridge);
 
 class Input {
   values = [];
@@ -125,7 +124,7 @@ class Input {
   }
 }
 
-globalThis.__piPhone = {
+const phone = {
   init({ home, temp }) {
     process.env.HOME = home;
     process.env.TMPDIR = temp;
@@ -322,3 +321,8 @@ globalThis.__piPhone = {
     return "[" + selected.join(",") + "]";
   },
 };
+
+export function install() {
+  installNativeFetch(bridge);
+  globalThis.__piPhone = phone;
+}

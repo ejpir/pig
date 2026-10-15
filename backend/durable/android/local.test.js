@@ -1,8 +1,8 @@
-import { test, expect } from "bun:test";
+import { test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import "./local.js";
+import { install } from "./local.js";
 test("native HTTP stream cancel forwards cancellation and ignores late body events", async () => {
   const response = fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -139,3 +139,21 @@ for (const headers of [false, true])
       }),
     ).not.toThrow();
   });
+
+let originalFetch, originalPhone, originalHome, originalTemp;
+beforeAll(() => {
+  originalFetch = globalThis.fetch;
+  originalPhone = globalThis.__piPhone;
+  originalHome = process.env.HOME;
+  originalTemp = process.env.TMPDIR;
+  install();
+});
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+  if (originalPhone === undefined) delete globalThis.__piPhone;
+  else globalThis.__piPhone = originalPhone;
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  if (originalTemp === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = originalTemp;
+});

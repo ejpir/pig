@@ -57,10 +57,10 @@ jobs:
       - name: Build and validate experimental Local adapters (offline)
         run: |
           (cd crates/pi_local && npm ci --ignore-scripts && bun run build)
-          (cd experiments/bun-embedding && npm ci --ignore-scripts)
+          (cd backend/durable && npm ci --ignore-scripts)
           python experiments/bun-embedding/build_local.py
-          (cd backend/durable && npm ci --ignore-scripts && bun run check && bun test)
-          bun test experiments/bun-embedding/native-models.test.js experiments/bun-embedding/local.test.js
+          (cd backend/durable && bun run check && bun test)
+          bun test backend/durable/android/native-models.test.js backend/durable/android/local.test.js
           cargo fmt --manifest-path crates/pi_local/Cargo.toml -- --check
           cargo test --locked --manifest-path crates/pi_local/Cargo.toml
           cargo clippy --locked --manifest-path crates/pi_local/Cargo.toml --all-targets -- -D warnings
@@ -249,7 +249,7 @@ jobs:
         id: runtime-cache
         with:
           path: ${{ runner.temp }}/bun-runtime-out
-          key: bun-android-arm64-1.4.3-ndk29-llvm23-${{ hashFiles('experiments/bun-embedding/native/**', 'experiments/bun-embedding/prepare.py', 'experiments/bun-embedding/relink.py', 'experiments/bun-embedding/build_runtime.py') }}
+          key: bun-android-arm64-1.4.3-ndk29-llvm23-${{ hashFiles('experiments/bun-embedding/native/**', 'experiments/bun-embedding/prepare.py', 'experiments/bun-embedding/relink.py', 'experiments/bun-embedding/build_runtime.py', 'licenses/MPL-2.0.txt') }}
       - name: Make room for the source/object build (hosted runner only)
         if: steps.runtime-cache.outputs.cache-hit != 'true'
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android/sdk/ndk
@@ -332,7 +332,7 @@ jobs:
           mkdir "$RUNNER_TEMP/bun-runtime/extracted"
           tar -xzf "$RUNNER_TEMP/bun-runtime/pi-bun-android-arm64-runtime.tar.gz" -C "$RUNNER_TEMP/bun-runtime/extracted"
           (cd crates/pi_local && npm ci --ignore-scripts)
-          (cd experiments/bun-embedding && npm ci --ignore-scripts)
+          (cd backend/durable && npm ci --ignore-scripts --omit=dev)
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;29.0.14206865'
       # The runner's Android SDK has the platform, build-tools and NDK the
       # builder needs. Releases are signed with the repository's key, so a new
