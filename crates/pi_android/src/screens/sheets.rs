@@ -213,7 +213,7 @@ impl PhoneApp {
                 .text_size(px(22.))
                 .line_height(px(28.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(if cfg!(feature = "quickjs-backend-test") {
+                .child(if cfg!(feature = "local-backend") {
                     "Where Pi runs"
                 } else {
                     "Computers"
@@ -416,7 +416,7 @@ impl PhoneApp {
             .filter(|s| !s.is_local())
             .flat_map(|s| s.computers.iter().cloned())
             .collect();
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         let known = {
             let mut known = known;
             for address in self.prefs(cx).host_keys.keys() {
@@ -502,7 +502,7 @@ impl PhoneApp {
                                 this.start.update(cx, |c, cx| c.clear(cx));
                                 this.replace_store(None);
                             }
-                            #[cfg(feature = "quickjs-backend-test")]
+                            #[cfg(feature = "local-backend")]
                             this.close_provider_accounts();
                             this.address
                                 .update(cx, |field, cx| field.set_text(address.clone(), cx));
@@ -521,14 +521,14 @@ impl PhoneApp {
                 .child(icon("chev_r", 16., colors.faint))
         };
         let menu = div().pb(px(8.));
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         let menu = menu.child(
             item("backend-local".into())
                 .debug_selector(|| "backend-local".into())
                 .child(icon("pi", 20., colors.accent))
                 .child(ui::row_text(
                     "Local",
-                    Some("Run Pi on this phone".into()),
+                    Some("Experimental · run Pi on this phone".into()),
                     colors,
                 ))
                 .when(self.is_local(), |row| {
@@ -570,7 +570,7 @@ impl PhoneApp {
             menu.child(
                 link("local-accounts", "settings", "Local providers").on_click(cx.listener(
                     |this, _, window, cx| {
-                        #[cfg(feature = "quickjs-backend-test")]
+                        #[cfg(feature = "local-backend")]
                         {
                             let synthetic = this
                                 .store
@@ -587,7 +587,7 @@ impl PhoneApp {
                                 cx,
                             );
                         }
-                        #[cfg(not(feature = "quickjs-backend-test"))]
+                        #[cfg(not(feature = "local-backend"))]
                         let _ = (this, window, cx);
                     },
                 )),
@@ -630,7 +630,7 @@ impl PhoneApp {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(session.title.clone()))
                 .child(ui::hint(format!("{} · {}", session.project, self.computer_name()), colors).mt(px(4.))))
             .child(ui::hint(
-                if self.is_local() {"Removes this in-memory conversation from this phone. No workspace files exist for local chat."} else if self.live() {
+                if self.is_local() {if cfg!(feature="local-backend") {"Hides this saved chat from the Local list. Its SQLite state and workspace files are retained."} else {"Removes this in-memory conversation from this phone. No workspace files exist for local chat."}} else if self.live() {
                     "Permanently deletes this session's conversation and execution history from the computer. This cannot be undone. Project files and edits are kept."
                 } else {
                     "Removes this sample conversation. No files on your computer are affected."

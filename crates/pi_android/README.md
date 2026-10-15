@@ -239,11 +239,29 @@ adb logcat -s pi GpuiActivity
 
 The script is gpui_android's, which lists what it needs.
 
-## Experimental on-device backend proof
+## Android Local — experimental
 
-`build_apk.py --quickjs-backend-test` builds a separate **Pi local backend tests** APK (`dev.pi.android.quickjstest`). Tap **Try the local QuickJS backend** on Connect to run the unmodified upstream agent/provider code inside this app, with an offline read/write fixture. No Bun/Node executable, computer, API key, or paid provider is used. The normal release remains SSH-based.
+The release APK bundles source-linked **Bun 1.4.3** and the unchanged **Pi/Durable
+1.2.0** SDK. Choose **Local** from the Pi/computer selector, sign in with a Claude
+or Codex subscription, then use the shared session/thread/composer UI. Chats and
+request identities persist in app-private SQLite; stock coding tools, images,
+thinking, compaction and Stop use the same Durable engine as desktop/SSH.
+Switching Local ↔ Remote parks the Local session instead of aborting its tools.
+Native encrypted account storage exclusively owns OAuth refresh and HTTP leases.
 
-The same opt-in APK offers **Local providers · Claude + Codex** with browser/device-code login, Keystore-encrypted credentials, refresh and local logout. The original Pi/computer selector and Computers sheet choose Local or a remote computer, without extra toolbar chrome. Account management does not launch a provider-specific chat. Local uses the existing session/thread/composer screens and both providers in the shared model picker; provider/model changes and account management preserve conversations and thread drafts, with model-supported thinking, image/text attachments, streaming and Stop. Synthetic auth/storage/inference tests pass; live-account interoperability is not yet validated. Conversations are memory-only; saved accounts survive upgrades/restarts. Stock tools and a credential-isolated shell host remain unfinished; this is not a completed local execution backend. This debuggable build is not production credential isolation. See [build/device verification](scripts/QUICKJS_BACKEND_VERIFICATION.md) and [provider account details](../../experiments/quickjs-backend/PROVIDER_AUTH_PLAN.md).
+**Experimental, not sandboxed.** Tools use Android `/system/bin/sh`, not GNU Bash
+or a Linux userland. Background execution, Activity recreation, arbitrary
+mid-tool crash recovery and production runtime/credential isolation remain
+unproven. Saved completed sessions do not imply exactly-once external tool effects.
+
+The builder needs `--bun-library /path/to/libbunembeddingpoc.so` (or
+`PI_ANDROID_BUN_LIBRARY`) and the pinned license beside it. CI builds that real
+runtime from pinned source, bundles it into the release APK, validates the bundle,
+and publishes runtime/relink archives too. `--ssh-only` is a developer-only opt-out.
+The separate `--bun-backend-test` build keeps `dev.pi.android.quickjstest` and the
+existing debug signing/data, enabling synthetic UI fixtures; it is not the normal
+release package. See [device verification](scripts/BUN_LOCAL_VERIFICATION.md),
+[native runtime](../pi_local/README.md) and [Bun build](../../experiments/bun-embedding/README.md).
 
 ## On the desktop
 

@@ -14,6 +14,9 @@ use std::{collections::HashMap, time::Duration};
 pub enum Event {
     NeedsYou(SessionId),
     Finished(SessionId),
+    /// Local manual compaction settled after canonical checkpoint/VM teardown.
+    #[cfg(feature = "local-backend")]
+    Compacted(SessionId, Option<String>),
     Deleted(SessionId),
     /// Something went wrong, in a session or with the computer.
     Problem(Option<SessionId>, String),
@@ -42,7 +45,7 @@ impl Project {
 
 pub struct Store {
     pub(crate) generation: u64,
-    #[cfg(feature = "quickjs-backend-test")]
+    #[cfg(feature = "local-backend")]
     pub(crate) local: Option<crate::local_chat::Local>,
     pub computer: Computer,
     /// Every computer the phone knows, the connected one first.
@@ -67,14 +70,14 @@ fn generation() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 impl Store {
-    #[cfg(feature = "quickjs-backend-test")]
+    #[cfg(feature = "local-backend")]
     pub(crate) fn retire_generation(&mut self) {
         self.generation = generation();
     }
     pub fn sample(computer: Computer) -> Self {
         Self {
             generation: generation(),
-            #[cfg(feature = "quickjs-backend-test")]
+            #[cfg(feature = "local-backend")]
             local: None,
             computers: demo::computers(computer.clone()),
             computer,
@@ -99,7 +102,7 @@ impl Store {
     pub fn live(computer: Computer, live: Live) -> Self {
         let mut store = Self {
             generation: generation(),
-            #[cfg(feature = "quickjs-backend-test")]
+            #[cfg(feature = "local-backend")]
             local: None,
             computers: vec![computer.clone()],
             computer,
@@ -119,42 +122,42 @@ impl Store {
     /// Shared UI contract. Local catalogs are authoritative; None retains the
     /// existing SSH legacy/default or sample presentation behavior.
     pub fn supports(&self, _feature: &str) -> bool {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(backend) = &self.local {
             return backend.supports(_feature);
         }
         true
     }
     pub fn commands(&self, id: SessionId) -> Option<&[pi_core::protocol::SlashCommand]> {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(backend) = &self.local {
             return backend.commands(id);
         }
         self.live.as_ref()?.commands(id)
     }
     pub fn models(&self) -> Option<&[pi_core::protocol::Model]> {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &self.local {
             return Some(local.models());
         }
         self.live.as_ref().map(|live| live.models.as_slice())
     }
     pub fn current_model(&self, id: Option<SessionId>) -> Option<&pi_core::protocol::Model> {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &self.local {
             return local.current_model(id);
         }
         self.live.as_ref()?.current_model(id?)
     }
     pub fn model_settings(&self, id: Option<SessionId>) -> Option<(String, String)> {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &self.local {
             return Some(local.model_settings(id));
         }
         self.live.as_ref()?.model_settings(id?)
     }
     pub fn thinking_levels(&self, id: Option<SessionId>) -> Option<Vec<String>> {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &self.local {
             return Some(local.thinking_levels(id));
         }
@@ -166,7 +169,7 @@ impl Store {
         provider: &str,
         model: &str,
     ) -> Result<(), String> {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &mut self.local {
             local.set_model(id, provider, model)?;
             if let Some(id) = id
@@ -185,7 +188,7 @@ impl Store {
         }
     }
     pub fn set_thinking(&mut self, id: Option<SessionId>, level: &str) -> Result<(), String> {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &mut self.local {
             local.set_thinking(id, level)?;
             if let Some(id) = id
@@ -208,41 +211,42 @@ impl Store {
         self.live.is_none() && !self.is_local()
     }
     pub fn is_local(&self) -> bool {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         {
             self.local.is_some()
         }
-        #[cfg(not(feature = "quickjs-backend-test"))]
+        #[cfg(not(feature = "local-backend"))]
         {
             false
         }
     }
     pub fn is_stopping(&self, id: SessionId) -> bool {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &self.local {
             return local.stopping(id);
         }
         self.live.as_ref().is_some_and(|live| live.is_stopping(id))
     }
     pub fn cancel_local(&self) {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &self.local {
             local.cancel();
         }
     }
-    #[cfg(feature = "quickjs-backend-test")]
+    #[cfg(feature = "local-backend")]
     pub fn local(local: crate::local_chat::Local) -> Self {
         let computer = Computer {
             name: "This phone".into(),
-            address: "local-quickjs".into(),
+            address: "local-bun".into(),
             pi_version: None,
             connected: true,
         };
+        let sessions = local.restored();
         Self {
             generation: generation(),
             computer: computer.clone(),
             computers: vec![computer],
-            sessions: Vec::new(),
+            sessions,
             earlier: 0,
             projects: Vec::new(),
             next_id: 1,
@@ -259,7 +263,7 @@ impl Store {
     }
 
     pub fn remove(&mut self, id: SessionId) {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &mut self.local {
             local.remove(id);
         }
@@ -307,7 +311,7 @@ impl Store {
 
     /// Moves time on: sample runs advance; live timers count up.
     pub fn tick(&mut self, elapsed: Duration) -> Vec<Event> {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &mut self.local {
             return local.tick(&mut self.sessions, elapsed);
         }
@@ -460,7 +464,7 @@ impl Store {
     }
 
     pub fn stop(&mut self, id: SessionId) -> Result<(), String> {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &self.local {
             return local.stop(id);
         }
@@ -489,6 +493,16 @@ impl Store {
         Ok(())
     }
 
+    pub fn supports_compact(&self, id: SessionId) -> bool {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &self.local {
+            return local.supports("manual_compaction") && local.commands(id).is_some();
+        }
+        self.live
+            .as_ref()
+            .is_some_and(|live| live.commands(id).is_some() && live.supports_compact(id))
+    }
+
     /// Manually compacts an existing live session without inserting slash text
     /// into its transcript.
     pub fn compact(
@@ -496,6 +510,15 @@ impl Store {
         id: SessionId,
         custom_instructions: Option<String>,
     ) -> Result<(), String> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &mut self.local {
+            let session = self
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == id)
+                .ok_or("Chat no longer available")?;
+            return local.compact(session, custom_instructions);
+        }
         let Some(live) = &mut self.live else {
             return Err("Compaction is available after connecting to a computer.".into());
         };
@@ -511,7 +534,7 @@ impl Store {
         prompt: crate::prompt::Prompt,
         attachments: Vec<String>,
     ) -> Result<(), String> {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &mut self.local {
             let session = self
                 .sessions
@@ -603,12 +626,12 @@ impl Store {
         prompt: crate::prompt::Prompt,
         attachments: Vec<String>,
     ) -> Result<SessionId, String> {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(local) = &mut self.local {
             let mut session = local.create()?;
             let id = session.id;
             if let Err(error) = local.send(&mut session, prompt, attachments) {
-                local.remove(id);
+                self.sessions.push(local.project(id));
                 return Err(error);
             }
             self.sessions.push(session);

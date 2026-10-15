@@ -1,26 +1,22 @@
-//! On-device execution adapter for the ordinary Store/session/thread UI.
-//! Session history is memory-only; no SSH transport, sample scripts, tools or files.
+//! Local UI adapter for the shared Durable runner; SQLite, not this cache, owns execution.
+#[cfg(all(test, target_os = "android", feature = "ui-test"))]
+use crate::store::Store;
 use crate::{app::PhoneApp, model::*, prompt::Prompt, store::Event};
-#[cfg(test)]
-use crate::{app::Route, store::Store};
 use gpui::{Context, Window};
-use pi_quickjs_backend_poc::{
+use pi_local::{
     auth::{Provider, Vault},
-    chat::{self, ChatTask, Request},
-    chat_fixture::{self, Mode},
+    bun::{Engine, FixtureMode as Mode},
+    models,
 };
 use serde_json::{Value, json};
+#[cfg(feature = "ui-test")]
+use std::sync::{Mutex, mpsc};
 use std::{
     collections::HashMap,
-    path::PathBuf,
-    sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicU32, Ordering},
-        mpsc,
-    },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
+    time::Duration,
 };
-
 const FEATURES: &[&str] = &[
     "models",
     "thinking",
@@ -28,20 +24,46 @@ const FEATURES: &[&str] = &[
     "streaming",
     "stop",
     "visualize",
+    "manual_compaction",
+    "auto_compaction",
 ];
-struct TurnMeta {
-    attachments: Vec<String>,
-    excluded: Option<String>,
+static ROOT: OnceLock<PathBuf> = OnceLock::new();
+pub fn configure(data: &Path) {
+    let _ = ROOT.set(data.parent().unwrap_or(data).join("no_backup/local-agent"));
+}
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Meta {
+    id: u32,
+    provider: String,
+    model: String,
+    thinking: String,
+    #[serde(default)]
+    pending: Option<Value>,
+    #[serde(default)]
+    attachments: Vec<Vec<String>>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Index {
+    version: u32,
+    next: u32,
+    sessions: Vec<Meta>,
 }
 struct Conversation {
     pi: pi_core::session::Session,
-    // Only successful canonical upstream messages become future request context.
-    history: Vec<Value>,
-    pending: Option<Value>,
-    task: Option<ChatTask>,
+    engine: Engine,
+    meta: Meta,
+    key: String,
+    cwd: String,
     status: &'static str,
-    turns: Vec<TurnMeta>,
-    record_error: bool,
+    loaded: bool,
+    /// Only a newly allocated, nonexistent state may queue its first prompt before the initial snapshot.
+    fresh: bool,
+    admitting: bool,
+    setting: Option<String>,
+    compact: Option<String>,
+    stopped: std::cell::Cell<bool>,
+    error: Option<String>,
+    history: Vec<Value>,
 }
 pub(crate) struct Local {
     default_provider: Provider,
@@ -53,10 +75,13 @@ pub(crate) struct Local {
     metadata: Vec<Value>,
     conversations: HashMap<SessionId, Conversation>,
     pub mode: Mode,
+    root: PathBuf,
+    next: u32,
+    index_error: Option<String>,
 }
 fn response(pi: &mut pi_core::session::Session, command: &str, data: Value) -> Result<(), String> {
     pi.apply(&json!({"type":"response","command":command,"success":true,"data":data}))
-        .map_err(|_| "Invalid local backend record".into())
+        .map_err(|_| "Invalid Local protocol record".into())
 }
 fn provider_id(id: &str) -> Option<Provider> {
     match id {
@@ -79,6 +104,10 @@ fn thinking_label(level: &str) -> &str {
 }
 impl Local {
     pub fn new(provider: Provider, vault: Arc<dyn Vault>, synthetic: bool) -> Self {
+        let root = ROOT
+            .get()
+            .cloned()
+            .unwrap_or_else(|| std::env::temp_dir().join("pi-bun-host"));
         let mut metadata = Vec::new();
         for p in [
             provider,
@@ -88,23 +117,172 @@ impl Local {
                 Provider::Claude
             },
         ] {
-            let mut models = chat::catalog(p).as_array().unwrap().clone();
-            models.sort_by_key(|m| m["id"] != chat::models(p)[0].0);
+            let mut models = models::catalog(p).as_array().unwrap().clone();
+            models.sort_by_key(|m| m["id"] != models::models(p)[0].0);
             metadata.extend(models);
         }
-        let catalog: Vec<pi_core::protocol::Model> =
-            serde_json::from_value(json!(metadata)).expect("pinned model catalog");
-        Self {
+        let catalog = serde_json::from_value(json!(metadata)).expect("pinned public catalog");
+        let mut result = Self {
             default_provider: provider,
             synthetic,
             vault,
-            default_model: chat::models(provider)[0].0.clone(),
+            default_model: models::models(provider)[0].0.clone(),
             default_thinking: "high".into(),
             catalog,
             metadata,
             conversations: HashMap::new(),
             mode: Mode::Reply,
+            root,
+            next: 0x8000_0000,
+            index_error: None,
+        };
+        match std::fs::read(result.index_path()) {
+            Ok(bytes) => match serde_json::from_slice::<Index>(&bytes) {
+                Ok(index)
+                    if index.version == 1
+                        && index.sessions.len() <= 8
+                        && index.next >= 0x8000_0000
+                        && index
+                            .sessions
+                            .iter()
+                            .all(|meta| meta.id >= 0x8000_0000 && meta.id < index.next)
+                        && index
+                            .sessions
+                            .iter()
+                            .map(|meta| meta.id)
+                            .collect::<std::collections::HashSet<_>>()
+                            .len()
+                            == index.sessions.len() =>
+                {
+                    result.next = index.next;
+                    for meta in index.sessions {
+                        if let Err(error) = result.open(meta, false) {
+                            result.index_error = Some(error);
+                        }
+                    }
+                }
+                _ => {
+                    result.index_error =
+                        Some("Saved Local index could not be opened; it was not overwritten".into())
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                result.index_error =
+                    Some("Saved Local index is unavailable; it was not overwritten".into())
+            }
         }
+        result
+    }
+    fn namespace(&self) -> PathBuf {
+        self.root.join(if self.synthetic {
+            "synthetic"
+        } else {
+            "accounts"
+        })
+    }
+    fn index_path(&self) -> PathBuf {
+        self.namespace().join("index.json")
+    }
+    fn save(&self) -> Result<(), String> {
+        self.save_extra(None)
+    }
+    fn save_extra(&self, extra: Option<&Meta>) -> Result<(), String> {
+        if let Some(error) = &self.index_error {
+            return Err(error.clone());
+        }
+        let save = || -> anyhow::Result<()> {
+            use std::io::Write;
+            std::fs::create_dir_all(self.namespace())?;
+            let mut sessions: Vec<_> = self
+                .conversations
+                .values()
+                .map(|c| c.meta.clone())
+                .collect();
+            if let Some(meta) = extra {
+                sessions.push(meta.clone());
+            }
+            sessions.sort_by_key(|m| m.id);
+            let bytes = serde_json::to_vec(&Index {
+                version: 1,
+                next: self.next,
+                sessions,
+            })?;
+            let path = self.index_path();
+            let temp = path.with_extension("new");
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&temp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::rename(temp, path)?;
+            std::fs::File::open(self.namespace())?.sync_all()?;
+            Ok(())
+        };
+        save().map_err(|_| "Could not save Local session index; your draft was kept".into())
+    }
+    fn open(&mut self, meta: Meta, fresh: bool) -> Result<(), String> {
+        let provider = provider_id(&meta.provider).ok_or("Unsupported saved provider")?;
+        if !self
+            .catalog
+            .iter()
+            .any(|m| m.provider == meta.provider && m.id == meta.model)
+        {
+            return Err("Saved model is not in this build's catalog".into());
+        }
+        let key = format!("local-{}", meta.id);
+        let state = self.namespace().join(&key);
+        if fresh && state.exists() {
+            return Err("New Local identity already exists; saved state was retained".into());
+        }
+        let cwd = self.namespace().join("workspace");
+        std::fs::create_dir_all(&cwd).map_err(|_| "Local workspace unavailable")?;
+        let engine=Engine::open(self.root.clone(),json!({"state":state,"cwd":cwd,"key":key,"synthetic":self.synthetic,"provider":provider.id(),"model":meta.model,"thinking":meta.thinking,"home":self.root.join("home"),"temp":self.root.join("tmp"),"mode":format!("{:?}",self.mode)}),self.vault.clone()).map_err(|_|"Could not start embedded Bun")?;
+        let mut pi = pi_core::session::Session::new(cwd.clone());
+        let model = self
+            .catalog
+            .iter()
+            .find(|m| m.provider == meta.provider && m.id == meta.model)
+            .unwrap();
+        response(
+            &mut pi,
+            "get_state",
+            json!({"sessionId":key,"model":model,"thinkingLevel":meta.thinking,"isStreaming":false,"isCompacting":false,"isBashRunning":false,"autoCompactionEnabled":true}),
+        )?;
+        response(
+            &mut pi,
+            "get_available_models",
+            json!({"models":self.catalog}),
+        )?;
+        response(&mut pi, "get_commands", json!({"commands":[]}))?;
+        if let Some(pending) = &meta.pending {
+            engine
+                .send(pending.clone())
+                .map_err(|_| "Saved prompt could not be checked")?;
+        }
+        let admitting = meta.pending.is_some();
+        self.conversations.insert(
+            SessionId(meta.id),
+            Conversation {
+                pi,
+                engine,
+                meta,
+                key,
+                cwd: cwd.to_string_lossy().into_owned(),
+                status: "loading",
+                loaded: false,
+                fresh,
+                admitting,
+                setting: None,
+                compact: None,
+                stopped: std::cell::Cell::new(false),
+                error: None,
+                history: Vec::new(),
+            },
+        );
+        Ok(())
     }
     fn metadata(&self, provider: Provider, model: &str) -> &Value {
         self.metadata
@@ -115,7 +293,7 @@ impl Local {
     fn clamp(&self, provider: Provider, model: &str, level: &str) -> String {
         self.metadata(provider, model)["clampedThinkingLevels"][level]
             .as_str()
-            .expect("known thinking level")
+            .unwrap_or("high")
             .into()
     }
     fn raw_levels(&self, provider: Provider, model: &str) -> Vec<String> {
@@ -126,57 +304,31 @@ impl Local {
             .map(|l| l.as_str().unwrap().into())
             .collect()
     }
+    pub fn restored(&self) -> Vec<Session> {
+        let mut ids: Vec<_> = self.conversations.keys().copied().collect();
+        ids.sort_by_key(|id| id.0);
+        ids.into_iter().map(|id| self.project(id)).collect()
+    }
     pub fn create(&mut self) -> Result<Session, String> {
         if self.conversations.len() >= 8 {
-            return Err(
-                "Delete an old chat before starting another (eight in-memory sessions maximum)."
-                    .into(),
-            );
+            return Err("Delete an old Local chat first (eight open sessions maximum)".into());
         }
-        static NEXT: AtomicU32 = AtomicU32::new(0x8000_0000);
-        let id = SessionId(
-            NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-                .map_err(|_| "Session identity limit")?,
-        );
-        let mut pi = pi_core::session::Session::default();
-        response(
-            &mut pi,
-            "get_state",
-            json!({"sessionId":format!("phone-{}",id.0),"sessionFile":null,
-            "model":self.current_model(None),"thinkingLevel":self.clamp(self.default_provider,&self.default_model,&self.default_thinking),
-            "isStreaming":false,"isCompacting":false,"isBashRunning":false,"autoCompactionEnabled":false}),
-        )?;
-        response(&mut pi, "get_messages", json!({"messages":[]}))?;
-        response(
-            &mut pi,
-            "get_available_models",
-            json!({"models":self.catalog}),
-        )?;
-        response(
-            &mut pi,
-            "get_available_thinking_levels",
-            json!({"levels":self.raw_levels(self.default_provider,&self.default_model)}),
-        )?;
-        response(&mut pi, "get_active_tools", json!({"activeTools":[]}))?;
-        response(&mut pi, "get_commands", json!({"commands":[]}))?;
-        response(
-            &mut pi,
-            "get_backend_info",
-            json!({"backend":"quickjs","commands":["prompt","abort","set_model","set_thinking_level","get_messages","get_state","get_available_models","get_available_thinking_levels"],"features":FEATURES,"uiCapabilities":FEATURES}),
-        )?;
-        self.conversations.insert(
+        if let Some(error) = &self.index_error {
+            return Err(error.clone());
+        }
+        let id = self.next;
+        self.next = self.next.checked_add(1).ok_or("Session identity limit")?;
+        let meta = Meta {
             id,
-            Conversation {
-                pi,
-                history: Vec::new(),
-                pending: None,
-                task: None,
-                status: "idle",
-                turns: Vec::new(),
-                record_error: false,
-            },
-        );
-        Ok(self.project(id))
+            provider: self.default_provider.id().into(),
+            model: self.default_model.clone(),
+            thinking: self.default_thinking.clone(),
+            pending: None,
+            attachments: Vec::new(),
+        };
+        self.save_extra(Some(&meta))?;
+        self.open(meta, true)?;
+        Ok(self.project(SessionId(id)))
     }
     pub fn current_model(&self, id: Option<SessionId>) -> Option<&pi_core::protocol::Model> {
         if let Some(id) = id {
@@ -187,9 +339,9 @@ impl Local {
             .find(|m| m.provider == self.default_provider.id() && m.id == self.default_model)
     }
     pub fn provider(&self, id: Option<SessionId>) -> Provider {
-        self.current_model(id).map_or(self.default_provider, |m| {
-            provider_id(&m.provider).expect("known provider")
-        })
+        self.current_model(id)
+            .and_then(|m| provider_id(&m.provider))
+            .unwrap_or(self.default_provider)
     }
     pub fn model(&self, id: Option<SessionId>) -> String {
         self.current_model(id)
@@ -213,7 +365,7 @@ impl Local {
     pub fn thinking_levels(&self, id: Option<SessionId>) -> Vec<String> {
         self.raw_levels(self.provider(id), &self.model(id))
             .iter()
-            .map(|l| thinking_label(l).to_owned())
+            .map(|l| thinking_label(l).into())
             .collect()
     }
     pub fn set_thinking(&mut self, id: Option<SessionId>, label: &str) -> Result<(), String> {
@@ -221,21 +373,26 @@ impl Local {
             .raw_levels(self.provider(id), &self.model(id))
             .into_iter()
             .find(|l| thinking_label(l) == label)
-            .ok_or("Thinking level is not supported by this model")?;
+            .ok_or("Unsupported thinking level")?;
         if let Some(id) = id {
             let c = self
                 .conversations
                 .get_mut(&id)
-                .ok_or("Session no longer available")?;
-            if c.task.is_some() {
-                return Err("Stop the current reply before changing thinking level".into());
+                .ok_or("Session unavailable")?;
+            if !c.loaded || c.pi.busy() || c.admitting || c.compact.is_some() || c.setting.is_some()
+            {
+                return Err("Stop the reply before changing thinking".into());
             }
-            c.pi.apply(&json!({"type":"thinking_level_changed","level":level}))
-                .map_err(|_| "Invalid thinking configuration")?;
+            let request = crate::prompt::request_id();
+            c.engine
+                .send(json!({"type":"set_thinking_level","id":request,"level":level}))
+                .map_err(|_| "Local command queue unavailable")?;
+            c.setting = Some(request);
+            return Ok(());
         } else {
             self.default_thinking = level;
         }
-        Ok(())
+        self.save()
     }
     pub fn set_model(
         &mut self,
@@ -248,85 +405,87 @@ impl Local {
             .iter()
             .find(|m| m.provider == provider && m.id == model)
             .cloned()
-            .ok_or("Model not available for this provider")?;
-        let old = id
-            .and_then(|id| self.conversations.get(&id))
-            .map_or(&self.default_thinking, |c| &c.pi.state.thinking_level);
-        let chosen_provider = provider_id(provider).ok_or("Unknown provider")?;
-        let level = self.clamp(chosen_provider, model, old);
-        let levels = self.raw_levels(chosen_provider, model);
+            .ok_or("Model unavailable")?;
+        let chosen = provider_id(provider).ok_or("Provider unavailable")?;
+        let thinking = self.clamp(
+            chosen,
+            model,
+            id.and_then(|id| self.conversations.get(&id))
+                .map_or(&self.default_thinking, |c| &c.pi.state.thinking_level),
+        );
         if let Some(id) = id {
             let c = self
                 .conversations
                 .get_mut(&id)
-                .ok_or("Session no longer available")?;
-            if c.task.is_some() {
-                return Err("Stop the current reply before changing models".into());
+                .ok_or("Session unavailable")?;
+            if !c.loaded || c.pi.busy() || c.admitting || c.compact.is_some() || c.setting.is_some()
+            {
+                return Err("Stop the reply before changing models".into());
             }
-            if !selected.input.iter().any(|v| v == "image")
-                && c.history.iter().any(|m| {
+            if !selected.input.iter().any(|s| s == "image")
+                && c.pi.messages.iter().any(|m| {
                     m["role"] == "user"
                         && m["content"]
                             .as_array()
-                            .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "image"))
+                            .is_some_and(|a| a.iter().any(|b| b["type"] == "image"))
                 })
             {
-                return Err("This conversation contains images. Choose an image-capable model or start a new chat.".into());
+                return Err("Choose an image-capable model for this chat".into());
             }
-            response(&mut c.pi, "set_model", json!(selected))?;
-            c.pi.apply(&json!({"type":"thinking_level_changed","level":level}))
-                .map_err(|_| "Invalid model configuration")?;
-            response(
-                &mut c.pi,
-                "get_available_thinking_levels",
-                json!({"levels":levels}),
-            )?;
+            let request = crate::prompt::request_id();
+            c.engine
+                .send(json!({"type":"set_model","id":request,"provider":provider,"modelId":model}))
+                .map_err(|_| "Local command queue unavailable")?;
+            c.setting = Some(request);
+            return Ok(());
         } else {
-            self.default_provider = chosen_provider;
+            self.default_provider = chosen;
             self.default_model = model.into();
-            self.default_thinking = level;
+            self.default_thinking = thinking;
         }
-        Ok(())
+        self.save()
     }
     pub fn supports(&self, feature: &str) -> bool {
         FEATURES.contains(&feature)
     }
     pub fn commands(&self, id: SessionId) -> Option<&[pi_core::protocol::SlashCommand]> {
-        Some(self.conversations.get(&id)?.pi.commands.as_slice())
+        self.conversations.get(&id).map(|_| &[][..])
     }
     pub fn running(&self) -> bool {
-        self.conversations.values().any(|c| c.task.is_some())
+        self.conversations.values().any(|c| {
+            !c.loaded || c.pi.busy() || c.admitting || c.compact.is_some() || c.setting.is_some()
+        })
     }
     pub fn stopping(&self, id: SessionId) -> bool {
-        self.conversations
-            .get(&id)
-            .and_then(|c| c.task.as_ref())
-            .is_some_and(|t| t.snapshot().status == "stopping")
+        self.conversations.get(&id).is_some_and(|c| c.stopped.get())
     }
-    pub fn leave_except(&self, shown: Option<SessionId>) {
+    /// Explicit application-lifecycle cancellation; never used for backend navigation.
+    pub fn cancel(&self) {
         for (id, c) in &self.conversations {
-            if Some(*id) != shown
-                && let Some(t) = &c.task
+            if !c.loaded || c.pi.busy() || c.admitting || c.compact.is_some() || c.setting.is_some()
             {
-                t.cancel();
+                let _ = self.stop(*id);
             }
         }
     }
-    pub fn cancel(&self) {
-        self.leave_except(None);
-    }
     pub fn stop(&self, id: SessionId) -> Result<(), String> {
-        let c = self
-            .conversations
-            .get(&id)
-            .ok_or("Session no longer available")?;
-        if let Some(t) = &c.task {
-            t.cancel();
-        }
+        let c = self.conversations.get(&id).ok_or("Session unavailable")?;
+        c.engine
+            .send(json!({"type":"abort","id":crate::prompt::request_id()}))
+            .map_err(|_| "Local stop command unavailable")?;
+        c.stopped.set(true);
         Ok(())
     }
     pub fn remove(&mut self, id: SessionId) {
-        self.conversations.remove(&id);
+        if let Some(c) = self.conversations.remove(&id) {
+            let _ = c
+                .engine
+                .send(json!({"type":"abort","id":crate::prompt::request_id()}));
+            drop(c);
+        }
+        if self.save().is_err() {
+            self.index_error = Some("Could not save Local session removal".into());
+        }
     }
     pub fn send(
         &mut self,
@@ -334,22 +493,30 @@ impl Local {
         prompt: Prompt,
         attachments: Vec<String>,
     ) -> Result<(), String> {
-        if self.running() {
-            return Err(
-                "A local reply is still running or stopping. Wait or press Stop first.".into(),
-            );
+        if prompt.message.trim().is_empty() && prompt.images.is_empty() {
+            return Err("Write a message first".into());
         }
-        if (prompt.message.trim().is_empty() && prompt.images.is_empty())
-            || prompt.message.len() > 2 * 1024 * 1024 + 32 * 1024
-            || session.turns.len() >= 32
+        if prompt.message.len() > 2 * 1024 * 1024
             || attachments.len() > 8
+            || serde_json::to_vec(&prompt.images).map_or(true, |v| v.len() > 6 * 1024 * 1024)
         {
-            return Err("Message/session limit reached. Shorten the message or start a new session. Your draft was kept.".into());
+            return Err("Local prompt/attachment limit reached; your draft was kept".into());
         }
         let c = self
             .conversations
             .get_mut(&session.id)
-            .ok_or("Session no longer available")?;
+            .ok_or("Session unavailable")?;
+        if (!c.loaded && !c.fresh)
+            || c.pi.busy()
+            || c.admitting
+            || c.compact.is_some()
+            || c.setting.is_some()
+            || c.meta.pending.is_some()
+        {
+            return Err(
+                "Wait for admission/reply or restart to check the retained request identity".into(),
+            );
+        }
         if !prompt.images.is_empty()
             && !c
                 .pi
@@ -358,166 +525,284 @@ impl Local {
                 .as_ref()
                 .is_some_and(|m| m.input.iter().any(|i| i == "image"))
         {
-            return Err("This model does not accept images. Choose another model or remove the images; your draft was kept.".into());
+            return Err("Choose an image-capable model first".into());
         }
-        let mut content = vec![json!({"type":"text","text":prompt.message})];
-        content.extend(
-            prompt
-                .images
-                .into_iter()
-                .map(|image| serde_json::to_value(image).expect("image content")),
-        );
-        let user = json!({"role":"user","content":content,"timestamp":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64});
-        let mut messages = c.history.clone();
-        messages.push(user.clone());
-        if serde_json::to_vec(&messages).map_or(true, |m| m.len() > 8 * 1024 * 1024) {
-            return Err("Session attachment/context limit reached. Start a new session; your draft was kept.".into());
+        let record = json!({"type":"prompt","id":format!("admit-{}",prompt.request_id),"requestId":prompt.request_id,"message":prompt.message,"images":prompt.images});
+        c.engine
+            .validate(&record)
+            .map_err(|_| "Prompt exceeds the native bridge limit; your draft was kept")?;
+        let previous = c.meta.clone();
+        c.meta.pending = Some(record.clone());
+        c.meta.attachments.push(attachments);
+        if let Err(error) = self.save() {
+            self.conversations.get_mut(&session.id).unwrap().meta = previous;
+            return Err(error);
         }
-        let request = Request {
-            provider: provider_id(&c.pi.state.model.as_ref().unwrap().provider)
-                .expect("known provider"),
-            model: c.pi.state.model.as_ref().unwrap().id.clone(),
-            thinking_level: c.pi.state.thinking_level.clone(),
-            messages,
-        };
-        let task=if self.synthetic {chat_fixture::start(request,self.vault.clone(),self.mode)} else {ChatTask::start(request,self.vault.clone())}
-            .map_err(|_|"Could not start the reply. Check message limits and account availability; your draft was kept.".to_owned())?;
-        // Same records consumed by the SSH frontend. No invented UI turn/summary.
-        c.pi.apply(&json!({"type":"message_end","message":user}))
-            .map_err(|_| "Invalid local prompt")?;
-        c.pi.apply(&json!({"type":"agent_start"}))
-            .map_err(|_| "Invalid local admission")?;
-        c.task = Some(task);
-        c.pending = Some(user);
+        let c = self.conversations.get_mut(&session.id).unwrap();
+        c.engine
+            .send(json!({"type":"phone_fixture_mode","mode":format!("{:?}",self.mode)}))
+            .map_err(|_| "Local command queue unavailable")?;
+        c.engine.send(record).map_err(
+            |_| "Prompt admission uncertain; it retains the same request identity on reopen",
+        )?;
+        c.admitting = true;
+        c.error = None;
         c.status = "preparing";
-        c.record_error = false;
-        c.turns.push(TurnMeta {
-            attachments,
-            excluded: None,
-        });
+        *session = self.project(session.id);
+        Ok(())
+    }
+    pub fn compact(
+        &mut self,
+        session: &mut Session,
+        instructions: Option<String>,
+    ) -> Result<(), String> {
+        let c = self
+            .conversations
+            .get_mut(&session.id)
+            .ok_or("Session unavailable")?;
+        if !c.loaded || c.pi.busy() || c.admitting || c.compact.is_some() || c.setting.is_some() {
+            return Err("Wait for the chat to become idle first".into());
+        }
+        let id = crate::prompt::request_id();
+        let mut record = json!({"type":"compact","id":id});
+        if let Some(instructions) = instructions {
+            record["customInstructions"] = json!(instructions);
+        }
+        c.engine
+            .send(record)
+            .map_err(|_| "Local compaction command unavailable")?;
+        c.compact = Some(id);
+        c.error = None;
+        c.status = "compacting";
         *session = self.project(session.id);
         Ok(())
     }
     pub fn project(&self, id: SessionId) -> Session {
         let c = &self.conversations[&id];
+        let pending: Vec<_> = c
+            .meta
+            .pending
+            .as_ref()
+            .filter(|_| c.admitting || c.error.is_some())
+            .map(|record| crate::projection::PendingPrompt {
+                text: record["message"].as_str().unwrap_or("").into(),
+                key: None,
+                starts_turn: true,
+            })
+            .into_iter()
+            .collect();
         let mut session = crate::projection::project(
             &c.pi,
             crate::projection::Facts {
                 id,
-                cwd: "",
-                folder: String::new(),
+                cwd: &c.cwd,
+                folder: c.cwd.clone(),
                 question: None,
-                outbox: &[],
-                key: &format!("local-{}", id.0),
+                outbox: &pending,
+                key: &c.key,
             },
         );
         session.local = true;
         session.project = "Local".into();
-        session.details.session_file = "In memory only · lost on restart".into();
-        session.activity = status_text(c.status).into();
-        for (turn, meta) in session.turns.iter_mut().zip(&c.turns) {
-            turn.attachments = meta.attachments.clone();
-            turn.excluded = meta.excluded.clone();
+        session.backend_features = Some(FEATURES.iter().map(|s| (*s).into()).collect());
+        session.details.session_file = "Saved on this phone · SQLite".into();
+        if !c.loaded {
+            session.activity = "Opening saved chat…".into();
+            session.state = State::Working;
+        } else if c.setting.is_some() {
+            session.activity = "Updating model settings…".into();
+            session.state = State::Working;
+        } else if c.stopped.get() && c.pi.busy() {
+            session.activity = "Stopping…".into();
+        } else if c.compact.is_some() {
+            session.activity = "Compacting…".into();
+            session.state = State::Working;
+        } else if c.admitting {
+            session.activity = "Admitting prompt…".into();
+            session.state = State::Working;
+        } else if !c.pi.busy() && session.turns.is_empty() {
+            session.activity = "Ready · Android sh tools available".into();
+        }
+        if let Some(error) = c.error.as_ref().or(self.index_error.as_ref()) {
+            session.state = State::Failed;
+            session.failure = Some(error.clone());
+            session.activity = error.clone();
+        }
+        for (turn, attachments) in session.turns.iter_mut().zip(&c.meta.attachments) {
+            turn.attachments = attachments.clone();
         }
         session
     }
     pub fn tick(&mut self, sessions: &mut [Session], _elapsed: Duration) -> Vec<Event> {
         let mut events = Vec::new();
+        let mut save = false;
         for session in sessions {
             let Some(c) = self.conversations.get_mut(&session.id) else {
                 continue;
             };
-            let Some(task) = &c.task else {
-                continue;
-            };
-            let finished = task.is_finished();
-            let snapshot = task.snapshot();
-            c.status = snapshot.status;
-            for record in task.take_records() {
-                if c.pi.apply(&record).is_err() {
-                    c.record_error = true;
-                    task.cancel();
+            let before = session.state;
+            let mut refresh = false;
+            for mut record in c.engine.records() {
+                let result: anyhow::Result<()> = (|| {
+                    match record["type"].as_str() {
+                        Some("durable_state") => {
+                            c.pi = pi_core::durable::project(&record, &c.pi, &c.key)?;
+                            c.loaded = true;
+                        }
+                        Some("durable_events") => {
+                            for event in pi_core::durable::events(&record, &c.pi, &c.key)? {
+                                c.pi.apply(&event)?;
+                            }
+                            let state = pi_core::durable::state_update(&c.pi)?;
+                            c.pi.apply(&state)?;
+                        }
+                        Some("durable_metadata") => {
+                            for event in pi_core::durable::metadata(&record, &c.pi, &c.key)? {
+                                c.pi.apply(&event)?;
+                            }
+                        }
+                        Some("durable_subagents") => {
+                            for event in pi_core::durable::subagents(&record, &c.pi, &c.key)? {
+                                c.pi.apply(&event)?;
+                            }
+                        }
+                        Some("response") => {
+                            if c.setting.as_deref() == record["id"].as_str() && c.setting.is_some()
+                            {
+                                if record["success"] != true {
+                                    c.setting = None;
+                                    c.error = Some("Model settings were not changed; wait for the chat to become idle and retry".into());
+                                } else if record["command"] == "get_state" {
+                                    c.pi.apply(&record)?;
+                                    c.setting = None;
+                                    c.error = None;
+                                } else {
+                                    // Re-read the committed/clamped configuration; never persist an optimistic selection.
+                                    c.engine
+                                        .send(json!({"type":"get_state","id":record["id"]}))?;
+                                }
+                            }
+                            if record["command"] == "prompt" {
+                                c.admitting = false;
+                                if record["success"] == true {
+                                    c.meta.pending = None;
+                                    save = true;
+                                } else {
+                                    c.error=Some(record["error"].as_str().unwrap_or("Prompt was not admitted; restart to check its original request identity").into());
+                                }
+                            }
+                            if record["command"] == "compact"
+                                && c.compact.as_deref() == record["id"].as_str()
+                            {
+                                c.compact = None;
+                                events.push(Event::Compacted(
+                                    session.id,
+                                    if record["success"] == true {
+                                        None
+                                    } else {
+                                        Some(
+                                            record["error"]
+                                                .as_str()
+                                                .unwrap_or("Compaction did not complete")
+                                                .into(),
+                                        )
+                                    },
+                                ));
+                                refresh = true;
+                            }
+                            if record["command"] == "abort" {
+                                c.stopped.set(false);
+                            }
+                            if record["command"] == "get_session_stats" {
+                                pi_core::durable::discard_stale_stats(&mut record, &c.pi)?;
+                            }
+                            if record["command"] != "get_state"
+                                && record["command"] != "get_messages"
+                            {
+                                c.pi.apply(&record)?;
+                            }
+                        }
+                        Some("local_error") => {
+                            c.loaded = true;
+                            c.admitting = false;
+                            c.setting = None;
+                            c.error = Some(
+                                record["error"]
+                                    .as_str()
+                                    .unwrap_or("Local runtime unavailable")
+                                    .into(),
+                            );
+                            if c.compact.take().is_some() {
+                                events.push(Event::Compacted(session.id, c.error.clone()));
+                            }
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                })();
+                if result.is_err() {
+                    c.error = Some(
+                        "Local presentation could not synchronize; saved SDK state was retained"
+                            .into(),
+                    );
+                    c.loaded = true;
+                    c.admitting = false;
+                    c.setting = None;
                 }
             }
-            if finished {
-                let message = task.take_message();
-                if c.status == "done"
-                    && !c.record_error
-                    && let (Some(user), Some(message)) = (c.pending.take(), message)
-                {
-                    c.history.extend([user, message.clone()]);
-                    let usage = &message["usage"];
-                    c.pi.stats.tokens.input += usage["input"].as_u64().unwrap_or(0);
-                    c.pi.stats.tokens.output += usage["output"].as_u64().unwrap_or(0);
-                    c.pi.stats.tokens.cache_read += usage["cacheRead"].as_u64().unwrap_or(0);
-                    c.pi.stats.tokens.cache_write += usage["cacheWrite"].as_u64().unwrap_or(0);
-                    c.pi.stats.total_messages = c.pi.messages.len() as u64;
-                } else {
-                    if c.status == "done" || c.record_error {
-                        c.status = "failed";
-                    }
-                    c.pending = None;
-                    let stop = if c.status == "stopped" {
-                        "aborted"
-                    } else {
-                        "error"
-                    };
-                    let mut last=c.pi.messages.last().filter(|m|m["role"]=="assistant").cloned().unwrap_or(json!({"role":"assistant","content":[],"timestamp":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64}));
-                    last["stopReason"] = json!(stop);
-                    last["errorMessage"] = json!(status_text(c.status));
-                    // A final message may already have closed the streaming pointer.
-                    if c.pi
-                        .messages
-                        .last()
-                        .is_some_and(|m| m["role"] == "assistant")
-                    {
-                        c.pi.messages.pop();
-                    }
-                    let _ = c.pi.apply(&json!({"type":"message_start","message":last}));
-                    let _ = c.pi.apply(&json!({"type":"message_end","message":last}));
-                    if let Some(meta) = c.turns.last_mut() {
-                        meta.excluded = Some(format!(
-                            "{} This turn is excluded from later requests.",
-                            status_text(c.status)
-                        ));
-                    }
-                }
-                c.task = None;
-                let _ = c.pi.apply(&json!({"type":"agent_settled"}));
-                if c.status != "stopped" {
+            if c.loaded
+                && let Some(model) = &c.pi.state.model
+                && (c.meta.provider != model.provider
+                    || c.meta.model != model.id
+                    || c.meta.thinking != c.pi.state.thinking_level)
+            {
+                c.meta.provider = model.provider.clone();
+                c.meta.model = model.id.clone();
+                c.meta.thinking = c.pi.state.thinking_level.clone();
+                save = true;
+            }
+            if c.loaded
+                && !c.pi.busy()
+                && !c.admitting
+                && c.compact.is_none()
+                && c.setting.is_none()
+            {
+                c.status = "idle";
+                if before == State::Working {
+                    refresh = true;
                     events.push(Event::Finished(session.id));
                 }
+            } else if c.compact.is_some() {
+                c.status = "compacting";
+            } else if c.pi.busy() {
+                c.status = "streaming";
             }
+            if refresh {
+                let _ = c
+                    .engine
+                    .send(json!({"type":"get_session_stats","id":crate::prompt::request_id()}));
+            }
+            c.history = c.pi.messages.clone();
             *session = self.project(session.id);
+        }
+        if save && self.save().is_err() {
+            self.index_error = Some(
+                "Could not update Local admission index; original request IDs were retained".into(),
+            );
         }
         events
     }
 }
-fn status_text(status: &str) -> &'static str {
-    match status {
-        "idle" => "Ready",
-        "preparing" => "Checking account…",
-        "streaming" => "Replying…",
-        "stopping" => "Stopping; waiting for account refresh to settle…",
-        "done" => "Reply complete",
-        "stopped" => "Stopped. Partial turns are not included in later requests.",
-        "account_changed" => "Account signed out or changed. Check Local providers.",
-        "auth_error" => {
-            "Provider rejected authorization. Check / refresh the account or sign in again."
-        }
-        "rate_limited" => "Provider usage limit reached. Wait before sending again.",
-        "request_rejected" => {
-            "Provider rejected this request/model. Try another model or a new chat."
-        }
-        _ => "Could not finish the reply. Check connectivity/account, then try again.",
-    }
-}
+
 // Independent coalescing writer: synthetic test geometry/status only, never chat text.
+#[cfg(feature = "ui-test")]
 type Publication = (PathBuf, Option<Value>);
+#[cfg(feature = "ui-test")]
 struct Telemetry {
     pending: Arc<Mutex<Option<Publication>>>,
     wake: mpsc::SyncSender<()>,
 }
+#[cfg(feature = "ui-test")]
 fn publish(path: PathBuf, value: Option<Value>) {
     static WRITER: OnceLock<Telemetry> = OnceLock::new();
     let writer = WRITER.get_or_init(|| {
@@ -547,7 +832,7 @@ fn publish(path: PathBuf, value: Option<Value>) {
 }
 
 impl PhoneApp {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "android", feature = "ui-test"))]
     pub(crate) fn open_local_chat(
         &mut self,
         provider: Provider,
@@ -613,10 +898,10 @@ impl PhoneApp {
         for store in self.store.iter_mut().chain(self.parked_local.iter_mut()) {
             if let Some(backend) = store.local.as_mut().filter(|b| b.synthetic == synthetic) {
                 for c in backend.conversations.values_mut() {
-                    if provider_id(&c.pi.state.model.as_ref().unwrap().provider) == Some(provider)
-                        && let Some(task) = &c.task
-                    {
-                        task.cancel();
+                    if provider_id(&c.pi.state.model.as_ref().unwrap().provider) == Some(provider) {
+                        let _ = c
+                            .engine
+                            .send(json!({"type":"abort","id":crate::prompt::request_id()}));
                     }
                 }
             }
@@ -654,6 +939,7 @@ impl PhoneApp {
         }
         true
     }
+    #[cfg(feature = "ui-test")]
     pub(crate) fn tick_local_chat(&mut self, cx: &mut Context<Self>) {
         let Some(store) = &self.store else {
             return;
@@ -701,7 +987,7 @@ impl PhoneApp {
                     || name.starts_with("thinking-choice-")
                     || name.starts_with("session-row-")
                     || name.starts_with("thread-"))
-                .then(|| (name, *rect))
+                .then_some((name, *rect))
             })
             .collect();
         let visible = self.visible && self.window_active && !self.local_providers.visible;
@@ -713,304 +999,12 @@ impl PhoneApp {
             "provider":local.provider(self.model_session()).id(),"model":local.model(self.model_session()),"thinking":local.model_settings(self.model_session()).1,"status":current.map_or("idle",|c|c.status),
             "running":local.running(),"sessions":store.sessions.len(),"turns":session.map_or(0,|s|s.turns.len()),"context_messages":current.map_or(0,|c|c.history.len()),
             "reply_verified":session.and_then(|s|s.turn()).and_then(|t|t.summary.as_ref()).is_some_and(|s|s.text()=="Hello from the phone 🌍"),
+            "tool_verified":current.is_some_and(|c|c.pi.tools.iter().any(|tool|tool.finished&&!tool.is_error&&tool.output.contains("phone-tool-ok"))),
             "bounds":if visible {json!(bounds)} else {json!({})},"scale":geometry.scale,"mode":format!("{:?}",local.mode)}),
             ),
         );
         if visible {
             cx.notify();
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{Modifiers, px};
-    use pi_quickjs_backend_poc::auth::VaultScope;
-    struct Memory(Mutex<std::collections::BTreeMap<String, Value>>);
-    impl Memory {
-        fn new() -> Arc<Self> {
-            Arc::new(Self(Mutex::new([Provider::Claude,Provider::Codex].into_iter().map(|p|(p.id().to_owned(),json!({"generation":"0","credential":{
-                "type":"oauth","access":"expired","refresh":"synthetic-chat-old","expires":0,"accountId":"acct_test_123"
-            }}))).collect())))
-        }
-    }
-    impl Vault for Memory {
-        fn scope(&self) -> VaultScope {
-            VaultScope::Synthetic
-        }
-        fn read(&self, provider: Provider) -> anyhow::Result<Value> {
-            Ok(self.0.lock().unwrap()[provider.id()].clone())
-        }
-        fn write(
-            &self,
-            provider: Provider,
-            expected: &str,
-            data: &str,
-        ) -> anyhow::Result<Option<String>> {
-            let mut records = self.0.lock().unwrap();
-            let v = records.get_mut(provider.id()).unwrap();
-            if v["generation"] != expected {
-                return Ok(None);
-            }
-            let next = (expected.parse::<u64>()? + 1).to_string();
-            *v = json!({"generation":next,"credential":serde_json::from_str::<Value>(data)?});
-            Ok(Some(next))
-        }
-        fn clear(&self, provider: Provider) -> anyhow::Result<()> {
-            self.0.lock().unwrap().get_mut(provider.id()).unwrap()["credential"] = Value::Null;
-            Ok(())
-        }
-    }
-    fn drain(store: &mut Store) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while store.running().next().is_some() {
-            assert!(std::time::Instant::now() < deadline);
-            store.tick(Duration::from_millis(10));
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-    #[test]
-    fn adapter_uses_canonical_completed_turns_without_demo_queue_tools_or_persistence() {
-        for provider in [Provider::Claude, Provider::Codex] {
-            let mut backend = Local::new(provider, Memory::new(), true);
-            let session = backend.create().unwrap();
-            let id = session.id;
-            let mut store = Store::local(backend);
-            store.sessions.push(session);
-            assert!(!store.is_sample());
-            assert!(store.live.is_none());
-            assert!(store.projects.is_empty());
-            assert!(
-                store
-                    .send(id, "image".into(), vec!["picture".into(); 9])
-                    .is_err()
-            );
-            assert!(store.session(id).unwrap().turns.is_empty());
-            for _ in 0..2 {
-                store.send(id, "synthetic question".into(), vec![]).unwrap();
-                assert!(store.send(id, "duplicate".into(), vec![]).is_err());
-                assert!(store.session(id).unwrap().queued.is_empty());
-                drain(&mut store);
-                assert_eq!(store.session(id).unwrap().state, State::Done);
-                assert_eq!(
-                    store
-                        .session(id)
-                        .unwrap()
-                        .turn()
-                        .unwrap()
-                        .summary
-                        .as_ref()
-                        .unwrap()
-                        .text(),
-                    "Hello from the phone 🌍"
-                );
-                assert!(store.session(id).unwrap().turn().unwrap().stages.is_empty());
-            }
-            assert_eq!(
-                store.local.as_ref().unwrap().conversations[&id]
-                    .history
-                    .len(),
-                4
-            );
-            store.set_thinking(Some(id), "Medium").unwrap();
-            let image=pi_core::protocol::ImageContent::new("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=".into(),"image/png");
-            store
-                .send(
-                    id,
-                    Prompt::new(
-                        "Attached text file: example.txt\nfixture-file-content".into(),
-                        vec![image],
-                    ),
-                    vec!["example.txt".into(), "tiny.png".into()],
-                )
-                .unwrap();
-            drain(&mut store);
-            let last = store.local.as_ref().unwrap().conversations[&id]
-                .history
-                .last()
-                .unwrap();
-            assert_eq!(last["thinkingLevel"], "medium");
-            assert_eq!(
-                store.session(id).unwrap().turn().unwrap().attachments.len(),
-                2
-            );
-            let canonical = store.local.as_ref().unwrap().conversations[&id]
-                .history
-                .clone();
-            assert_eq!(canonical[4]["content"][1]["type"], "image");
-            if provider == Provider::Codex {
-                assert!(
-                    store
-                        .set_model(Some(id), provider.id(), "gpt-5.3-codex-spark")
-                        .is_err()
-                );
-            }
-            assert_eq!(canonical[1]["role"], "assistant");
-            assert!(canonical[1]["usage"].is_object());
-            let other = if provider == Provider::Claude {
-                Provider::Codex
-            } else {
-                Provider::Claude
-            };
-            let generation = store.generation;
-            store
-                .set_model(Some(id), other.id(), &chat::models(other)[0].0)
-                .unwrap();
-            assert_eq!(store.generation, generation);
-            assert_eq!(
-                store.local.as_ref().unwrap().conversations[&id].history,
-                canonical
-            );
-            assert_eq!(store.session(id).unwrap().turns.len(), 3);
-            store
-                .send(id, "follow up using the other provider".into(), vec![])
-                .unwrap();
-            drain(&mut store);
-            assert_eq!(store.session(id).unwrap().state, State::Done);
-            assert_eq!(
-                store.local.as_ref().unwrap().conversations[&id].history[7]["provider"],
-                other.id()
-            );
-            let canonical = store.local.as_ref().unwrap().conversations[&id]
-                .history
-                .clone();
-            store.local.as_mut().unwrap().mode = Mode::Stall;
-            store.send(id, "stop fixture".into(), vec![]).unwrap();
-            store.stop(id).unwrap();
-            assert_eq!(
-                store.session(id).unwrap().state,
-                State::Working,
-                "must drain before allowing another request"
-            );
-            drain(&mut store);
-            assert_eq!(store.session(id).unwrap().state, State::Stopped);
-            assert_eq!(
-                store.local.as_ref().unwrap().conversations[&id].history,
-                canonical
-            );
-            store.local.as_mut().unwrap().mode = Mode::Reject;
-            store.send(id, "reject fixture".into(), vec![]).unwrap();
-            drain(&mut store);
-            assert_eq!(store.session(id).unwrap().state, State::Failed);
-            assert_eq!(
-                store.local.as_ref().unwrap().conversations[&id].history,
-                canonical
-            );
-            store.remove(id);
-            assert!(store.local.as_ref().unwrap().conversations.is_empty());
-        }
-    }
-    #[gpui::test]
-    fn local_uses_shared_thread_model_picker_preferences_and_account_boundaries(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
-        cx.simulate_resize(gpui::size(px(384.), px(854.)));
-        cx.update(|window, cx| {
-            app.update(cx, |app, cx| {
-                app.visible = true;
-                app.window_active = true;
-                assert!(app.open_local_chat(Provider::Claude, Memory::new(), true, window, cx));
-                assert!(matches!(app.route(), Route::Thread(_)));
-                assert!(!app.store.as_ref().unwrap().is_sample());
-            })
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("composer-model").is_some());
-        for name in ["composer-attach", "composer-thinking"] {
-            assert!(cx.debug_bounds(name).is_some(), "{name}");
-        }
-        for name in ["composer-command", "local-chat-composer", "backend-picker"] {
-            assert!(cx.debug_bounds(name).is_none(), "{name}");
-        }
-        let point = cx.debug_bounds("composer-model").unwrap().center();
-        cx.simulate_click(point, Modifiers::none());
-        cx.run_until_parked();
-        let point = cx.debug_bounds("model-choice-1").unwrap().center();
-        cx.simulate_click(point, Modifiers::none());
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            app.update(cx, |app, cx| {
-                let id = app.model_session().unwrap();
-                assert_eq!(
-                    app.model_settings(cx).0,
-                    chat::models(Provider::Claude)[1].1
-                );
-                assert_eq!(
-                    app.prefs(cx).model,
-                    "Opus 5.5",
-                    "local picker must not change SSH defaults"
-                );
-                let composer = app.thread_composer(id, window, cx);
-                assert!(!composer.read(cx).area.read(cx).enter_sends);
-                composer.update(cx, |c, cx| c.set_text("private draft", cx));
-                app.open_url("pi://unknown/not-navigation", window, cx);
-                assert_eq!(app.route(), Route::Thread(id));
-                assert_eq!(composer.read(cx).area.read(cx).text(), "private draft");
-                let old = app.store.as_ref().unwrap().generation;
-                assert!(app.open_local_chat(Provider::Claude, Memory::new(), true, window, cx));
-                assert_eq!(app.store.as_ref().unwrap().generation, old);
-                assert_eq!(composer.read(cx).area.read(cx).text(), "private draft");
-                app.select_local_backend(window, cx);
-                assert_eq!(app.route(), Route::Thread(id));
-                assert!(app.open_local_chat(Provider::Codex, Memory::new(), true, window, cx));
-                assert_eq!(app.store.as_ref().unwrap().generation, old);
-                assert_eq!(app.model_session(), Some(id));
-                assert_eq!(composer.read(cx).area.read(cx).text(), "private draft");
-                app.choose_model(
-                    "GPT".into(),
-                    Provider::Codex.id().into(),
-                    chat::models(Provider::Codex)[0].0.clone(),
-                    cx,
-                );
-                assert_eq!(app.model_session(), Some(id));
-                assert_eq!(app.store.as_ref().unwrap().generation, old);
-                assert_eq!(
-                    app.store.as_ref().unwrap().session(id).unwrap().project,
-                    "Local"
-                );
-                assert_eq!(composer.read(cx).area.read(cx).text(), "private draft");
-                app.invalidate_local_account(Provider::Claude, true, cx);
-                assert!(app.store.as_ref().unwrap().session(id).is_some());
-                app.invalidate_local_account(Provider::Codex, false, cx);
-                assert!(app.store.is_some());
-                app.invalidate_local_account(Provider::Codex, true, cx);
-                assert!(app.store.as_ref().unwrap().session(id).is_some());
-                assert_eq!(composer.read(cx).area.read(cx).text(), "private draft");
-                assert!(!<PhoneApp as pi_visual_ui::Host>::visual_persist(app));
-                let import = composer.update(cx, |c, cx| c.begin_import(cx));
-                assert!(!composer.read(cx).can_send(cx));
-                app.start.update(cx, |c, cx| {
-                    c.set_text("new session draft", cx);
-                    c.attach(
-                        crate::composer::Attachment::File {
-                            name: "note.txt".into(),
-                            size: "4 bytes".into(),
-                            contents: "note".into(),
-                        },
-                        cx,
-                    );
-                });
-                app.open_sample(window, cx);
-                assert!(app.parked_local.as_ref().unwrap().session(id).is_some());
-                app.select_local_backend(window, cx);
-                assert!(app.store.as_ref().unwrap().session(id).is_some());
-                assert_ne!(
-                    app.store.as_ref().unwrap().generation,
-                    old,
-                    "retire callbacks admitted before parking"
-                );
-                assert!(composer.read(cx).can_send(cx));
-                assert!(!composer.update(cx, |c, cx| c.finish_import(import, cx)));
-                assert_eq!(app.start.read(cx).area.read(cx).text(), "new session draft");
-                assert_eq!(app.start.read(cx).attachments().len(), 1);
-                assert_eq!(
-                    app.threads[&id].read(cx).area.read(cx).text(),
-                    "private draft"
-                );
-            })
-        });
     }
 }

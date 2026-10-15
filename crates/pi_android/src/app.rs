@@ -372,19 +372,17 @@ pub struct PhoneApp {
     _retry: Option<Task<()>>,
     /// Where the key and settings live.
     pub(crate) data_dir: PathBuf,
-    #[cfg(feature = "quickjs-backend-test")]
-    pub(crate) quickjs_backend_test: crate::quickjs_backend_test::Panel,
-    #[cfg(feature = "quickjs-backend-test")]
+    #[cfg(feature = "local-backend")]
     pub(crate) local_providers: crate::provider_accounts::Panel,
-    #[cfg(feature = "quickjs-backend-test")]
+    #[cfg(feature = "local-backend")]
     pub(crate) local_frame: u64,
-    #[cfg(feature = "quickjs-backend-test")]
+    #[cfg(feature = "local-backend")]
     pub(crate) local_private: bool,
-    #[cfg(feature = "quickjs-backend-test")]
+    #[cfg(feature = "local-backend")]
     pub(crate) parked_local: Option<Store>,
-    #[cfg(feature = "quickjs-backend-test")]
+    #[cfg(feature = "local-backend")]
     parked_local_threads: HashMap<SessionId, Entity<Composer>>,
-    #[cfg(feature = "quickjs-backend-test")]
+    #[cfg(feature = "local-backend")]
     parked_local_start: Option<(String, Vec<crate::composer::Attachment>)>,
     /// Finds a folder or file in the project browser, or goes to a path.
     pub(crate) folder: Entity<TextArea>,
@@ -565,6 +563,7 @@ impl PhoneApp {
             cx.observe_window_activation(window, |this, window, cx| {
                 this.window_active = window.is_window_active();
                 if !this.window_active {
+                    crate::scroll::cancel_motion();
                     this.visual_apps
                         .borrow_mut()
                         .projection_deferred(this.route(), false);
@@ -593,6 +592,8 @@ impl PhoneApp {
             || std::env::temp_dir().join("pi-android"),
             Path::to_path_buf,
         );
+        #[cfg(feature = "local-backend")]
+        crate::local_chat::configure(&data_dir);
         // On the phone the key is made at once, to show; elsewhere on connecting.
         let phone_key = prefs_path
             .is_some()
@@ -659,19 +660,17 @@ impl PhoneApp {
             resuming: None,
             _retry: None,
             data_dir,
-            #[cfg(feature = "quickjs-backend-test")]
-            quickjs_backend_test: Default::default(),
-            #[cfg(feature = "quickjs-backend-test")]
+            #[cfg(feature = "local-backend")]
             local_providers: Default::default(),
-            #[cfg(feature = "quickjs-backend-test")]
+            #[cfg(feature = "local-backend")]
             local_frame: 0,
-            #[cfg(feature = "quickjs-backend-test")]
+            #[cfg(feature = "local-backend")]
             local_private: false,
-            #[cfg(feature = "quickjs-backend-test")]
+            #[cfg(feature = "local-backend")]
             parked_local: None,
-            #[cfg(feature = "quickjs-backend-test")]
+            #[cfg(feature = "local-backend")]
             parked_local_threads: HashMap::new(),
-            #[cfg(feature = "quickjs-backend-test")]
+            #[cfg(feature = "local-backend")]
             parked_local_start: None,
             folder,
             reconnecting: false,
@@ -728,7 +727,14 @@ impl PhoneApp {
         };
         app.apply_theme(window, cx);
         app.apply_return_sends(cx);
-        if let Some(address) = computer {
+        #[cfg(feature = "local-backend")]
+        let prefer_local = app.data_dir.join("local-backend-preferred").is_file();
+        #[cfg(not(feature = "local-backend"))]
+        let prefer_local = false;
+        if prefer_local {
+            #[cfg(feature = "local-backend")]
+            app.select_local_backend(window, cx);
+        } else if let Some(address) = computer {
             app.address
                 .update(cx, |field, cx| field.set_text(address.clone(), cx));
             if sample {
@@ -840,8 +846,7 @@ impl PhoneApp {
     fn compact_available_for_session(&self, id: SessionId) -> bool {
         self.store
             .as_ref()
-            .and_then(|store| store.live.as_ref())
-            .is_some_and(|live| live.commands(id).is_some() && live.supports_compact(id))
+            .is_some_and(|store| store.supports_compact(id))
     }
 
     pub(crate) fn compact_pending(&self, id: SessionId) -> bool {
@@ -849,9 +854,12 @@ impl PhoneApp {
     }
 
     fn compact_for_session(&self, id: SessionId, draft: &str) -> Option<Option<String>> {
-        let live = self.store.as_ref()?.live.as_ref()?;
+        let store = self.store.as_ref()?;
+        if store.live.is_none() && !store.is_local() {
+            return None;
+        }
         let parsed = compact_instructions(draft, false)?;
-        let Some(commands) = live.commands(id) else {
+        let Some(commands) = store.commands(id) else {
             // Do not turn an action into model text while its possible session
             // shadow is still unknown. Live keeps the draft and asks to wait.
             return Some(parsed);
@@ -933,10 +941,6 @@ impl PhoneApp {
     /// Tells the connection which session is on screen: idle ones elsewhere
     /// let go of their channel.
     fn show_live(&mut self) {
-        #[cfg(feature = "quickjs-backend-test")]
-        if let Some(local) = self.store.as_ref().and_then(|store| store.local.as_ref()) {
-            local.leave_except(self.model_session());
-        }
         let shown = match self.route() {
             Route::Thread(id)
             | Route::Review(id)
@@ -954,11 +958,6 @@ impl PhoneApp {
     }
 
     fn entered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.route(), Route::Thread(_))
-            && let Some(store) = &self.store
-        {
-            store.cancel_local();
-        }
         self.show_live();
         if let Route::Thread(id) = self.route() {
             self.begin_thread_loading(id);
@@ -1140,18 +1139,10 @@ impl PhoneApp {
 
     /// One step back; false when there is nothing to go back to.
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if self.local_providers.visible {
             self.close_provider_accounts();
             self.tick_provider_accounts(cx);
-            cx.notify();
-            return true;
-        }
-        #[cfg(feature = "quickjs-backend-test")]
-        if self.quickjs_backend_test.visible {
-            self.quickjs_backend_test.cancel("back");
-            self.quickjs_backend_test.visible = false;
-            self.tick_quickjs_backend_test(cx);
             cx.notify();
             return true;
         }
@@ -1259,8 +1250,13 @@ impl PhoneApp {
         self.replace_store(Some(store));
     }
     pub(crate) fn preserve_local_drafts(&mut self, cx: &mut Context<Self>) {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if self.is_local() {
+            // Preserve the command before parking its cleared composer. Parked
+            // backend completions have no active composer/notification target.
+            for (_, (target, draft)) in std::mem::take(&mut self.pending_compacts) {
+                self.restore_compact_draft(target, &draft, cx);
+            }
             self.parked_local_start = Some(self.start.update(cx, |c, cx| {
                 c.cancel_imports(cx);
                 (c.area.read(cx).text().to_owned(), c.attachments().to_vec())
@@ -1269,15 +1265,18 @@ impl PhoneApp {
                 composer.update(cx, |c, cx| c.cancel_imports(cx));
             }
         }
-        #[cfg(not(feature = "quickjs-backend-test"))]
+        #[cfg(not(feature = "local-backend"))]
         let _ = cx;
     }
     pub(crate) fn replace_store(&mut self, store: Option<Store>) {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
+        if store.as_ref().is_some_and(|store| store.local.is_none()) {
+            let _ = std::fs::remove_file(self.data_dir.join("local-backend-preferred"));
+        }
+        #[cfg(feature = "local-backend")]
         if self.is_local()
             && let Some(mut previous) = self.store.take()
         {
-            previous.cancel_local();
             previous.retire_generation();
             let ids: Vec<_> = previous.sessions.iter().map(|s| s.id).collect();
             self.parked_local_threads = ids
@@ -1910,8 +1909,12 @@ impl PhoneApp {
         .detach();
     }
 
-    #[cfg(feature = "quickjs-backend-test")]
+    #[cfg(feature = "local-backend")]
     pub(crate) fn select_local_backend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "local-backend")]
+        if !self.local_providers.is_synthetic() {
+            let _ = std::fs::write(self.data_dir.join("local-backend-preferred"), "local");
+        }
         self.close_sheet(cx);
         self.closing_sheet = None;
         self.cancel_connection_attempt();
@@ -1932,7 +1935,7 @@ impl PhoneApp {
                 return;
             };
             self.install_store(Store::local(crate::local_chat::Local::new(
-                pi_quickjs_backend_poc::auth::Provider::Claude,
+                pi_local::auth::Provider::Claude,
                 vault,
                 synthetic,
             )));
@@ -2159,16 +2162,14 @@ impl PhoneApp {
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if let Some(backend) = &mut self.parked_local {
             let _ = backend.tick(Duration::ZERO);
         }
         let _trace = gpui_android::trace::scope(c"pi.app.tick");
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(all(feature = "local-backend", feature = "ui-test"))]
         self.tick_local_chat(cx);
-        #[cfg(feature = "quickjs-backend-test")]
-        self.tick_quickjs_backend_test(cx);
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         self.tick_provider_accounts(cx);
         // Framework duration-scale updates can arrive while we stay visible.
         // Poll at the existing low-frequency ticker, never on animation frames.
@@ -2229,7 +2230,11 @@ impl PhoneApp {
             self.last_tick = now;
             return;
         };
-        if store.running().next().is_none() {
+        #[cfg(feature = "local-backend")]
+        let local_idle = store.local.is_some();
+        #[cfg(not(feature = "local-backend"))]
+        let local_idle = false;
+        if !local_idle && store.running().next().is_none() {
             self.last_tick = now;
             return;
         }
@@ -2254,6 +2259,19 @@ impl PhoneApp {
     }
 
     fn alert(&mut self, event: Event, cx: &mut Context<Self>) {
+        #[cfg(feature = "local-backend")]
+        if let Event::Compacted(id, error) = &event {
+            if let Some((target, draft)) = self.pending_compacts.remove(id)
+                && error.is_some()
+            {
+                self.restore_compact_draft(target, &draft, cx);
+            }
+            self.notify_user(
+                error.clone().unwrap_or_else(|| "Context compacted".into()),
+                cx,
+            );
+            return;
+        }
         let prefs = self.prefs(cx).clone();
         let accent = theme(cx).accent_rgb();
         let Some(store) = &self.store else {
@@ -2264,6 +2282,8 @@ impl PhoneApp {
         }
         let computer = store.computer.name.clone();
         match event {
+            #[cfg(feature = "local-backend")]
+            Event::Compacted(..) => {}
             Event::Deleted(id) => self.finish_deletion(id, cx),
             Event::NeedsYou(id) => {
                 if self.viewing(id) {
@@ -2341,18 +2361,16 @@ impl PhoneApp {
         let visible = visibility.is_visible();
         let changed = self.visible != visible;
         self.visible = visible;
-        #[cfg(feature = "quickjs-backend-test")]
-        self.tick_quickjs_backend_test(cx);
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         self.tick_provider_accounts(cx);
         if !visible {
-            #[cfg(feature = "quickjs-backend-test")]
+            #[cfg(feature = "local-backend")]
             if let Some(store) = &self.store {
                 store.cancel_local();
             }
-            #[cfg(feature = "quickjs-backend-test")]
-            self.quickjs_backend_test.cancel("background");
             // Cancel synchronously even if Hidden→Visible happens between ticks.
+            // Android may stop delivering scroll phases before the final Ended.
+            crate::scroll::cancel_motion();
             self.visual_apps
                 .borrow_mut()
                 .projection_deferred(self.route(), false);
@@ -2385,17 +2403,12 @@ impl PhoneApp {
 
     /// A `pi://` link from a notification.
     pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         {
             // Unknown/read-only test links must not terminate local chat or expose its frame.
             let local_link = matches!(
                 url,
-                "pi://test/local-providers"
-                    | "pi://test/local-providers/synthetic"
-                    | "pi://test/quickjs-backend"
-                    | "pi://test/quickjs-backend/run"
-                    | "pi://test/quickjs-backend/stall"
-                    | "pi://test/quickjs-backend/cancel"
+                "pi://test/local-providers" | "pi://test/local-providers/synthetic"
             );
             let navigation = local_link
                 || url == "pi://helper-update"
@@ -2410,9 +2423,6 @@ impl PhoneApp {
             if (self.is_local() || self.local_providers.visible) && !navigation {
                 return;
             }
-            if navigation && let Some(store) = &self.store {
-                store.cancel_local();
-            }
             self.close_provider_accounts();
             window.dismiss_virtual_keyboard();
             window.focus(&self.focus, cx);
@@ -2421,12 +2431,6 @@ impl PhoneApp {
                 return;
             }
             self.close_provider_accounts();
-            if self.quickjs_backend_url(url, window, cx) {
-                return;
-            }
-            self.quickjs_backend_test.cancel("navigation");
-            self.quickjs_backend_test.visible = false;
-            self.tick_quickjs_backend_test(cx);
         }
         if url == "pi://helper-update" {
             self.close_sheet(cx);
@@ -3350,7 +3354,9 @@ impl PhoneApp {
     ) {
         if let Some(composer) = self.composer(target) {
             composer.update(cx, |composer, cx| {
-                if !composer.can_send(cx) {
+                // An in-flight attachment import disables Send even when a new
+                // draft exists. Never overwrite text/attachments composed later.
+                if composer.area.read(cx).text().is_empty() && composer.attachments().is_empty() {
                     composer.set_text(draft, cx);
                 }
             });
@@ -3366,9 +3372,8 @@ impl PhoneApp {
     ) {
         if self.store.as_ref().is_some_and(|s| !s.is_sample()) {
             let active = composer_target_active(target, self.route());
-            #[cfg(feature = "quickjs-backend-test")]
-            let active =
-                active && !self.local_providers.visible && !self.quickjs_backend_test.visible;
+            #[cfg(feature = "local-backend")]
+            let active = active && !self.local_providers.visible;
             if !active || !self.visible || !self.window_active {
                 return;
             }
@@ -3748,13 +3753,13 @@ pub(crate) fn size_label(bytes: u64) -> String {
 impl Render for PhoneApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _trace = gpui_android::trace::scope(c"pi.root.build");
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         {
             self.local_frame = self.local_frame.wrapping_add(1);
         }
-        #[cfg(feature = "quickjs-backend-test")]
-        let backend_visible = self.quickjs_backend_test.visible || self.local_providers.visible;
-        #[cfg(not(feature = "quickjs-backend-test"))]
+        #[cfg(feature = "local-backend")]
+        let backend_visible = self.local_providers.visible;
+        #[cfg(not(feature = "local-backend"))]
         let backend_visible = false;
         // Route/sheet transitions cancel before a retained old surface can run
         // another callback. Do not wait for the next ticker or remote record.
@@ -3809,13 +3814,12 @@ impl Render for PhoneApp {
         if expanded_page.is_none() {
             self.inline_pages.borrow_mut().expanded = None;
         }
-        #[cfg(feature = "quickjs-backend-test")]
-        let backend_screen = if self.local_providers.visible {
-            Some(self.provider_accounts_screen(cx).into_any_element())
-        } else {
-            backend_visible.then(|| self.quickjs_backend_screen(cx).into_any_element())
-        };
-        #[cfg(not(feature = "quickjs-backend-test"))]
+        #[cfg(feature = "local-backend")]
+        let backend_screen = self
+            .local_providers
+            .visible
+            .then(|| self.provider_accounts_screen(cx).into_any_element());
+        #[cfg(not(feature = "local-backend"))]
         let backend_screen: Option<gpui::AnyElement> = None;
         let screen = if let Some(screen) = backend_screen {
             screen
@@ -4336,6 +4340,64 @@ mod tests {
     }
 
     #[gpui::test]
+    fn interrupted_scroll_does_not_freeze_updates_or_timer_after_foregrounding(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        app.update(cx, |app, _| {
+            app.store = Some(crate::store::Store::sample(
+                crate::model::Computer::from_address("sample@computer.local"),
+            ));
+        });
+        for hidden in [false, true] {
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+            let (id, elapsed) = app.update(cx, |app, cx| {
+                let session = app.store.as_ref().unwrap().running().next().unwrap();
+                let before = (session.id, session.elapsed);
+                crate::scroll::note_input(gpui::TouchPhase::Moved);
+                crate::scroll::note_movement(gpui::px(100.));
+                app.take_updates(
+                    vec![(Some(before.0), Update::Ended(1, "queued".into()))],
+                    cx,
+                );
+                assert!(app.projection_deferred());
+                assert!(app.deferred_flush_scheduled);
+                // A tick during a gesture must not change the projection.
+                app.last_tick = Instant::now() - Duration::from_secs(1);
+                app.tick(cx);
+                assert_eq!(
+                    app.store
+                        .as_ref()
+                        .unwrap()
+                        .session(before.0)
+                        .unwrap()
+                        .elapsed,
+                    before.1
+                );
+                before
+            });
+            // No TouchPhase::Ended arrives when the OS interrupts the gesture.
+            if hidden {
+                cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+                cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+            } else {
+                cx.deactivate_window();
+                cx.update(|window, _| window.activate_window());
+            }
+            app.read_with(cx, |app, _| assert!(!app.projection_deferred()));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+            app.update(cx, |app, cx| {
+                assert!(!app.deferred_flush_scheduled);
+                assert!(app.deferred_updates.is_empty());
+                app.tick(cx);
+                assert!(app.store.as_ref().unwrap().session(id).unwrap().elapsed > elapsed);
+            });
+        }
+    }
+
+    #[gpui::test]
     fn a_later_batch_joins_an_existing_deferred_queue_in_order(cx: &mut TestAppContext) {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.update(|_, cx| {
@@ -4392,12 +4454,14 @@ mod tests {
         assert_eq!(sheet_scrim_opacity(false, 0.5), 0.5);
         assert_eq!(sheet_scrim_opacity(false, 1.), 0.);
     }
-    #[cfg(feature = "quickjs-backend-test")]
+    #[cfg(all(feature = "local-backend", target_os = "android"))]
     #[gpui::test]
     fn local_reselection_retires_remote_generations_without_losing_conversations(
         cx: &mut gpui::TestAppContext,
     ) {
-        use pi_quickjs_backend_poc::auth::{Provider, Vault, VaultScope};
+        use super::Target;
+        use crate::store::Event;
+        use pi_local::auth::{Provider, Vault, VaultScope};
         struct EmptyVault;
         impl Vault for EmptyVault {
             fn scope(&self) -> VaultScope {
@@ -4433,6 +4497,40 @@ mod tests {
                 assert_ne!(app.connection_generation, attempt);
                 assert_eq!(app.store.as_ref().unwrap().generation, store);
                 assert_eq!(app.route(), route);
+                let id = app.model_session().unwrap();
+                assert!(app.compact_available_for_session(id));
+                assert_eq!(
+                    app.compact_for_session(id, "/compact keep decisions"),
+                    Some(Some("keep decisions".into()))
+                );
+                assert_eq!(app.compact_for_session(id, "/compactly"), None);
+                let composer = app.thread_composer(id, window, cx);
+                let target = Target::Thread(id);
+                composer.update(cx, |c, cx| c.set_text("/compact keep decisions", cx));
+                app.pending_compacts
+                    .insert(id, (target, "/compact keep decisions".into()));
+                composer.update(cx, |c, cx| c.clear(cx));
+                app.alert(Event::Compacted(id, Some("Nothing to compact".into())), cx);
+                assert!(!app.compact_pending(id));
+                assert_eq!(
+                    composer.read(cx).area.read(cx).text(),
+                    "/compact keep decisions"
+                );
+                app.pending_compacts
+                    .insert(id, (target, "/compact old command".into()));
+                composer.update(cx, |c, cx| c.set_text("new draft", cx));
+                let import = composer.update(cx, |c, cx| c.begin_import(cx));
+                app.alert(Event::Compacted(id, Some("Cancelled".into())), cx);
+                assert_eq!(
+                    composer.read(cx).area.read(cx).text(),
+                    "new draft",
+                    "disabled Send during import must not replace a later draft"
+                );
+                composer.update(cx, |c, cx| c.finish_import(import, cx));
+                app.pending_compacts.insert(id, (target, "/compact".into()));
+                app.alert(Event::Compacted(id, None), cx);
+                assert!(!app.compact_pending(id));
+                assert_eq!(composer.read(cx).area.read(cx).text(), "new draft");
                 assert_eq!(
                     super::prompt_with_capabilities(
                         "@Visualize make a calculator",

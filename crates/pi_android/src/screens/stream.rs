@@ -408,6 +408,23 @@ impl PhoneApp {
                     );
                 }
                 Piece::Step(n) => match &turn.flow[n] {
+                    // Collapsed thoughts are activity rows, not content blocks.
+                    // Keep them in the compact run of calls; flushing here adds
+                    // a full content gap on both sides of every thought.
+                    Flow::Thinking(text) if !self.expanded_thinking.contains(&(id, index, n)) => {
+                        calls.push(
+                            self.thinking(
+                                id,
+                                index,
+                                n,
+                                text,
+                                live && n + 1 == turn.flow.len(),
+                                colors,
+                                cx,
+                            )
+                            .into_any_element(),
+                        );
+                    }
                     Flow::Tool(kind, tool_index) => {
                         let Some(tool) = turn.tool(*kind, *tool_index) else {
                             continue;

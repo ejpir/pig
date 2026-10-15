@@ -1048,7 +1048,7 @@ impl PhoneApp {
     pub(crate) fn write_fixture_state(&self, cx: &gpui::App) {
         // Latched after opening real local accounts: an old private frame can remain
         // in the shared geometry map across navigation. Never publish it via fixtures.
-        #[cfg(feature = "quickjs-backend-test")]
+        #[cfg(feature = "local-backend")]
         if self.local_private {
             return;
         }

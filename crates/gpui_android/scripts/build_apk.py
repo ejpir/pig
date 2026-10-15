@@ -61,6 +61,9 @@ class App:
     launcher: tuple = ()  # (folder, background)
     # Full notices for fonts/assets embedded by the app, in addition to GPUI's emoji font.
     licenses: tuple = ()  # Paths, copied by filename to assets/licenses/.
+    # Optional source-linked runtimes for the same app namespace. Never executables.
+    assets: tuple = ()  # (APK-relative asset name, bytes), e.g. build provenance.
+    native_libraries: tuple = ()  # Paths, copied by filename alongside the app .so.
 
 
 TOUCH = App(
@@ -92,7 +95,9 @@ def sdk_root():
     for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
         if os.environ.get(name):
             return Path(os.environ[name])
-    default = Path.home() / ("Library/Android/sdk" if sys.platform == "darwin" else "Android/Sdk")
+    default = Path.home() / (
+        "Library/Android/sdk" if sys.platform == "darwin" else "Android/Sdk"
+    )
     return default if default.exists() else None
 
 
@@ -106,14 +111,18 @@ def tool(env, finder, what):
 
 
 def find_android_jar(sdk):
-    platforms = [p for p in (sdk / "platforms").glob("android-*") if (p / "android.jar").exists()]
+    platforms = [
+        p for p in (sdk / "platforms").glob("android-*") if (p / "android.jar").exists()
+    ]
     platforms = [p for p in platforms if version_key(p)[0] >= MIN_SDK]
     best = newest(platforms)
     return best / "android.jar" if best else None
 
 
 def find_build_tool(sdk, jar):
-    best = newest([p for p in (sdk / "build-tools").glob("*") if (p / "lib" / jar).exists()])
+    best = newest(
+        [p for p in (sdk / "build-tools").glob("*") if (p / "lib" / jar).exists()]
+    )
     return best / "lib" / jar if best else None
 
 
@@ -123,17 +132,29 @@ def ndk_linker_env(sdk, target):
     linker_var = f"CARGO_TARGET_{target_env}_LINKER"
     if os.environ.get(linker_var):
         return {}
-    ndk = Path(os.environ["ANDROID_NDK_ROOT"]) if os.environ.get("ANDROID_NDK_ROOT") else None
+    ndk = (
+        Path(os.environ["ANDROID_NDK_ROOT"])
+        if os.environ.get("ANDROID_NDK_ROOT")
+        else None
+    )
     if ndk is None and sdk is not None:
         ndk = newest(list((sdk / "ndk").glob("*")))
     if ndk is None or not ndk.exists():
-        fail("the Android NDK was not found; set ANDROID_NDK_ROOT or install it with the SDK manager")
-    host = {"darwin": "darwin-x86_64", "linux": "linux-x86_64", "win32": "windows-x86_64"}[sys.platform]
+        fail(
+            "the Android NDK was not found; set ANDROID_NDK_ROOT or install it with the SDK manager"
+        )
+    host = {
+        "darwin": "darwin-x86_64",
+        "linux": "linux-x86_64",
+        "win32": "windows-x86_64",
+    }[sys.platform]
     bin_dir = ndk / "toolchains" / "llvm" / "prebuilt" / host / "bin"
     suffix = ".cmd" if sys.platform == "win32" else ""
     clang = bin_dir / f"{target}{MIN_SDK}-clang{suffix}"
     if not clang.exists():
-        fail(f"{clang} not found; this NDK has no toolchain for {host} ({platform.machine()})")
+        fail(
+            f"{clang} not found; this NDK has no toolchain for {host} ({platform.machine()})"
+        )
     rust_env = target.replace("-", "_")
     return {
         linker_var: str(clang),
@@ -156,13 +177,27 @@ def run(command, **kwargs):
 
 ANDROID_NS = "http://schemas.android.com/apk/res/android"
 ATTRIBUTE_IDS = {  # android.R.attr
-    "theme": 0x01010000, "label": 0x01010001, "icon": 0x01010002, "name": 0x01010003, "hasCode": 0x0101000C,
-    "debuggable": 0x0101000F, "exported": 0x01010010, "authorities": 0x01010018,
-    "grantUriPermissions": 0x0101001B, "launchMode": 0x0101001D, "configChanges": 0x0101001F,
-    "value": 0x01010024, "scheme": 0x01010027, "host": 0x01010028,
-    "minSdkVersion": 0x0101020C, "versionCode": 0x0101021B,
-    "versionName": 0x0101021C, "targetSdkVersion": 0x01010270,
-    "drawable": 0x01010199, "extractNativeLibs": 0x010104EA, "roundIcon": 0x0101052C,
+    "theme": 0x01010000,
+    "label": 0x01010001,
+    "icon": 0x01010002,
+    "name": 0x01010003,
+    "hasCode": 0x0101000C,
+    "debuggable": 0x0101000F,
+    "exported": 0x01010010,
+    "authorities": 0x01010018,
+    "grantUriPermissions": 0x0101001B,
+    "launchMode": 0x0101001D,
+    "configChanges": 0x0101001F,
+    "value": 0x01010024,
+    "scheme": 0x01010027,
+    "host": 0x01010028,
+    "minSdkVersion": 0x0101020C,
+    "versionCode": 0x0101021B,
+    "versionName": 0x0101021C,
+    "targetSdkVersion": 0x01010270,
+    "drawable": 0x01010199,
+    "extractNativeLibs": 0x010104EA,
+    "roundIcon": 0x0101052C,
     "enableOnBackInvokedCallback": 0x0101066C,
     "shell": 0x01010594,  # android.R.attr.shell (profileable, API 29)
 }
@@ -186,86 +221,202 @@ def attribute(name, kind, value, android=True):
 def workspace_version():
     """The workspace version, and a version code that grows with it (1.2.3 is 1002003)."""
     text = (WORKSPACE / "Cargo.toml").read_text()
-    version = re.search(r'^\[workspace\.package\][^\[]*?^version = "([^"]+)"', text, re.M | re.S).group(1)
-    major, minor, patch = (int(part) for part in re.match(r"(\d+)\.(\d+)\.(\d+)", version).groups())
+    version = re.search(
+        r'^\[workspace\.package\][^\[]*?^version = "([^"]+)"',
+        text,
+        re.MULTILINE | re.DOTALL,
+    ).group(1)
+    major, minor, patch = (
+        int(part) for part in re.match(r"(\d+)\.(\d+)\.(\d+)", version).groups()
+    )
     return version, major * 1_000_000 + minor * 1_000 + patch
 
 
 def manifest(app, debuggable):
     version, code = workspace_version()
-    return element("manifest", [
-        attribute("package", STRING, app.package, android=False),
-        attribute("versionCode", INT_DEC, code),
-        attribute("versionName", STRING, version),
-    ], [
-        element("uses-sdk", [
-            attribute("minSdkVersion", INT_DEC, MIN_SDK),
-            attribute("targetSdkVersion", INT_DEC, TARGET_SDK),
-        ]),
-        *(element("uses-permission", [attribute("name", STRING, permission)])
-          for permission in app.permissions),
-        element("application", [
-            attribute("label", STRING, app.label),
-            *([attribute("icon", REFERENCE, LAUNCHER_ICON),
-               attribute("roundIcon", REFERENCE, LAUNCHER_ICON)] if app.launcher else []),
-            attribute("hasCode", BOOLEAN, True),
-            attribute("debuggable", BOOLEAN, debuggable),
-            attribute("extractNativeLibs", BOOLEAN, True),
-            attribute("theme", REFERENCE, THEME_NO_ACTION_BAR),
-            # Back reaches the app as the "back" key, which Android 16+ sends
-            # only to apps that leave predictive back off.
-            attribute("enableOnBackInvokedCallback", BOOLEAN, False),
-        ], [
-            *([element("profileable", [attribute("shell", BOOLEAN, True)])] if app.profileable else []),
-            element("activity", [
-                attribute("name", STRING, ACTIVITY),
-                attribute("exported", BOOLEAN, True),
-                attribute("label", STRING, app.label),
-                attribute("launchMode", INT_DEC, LAUNCH_SINGLE_TASK),
-                attribute("configChanges", INT_HEX, CONFIG_CHANGES),
-            ], [
-                element("meta-data", [
-                    attribute("name", STRING, "android.app.lib_name"),
-                    attribute("value", STRING, app.library),
-                ]),
-                element("intent-filter", [], [
-                    element("action", [attribute("name", STRING, "android.intent.action.MAIN")]),
-                    element("category", [attribute("name", STRING, "android.intent.category.LAUNCHER")]),
-                ]),
-                *(element("intent-filter", [], [
-                    element("action", [attribute("name", STRING, "android.intent.action.VIEW")]),
-                    element("category", [attribute("name", STRING, "android.intent.category.DEFAULT")]),
-                    element("category", [attribute("name", STRING, "android.intent.category.BROWSABLE")]),
-                    element("data", [
-                        attribute("scheme", STRING, scheme),
-                        attribute("host", STRING, host),
-                    ]),
-                ]) for scheme, host in app.deep_links),
-            ]),
-            *( [element("activity", [
-                attribute("name", STRING, "dev.pi.gpui.PairScannerActivity"),
-                attribute("exported", BOOLEAN, False),
-                attribute("label", STRING, "Scan computer"),
-                attribute("theme", REFERENCE, THEME_NO_ACTION_BAR),
-                attribute("configChanges", INT_HEX, CONFIG_CHANGES),
-            ])] if app.qr_scanner else []),
-            # HTML pages an app shows full screen (activity::show_page).
-            element("activity", [
-                attribute("name", STRING, "dev.pi.gpui.PageActivity"),
-                attribute("exported", BOOLEAN, False),
-                attribute("label", STRING, "Page"),
-                attribute("theme", REFERENCE, THEME_NO_ACTION_BAR),
-                attribute("configChanges", INT_HEX, CONFIG_CHANGES),
-            ]),
-            # Serves copied images to the apps that paste them.
-            element("provider", [
-                attribute("name", STRING, "dev.pi.gpui.ClipboardProvider"),
-                attribute("authorities", STRING, f"{app.package}.gpui.clipboard"),
-                attribute("exported", BOOLEAN, False),
-                attribute("grantUriPermissions", BOOLEAN, True),
-            ]),
-        ]),
-    ])
+    return element(
+        "manifest",
+        [
+            attribute("package", STRING, app.package, android=False),
+            attribute("versionCode", INT_DEC, code),
+            attribute("versionName", STRING, version),
+        ],
+        [
+            element(
+                "uses-sdk",
+                [
+                    attribute("minSdkVersion", INT_DEC, MIN_SDK),
+                    attribute("targetSdkVersion", INT_DEC, TARGET_SDK),
+                ],
+            ),
+            *(
+                element("uses-permission", [attribute("name", STRING, permission)])
+                for permission in app.permissions
+            ),
+            element(
+                "application",
+                [
+                    attribute("label", STRING, app.label),
+                    *(
+                        [
+                            attribute("icon", REFERENCE, LAUNCHER_ICON),
+                            attribute("roundIcon", REFERENCE, LAUNCHER_ICON),
+                        ]
+                        if app.launcher
+                        else []
+                    ),
+                    attribute("hasCode", BOOLEAN, True),
+                    attribute("debuggable", BOOLEAN, debuggable),
+                    attribute("extractNativeLibs", BOOLEAN, True),
+                    attribute("theme", REFERENCE, THEME_NO_ACTION_BAR),
+                    # Back reaches the app as the "back" key, which Android 16+ sends
+                    # only to apps that leave predictive back off.
+                    attribute("enableOnBackInvokedCallback", BOOLEAN, False),
+                ],
+                [
+                    *(
+                        [element("profileable", [attribute("shell", BOOLEAN, True)])]
+                        if app.profileable
+                        else []
+                    ),
+                    element(
+                        "activity",
+                        [
+                            attribute("name", STRING, ACTIVITY),
+                            attribute("exported", BOOLEAN, True),
+                            attribute("label", STRING, app.label),
+                            attribute("launchMode", INT_DEC, LAUNCH_SINGLE_TASK),
+                            attribute("configChanges", INT_HEX, CONFIG_CHANGES),
+                        ],
+                        [
+                            element(
+                                "meta-data",
+                                [
+                                    attribute("name", STRING, "android.app.lib_name"),
+                                    attribute("value", STRING, app.library),
+                                ],
+                            ),
+                            element(
+                                "intent-filter",
+                                [],
+                                [
+                                    element(
+                                        "action",
+                                        [
+                                            attribute(
+                                                "name",
+                                                STRING,
+                                                "android.intent.action.MAIN",
+                                            )
+                                        ],
+                                    ),
+                                    element(
+                                        "category",
+                                        [
+                                            attribute(
+                                                "name",
+                                                STRING,
+                                                "android.intent.category.LAUNCHER",
+                                            )
+                                        ],
+                                    ),
+                                ],
+                            ),
+                            *(
+                                element(
+                                    "intent-filter",
+                                    [],
+                                    [
+                                        element(
+                                            "action",
+                                            [
+                                                attribute(
+                                                    "name",
+                                                    STRING,
+                                                    "android.intent.action.VIEW",
+                                                )
+                                            ],
+                                        ),
+                                        element(
+                                            "category",
+                                            [
+                                                attribute(
+                                                    "name",
+                                                    STRING,
+                                                    "android.intent.category.DEFAULT",
+                                                )
+                                            ],
+                                        ),
+                                        element(
+                                            "category",
+                                            [
+                                                attribute(
+                                                    "name",
+                                                    STRING,
+                                                    "android.intent.category.BROWSABLE",
+                                                )
+                                            ],
+                                        ),
+                                        element(
+                                            "data",
+                                            [
+                                                attribute("scheme", STRING, scheme),
+                                                attribute("host", STRING, host),
+                                            ],
+                                        ),
+                                    ],
+                                )
+                                for scheme, host in app.deep_links
+                            ),
+                        ],
+                    ),
+                    *(
+                        [
+                            element(
+                                "activity",
+                                [
+                                    attribute(
+                                        "name",
+                                        STRING,
+                                        "dev.pi.gpui.PairScannerActivity",
+                                    ),
+                                    attribute("exported", BOOLEAN, False),
+                                    attribute("label", STRING, "Scan computer"),
+                                    attribute("theme", REFERENCE, THEME_NO_ACTION_BAR),
+                                    attribute("configChanges", INT_HEX, CONFIG_CHANGES),
+                                ],
+                            )
+                        ]
+                        if app.qr_scanner
+                        else []
+                    ),
+                    # HTML pages an app shows full screen (activity::show_page).
+                    element(
+                        "activity",
+                        [
+                            attribute("name", STRING, "dev.pi.gpui.PageActivity"),
+                            attribute("exported", BOOLEAN, False),
+                            attribute("label", STRING, "Page"),
+                            attribute("theme", REFERENCE, THEME_NO_ACTION_BAR),
+                            attribute("configChanges", INT_HEX, CONFIG_CHANGES),
+                        ],
+                    ),
+                    # Serves copied images to the apps that paste them.
+                    element(
+                        "provider",
+                        [
+                            attribute("name", STRING, "dev.pi.gpui.ClipboardProvider"),
+                            attribute(
+                                "authorities", STRING, f"{app.package}.gpui.clipboard"
+                            ),
+                            attribute("exported", BOOLEAN, False),
+                            attribute("grantUriPermissions", BOOLEAN, True),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
 
 
 # The resources an app with a launcher icon has, in a table built here as the
@@ -281,10 +432,14 @@ TYPE_INT_COLOR_ARGB8 = 0x1C
 
 def adaptive_icon():
     """res/mipmap/ic_launcher.xml: the colour behind the foreground."""
-    return element("adaptive-icon", [], [
-        element("background", [attribute("drawable", REFERENCE, 0x7F010000)]),
-        element("foreground", [attribute("drawable", REFERENCE, 0x7F020000)]),
-    ])
+    return element(
+        "adaptive-icon",
+        [],
+        [
+            element("background", [attribute("drawable", REFERENCE, 0x7F010000)]),
+            element("foreground", [attribute("drawable", REFERENCE, 0x7F020000)]),
+        ],
+    )
 
 
 def string_pool(strings):
@@ -298,7 +453,17 @@ def string_pool(strings):
         data += length(len(text)) + length(len(encoded)) + encoded + b"\0"
     data += b"\0" * (-len(data) % 4)
     strings_start = 28 + 4 * len(strings)
-    header = struct.pack("<HHIIIIII", 0x0001, 28, strings_start + len(data), len(strings), 0, 0x100, strings_start, 0)
+    header = struct.pack(
+        "<HHIIIIII",
+        0x0001,
+        28,
+        strings_start + len(data),
+        len(strings),
+        0,
+        0x100,
+        strings_start,
+        0,
+    )
     return header + b"".join(struct.pack("<I", offset) for offset in offsets) + data
 
 
@@ -316,7 +481,9 @@ def resource_table(package, background):
     type_pool, key_pool = string_pool(types), string_pool(keys)
     chunks = b""
     for type_id, (kind, names) in enumerate(RESOURCE_TYPES, 1):
-        chunks += struct.pack("<HHIBBHI", 0x0202, 16, 16 + 4 * len(names), type_id, 0, 0, len(names))
+        chunks += struct.pack(
+            "<HHIBBHI", 0x0202, 16, 16 + 4 * len(names), type_id, 0, 0, len(names)
+        )
         chunks += b"\0" * 4 * len(names)
         entries = b""
         offsets = []
@@ -330,13 +497,30 @@ def resource_table(package, background):
         config = struct.pack("<I", 64) + b"\0" * 60
         header_size = 20 + len(config)
         entries_start = header_size + 4 * len(names)
-        chunks += struct.pack("<HHIBBHII", 0x0201, header_size, entries_start + len(entries),
-                              type_id, 0, 0, len(names), entries_start)
+        chunks += struct.pack(
+            "<HHIBBHII",
+            0x0201,
+            header_size,
+            entries_start + len(entries),
+            type_id,
+            0,
+            0,
+            len(names),
+            entries_start,
+        )
         chunks += config + b"".join(struct.pack("<I", o) for o in offsets) + entries
     name = package.encode("utf-16-le")[:254].ljust(256, b"\0")
     header_size = 288
-    package_chunk = struct.pack("<HHII", 0x0200, header_size, header_size + len(type_pool) + len(key_pool) + len(chunks), 0x7F)
-    package_chunk += name + struct.pack("<IIIII", header_size, len(types), header_size + len(type_pool), len(keys), 0)
+    package_chunk = struct.pack(
+        "<HHII",
+        0x0200,
+        header_size,
+        header_size + len(type_pool) + len(key_pool) + len(chunks),
+        0x7F,
+    )
+    package_chunk += name + struct.pack(
+        "<IIIII", header_size, len(types), header_size + len(type_pool), len(keys), 0
+    )
     package_chunk += type_pool + key_pool + chunks
     body = string_pool(paths) + package_chunk
     return struct.pack("<HHII", 0x0002, 12, 12 + len(body), 1) + body
@@ -371,7 +555,9 @@ def encode_xml(root):
 
     pool = string_pool(strings)
     ids = [ATTRIBUTE_IDS[name] for name in android_names]
-    resource_map = struct.pack("<HHI", 0x0180, 8, 8 + 4 * len(ids)) + b"".join(struct.pack("<I", i) for i in ids)
+    resource_map = struct.pack("<HHI", 0x0180, 8, 8 + 4 * len(ids)) + b"".join(
+        struct.pack("<I", i) for i in ids
+    )
 
     none = 0xFFFFFFFF
     body = [struct.pack("<HHIIIII", 0x0100, 16, 24, 1, none, prefix, namespace)]
@@ -379,14 +565,34 @@ def encode_xml(root):
     def emit(node):
         tag, attributes, children = node
         # Android looks attributes up by resource id, so they are sorted by it.
-        attributes = sorted(attributes, key=lambda a: ATTRIBUTE_IDS.get(a[0], none) if a[3] else none)
+        attributes = sorted(
+            attributes, key=lambda a: ATTRIBUTE_IDS.get(a[0], none) if a[3] else none
+        )
         encoded = b""
         for name, kind, value, android in attributes:
             raw = index(value) if kind == STRING else none
-            datum = index(value) if kind == STRING else (none if value else 0) if kind == BOOLEAN else value
-            encoded += struct.pack("<IIIHBBI", namespace if android else none, index(name), raw, 8, 0, kind, datum)
+            datum = (
+                index(value)
+                if kind == STRING
+                else (none if value else 0)
+                if kind == BOOLEAN
+                else value
+            )
+            encoded += struct.pack(
+                "<IIIHBBI",
+                namespace if android else none,
+                index(name),
+                raw,
+                8,
+                0,
+                kind,
+                datum,
+            )
         body.append(struct.pack("<HHIII", 0x0102, 16, 36 + len(encoded), 1, none))
-        body.append(struct.pack("<IIHHHHHH", none, index(tag), 20, 20, len(attributes), 0, 0, 0) + encoded)
+        body.append(
+            struct.pack("<IIHHHHHH", none, index(tag), 20, 20, len(attributes), 0, 0, 0)
+            + encoded
+        )
         for child in children:
             emit(child)
         body.append(struct.pack("<HHIIIII", 0x0103, 16, 24, 1, none, none, index(tag)))
@@ -401,9 +607,28 @@ def debug_keystore(keytool="keytool"):
     keystore = Path.home() / ".android" / "debug.keystore"
     if not keystore.exists():
         keystore.parent.mkdir(parents=True, exist_ok=True)
-        run([keytool, "-genkeypair", "-keystore", keystore, "-storepass", "android",
-             "-keypass", "android", "-alias", "androiddebugkey", "-keyalg", "RSA",
-             "-keysize", "2048", "-validity", "10000", "-dname", "CN=Android Debug,O=Android,C=US"])
+        run(
+            [
+                keytool,
+                "-genkeypair",
+                "-keystore",
+                keystore,
+                "-storepass",
+                "android",
+                "-keypass",
+                "android",
+                "-alias",
+                "androiddebugkey",
+                "-keyalg",
+                "RSA",
+                "-keysize",
+                "2048",
+                "-validity",
+                "10000",
+                "-dname",
+                "CN=Android Debug,O=Android,C=US",
+            ]
+        )
     return keystore
 
 
@@ -423,6 +648,10 @@ def signing_key(keytool):
 def write_licenses(apk, app):
     """Carry full copyright/license notices with embedded fonts, not just URLs."""
     apk.write(CRATE / "assets/fonts/OFL.txt", "assets/licenses/NotoEmoji-OFL.txt")
+    for name, value in app.assets:
+        if Path(name).is_absolute() or ".." in Path(name).parts:
+            fail("Invalid APK asset path")
+        apk.writestr(f"assets/{name}", value)
     for source in app.licenses:
         source = Path(source)
         apk.write(source, f"assets/licenses/{source.name}")
@@ -430,53 +659,137 @@ def write_licenses(apk, app):
 
 def build(app, debug, out, target=TARGET):
     sdk = sdk_root()
-    android_jar = tool("ANDROID_JAR", lambda: sdk and find_android_jar(sdk), f"android.jar (API {MIN_SDK}+)")
-    d8 = tool("D8_JAR", lambda: sdk and find_build_tool(sdk, "d8.jar"), "d8.jar (build-tools)")
-    apksigner = tool("APKSIGNER_JAR", lambda: sdk and find_build_tool(sdk, "apksigner.jar"), "apksigner.jar (build-tools)")
+    android_jar = tool(
+        "ANDROID_JAR",
+        lambda: sdk and find_android_jar(sdk),
+        f"android.jar (API {MIN_SDK}+)",
+    )
+    d8 = tool(
+        "D8_JAR", lambda: sdk and find_build_tool(sdk, "d8.jar"), "d8.jar (build-tools)"
+    )
+    apksigner = tool(
+        "APKSIGNER_JAR",
+        lambda: sdk and find_build_tool(sdk, "apksigner.jar"),
+        "apksigner.jar (build-tools)",
+    )
     java = os.environ.get("JAVA", "java")
     javac = os.environ.get("JAVAC", "javac")
     keytool = os.environ.get("KEYTOOL", "keytool")
     for program in (javac, java, keytool):
         if not Path(program).is_file() and not shutil.which(program):
-            fail(f"{program} not found; install a JDK (Android Studio's is in its jbr folder)")
+            fail(
+                f"{program} not found; install a JDK (Android Studio's is in its jbr folder)"
+            )
 
     env = {**os.environ, **ndk_linker_env(sdk, target)}
     cargo = env.get("CARGO", "cargo")
     profile = [] if debug else ["--release"]
-    run([cargo, "build", *app.cargo, "--target", target, *profile], cwd=WORKSPACE, env=env)
+    run(
+        [cargo, "build", "--locked", *app.cargo, "--target", target, *profile],
+        cwd=WORKSPACE,
+        env=env,
+    )
     target_dir = Path(env.get("CARGO_TARGET_DIR", WORKSPACE / "target"))
-    library = target_dir / target / ("debug" if debug else "release") / app.output / f"lib{app.library}.so"
+    library = (
+        target_dir
+        / target
+        / ("debug" if debug else "release")
+        / app.output
+        / f"lib{app.library}.so"
+    )
 
     with tempfile.TemporaryDirectory(prefix="gpui-apk-") as scratch:
         scratch = Path(scratch)
         classes = scratch / "classes"
         sources = sorted((CRATE / "java").rglob("*.java"))
-        run([javac, "--release", "11", "-classpath", android_jar, "-d", classes, *sources])
-        run([java, "-cp", d8, "com.android.tools.r8.D8", "--min-api", MIN_SDK, "--lib", android_jar,
-             "--output", scratch, *sorted(classes.rglob("*.class"))])
+        run(
+            [
+                javac,
+                "--release",
+                "11",
+                "-classpath",
+                android_jar,
+                "-d",
+                classes,
+                *sources,
+            ]
+        )
+        run(
+            [
+                java,
+                "-cp",
+                d8,
+                "com.android.tools.r8.D8",
+                "--min-api",
+                MIN_SDK,
+                "--lib",
+                android_jar,
+                "--output",
+                scratch,
+                *sorted(classes.rglob("*.class")),
+            ]
+        )
         unsigned = scratch / "unsigned.apk"
         with zipfile.ZipFile(unsigned, "w", zipfile.ZIP_DEFLATED) as apk:
-            apk.writestr("AndroidManifest.xml", encode_xml(manifest(app, debuggable=debug or app.debuggable)))
+            apk.writestr(
+                "AndroidManifest.xml",
+                encode_xml(manifest(app, debuggable=debug or app.debuggable)),
+            )
             apk.write(scratch / "classes.dex", "classes.dex")
             apk.write(library, f"lib/{TARGET_ABIS[target]}/lib{app.library}.so")
+            for extra in app.native_libraries:
+                extra = Path(extra)
+                if (
+                    not extra.is_file()
+                    or not extra.name.startswith("lib")
+                    or extra.suffix != ".so"
+                ):
+                    fail(f"Missing shared native runtime: {extra}")
+                apk.write(extra, f"lib/{TARGET_ABIS[target]}/{extra.name}")
             write_licenses(apk, app)
             if app.launcher:
                 folder, background = app.launcher
                 # Stored, not compressed: Android maps resources.arsc directly.
-                apk.writestr(zipfile.ZipInfo("resources.arsc"), resource_table(app.package, background))
+                apk.writestr(
+                    zipfile.ZipInfo("resources.arsc"),
+                    resource_table(app.package, background),
+                )
                 for name in ("ic_launcher_foreground", "ic_notification"):
-                    apk.write(Path(folder) / f"{name}.png", f"res/drawable/{name}.png", zipfile.ZIP_STORED)
+                    apk.write(
+                        Path(folder) / f"{name}.png",
+                        f"res/drawable/{name}.png",
+                        zipfile.ZIP_STORED,
+                    )
                 apk.writestr("res/mipmap/ic_launcher.xml", encode_xml(adaptive_icon()))
         out.parent.mkdir(parents=True, exist_ok=True)
-        run([java, "-jar", apksigner, "sign", *signing_key(keytool), "--min-sdk-version", MIN_SDK, "--out", out, unsigned])
+        run(
+            [
+                java,
+                "-jar",
+                apksigner,
+                "sign",
+                *signing_key(keytool),
+                "--min-sdk-version",
+                MIN_SDK,
+                "--out",
+                out,
+                unsigned,
+            ]
+        )
     print(f"Built {out}\nInstall it with: adb install -r {out}")
 
 
 def main(app=TOUCH, default_out="gpui-touch.apk"):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--debug", action="store_true", help="build Rust without optimizations")
-    parser.add_argument("--target", choices=TARGET_ABIS, default=TARGET,
-                        help="Rust Android target (ARM64 by default; x86_64 is useful for emulators)")
+    parser.add_argument(
+        "--debug", action="store_true", help="build Rust without optimizations"
+    )
+    parser.add_argument(
+        "--target",
+        choices=TARGET_ABIS,
+        default=TARGET,
+        help="Rust Android target (ARM64 by default; x86_64 is useful for emulators)",
+    )
     parser.add_argument("--out", type=Path, default=WORKSPACE / "dist" / default_out)
     args = parser.parse_args()
     build(app, args.debug, args.out, args.target)

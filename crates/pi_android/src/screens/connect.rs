@@ -341,7 +341,7 @@ impl PhoneApp {
                                 .text_size(px(15.))
                                 .line_height(px(22.))
                                 .text_color(colors.secondary)
-                                .child(if cfg!(feature="quickjs-backend-test") {"Choose Local from the Pi logo to run on this phone, or connect a computer below."} else {"On your computer. This phone follows its sessions, answers its questions and reviews what it changed."}),
+                                .child(if cfg!(feature="local-backend") {"Choose Local from the Pi logo to run on this phone, or connect a computer below."} else {"On your computer. This phone follows its sessions, answers its questions and reviews what it changed."}),
                         )
                         .child(
                             div()
@@ -365,14 +365,7 @@ impl PhoneApp {
                     .flex_col()
                     .gap(px(8.))
                     .map(|panel| {
-                        #[cfg(feature = "quickjs-backend-test")]
-                        let panel = panel.when(gpui_android::activity::is_debug_build(), |panel| panel.child(
-                            ui::button("open-quickjs-backend", Button::Plain, None, "Try the local QuickJS backend", false, &colors)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.quickjs_backend_url("pi://test/quickjs-backend", window, cx);
-                                })),
-                        ));
-                        #[cfg(feature = "quickjs-backend-test")]
+                        #[cfg(feature = "local-backend")]
                         let panel = panel.child(ui::button("open-local-providers", Button::Plain, None, "Local providers · Claude + Codex", false, &colors)
                             .on_click(cx.listener(|this, _, window, cx| { this.provider_accounts_url("pi://test/local-providers", window, cx); })));
                         panel

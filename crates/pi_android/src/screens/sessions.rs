@@ -297,9 +297,12 @@ impl PhoneApp {
                 list.child(
                     ui::hint(
                         match found {
-                            _ if store.is_local() => {
-                                "On-device sessions · in memory only, lost on restart".into()
+                            _ if store.is_local() => if cfg!(feature = "local-backend") {
+                                "On-device sessions · saved on this phone"
+                            } else {
+                                "On-device sessions · in memory only, lost on restart"
                             }
+                            .into(),
                             true => format!(
                                 "Sessions on {} that Pi Desktop or this phone started over SSH",
                                 store.computer.name

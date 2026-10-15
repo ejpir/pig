@@ -134,6 +134,13 @@ pub(crate) fn note_input(phase: TouchPhase) {
     MOTION.with(|motion| motion.borrow_mut().input(phase, Instant::now()));
 }
 
+/// A hidden or inactive window cannot finish its old gesture reliably. Drop
+/// both the active-scroll latch and its quiet tail so it cannot freeze live
+/// projections after the phone wakes, waiting for another scroll to end.
+pub(crate) fn cancel_motion() {
+    MOTION.with(|motion| *motion.borrow_mut() = Motion::default());
+}
+
 /// Records movement from a viewport that does not use `ScrollHandle`, such as
 /// GPUI's virtualized list. Settled-fling touch filtering needs pixels as well
 /// as gesture phases so catching momentum cannot become a tap on its content.
@@ -702,6 +709,18 @@ mod tests {
             );
             *motion.borrow_mut() = Motion::default();
         });
+    }
+
+    #[test]
+    fn cancelling_motion_releases_an_interrupted_gesture_without_a_quiet_tail() {
+        for phase in [TouchPhase::Started, TouchPhase::Moved, TouchPhase::Ended] {
+            note_viewport_input(phase, Viewport::Scroll(ScrollHandle::new()));
+            note_movement(px(100.));
+            assert!(in_motion());
+            cancel_motion();
+            assert!(!in_motion());
+            MOTION.with(|motion| assert!(motion.borrow().viewport.is_none()));
+        }
     }
 
     #[test]

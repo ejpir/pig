@@ -1,10 +1,13 @@
 """Offline archive/publish-policy tests; synthetic headers do not prove native builds."""
+
 import hashlib
 import io
+import json
 import plistlib
 import struct
 import tarfile
 import tempfile
+import tomllib
 import unittest
 import zipfile
 from pathlib import Path
@@ -12,11 +15,19 @@ from unittest.mock import patch
 
 import fetch_pi
 from package_desktop import TARGETS, archive_name, check_binary, package
+from package_remote import asset_name
+from package_remote import package as package_remote
 from release_desktop import (
-    ANDROID_APK, ANDROID_LICENSES, manifest, validate_android_notices,
-    validate_tag, validate_release_version,
+    ANDROID_APK,
+    ANDROID_LICENSES,
+    BUN_RUNTIME_ASSETS,
+    manifest,
+    release_android_manifest,
+    validate_android_notices,
+    validate_local_apk,
+    validate_release_version,
+    validate_tag,
 )
-from package_remote import asset_name, package as package_remote
 
 
 class PackagingTests(unittest.TestCase):
@@ -29,7 +40,9 @@ class PackagingTests(unittest.TestCase):
         header = bytearray(64)
         if "linux" in target:
             header[:6] = b"\x7fELF\x02\x01"
-            struct.pack_into("<H", header, 18, 183 if target.startswith("aarch64") else 62)
+            struct.pack_into(
+                "<H", header, 18, 183 if target.startswith("aarch64") else 62
+            )
         elif "apple" in target:
             header[:4] = b"\xcf\xfa\xed\xfe"
             struct.pack_into("<I", header, 4, 0x0100000C)
@@ -58,12 +71,20 @@ class PackagingTests(unittest.TestCase):
             "COMMIT-MONO-OFL.txt": root / "licenses/COMMIT-MONO-OFL.txt",
             "QUICKJS-NG-MIT.txt": root / "licenses/QUICKJS-NG-MIT.txt",
             "RQUICKJS-MIT.txt": root / "licenses/RQUICKJS-MIT.txt",
-            **{name: root / "licenses" / name for name in (
-                "ROXMLTREE-MIT.txt", "SVGTYPES-MIT.txt", "KURBO-MIT.txt", "LYON-MIT.txt",
-            )},
+            **{
+                name: root / "licenses" / name
+                for name in (
+                    "ROXMLTREE-MIT.txt",
+                    "SVGTYPES-MIT.txt",
+                    "KURBO-MIT.txt",
+                    "LYON-MIT.txt",
+                )
+            },
         }
         with zipfile.ZipFile(output) as apk:
-            self.assertEqual(set(apk.namelist()), {f"assets/licenses/{name}" for name in sources})
+            self.assertEqual(
+                set(apk.namelist()), {f"assets/licenses/{name}" for name in sources}
+            )
             for name, source in sources.items():
                 with self.subTest(font=name):
                     notice = apk.read(f"assets/licenses/{name}")
@@ -75,11 +96,79 @@ class PackagingTests(unittest.TestCase):
                         self.assertIn(b"Permission is hereby granted", notice)
 
     def android_apk(self, path, missing=None, incomplete=None):
+        library = bytearray(64)
+        library[:6] = b"\x7fELF\x02\x01"
+        struct.pack_into("<HH", library, 16, 3, 183)
+        bundle = b"// synthetic SDK fixture, not a native runtime test"
+        version = tomllib.loads(
+            (Path(__file__).resolve().parent.parent / "Cargo.toml").read_text()
+        )["workspace"]["package"]["version"]
+        metadata = {
+            "version": version,
+            "status": "experimental",
+            "engine": "bun",
+            "bun": "1.4.3",
+            "sdk": "1.2.0",
+            "abi": "arm64-v8a",
+            "librarySha256": hashlib.sha256(library).hexdigest(),
+            "bundleSha256": hashlib.sha256(bundle).hexdigest(),
+        }
         with zipfile.ZipFile(path, "w") as apk:
+            apk.writestr("AndroidManifest.xml", release_android_manifest())
+            apk.writestr("assets/local-runtime.json", json.dumps(metadata))
+            apk.writestr("assets/bun-local.mjs", bundle)
+            apk.writestr("lib/arm64-v8a/libpi_android.so", bundle)
+            apk.writestr("lib/arm64-v8a/libbunembeddingpoc.so", library)
+            for name in [
+                "LICENSE.bun.md",
+                "BUN-LINKED-NOTICES.txt",
+                "BUN-DURABLE-NOTICES.txt",
+                "LOCAL-AUTH-NPM-NOTICES.txt",
+            ]:
+                apk.writestr("assets/licenses/" + name, "Synthetic nonempty notice")
             for name, source in ANDROID_LICENSES.items():
                 if name != missing:
-                    apk.writestr(f"assets/licenses/{name}",
-                                 b"license URL only" if name == incomplete else source.read_bytes())
+                    apk.writestr(
+                        f"assets/licenses/{name}",
+                        b"license URL only"
+                        if name == incomplete
+                        else source.read_bytes(),
+                    )
+        return bytes(library)
+
+    def runtime_archives(self, output, library):
+        for name, entries in [
+            ("pi-bun-android-arm64-runtime.tar.gz", {"libbunembeddingpoc.so": library}),
+            (
+                "pi-bun-android-arm64-relink.tar.gz",
+                {
+                    "objects/native.o": b"synthetic object",
+                    "relink.py": b"# synthetic test",
+                },
+            ),
+        ]:
+            with tarfile.open(output / name, "w:gz") as archive:
+                for path, value in entries.items():
+                    info = tarfile.TarInfo(path)
+                    info.size = len(value)
+                    archive.addfile(info, io.BytesIO(value))
+
+    def test_release_rejects_apk_without_the_actual_sdk_or_bun(self):
+        apk = self.root / ANDROID_APK
+        self.android_apk(apk)
+        validate_local_apk(apk)
+        broken = self.root / "broken.apk"
+        with zipfile.ZipFile(apk) as original, zipfile.ZipFile(broken, "w") as archive:
+            for name in original.namelist():
+                archive.writestr(
+                    name,
+                    b"not the declared bundle"
+                    if name == "lib/arm64-v8a/libpi_android.so"
+                    else original.read(name),
+                )
+        broken.replace(apk)
+        with self.assertRaises(ValueError):
+            validate_local_apk(apk)
 
     def test_release_refuses_missing_or_incomplete_android_font_notices(self):
         apk = self.root / ANDROID_APK
@@ -102,15 +191,22 @@ class PackagingTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         app = runpy.run_path(str(root / "crates/pi_android/scripts/build_apk.py"))["PI"]
         app.licenses = (self.root / "missing-OFL.txt",)
-        with zipfile.ZipFile(self.root / "pi.apk", "w") as apk:
-            with self.assertRaises(FileNotFoundError):
-                sys.modules["build_apk"].write_licenses(apk, app)
+        with (
+            zipfile.ZipFile(self.root / "pi.apk", "w") as apk,
+            self.assertRaises(FileNotFoundError),
+        ):
+            sys.modules["build_apk"].write_licenses(apk, app)
 
     def test_supported_matrix_has_four_distinct_archives(self):
-        self.assertEqual(set(archive_name(target) for target in TARGETS), {
-            "pi-desktop-linux-amd64.tar.gz", "pi-desktop-linux-arm64.tar.gz",
-            "pi-desktop-macos-arm64.zip", "pi-desktop-windows-amd64.zip",
-        })
+        self.assertEqual(
+            {archive_name(target) for target in TARGETS},
+            {
+                "pi-desktop-linux-amd64.tar.gz",
+                "pi-desktop-linux-arm64.tar.gz",
+                "pi-desktop-macos-arm64.zip",
+                "pi-desktop-windows-amd64.zip",
+            },
+        )
 
     def test_headers_refuse_mislabeled_architecture_platform_and_truncation(self):
         for target in TARGETS:
@@ -130,12 +226,22 @@ class PackagingTests(unittest.TestCase):
             prefix = archive.name.removesuffix(".tar.gz")
             with tarfile.open(archive) as tar:
                 names = tar.getnames()
-                for name in ["bin/pi-desktop", "LICENSE", "README.md", "THIRD_PARTY.md",
-                             "licenses/ZED-GPL-3.0", "share/applications/dev.pi.desktop.desktop",
-                             "share/icons/hicolor/128x128/apps/dev.pi.desktop.png"]:
+                for name in [
+                    "bin/pi-desktop",
+                    "LICENSE",
+                    "README.md",
+                    "THIRD_PARTY.md",
+                    "licenses/ZED-GPL-3.0",
+                    "share/applications/dev.pi.desktop.desktop",
+                    "share/icons/hicolor/128x128/apps/dev.pi.desktop.png",
+                ]:
                     self.assertIn(f"{prefix}/{name}", names)
-                self.assertEqual(tar.getmember(f"{prefix}/bin/pi-desktop").mode & 0o777, 0o755)
-                self.assertFalse(any("artifacts/" in name or "target/" in name for name in names))
+                self.assertEqual(
+                    tar.getmember(f"{prefix}/bin/pi-desktop").mode & 0o777, 0o755
+                )
+                self.assertFalse(
+                    any("artifacts/" in name or "target/" in name for name in names)
+                )
 
     def test_windows_zip_is_portable_with_legal_files_no_working_tree(self):
         target = "x86_64-pc-windows-msvc"
@@ -148,7 +254,9 @@ class PackagingTests(unittest.TestCase):
             self.assertIn("pi-desktop-windows-amd64/pi-desktop.exe", names)
             self.assertIn("pi-desktop-windows-amd64/licenses/ZED-GPL-3.0", names)
             self.assertNotIn("scratch.log", names)
-            self.assertFalse(any(".git/" in name or "node_modules/" in name for name in names))
+            self.assertFalse(
+                any(".git/" in name or "node_modules/" in name for name in names)
+            )
 
     def test_pi_notices_and_bundled_licenses_ship_in_licenses(self):
         target = "x86_64-unknown-linux-gnu"
@@ -174,12 +282,19 @@ class PackagingTests(unittest.TestCase):
                 bundle = Path(argv[-2])
                 self.assertEqual(bundle.name, "Pi Desktop.app")
                 self.assertTrue((bundle / "Contents/MacOS/pi-desktop").is_file())
-                self.assertTrue((bundle / "Contents/Resources/licenses/ZED-GPL-3.0").is_file())
+                self.assertTrue(
+                    (bundle / "Contents/Resources/licenses/ZED-GPL-3.0").is_file()
+                )
                 with (bundle / "Contents/Info.plist").open("rb") as source:
-                    self.assertEqual(plistlib.load(source)["CFBundleExecutable"], "pi-desktop")
+                    self.assertEqual(
+                        plistlib.load(source)["CFBundleExecutable"], "pi-desktop"
+                    )
                 Path(argv[-1]).write_bytes(b"mock archive; not a native-signing test")
 
-        with patch("package_desktop.sys.platform", "darwin"), patch("package_desktop.subprocess.run", side_effect=command):
+        with (
+            patch("package_desktop.sys.platform", "darwin"),
+            patch("package_desktop.subprocess.run", side_effect=command),
+        ):
             package(self.binary(target), target, self.root / "dist")
         self.assertEqual([call[0] for call in calls], ["codesign", "codesign", "ditto"])
         self.assertIn("--verify", calls[1])
@@ -191,7 +306,9 @@ class PackagingTests(unittest.TestCase):
         for platform in ["darwin-arm64", "linux-x64", "linux-arm64"]:
             self.assertRegex(hashes[f"pi-{platform}.tar.gz"], r"^[0-9a-f]{64}$")
         self.assertRegex(hashes["pi-windows-x64.zip"], r"^[0-9a-f]{64}$")
-        extension = (fetch_pi.ROOT / "crates/pi_core/extension/pi-desktop.ts").read_text()
+        extension = (
+            fetch_pi.ROOT / "crates/pi_core/extension/pi-desktop.ts"
+        ).read_text()
         self.assertIn(f'const EXTENSION_VERSION = "{version}-', extension)
 
     def test_pi_archives_unpack_with_the_executable_at_the_top(self):
@@ -212,24 +329,41 @@ class PackagingTests(unittest.TestCase):
                 archive.writestr("theme/dark.json", "{}")
             return data.getvalue()
 
-        for name, data, program in [("pi-linux-x64.tar.gz", tarball(), "pi"), ("pi-windows-x64.zip", zipped(), "pi.exe")]:
+        for name, data, program in [
+            ("pi-linux-x64.tar.gz", tarball(), "pi"),
+            ("pi-windows-x64.zip", zipped(), "pi.exe"),
+        ]:
             folder = self.root / name
             folder.mkdir()
             fetch_pi.unpack(data, name, folder)
             self.assertTrue((folder / program).is_file(), name)
             self.assertTrue((folder / "theme/dark.json").is_file(), name)
-            self.assertEqual(sorted(entry.name for entry in folder.iterdir()), sorted([program, "theme"]))
+            self.assertEqual(
+                sorted(entry.name for entry in folder.iterdir()),
+                sorted([program, "theme"]),
+            )
 
     def test_macos_refuses_non_native_packaging(self):
-        with patch("package_desktop.sys.platform", "linux"):
-            with self.assertRaises(ValueError):
-                package(self.binary("aarch64-apple-darwin"), "aarch64-apple-darwin", self.root / "dist")
+        with (
+            patch("package_desktop.sys.platform", "linux"),
+            self.assertRaises(ValueError),
+        ):
+            package(
+                self.binary("aarch64-apple-darwin"),
+                "aarch64-apple-darwin",
+                self.root / "dist",
+            )
 
     def test_remote_helpers_have_distinct_verified_native_assets(self):
-        self.assertEqual({asset_name(target) for target in TARGETS}, {
-            "pi-desktop-remote-linux-amd64", "pi-desktop-remote-linux-arm64",
-            "pi-desktop-remote-macos-arm64", "pi-desktop-remote-windows-amd64.exe",
-        })
+        self.assertEqual(
+            {asset_name(target) for target in TARGETS},
+            {
+                "pi-desktop-remote-linux-amd64",
+                "pi-desktop-remote-linux-arm64",
+                "pi-desktop-remote-macos-arm64",
+                "pi-desktop-remote-windows-amd64.exe",
+            },
+        )
         for target in ["aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]:
             binary = self.binary(target)
             installed = package_remote(binary, target, self.root / "remote")
@@ -239,7 +373,15 @@ class PackagingTests(unittest.TestCase):
     def test_release_tags_are_validated_not_shell_interpolated(self):
         for tag in ["v0.1.0", "v1.2.3-rc.1"]:
             validate_tag(tag)
-        for tag in ["main", "v", "v1.2", "v1.2.3\n", "v1.2.3/../bad", "v1.2.3;exit", "v$(id)"]:
+        for tag in [
+            "main",
+            "v",
+            "v1.2",
+            "v1.2.3\n",
+            "v1.2.3/../bad",
+            "v1.2.3;exit",
+            "v$(id)",
+        ]:
             with self.assertRaises(ValueError):
                 validate_tag(tag)
 
@@ -251,8 +393,12 @@ class PackagingTests(unittest.TestCase):
     def test_release_manifest_requires_exact_complete_matrix_and_correct_digests(self):
         output = self.root / "release"
         output.mkdir()
-        names = sorted([archive_name(target) for target in TARGETS] + [asset_name(target) for target in TARGETS]
-                       + [ANDROID_APK])
+        names = sorted(
+            [archive_name(target) for target in TARGETS]
+            + [asset_name(target) for target in TARGETS]
+            + [ANDROID_APK]
+            + sorted(BUN_RUNTIME_ASSETS)
+        )
         for name in names[:-1]:
             (output / name).write_bytes(b"fixture")
         with self.assertRaises(ValueError):
@@ -262,9 +408,15 @@ class PackagingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             manifest(output)
         (output / "scratch.log").unlink()
-        self.android_apk(output / ANDROID_APK)
-        self.assertEqual(manifest(output).read_text(), "".join(
-            f"{hashlib.sha256((output / name).read_bytes()).hexdigest()}  {name}\n" for name in names))
+        library = self.android_apk(output / ANDROID_APK)
+        self.runtime_archives(output, library)
+        self.assertEqual(
+            manifest(output).read_text(),
+            "".join(
+                f"{hashlib.sha256((output / name).read_bytes()).hexdigest()}  {name}\n"
+                for name in names
+            ),
+        )
 
     def test_empty_or_symlink_release_archives_are_refused(self):
         output = self.root / "release"
@@ -272,7 +424,8 @@ class PackagingTests(unittest.TestCase):
         for target in TARGETS:
             (output / archive_name(target)).write_bytes(b"fixture")
             (output / asset_name(target)).write_bytes(b"fixture")
-        self.android_apk(output / ANDROID_APK)
+        library = self.android_apk(output / ANDROID_APK)
+        self.runtime_archives(output, library)
         first = output / archive_name(next(iter(TARGETS)))
         first.write_bytes(b"")
         with self.assertRaises(ValueError):

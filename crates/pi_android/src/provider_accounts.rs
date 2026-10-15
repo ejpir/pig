@@ -5,7 +5,7 @@ use crate::{
     ui::{self, Button},
 };
 use gpui::{Context, Window, div, prelude::*, px};
-use pi_quickjs_backend_poc::auth::{AuthTask, Operation, Provider, Vault};
+use pi_local::auth::{AuthTask, Operation, Provider, Vault};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::{
@@ -52,11 +52,11 @@ fn publish(path: PathBuf, value: Option<Value>) {
 #[cfg(target_os = "android")]
 struct AndroidVault(
     gpui_android::secure_storage::ProviderVault,
-    pi_quickjs_backend_poc::auth::VaultScope,
+    pi_local::auth::VaultScope,
 );
 #[cfg(target_os = "android")]
 impl Vault for AndroidVault {
-    fn scope(&self) -> pi_quickjs_backend_poc::auth::VaultScope {
+    fn scope(&self) -> pi_local::auth::VaultScope {
         self.1
     }
     fn read(&self, provider: Provider) -> anyhow::Result<Value> {
@@ -83,9 +83,9 @@ pub(crate) fn vault(synthetic: bool) -> Option<Arc<dyn Vault>> {
         Some(Arc::new(AndroidVault(
             gpui_android::secure_storage::provider_vault(synthetic)?,
             if synthetic {
-                pi_quickjs_backend_poc::auth::VaultScope::Synthetic
+                pi_local::auth::VaultScope::Synthetic
             } else {
-                pi_quickjs_backend_poc::auth::VaultScope::Accounts
+                pi_local::auth::VaultScope::Accounts
             },
         )))
     }
@@ -155,8 +155,7 @@ impl Panel {
             state["busy"] = json!(true);
         }
         std::thread::spawn(move || {
-            let error = clear
-                .is_some_and(|p| pi_quickjs_backend_poc::auth::logout(p, vault.as_ref()).is_err());
+            let error = clear.is_some_and(|p| pi_local::auth::logout(p, vault.as_ref()).is_err());
             let mut state = json!({"busy": false, "error": error});
             for provider in [Provider::Claude, Provider::Codex] {
                 state[provider.id()] = match vault.read(provider) {
@@ -181,7 +180,12 @@ impl PhoneApp {
     ) -> bool {
         let synthetic = match url {
             "pi://test/local-providers" => false,
-            "pi://test/local-providers/synthetic" => true,
+            "pi://test/local-providers/synthetic"
+                if cfg!(feature = "ui-test")
+                    && (cfg!(test) || gpui_android::activity::is_debug_build()) =>
+            {
+                true
+            }
             _ => return false,
         };
         if self.connecting || self.resuming.is_some() {
@@ -199,8 +203,6 @@ impl PhoneApp {
         self.close_expanded_visual(window, cx);
         window.dismiss_virtual_keyboard();
         window.focus(&self.focus, cx);
-        self.quickjs_backend_test.cancel("navigation");
-        self.quickjs_backend_test.visible = false;
         self.local_providers.dismiss_dialog();
         self.local_providers = Panel {
             visible: true,
@@ -263,7 +265,7 @@ impl PhoneApp {
             self.invalidate_local_account(provider, self.local_providers.synthetic, cx);
         }
         let result = if self.local_providers.synthetic {
-            pi_quickjs_backend_poc::auth_fixture::start(provider, operation, vault)
+            pi_local::auth_fixture::start(provider, operation, vault)
         } else {
             AuthTask::start(provider, operation, vault)
         };
@@ -344,11 +346,10 @@ impl PhoneApp {
             if let Ok(value) = serde_json::from_str::<Value>(&reply)
                 && let Some(code) = value["code"].as_str()
                 && let Some(task) = &self.local_providers.task
+                && task.respond(&id, code.to_owned()).is_err()
             {
-                if task.respond(&id, code.to_owned()).is_err() {
-                    self.local_providers.error =
-                        Some("Code could not be submitted. Try again or restart sign-in.".into());
-                }
+                self.local_providers.error =
+                    Some("Code could not be submitted. Try again or restart sign-in.".into());
             }
         }
         if self
@@ -364,7 +365,9 @@ impl PhoneApp {
         // No secret-bearing snapshots, URLs, codes or tokens are published. Even geometry
         // is only emitted in the explicitly synthetic mode, using a different vault namespace.
         let visible = self.local_providers.visible && self.visible && self.window_active;
+        #[cfg(feature = "ui-test")]
         let path = self.data_dir.join("quickjs-provider-test");
+        #[cfg(feature = "ui-test")]
         if self.local_providers.synthetic && !self.local_private {
             let geometry = cx.global::<crate::testing::State>();
             let phase = self
@@ -513,7 +516,7 @@ impl PhoneApp {
                         if let (Some(task), Some(provider)) = (&this.local_providers.task, this.local_providers.task_provider)
                             && !task.is_finished() && !task.is_cancelled()
                             && let Some(url) = task.snapshot()["url"].as_str()
-                            && pi_quickjs_backend_poc::auth::allowed_browser_url(provider, url) { cx.open_url(url); }
+                            && pi_local::auth::allowed_browser_url(provider, url) { cx.open_url(url); }
                     })))))
                 .when(running && state["status"] == "prompt", |d| d.child(ui::button("provider-code", Button::Primary, None, "Enter authorization code", false, &colors)
                     .on_click(cx.listener(move |this, _, _, _| {
@@ -523,7 +526,8 @@ impl PhoneApp {
                         }
                     }))))
                 .when(running && self.local_providers.task_operation == Some(Operation::Login), |d| d.child(ui::button("provider-cancel", Button::Plain, None, "Cancel sign-in", false, &colors)
-                    .on_click(cx.listener(move |this, _, _, cx| { if !this.provider_action(stamp) { return; } if let Some(task) = &this.local_providers.task { task.cancel(); } this.local_providers.dismiss_dialog(); cx.notify(); }))))
+                    .on_click(cx.listener(move |this, _, _, cx| { if !this.provider_action(stamp) { return; }
+                        if let Some(task) = &this.local_providers.task { task.cancel(); } this.local_providers.dismiss_dialog(); cx.notify(); }))))
                 .children(self.local_providers.error.clone().map(|error| ui::hint(error, &colors)))
                 .when(saved["error"] == true, |d| d.child(ui::hint("Could not remove account. Try signing out again.", &colors)))
                 .child(ui::hint("Browser/background transitions keep sign-in running. Back cancels sign-in; refresh finishes independently to save rotated tokens. Sign out removes this phone's credentials, not the provider's remote authorization.", &colors)))

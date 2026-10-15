@@ -160,7 +160,7 @@ impl PhoneApp {
                     })
                     .when(!workspace, |body| {
                         body.child(
-                            ui::hint("Pi on this phone · chats are lost on restart", &colors)
+                            ui::hint("Experimental Local · chats saved on this phone", &colors)
                                 .px(px(20.)),
                         )
                     })

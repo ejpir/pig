@@ -1,6 +1,7 @@
 mod channel;
 pub mod clock;
 pub mod command_output;
+pub mod durable;
 pub mod extension;
 pub mod history;
 pub mod pairing;

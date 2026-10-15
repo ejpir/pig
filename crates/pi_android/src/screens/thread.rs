@@ -85,7 +85,7 @@ fn agents_at_work(count: usize) -> String {
 
 fn thread_subtitle(session: &Session, computer_name: &str, compacting: bool) -> String {
     if session.local {
-        return format!("{} · on this phone · not saved", session.project);
+        return format!("{} · saved on this phone", session.project);
     }
     if compacting {
         return format!("{} · {}", session.project, computer_name);

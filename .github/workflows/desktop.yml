@@ -51,6 +51,23 @@ jobs:
         with:
           workspaces: pi-desktop
           key: checks
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - name: Build and validate experimental Local adapters (offline)
+        run: |
+          (cd crates/pi_local && npm ci --ignore-scripts && bun run build)
+          (cd experiments/bun-embedding && npm ci --ignore-scripts)
+          python experiments/bun-embedding/build_local.py
+          (cd backend/durable && npm ci --ignore-scripts && bun run check && bun test)
+          bun test experiments/bun-embedding/native-models.test.js experiments/bun-embedding/local.test.js
+          cargo fmt --manifest-path crates/pi_local/Cargo.toml -- --check
+          cargo test --locked --manifest-path crates/pi_local/Cargo.toml
+          cargo clippy --locked --manifest-path crates/pi_local/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --locked -p pi_android --features local-backend --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p pi_android --features bun-backend-test --all-targets --no-deps -- -D warnings
+          cargo test --locked -p pi_android --features bun-backend-test
+          python -m unittest discover -s experiments/bun-embedding -p 'test_*_tooling.py' -v
       # Do not traverse/format the sibling Zed checkout.
       - name: Format
         run: cargo fmt -p pi_visual -p pi_visual_ui -p pi_markdown -p pi_core -p pi_remote -p pi_android -p gpui_android -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
@@ -222,10 +239,58 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  bun-runtime:
+    name: Build / embedded Bun Android ARM64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: runtime-cache
+        with:
+          path: ${{ runner.temp }}/bun-runtime-out
+          key: bun-android-arm64-1.4.3-ndk29-llvm23-${{ hashFiles('experiments/bun-embedding/native/**', 'experiments/bun-embedding/prepare.py', 'experiments/bun-embedding/relink.py', 'experiments/bun-embedding/build_runtime.py') }}
+      - name: Make room for the source/object build (hosted runner only)
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android/sdk/ndk
+      - uses: oven-sh/setup-bun@v2
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        with:
+          bun-version: '1.4.2'
+      - uses: dtolnay/rust-toolchain@master
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        with:
+          toolchain: nightly-2026-09-15
+          components: rust-src
+          targets: aarch64-linux-android
+      - name: Install LLVM 23 and pinned Android NDK
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /usr/share/keyrings/llvm.asc >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/llvm.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm23.list
+          sudo apt-get update
+          sudo apt-get install -y clang-23 lld-23 llvm-23 llvm-23-dev nasm cmake ninja-build pkg-config libssl-dev
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;29.0.14206865'
+      - name: Source-build, relink and preserve LGPL relink inputs
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 experiments/bun-embedding/build_runtime.py \
+            --work-dir "$RUNNER_TEMP/bun-build" --ndk "$ANDROID_HOME/ndk/29.0.14206865" \
+            --llvm /usr/lib/llvm-23 --out-dir "$RUNNER_TEMP/bun-runtime-out" --jobs 2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-desktop-bun-android-arm64
+          path: ${{ runner.temp }}/bun-runtime-out/*.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
   android:
     name: Package / android-arm64
+    needs: bun-runtime
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: pi-desktop
@@ -255,6 +320,20 @@ jobs:
         with:
           workspaces: pi-desktop
           key: android
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - uses: actions/download-artifact@v4
+        with:
+          name: pi-desktop-bun-android-arm64
+          path: ${{ runner.temp }}/bun-runtime
+      - name: Prepare bundled Local runtime and SDK
+        run: |
+          mkdir "$RUNNER_TEMP/bun-runtime/extracted"
+          tar -xzf "$RUNNER_TEMP/bun-runtime/pi-bun-android-arm64-runtime.tar.gz" -C "$RUNNER_TEMP/bun-runtime/extracted"
+          (cd crates/pi_local && npm ci --ignore-scripts)
+          (cd experiments/bun-embedding && npm ci --ignore-scripts)
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;29.0.14206865'
       # The runner's Android SDK has the platform, build-tools and NDK the
       # builder needs. Releases are signed with the repository's key, so a new
       # version installs over the last; other builds use a throwaway debug key.
@@ -275,8 +354,11 @@ jobs:
           else
             echo '::warning::No ANDROID_KEYSTORE_BASE64 secret; signing with a debug key'
           fi
-          export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
+          export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/29.0.14206865"
+          export PI_ANDROID_BUN_LIBRARY="$(find "$RUNNER_TEMP/bun-runtime/extracted" -name libbunembeddingpoc.so -type f)"
+          test -f "$PI_ANDROID_BUN_LIBRARY"
           python crates/pi_android/scripts/build_apk.py --out dist/pi-android-arm64.apk
+          python scripts/release_desktop.py --tag "v$(python -c 'import tomllib;print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')" --android-apk dist/pi-android-arm64.apk
       - uses: actions/upload-artifact@v4
         with:
           name: pi-desktop-android-arm64
@@ -287,7 +369,7 @@ jobs:
   release:
     name: Publish / ${{ github.ref_name }}
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [checks, native, android]
+    needs: [checks, native, android, bun-runtime]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -301,7 +383,7 @@ jobs:
           pattern: pi-desktop-*
           path: ${{ runner.temp }}/release
           merge-multiple: true
-      - name: Verify all four packages, four helpers and the APK, and checksum them
+      - name: Verify desktop packages/helpers, bundled Local APK and runtime/relink archives
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python scripts/release_desktop.py --tag "$RELEASE_TAG" --directory "$RUNNER_TEMP/release"
