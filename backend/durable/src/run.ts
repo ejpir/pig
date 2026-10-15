@@ -43,7 +43,7 @@ const commands = [
   "cancel_submission",
   "get_subagent", "stop_subagent", "prompt_subagent",
 ];
-const info = {
+const defaultInfo = {
   backend: "pi-durable", version: "1", piVersion: "1.2.0", protocolVersion: 2,
   bunVersion: Bun.version, workerPid: process.pid, commands,
   features: ["durable_execution", "committed_snapshots", "incremental_events", "request_deduplication", "remote_pi_credentials", "builtin_providers", "image_prompts", "image_references", "prompt_templates", "skills", "subagents", "subagent_input", "swarm_messaging", "manual_compaction"],
@@ -238,10 +238,25 @@ export function sessionStats(
  * given its folder. Read again for each prompt and command list, so a new file
  * needs no restart.
  */
+/** In-process host boundary. Execution, commands, projection and recovery stay shared. */
+export interface RunHost {
+  state: string; cwd: string; key: string;
+  input: AsyncIterable<Buffer>;
+  output: (line: string) => void | Promise<void>;
+  assertOwner: () => void | Promise<void>;
+  stopInput: () => void;
+  env?: (target: { cwd?: string }) => NodeExecutionEnv;
+  initialModel?: { provider: string; modelId: string };
+  initialThinking?: string;
+  info?: Record<string, unknown>;
+  onReport?: (error: unknown) => void;
+}
 export async function run(
-  models: Models, extensions: readonly Extension[] = [], resources: (cwd?: string) => Resources = () => noResources,
+  models: Models, extensions: readonly Extension[] = [], resources: (cwd?: string) => Resources = () => noResources, host?: RunHost,
 ): Promise<void> {
-  const args = process.argv.slice(2);
+  const info = { ...defaultInfo, ...host?.info };
+  const report = host?.onReport ?? ((error: unknown) => console.error("Durable report:", error));
+  const args = host ? [] : process.argv.slice(2);
   if (args.length === 1 && args[0] === "--list-commands") {
     // Before a session has a folder: the user's own commands and the built-ins.
     console.log(JSON.stringify({ version: 1, commands: promptCommands(resources()) }));
@@ -259,16 +274,19 @@ export async function run(
     if (index < 0 || !args[index + 1]) throw new Error(`Missing ${name}`);
     return args[index + 1];
   };
-  const directory = option("--state");
-  const cwd = option("--cwd");
-  const key = option("--key");
+  const directory = host?.state ?? option("--state");
+  const cwd = host?.cwd ?? option("--cwd");
+  const key = host?.key ?? option("--key");
+  if (host) await host.assertOwner();
+  else {
   if (process.env.PI_DESKTOP_DURABLE_OWNED !== "1") throw new Error("Launch through the Rust durable-worker storage owner");
   if (process.platform !== "win32") {
     // This inherited descriptor keeps the OS writer lock held even if the Rust owner is killed.
     const fd = Number(process.env.PI_DESKTOP_DURABLE_LOCK_FD);
     if (!Number.isInteger(fd) || fd < 3 || !fstatSync(fd).isFile()) throw new Error("Missing inherited durable writer lock");
   }
-  const mask = process.umask(0o077);
+  }
+  const mask = host ? undefined : process.umask(0o077);
   let storage: SqliteStorage;
   try {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -282,8 +300,17 @@ export async function run(
       throw error;
     }
   } finally {
-    process.umask(mask);
+    if (mask !== undefined) process.umask(mask);
   }
+  let ownedHarness: Harness | undefined;
+  let stopEvents: (() => Promise<unknown>) | undefined;
+  const dispose: (() => void)[] = [];
+  const deliveries = new Set<Promise<unknown>>();
+  let compacting: Promise<void> | undefined;
+  let commands: Promise<void> | undefined;
+  let flushing = Promise.resolve();
+  let stopping = false;
+  try {
   let found = resources(cwd);
   const registry = createRegistry();
   registry.install(CodingTools);
@@ -304,20 +331,21 @@ export async function run(
   let compactionMetadata: () => { autoCompaction: boolean; compactionThresholdPercent?: number } = () => ({ autoCompaction: true });
   let contextWindow: () => number | undefined = () => undefined;
   const compactionPolicy = (): CompactionPolicy => resolveCompactionPolicy(compactionMetadata(), contextWindow());
-  const harness = opened = await Harness.open(storage, {
+  const harness = opened = ownedHarness = await Harness.open(storage, {
     models, registry: compactionRegistry(registry, () => compactionMetadata()), settings: {
       extensions: registry.snapshot().installed().filter((extension) => extension.name !== SwarmTools.name),
       // Percentage offsets are resolved per generation by the registry adapter.
       // Other tasks need only the unchanged reserve/retention and enabled flag.
       get compaction() { return resolveCompactionPolicy(compactionMetadata(), undefined); },
     },
-    env: ({ cwd: selected = cwd }) => new NodeExecutionEnv({ cwd: selected }),
-    onReport: (error) => console.error("Durable report:", error),
+    env: host?.env ?? (({ cwd: selected = cwd }) => new NodeExecutionEnv({ cwd: selected })),
+    onReport: report,
   }, context);
-  const provider = process.env.PI_DESKTOP_DURABLE_PROVIDER;
-  const modelId = process.env.PI_DESKTOP_DURABLE_MODEL;
+  const provider = host?.initialModel?.provider ?? (host ? undefined : process.env.PI_DESKTOP_DURABLE_PROVIDER);
+  const modelId = host?.initialModel?.modelId ?? (host ? undefined : process.env.PI_DESKTOP_DURABLE_MODEL);
   const root = await harness.root(context, { agent: {
     cwd, ...(provider && modelId ? { model: { provider, modelId } } : {}),
+    ...(host?.initialThinking ? { thinkingLevel: host.initialThinking as ModelThinkingLevel } : {}),
   } });
   await root.commit(async (tx) => {
     const metadata = await tx.doc(Metadata, root.id);
@@ -327,10 +355,13 @@ export async function run(
     (await tx.doc(Calls, root.id)).calls ??= {};
   }, context);
   const state = await root.viewState(context);
+  dispose.push(() => state.dispose());
   const metadata = await harness.documentState(Metadata, root.id, context);
+  if (metadata) dispose.push(() => metadata.dispose());
   if (!metadata?.value) throw new Error("Durable desktop metadata was not committed");
   // Subagents working in the background, which the view's own documents don't carry.
   const calls = await harness.documentState(Calls, root.id, context);
+  if (calls) dispose.push(() => calls.dispose());
   if (!calls) throw new Error("Durable subagent calls were not committed");
   compactionMetadata = () => metadata.value!;
   const chosenModel = () => {
@@ -339,6 +370,7 @@ export async function run(
   };
   contextWindow = () => chosenModel()?.contextWindow;
   const events = await watchEvents(harness, root.id, context);
+  stopEvents = () => events.stop();
   // One output line at a time, with backpressure. The durable event watch itself
   // bounds pending frames and replaces an overflow with one resync snapshot.
   let failOutput!: (error: unknown) => void;
@@ -357,10 +389,11 @@ export async function run(
       return Promise.reject(error);
     }
     const next = output.then(async () => {
-      if (!process.stdout.write(line)) await once(process.stdout, "drain");
+      if (host) await host.output(line);
+      else if (!process.stdout.write(line)) await once(process.stdout, "drain");
     });
     void next.catch(failOutput);
-    output = next;
+    flushing = output = next;
     return next;
   };
   const history = new History(root, context);
@@ -406,19 +439,25 @@ export async function run(
     return event;
   };
   await snapshot(events.snapshot);
-  events.start(async (batch) => {
+  events.start((batch) => {
+    const delivery = (async () => {
     const resync = batch.find((event): event is SnapshotEvent => event.type === "snapshot");
     if (resync !== undefined) await snapshot(resync);
     else await send({ type: "durable_events", key, events: imageReferences(batch.map(wireEvent)), backend: info });
+    })();
+    deliveries.add(delivery);
+    void delivery.finally(() => deliveries.delete(delivery)).catch(() => {});
+    return delivery;
   });
   const eventFailure = eventStreamFailure(events.closed);
   void eventFailure.catch(() => {});
   const unsubscribeMetadata = metadata.subscribe(() => {
-    send({ type: "durable_metadata", key, data: metadata.value }).catch((error) => console.error("Durable report:", error));
+    send({ type: "durable_metadata", key, data: metadata.value }).catch(report);
   });
   const unsubscribeCalls = calls.subscribe(() => {
-    send({ type: "durable_subagents", key, data: calls.value ?? { calls: {} } }).catch((error) => console.error("Durable report:", error));
+    send({ type: "durable_subagents", key, data: calls.value ?? { calls: {} } }).catch(report);
   });
+  dispose.push(unsubscribeMetadata, unsubscribeCalls);
   // Missing definitions, corrupt/newer storage and startup errors must fail closed, not select stock Pi.
   harness.resume();
 
@@ -656,9 +695,9 @@ export async function run(
       await send({ type: "response", id: record.id, command: record.type, success: false, error: String(error) });
     }
   };
-  let compacting: Promise<void> | undefined;
   const commandsLoop = async () => {
-    for await (const record of records(process.stdin)) {
+    for await (const record of records(host?.input ?? process.stdin)) {
+      if (stopping) break;
       if (typeof record.id !== "string" || !record.id.length || record.id.length > 256) throw new Error("Missing request correlation ID");
       if (record.type === "compact") {
         if (compacting !== undefined) {
@@ -670,7 +709,7 @@ export async function run(
           if (compacting === tracked) compacting = undefined;
         });
         compacting = tracked;
-        tracked.catch((error) => console.error("Durable report:", error));
+        tracked.catch(report);
         continue;
       }
       if (compacting !== undefined && record.type !== "abort" && record.type !== "get_session_stats") {
@@ -685,17 +724,19 @@ export async function run(
     // subscribers isolate failures, so the shared output failure signal covers
     // their callbacks too. Either condition is fatal: staying attached without
     // incremental delivery would present a stale running session indefinitely.
-    await Promise.race([commandsLoop(), eventFailure, outputFailure]);
+    commands = commandsLoop();
+    await Promise.race([commands, eventFailure, outputFailure]);
   } finally {
-    await compacting?.catch(() => {});
-    // Owner-pipe EOF stops this process, NOT the durable run. close preserves pending checkpoints.
-    await events.stop();
-    unsubscribeCalls();
-    unsubscribeMetadata();
-    calls.dispose();
-    state.dispose();
-    metadata.dispose();
-    await harness.close(context);
-    await output;
+    // Outer cleanup below also covers startup failures.
+  }
+  } finally {
+    stopping = true;
+    host?.stopInput();
+    await stopEvents?.().catch(report);
+    // Suspension preserves checkpoints; user Stop remains the explicit abort command.
+    if (ownedHarness) await ownedHarness.close(context).catch(report);
+    else await storage.close(context).catch(report);
+    await Promise.allSettled([...deliveries, ...(host && commands ? [commands] : []), ...(compacting ? [compacting] : []), flushing]);
+    for (const cleanup of dispose.reverse()) { try { cleanup(); } catch (error) { report(error); } }
   }
 }

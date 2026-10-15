@@ -274,7 +274,7 @@ impl PhoneApp {
                                     (Some(fingerprint), true) => format!(
                                         "Connected over SSH with this phone's own key. {computer}'s host key is {fingerprint}; a different one is refused."
                                     ),
-                                    _ if self.is_local() => "Subscription inference runs on this phone. Conversations are held in memory only and are lost on restart.".to_owned(),
+                                    _ if self.is_local() => if cfg!(feature="bun-backend-test") {"Bun + Durable run on this phone. Chats are saved in SQLite. Stock tools use Android sh, not GNU Bash or a Linux userland."} else {"Subscription inference runs on this phone. Conversations are held in memory only and are lost on restart."}.to_owned(),
                                     _ => "These are sample sessions: nothing runs on a computer. Add one above to follow its sessions."
                                         .to_owned(),
                                 },

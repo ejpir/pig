@@ -61,6 +61,8 @@ class App:
     launcher: tuple = ()  # (folder, background)
     # Full notices for fonts/assets embedded by the app, in addition to GPUI's emoji font.
     licenses: tuple = ()  # Paths, copied by filename to assets/licenses/.
+    # Optional source-linked runtimes for the same app namespace. Never executables.
+    native_libraries: tuple = ()  # Paths, copied by filename alongside the app .so.
 
 
 TOUCH = App(
@@ -459,6 +461,11 @@ def build(app, debug, out, target=TARGET):
             apk.writestr("AndroidManifest.xml", encode_xml(manifest(app, debuggable=debug or app.debuggable)))
             apk.write(scratch / "classes.dex", "classes.dex")
             apk.write(library, f"lib/{TARGET_ABIS[target]}/lib{app.library}.so")
+            for extra in app.native_libraries:
+                extra = Path(extra)
+                if not extra.is_file() or not extra.name.startswith("lib") or extra.suffix != ".so":
+                    fail(f"Missing shared native runtime: {extra}")
+                apk.write(extra, f"lib/{TARGET_ABIS[target]}/{extra.name}")
             write_licenses(apk, app)
             if app.launcher:
                 folder, background = app.launcher

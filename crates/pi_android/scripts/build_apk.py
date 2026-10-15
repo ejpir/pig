@@ -38,7 +38,32 @@ PI = build_apk.App(
 )
 
 if __name__ == "__main__":
-    if "--quickjs-backend-test" in sys.argv:
+    if "--bun-backend-test" in sys.argv:
+        sys.argv.remove("--bun-backend-test")
+        if "--bun-library" not in sys.argv:
+            raise SystemExit("--bun-backend-test requires --bun-library <architecture-matching libbunembeddingpoc.so>")
+        index = sys.argv.index("--bun-library")
+        library = Path(sys.argv[index + 1]).resolve()
+        del sys.argv[index:index + 2]
+        if library.name != "libbunembeddingpoc.so" or not library.is_file():
+            raise SystemExit("Expected the source-linked libbunembeddingpoc.so")
+        symbols = subprocess.check_output(["readelf", "--dyn-syms", "--wide", str(library)], text=True)
+        if not all(name in symbols for name in ("pi_bun_init", "pi_bun_eval", "pi_bun_pump")):
+            raise SystemExit("Missing the source embedding ABI")
+        experiment = build_apk.WORKSPACE / "experiments" / "quickjs-backend"
+        subprocess.run(["bun", "run", "build"], cwd=experiment, check=True)
+        subprocess.run([sys.executable, str(build_apk.WORKSPACE / "experiments/bun-embedding/build_local.py")], check=True)
+        license_path = library.parent / "LICENSE.bun.md"
+        if not license_path.is_file():
+            raise SystemExit("Place the pinned Bun LICENSE.bun.md beside the shared library")
+        PI.package = "dev.pi.android.quickjstest"
+        PI.label = "Pi local backend tests"
+        PI.debuggable = True
+        PI.cargo += ["--features", "bun-backend-test"]
+        PI.native_libraries = (library,)
+        PI.licenses += (license_path, experiment / "generated/BUN-DURABLE-NOTICES.txt", experiment / "generated/QUICKJS-BACKEND-NPM-NOTICES.txt")
+        build_apk.main(PI, "pi-bun-local-test.apk")
+    elif "--quickjs-backend-test" in sys.argv:
         sys.argv.remove("--quickjs-backend-test")
         if "--ui-test" in sys.argv:
             sys.argv.remove("--ui-test")

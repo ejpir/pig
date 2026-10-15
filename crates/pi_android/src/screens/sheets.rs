@@ -630,7 +630,7 @@ impl PhoneApp {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(session.title.clone()))
                 .child(ui::hint(format!("{} · {}", session.project, self.computer_name()), colors).mt(px(4.))))
             .child(ui::hint(
-                if self.is_local() {"Removes this in-memory conversation from this phone. No workspace files exist for local chat."} else if self.live() {
+                if self.is_local() {if cfg!(feature="bun-backend-test") {"Hides this saved chat from the Local list. Its SQLite state and workspace files are retained."} else {"Removes this in-memory conversation from this phone. No workspace files exist for local chat."}} else if self.live() {
                     "Permanently deletes this session's conversation and execution history from the computer. This cannot be undone. Project files and edits are kept."
                 } else {
                     "Removes this sample conversation. No files on your computer are affected."

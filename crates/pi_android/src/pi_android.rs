@@ -15,6 +15,7 @@ mod demo;
 mod inline_page;
 mod live;
 #[cfg(feature = "quickjs-backend-test")]
+#[cfg_attr(feature = "bun-backend-test", path = "bun_local_chat.rs")]
 mod local_chat;
 mod message;
 mod model;

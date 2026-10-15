@@ -14,6 +14,9 @@ use std::{collections::HashMap, time::Duration};
 pub enum Event {
     NeedsYou(SessionId),
     Finished(SessionId),
+    /// Local manual compaction settled after canonical checkpoint/VM teardown.
+    #[cfg(feature = "quickjs-backend-test")]
+    Compacted(SessionId, Option<String>),
     Deleted(SessionId),
     /// Something went wrong, in a session or with the computer.
     Problem(Option<SessionId>, String),
@@ -234,15 +237,19 @@ impl Store {
     pub fn local(local: crate::local_chat::Local) -> Self {
         let computer = Computer {
             name: "This phone".into(),
-            address: "local-quickjs".into(),
+            address: if cfg!(feature="bun-backend-test") {"local-bun"} else {"local-quickjs"}.into(),
             pi_version: None,
             connected: true,
         };
+        #[cfg(feature = "bun-backend-test")]
+        let sessions = local.restored();
+        #[cfg(not(feature = "bun-backend-test"))]
+        let sessions = Vec::new();
         Self {
             generation: generation(),
             computer: computer.clone(),
             computers: vec![computer],
-            sessions: Vec::new(),
+            sessions,
             earlier: 0,
             projects: Vec::new(),
             next_id: 1,
@@ -489,6 +496,16 @@ impl Store {
         Ok(())
     }
 
+    pub fn supports_compact(&self, id: SessionId) -> bool {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &self.local {
+            return local.supports("manual_compaction") && local.commands(id).is_some();
+        }
+        self.live
+            .as_ref()
+            .is_some_and(|live| live.commands(id).is_some() && live.supports_compact(id))
+    }
+
     /// Manually compacts an existing live session without inserting slash text
     /// into its transcript.
     pub fn compact(
@@ -496,6 +513,15 @@ impl Store {
         id: SessionId,
         custom_instructions: Option<String>,
     ) -> Result<(), String> {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Some(local) = &mut self.local {
+            let session = self
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == id)
+                .ok_or("Chat no longer available")?;
+            return local.compact(session, custom_instructions);
+        }
         let Some(live) = &mut self.live else {
             return Err("Compaction is available after connecting to a computer.".into());
         };
@@ -608,7 +634,10 @@ impl Store {
             let mut session = local.create()?;
             let id = session.id;
             if let Err(error) = local.send(&mut session, prompt, attachments) {
+                #[cfg(not(feature="bun-backend-test"))]
                 local.remove(id);
+                #[cfg(feature="bun-backend-test")]
+                self.sessions.push(local.project(id));
                 return Err(error);
             }
             self.sessions.push(session);

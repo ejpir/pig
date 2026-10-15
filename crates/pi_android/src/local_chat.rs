@@ -6,7 +6,7 @@ use crate::{app::Route, store::Store};
 use gpui::{Context, Window};
 use pi_quickjs_backend_poc::{
     auth::{Provider, Vault},
-    chat::{self, ChatTask, Request},
+    chat::{self, ChatTask, Request, SessionInput},
     chat_fixture::{self, Mode},
 };
 use serde_json::{Value, json};
@@ -28,15 +28,29 @@ const FEATURES: &[&str] = &[
     "streaming",
     "stop",
     "visualize",
+    "manual_compaction",
+    "auto_compaction",
 ];
+// Byte budgets cover retained canonical branches, projected context, visible failed
+// turns and attachment metadata. Compaction is not transcript deletion.
+const SESSION_BYTES: usize = 24 * 1024 * 1024;
+const LOCAL_BYTES: usize = 64 * 1024 * 1024;
+fn bytes(value: &impl serde::Serialize) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX / 16, |v| v.len())
+}
+#[derive(serde::Serialize)]
 struct TurnMeta {
     attachments: Vec<String>,
     excluded: Option<String>,
 }
 struct Conversation {
     pi: pi_core::session::Session,
-    // Only successful canonical upstream messages become future request context.
+    // Display/model-input compatibility view only. The full SDK checkpoint is
+    // the sole inference authority, including edits, compactions and all branches.
     history: Vec<Value>,
+    checkpoint: Option<Value>,
+    compact: bool,
+    poisoned: bool,
     pending: Option<Value>,
     task: Option<ChatTask>,
     status: &'static str,
@@ -126,6 +140,27 @@ impl Local {
             .map(|l| l.as_str().unwrap().into())
             .collect()
     }
+    fn retained_bytes(&self) -> usize {
+        self.conversations
+            .values()
+            .map(Conversation::retained_bytes)
+            .sum()
+    }
+    fn admit_bytes(&self, id: SessionId, added: usize) -> Result<(), String> {
+        let current = self
+            .conversations
+            .get(&id)
+            .ok_or("Session no longer available")?;
+        if current.poisoned {
+            return Err("Session state could not be synchronized. Start a new session; the transcript and draft were kept.".into());
+        }
+        if current.retained_bytes().saturating_add(added) > SESSION_BYTES
+            || self.retained_bytes().saturating_add(added) > LOCAL_BYTES
+        {
+            return Err("Local session memory limit reached. Delete an old session or start a new one; your draft was kept. Compaction reduces model context, not saved transcript size.".into());
+        }
+        Ok(())
+    }
     pub fn create(&mut self) -> Result<Session, String> {
         if self.conversations.len() >= 8 {
             return Err(
@@ -144,7 +179,7 @@ impl Local {
             "get_state",
             json!({"sessionId":format!("phone-{}",id.0),"sessionFile":null,
             "model":self.current_model(None),"thinkingLevel":self.clamp(self.default_provider,&self.default_model,&self.default_thinking),
-            "isStreaming":false,"isCompacting":false,"isBashRunning":false,"autoCompactionEnabled":false}),
+            "isStreaming":false,"isCompacting":false,"isBashRunning":false,"autoCompactionEnabled":true}),
         )?;
         response(&mut pi, "get_messages", json!({"messages":[]}))?;
         response(
@@ -162,13 +197,16 @@ impl Local {
         response(
             &mut pi,
             "get_backend_info",
-            json!({"backend":"quickjs","commands":["prompt","abort","set_model","set_thinking_level","get_messages","get_state","get_available_models","get_available_thinking_levels"],"features":FEATURES,"uiCapabilities":FEATURES}),
+            json!({"backend":"quickjs","commands":["prompt","abort","set_model","set_thinking_level","get_messages","get_state","get_available_models","get_available_thinking_levels","compact","get_session_stats"],"features":FEATURES,"uiCapabilities":FEATURES}),
         )?;
         self.conversations.insert(
             id,
             Conversation {
                 pi,
                 history: Vec::new(),
+                checkpoint: None,
+                compact: false,
+                poisoned: false,
                 pending: None,
                 task: None,
                 status: "idle",
@@ -341,11 +379,18 @@ impl Local {
         }
         if (prompt.message.trim().is_empty() && prompt.images.is_empty())
             || prompt.message.len() > 2 * 1024 * 1024 + 32 * 1024
-            || session.turns.len() >= 32
             || attachments.len() > 8
         {
             return Err("Message/session limit reached. Shorten the message or start a new session. Your draft was kept.".into());
         }
+        // A new user can be retained in UI + checkpoint entries + projection +
+        // compatibility view. Reserve bounded assistant/summary/metadata space too.
+        self.admit_bytes(
+            session.id,
+            (prompt.message.len() + bytes(&prompt.images) + bytes(&attachments))
+                .saturating_mul(4)
+                .saturating_add(2 * 1024 * 1024),
+        )?;
         let c = self
             .conversations
             .get_mut(&session.id)
@@ -380,7 +425,21 @@ impl Local {
             thinking_level: c.pi.state.thinking_level.clone(),
             messages,
         };
-        let task=if self.synthetic {chat_fixture::start(request,self.vault.clone(),self.mode)} else {ChatTask::start(request,self.vault.clone())}
+        if c.checkpoint.as_ref().is_some_and(|cp| {
+            bytes(&cp["fileEntries"])
+                .saturating_add(bytes(&user))
+                .saturating_add(2 * 1024 * 1024)
+                > 8 * 1024 * 1024
+                || cp["fileEntries"].as_array().unwrap().len() > 19984
+        }) {
+            return Err("Canonical session memory limit reached. Start a new session; your transcript and draft were kept.".into());
+        }
+        let input = SessionInput {
+            session_id: c.pi.state.session_id.clone(),
+            checkpoint: c.checkpoint.clone(),
+            ..Default::default()
+        };
+        let task=if self.synthetic {chat_fixture::start_session(request,input,self.vault.clone(),self.mode)} else {ChatTask::start_session(request,input,self.vault.clone())}
             .map_err(|_|"Could not start the reply. Check message limits and account availability; your draft was kept.".to_owned())?;
         // Same records consumed by the SSH frontend. No invented UI turn/summary.
         c.pi.apply(&json!({"type":"message_end","message":user}))
@@ -390,11 +449,57 @@ impl Local {
         c.task = Some(task);
         c.pending = Some(user);
         c.status = "preparing";
+        c.compact = false;
         c.record_error = false;
         c.turns.push(TurnMeta {
             attachments,
             excluded: None,
         });
+        *session = self.project(session.id);
+        Ok(())
+    }
+    pub fn compact(
+        &mut self,
+        session: &mut Session,
+        instructions: Option<String>,
+    ) -> Result<(), String> {
+        if self.running() {
+            return Err(
+                "A local operation is still running or stopping. Wait or press Stop first.".into(),
+            );
+        }
+        self.admit_bytes(session.id, 2 * 1024 * 1024)?;
+        let c = self
+            .conversations
+            .get_mut(&session.id)
+            .ok_or("Session no longer available")?;
+        let model = c.pi.state.model.as_ref().unwrap();
+        let request = Request {
+            provider: provider_id(&model.provider).unwrap(),
+            model: model.id.clone(),
+            thinking_level: c.pi.state.thinking_level.clone(),
+            messages: c.history.clone(),
+        };
+        if c.checkpoint.as_ref().is_some_and(|cp| {
+            bytes(&cp["fileEntries"]).saturating_add(2 * 1024 * 1024) > 8 * 1024 * 1024
+                || cp["fileEntries"].as_array().unwrap().len() > 19984
+        }) {
+            return Err("Canonical session memory limit reached. Start a new session; your transcript and draft were kept.".into());
+        }
+        let input = SessionInput {
+            session_id: c.pi.state.session_id.clone(),
+            checkpoint: c.checkpoint.clone(),
+            compact: true,
+            custom_instructions: instructions,
+        };
+        let task=if self.synthetic {chat_fixture::start_session(request,input,self.vault.clone(),self.mode)} else {ChatTask::start_session(request,input,self.vault.clone())}
+            .map_err(|_|"Could not start compaction. Check account availability and instruction limits; your draft was kept.")?;
+        c.task = Some(task);
+        c.compact = true;
+        c.record_error = false;
+        c.status = "compacting";
+        c.pi.apply(&json!({"type":"compaction_start","reason":"manual"}))
+            .map_err(|_| "Invalid compact admission")?;
         *session = self.project(session.id);
         Ok(())
     }
@@ -414,7 +519,12 @@ impl Local {
         session.local = true;
         session.project = "Local".into();
         session.details.session_file = "In memory only · lost on restart".into();
-        session.activity = status_text(c.status).into();
+        session.activity = if c.compact && c.task.is_some() && c.status != "stopping" {
+            "Compacting…"
+        } else {
+            status_text(c.status)
+        }
+        .into();
         for (turn, meta) in session.turns.iter_mut().zip(&c.turns) {
             turn.attachments = meta.attachments.clone();
             turn.excluded = meta.excluded.clone();
@@ -440,23 +550,59 @@ impl Local {
                 }
             }
             if finished {
-                let message = task.take_message();
-                if c.status == "done"
+                // Pending is a transient admission copy, not settled retention.
+                c.pending = None;
+                let (checkpoint, stats, _) = task.take_session_result();
+                if let Some(checkpoint) = checkpoint
                     && !c.record_error
-                    && let (Some(user), Some(message)) = (c.pending.take(), message)
                 {
-                    c.history.extend([user, message.clone()]);
-                    let usage = &message["usage"];
-                    c.pi.stats.tokens.input += usage["input"].as_u64().unwrap_or(0);
-                    c.pi.stats.tokens.output += usage["output"].as_u64().unwrap_or(0);
-                    c.pi.stats.tokens.cache_read += usage["cacheRead"].as_u64().unwrap_or(0);
-                    c.pi.stats.tokens.cache_write += usage["cacheWrite"].as_u64().unwrap_or(0);
-                    c.pi.stats.total_messages = c.pi.messages.len() as u64;
-                } else {
-                    if c.status == "done" || c.record_error {
-                        c.status = "failed";
+                    let old_entries = c
+                        .checkpoint
+                        .as_ref()
+                        .and_then(|cp| cp["fileEntries"].as_array())
+                        .map_or(0, Vec::len);
+                    for entry in checkpoint["fileEntries"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .skip(old_entries)
+                    {
+                        if entry["type"] == "compaction" {
+                            c.pi.messages.push(json!({"role":"compactionSummary","summary":entry["summary"],"timestamp":entry["timestamp"]}));
+                        }
                     }
-                    c.pending = None;
+                    c.history = checkpoint["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|m| m["role"] != "system")
+                        .cloned()
+                        .collect();
+                    c.checkpoint = Some(checkpoint);
+                    if let Some(stats) = stats {
+                        let _ = c.pi.apply(&json!({"type":"stats_update","stats":stats}));
+                    }
+                    if c.retained_bytes() > SESSION_BYTES {
+                        c.status = "sync_failed";
+                        c.poisoned = true;
+                    }
+                }
+                if c.status == "sync_failed" || c.record_error {
+                    c.poisoned = true;
+                    c.status = "sync_failed";
+                }
+                if c.compact {
+                    let success = c.status == "done" && !c.record_error;
+                    let _=c.pi.apply(&json!({"type":"response","command":"compact","success":success,"error":if success {Value::Null} else {json!(status_text(c.status))}}));
+                    events.push(Event::Compacted(
+                        session.id,
+                        if success {
+                            None
+                        } else {
+                            Some(status_text(c.status).into())
+                        },
+                    ));
+                } else if c.status != "done" || c.record_error {
                     let stop = if c.status == "stopped" {
                         "aborted"
                     } else {
@@ -465,7 +611,6 @@ impl Local {
                     let mut last=c.pi.messages.last().filter(|m|m["role"]=="assistant").cloned().unwrap_or(json!({"role":"assistant","content":[],"timestamp":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64}));
                     last["stopReason"] = json!(stop);
                     last["errorMessage"] = json!(status_text(c.status));
-                    // A final message may already have closed the streaming pointer.
                     if c.pi
                         .messages
                         .last()
@@ -482,9 +627,10 @@ impl Local {
                         ));
                     }
                 }
+                c.pending = None;
                 c.task = None;
                 let _ = c.pi.apply(&json!({"type":"agent_settled"}));
-                if c.status != "stopped" {
+                if !c.compact && c.status != "stopped" {
                     events.push(Event::Finished(session.id));
                 }
             }
@@ -493,11 +639,31 @@ impl Local {
         events
     }
 }
+impl Conversation {
+    fn retained_bytes(&self) -> usize {
+        bytes(&self.pi.messages)
+            .saturating_add(bytes(&self.history))
+            .saturating_add(bytes(&self.checkpoint))
+            .saturating_add(bytes(&self.turns))
+            .saturating_add(bytes(&self.pending))
+    }
+}
 fn status_text(status: &str) -> &'static str {
     match status {
         "idle" => "Ready",
         "preparing" => "Checking account…",
         "streaming" => "Replying…",
+        "compacting" => "Compacting…",
+        "compaction_failed" => {
+            "Context summarization did not complete. Previous context was kept; check connectivity/account and try again."
+        }
+        "nothing_to_compact" => "Nothing to compact yet (or already compacted).",
+        "context_full" => {
+            "Input still exceeds the model context after compaction. Shorten the message or choose a larger-context model."
+        }
+        "sync_failed" => {
+            "Session state could not be synchronized. Start a new session; the transcript was kept."
+        }
         "stopping" => "Stopping; waiting for account refresh to settle…",
         "done" => "Reply complete",
         "stopped" => "Stopped. Partial turns are not included in later requests.",
@@ -701,7 +867,7 @@ impl PhoneApp {
                     || name.starts_with("thinking-choice-")
                     || name.starts_with("session-row-")
                     || name.starts_with("thread-"))
-                .then(|| (name, *rect))
+                .then_some((name, *rect))
             })
             .collect();
         let visible = self.visible && self.window_active && !self.local_providers.visible;
@@ -723,13 +889,14 @@ impl PhoneApp {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use gpui::{Modifiers, px};
     use pi_quickjs_backend_poc::auth::VaultScope;
-    struct Memory(Mutex<std::collections::BTreeMap<String, Value>>);
+    pub(crate) static ACCOUNT_TEST_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) struct Memory(Mutex<std::collections::BTreeMap<String, Value>>);
     impl Memory {
-        fn new() -> Arc<Self> {
+        pub(crate) fn new() -> Arc<Self> {
             Arc::new(Self(Mutex::new([Provider::Claude,Provider::Codex].into_iter().map(|p|(p.id().to_owned(),json!({"generation":"0","credential":{
                 "type":"oauth","access":"expired","refresh":"synthetic-chat-old","expires":0,"accountId":"acct_test_123"
             }}))).collect())))
@@ -762,8 +929,8 @@ mod tests {
             Ok(())
         }
     }
-    fn drain(store: &mut Store) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    pub(crate) fn drain(store: &mut Store) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while store.running().next().is_some() {
             assert!(std::time::Instant::now() < deadline);
             store.tick(Duration::from_millis(10));
@@ -772,6 +939,7 @@ mod tests {
     }
     #[test]
     fn adapter_uses_canonical_completed_turns_without_demo_queue_tools_or_persistence() {
+        let _serial = ACCOUNT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for provider in [Provider::Claude, Provider::Codex] {
             let mut backend = Local::new(provider, Memory::new(), true);
             let session = backend.create().unwrap();
@@ -897,8 +1065,93 @@ mod tests {
                 store.local.as_ref().unwrap().conversations[&id].history,
                 canonical
             );
+            store.local.as_mut().unwrap().mode = Mode::Reply;
+            for text in ["old facts ".repeat(10000), "recent facts ".repeat(10000)] {
+                store.send(id, text.as_str().into(), vec![]).unwrap();
+                drain(&mut store);
+            }
+            let before = store.session(id).unwrap().clone();
+            let graph = store.local.as_ref().unwrap().conversations[&id]
+                .checkpoint
+                .as_ref()
+                .unwrap()["fileEntries"]
+                .as_array()
+                .unwrap()
+                .clone();
+            assert!(store.supports_compact(id));
+            store.compact(id, Some("retain facts".into())).unwrap();
+            assert_eq!(store.session(id).unwrap().state, State::Working);
+            assert!(store.session(id).unwrap().activity.contains("Compacting"));
+            assert!(store.send(id, "during compaction".into(), vec![]).is_err());
+            let mut compact_events = Vec::new();
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            while store.running().next().is_some() {
+                assert!(std::time::Instant::now() < until);
+                compact_events.extend(store.tick(Duration::from_millis(10)));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(compact_events.contains(&Event::Compacted(id, None)));
+            let after = store.session(id).unwrap();
+            assert_eq!(after.id, before.id);
+            assert_eq!(after.turns.len(), before.turns.len());
+            assert_eq!(after.details.context_percent, None);
+            assert!(after.details.auto_compaction_enabled);
+            assert!(after.turns.iter().any(|t| {
+                t.flow
+                    .iter()
+                    .any(|f| matches!(f,Flow::Compacted(summary) if summary.contains("Hello")))
+            }));
+            for (old, new) in before.turns.iter().zip(&after.turns) {
+                assert_eq!(old.attachments, new.attachments);
+                assert_eq!(old.excluded, new.excluded);
+            }
+            let cp = store.local.as_ref().unwrap().conversations[&id]
+                .checkpoint
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                &cp["fileEntries"].as_array().unwrap()[..graph.len()],
+                graph.as_slice()
+            );
+            store.send(id, "after compaction".into(), vec![]).unwrap();
+            drain(&mut store);
+            assert_eq!(store.session(id).unwrap().state, State::Done);
+            // Byte admission counts visible failures/metadata too, not only active LLM context.
+            let c = store
+                .local
+                .as_mut()
+                .unwrap()
+                .conversations
+                .get_mut(&id)
+                .unwrap();
+            c.turns.last_mut().unwrap().excluded = Some("x".repeat(SESSION_BYTES));
+            assert!(store.send(id, "budget check".into(), vec![]).is_err());
             store.remove(id);
             assert!(store.local.as_ref().unwrap().conversations.is_empty());
+            // Maximum supported attachment payloads must survive native settlement,
+            // checkpoint restoration and a subsequent prompt, not just the JS VM.
+            use base64::Engine;
+            let image = pi_core::protocol::ImageContent::new(
+                base64::engine::general_purpose::STANDARD.encode(vec![1; 1024 * 1024]),
+                "image/png",
+            );
+            let session = store.local.as_mut().unwrap().create().unwrap();
+            let id = session.id;
+            store.sessions.push(session);
+            store
+                .send(
+                    id,
+                    Prompt::new("four images".into(), vec![image; 4]),
+                    vec!["image.png".into(); 4],
+                )
+                .unwrap();
+            drain(&mut store);
+            assert_eq!(store.session(id).unwrap().state, State::Done);
+            assert!(!store.local.as_ref().unwrap().conversations[&id].poisoned);
+            store.send(id, "image follow-up".into(), vec![]).unwrap();
+            drain(&mut store);
+            assert_eq!(store.session(id).unwrap().state, State::Done);
+            store.remove(id);
         }
     }
     #[gpui::test]
@@ -922,9 +1175,13 @@ mod tests {
         for name in ["composer-attach", "composer-thinking"] {
             assert!(cx.debug_bounds(name).is_some(), "{name}");
         }
-        for name in ["composer-command", "local-chat-composer", "backend-picker"] {
+        for name in ["local-chat-composer", "backend-picker"] {
             assert!(cx.debug_bounds(name).is_none(), "{name}");
         }
+        assert!(
+            cx.debug_bounds("composer-command").is_some(),
+            "Local exposes the shared Compact action"
+        );
         let point = cx.debug_bounds("composer-model").unwrap().center();
         cx.simulate_click(point, Modifiers::none());
         cx.run_until_parked();

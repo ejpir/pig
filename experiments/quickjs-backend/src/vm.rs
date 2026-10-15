@@ -67,8 +67,11 @@ pub(crate) fn execute(
     let mut host = config.host;
     let http_cancel = cancel.clone();
     let http_revoked = config.revoked.clone();
+    let admission_cancel = host.cancelled.clone();
     let cancelled = Arc::new(move || {
-        http_cancel.load(Ordering::Relaxed) || http_revoked.as_ref().is_some_and(|check| check())
+        http_cancel.load(Ordering::Relaxed)
+            || http_revoked.as_ref().is_some_and(|check| check())
+            || admission_cancel.as_ref().is_some_and(|check| check())
     });
     host.cancelled = Some(cancelled.clone());
     // The body is itself JSON inside this envelope; escaping can double it.

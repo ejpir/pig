@@ -1,11 +1,16 @@
 pub mod app_fixture;
 pub mod auth;
 pub mod auth_fixture;
+#[cfg(feature = "bun")]
+pub mod bun;
+#[cfg(feature = "bun")]
+mod bun_vm;
 pub mod chat;
 pub mod chat_fixture;
 mod dns;
 pub mod fixture;
 mod http;
+mod sdk_platform;
 mod vm;
 mod workspace;
 

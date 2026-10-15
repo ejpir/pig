@@ -1,3 +1,4 @@
+pub mod durable;
 mod channel;
 pub mod clock;
 pub mod command_output;

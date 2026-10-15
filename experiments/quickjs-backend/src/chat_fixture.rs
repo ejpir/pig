@@ -1,7 +1,7 @@
 //! Offline subscription wire fixtures. Real destination policy runs before loopback remapping.
 use crate::{
     auth::{Vault, VaultScope},
-    chat::{ChatTask, Request},
+    chat::{ChatTask, Request, SessionInput},
     http::HttpHost,
 };
 use anyhow::{Result, ensure};
@@ -27,6 +27,16 @@ pub enum Mode {
     OversizeEnd,
     #[cfg(test)]
     OversizeSignature,
+    #[cfg(test)]
+    OverflowOnce,
+    #[cfg(test)]
+    OverflowAlways,
+    #[cfg(test)]
+    OverflowSummaryError,
+    #[cfg(test)]
+    SummaryError,
+    #[cfg(test)]
+    SummaryLength,
 }
 struct Server {
     base: String,
@@ -158,6 +168,28 @@ impl Server {
                         );
                     }
                     received.lock().unwrap().push(data.clone());
+                    #[cfg(test)]
+                    let summary = data.to_string().contains("context summarization assistant");
+                    #[cfg(test)]
+                    if (!summary
+                        && (mode == Mode::OverflowAlways
+                            || (matches!(mode, Mode::OverflowOnce | Mode::OverflowSummaryError)
+                                && received.lock().unwrap().len() == 1)))
+                        || (summary
+                            && matches!(mode, Mode::SummaryError | Mode::OverflowSummaryError))
+                    {
+                        let text = if summary {
+                            r#"{"error":{"message":"synthetic-SECRET-summary-error"}}"#
+                        } else {
+                            r#"{"error":{"message":"context length exceeded"}}"#
+                        };
+                        write!(
+                            socket,
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                            text.len()
+                        )?;
+                        return Ok(());
+                    }
                     if mode == Mode::Reject {
                         let text =
                             r#"{"error":{"message":"synthetic-SECRET-response-must-not-leak"}}"#;
@@ -186,6 +218,20 @@ impl Server {
                             json!({"type":"response.completed","response":{"id":"resp_fixture","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}),
                         ]
                     };
+                    #[cfg(test)]
+                    if mode == Mode::SummaryLength && summary {
+                        for event in &mut events {
+                            if event["type"] == "message_delta" {
+                                event["delta"]["stop_reason"] = json!("max_tokens");
+                            }
+                            if event["type"] == "response.completed" {
+                                event["type"] = json!("response.incomplete");
+                                event["response"]["status"] = json!("incomplete");
+                                event["response"]["incomplete_details"] =
+                                    json!({"reason":"max_output_tokens"});
+                            }
+                        }
+                    }
                     let thinking = "Synthetic reasoning";
                     if claude && data["thinking"].is_object() {
                         for event in &mut events {
@@ -294,13 +340,22 @@ impl Server {
         }))
     }
     fn start(self: &Arc<Self>, request: Request, vault: Arc<dyn Vault>) -> Result<ChatTask> {
+        self.start_session(request, SessionInput::default(), vault)
+    }
+    fn start_session(
+        self: &Arc<Self>,
+        request: Request,
+        session: SessionInput,
+        vault: Arc<dyn Vault>,
+    ) -> Result<ChatTask> {
         ensure!(
             vault.scope() == VaultScope::Synthetic,
             "fixture requires synthetic vault"
         );
         let provider = request.provider;
-        ChatTask::start_with_hosts(
+        ChatTask::start_session_with_hosts(
             request,
+            session,
             vault,
             HttpHost::auth_fixture(provider, &self.base, self.clone())?,
             HttpHost::inference_fixture(provider, &self.base, self.clone())?,
@@ -313,6 +368,15 @@ pub fn start(request: Request, vault: Arc<dyn Vault>, mode: Mode) -> Result<Chat
         "fixture requires synthetic vault"
     );
     Server::new(mode)?.start(request, vault)
+}
+
+pub fn start_session(
+    request: Request,
+    session: SessionInput,
+    vault: Arc<dyn Vault>,
+    mode: Mode,
+) -> Result<ChatTask> {
+    Server::new(mode)?.start_session(request, session, vault)
 }
 
 #[cfg(test)]
@@ -373,6 +437,355 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
+    }
+    #[test]
+    fn sdk_manual_compaction_restores_canonical_entries_and_context() -> Result<()> {
+        let _serial = auth::TEST_ACCOUNT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for provider in [Provider::Claude, Provider::Codex] {
+            let server = Server::new(Mode::Reply)?;
+            let vault = Memory::new(provider);
+            let first = server.start(
+                request(provider, vec![user(&"old history ".repeat(9000))]),
+                vault.clone(),
+            )?;
+            wait(&first, ChatTask::is_finished);
+            assert_eq!(first.snapshot().status, "done");
+            let (checkpoint, stats, _) = first.take_session_result();
+            let checkpoint = checkpoint.unwrap();
+            assert!(stats.unwrap()["contextUsage"]["tokens"].as_u64().unwrap() > 0);
+            let mut messages = checkpoint["messages"].as_array().unwrap().clone();
+            messages.push(user(&"recent history ".repeat(9000)));
+            let second = server.start_session(
+                request(provider, messages),
+                SessionInput {
+                    session_id: Some(checkpoint["sessionId"].as_str().unwrap().into()),
+                    checkpoint: Some(checkpoint),
+                    ..Default::default()
+                },
+                vault.clone(),
+            )?;
+            wait(&second, ChatTask::is_finished);
+            assert_eq!(second.snapshot().status, "done");
+            let checkpoint = second.take_session_result().0.unwrap();
+            let id = checkpoint["sessionId"].as_str().unwrap().to_owned();
+            let entries = checkpoint["fileEntries"].as_array().unwrap().clone();
+            let messages = checkpoint["messages"].as_array().unwrap().clone();
+            let compact = server.start_session(
+                request(provider, messages),
+                SessionInput {
+                    session_id: Some(id.clone()),
+                    checkpoint: Some(checkpoint),
+                    compact: true,
+                    custom_instructions: Some("Keep important facts".into()),
+                    ..Default::default()
+                },
+                vault.clone(),
+            )?;
+            wait(&compact, ChatTask::is_finished);
+            assert_eq!(compact.snapshot().status, "done");
+            let (checkpoint, stats, result) = compact.take_session_result();
+            let checkpoint = checkpoint.unwrap();
+            assert_eq!(checkpoint["sessionId"], id);
+            assert_eq!(
+                &checkpoint["fileEntries"].as_array().unwrap()[..entries.len()],
+                entries.as_slice()
+            );
+            assert!(
+                checkpoint["fileEntries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["type"] == "compaction")
+            );
+            assert!(stats.unwrap()["contextUsage"]["tokens"].is_null());
+            assert!(
+                result.unwrap()["summary"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Hello")
+            );
+            let mut context = checkpoint["messages"].as_array().unwrap().clone();
+            context.push(user("After summary"));
+            let next = server.start_session(
+                request(provider, context),
+                SessionInput {
+                    session_id: Some(id),
+                    checkpoint: Some(checkpoint),
+                    ..Default::default()
+                },
+                vault,
+            )?;
+            wait(&next, ChatTask::is_finished);
+            assert_eq!(next.snapshot().status, "done");
+            assert_eq!(server.requests.lock().unwrap().len(), 4);
+            assert!(
+                server.requests.lock().unwrap()[3]
+                    .to_string()
+                    .contains("Hello")
+            );
+            assert!(next.take_session_result().1.unwrap()["contextUsage"]["tokens"].is_number());
+        }
+        Ok(())
+    }
+    fn seed_checkpoint(provider: Provider) -> Result<Value> {
+        let server = Server::new(Mode::Reply)?;
+        let vault = Memory::new(provider);
+        let first = server.start(
+            request(provider, vec![user(&"old facts ".repeat(10000))]),
+            vault.clone(),
+        )?;
+        wait(&first, ChatTask::is_finished);
+        assert_eq!(first.snapshot().status, "done");
+        let cp = first.take_session_result().0.unwrap();
+        let mut messages = cp["messages"].as_array().unwrap().clone();
+        messages.push(user(&"recent facts ".repeat(10000)));
+        let second = server.start_session(
+            request(provider, messages),
+            SessionInput {
+                session_id: Some(cp["sessionId"].as_str().unwrap().into()),
+                checkpoint: Some(cp),
+                ..Default::default()
+            },
+            vault,
+        )?;
+        wait(&second, ChatTask::is_finished);
+        assert_eq!(second.snapshot().status, "done");
+        Ok(second.take_session_result().0.unwrap())
+    }
+    #[test]
+    fn sdk_threshold_overflow_retry_and_failed_summary_preserve_graph() -> Result<()> {
+        let _serial = auth::TEST_ACCOUNT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for provider in [Provider::Claude, Provider::Codex] {
+            let cp = seed_checkpoint(provider)?;
+            for mode in [
+                Mode::OverflowOnce,
+                Mode::OverflowAlways,
+                Mode::OverflowSummaryError,
+            ] {
+                let server = Server::new(mode)?;
+                let mut messages = cp["messages"].as_array().unwrap().clone();
+                messages.push(user("next turn"));
+                let task = server.start_session(
+                    request(provider, messages),
+                    SessionInput {
+                        session_id: Some(cp["sessionId"].as_str().unwrap().into()),
+                        checkpoint: Some(cp.clone()),
+                        ..Default::default()
+                    },
+                    Memory::new(provider),
+                )?;
+                wait(&task, ChatTask::is_finished);
+                assert_eq!(
+                    task.snapshot().status,
+                    if mode == Mode::OverflowOnce {
+                        "done"
+                    } else if mode == Mode::OverflowSummaryError {
+                        "compaction_failed"
+                    } else {
+                        "context_full"
+                    },
+                    "{mode:?}, requests={}",
+                    server.requests.lock().unwrap().len()
+                );
+                let next = task.take_session_result().0.unwrap();
+                let entries = next["fileEntries"].as_array().unwrap();
+                assert_eq!(
+                    &entries[..cp["fileEntries"].as_array().unwrap().len()],
+                    cp["fileEntries"].as_array().unwrap()
+                );
+                assert!(
+                    entries.iter().any(|e| e["type"] == "context_edit"),
+                    "upstream recovery edits must survive failed summaries too"
+                );
+                assert_eq!(
+                    entries.iter().filter(|e| e["type"] == "compaction").count(),
+                    usize::from(mode != Mode::OverflowSummaryError)
+                );
+                assert_eq!(
+                    server.requests.lock().unwrap().len(),
+                    if mode == Mode::OverflowSummaryError {
+                        2
+                    } else {
+                        3
+                    },
+                    "one compact/retry per turn"
+                );
+                if mode != Mode::OverflowOnce {
+                    assert!(task.take_message().is_none());
+                }
+                assert!(!next.to_string().contains("SECRET"));
+            }
+            for mode in [Mode::SummaryError, Mode::SummaryLength, Mode::Stall] {
+                let server = Server::new(mode)?;
+                let task = server.start_session(
+                    request(provider, cp["messages"].as_array().unwrap().clone()),
+                    SessionInput {
+                        session_id: Some(cp["sessionId"].as_str().unwrap().into()),
+                        checkpoint: Some(cp.clone()),
+                        compact: true,
+                        custom_instructions: None,
+                        ..Default::default()
+                    },
+                    Memory::new(provider),
+                )?;
+                if mode == Mode::Stall {
+                    wait_for(|| !server.requests.lock().unwrap().is_empty());
+                    thread::sleep(Duration::from_millis(50));
+                    task.cancel();
+                }
+                wait(&task, ChatTask::is_finished);
+                assert_ne!(task.snapshot().status, "done");
+                assert!(task.take_message().is_none());
+                let next = task.take_session_result().0.unwrap();
+                assert!(
+                    !next["fileEntries"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|e| e["type"] == "compaction"),
+                    "partial/failed summaries must not be committed"
+                );
+                assert_eq!(
+                    next["messages"], cp["messages"],
+                    "failed summary preserves context"
+                );
+                if mode == Mode::Stall {
+                    assert_eq!(task.snapshot().status, "stopped");
+                    assert!(server.closed.load(Ordering::Relaxed));
+                }
+            }
+            let mut high = cp.clone();
+            let window = crate::chat::catalog(provider)
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == crate::chat::models(provider)[0].0)
+                .unwrap()["contextWindow"]
+                .as_u64()
+                .unwrap();
+            let last = high["fileEntries"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .rev()
+                .find(|e| e["type"] == "message" && e["message"]["role"] == "assistant")
+                .unwrap();
+            last["message"]["usage"]["input"] = json!(window - 16384);
+            last["message"]["usage"]["totalTokens"] = json!(window - 16382); // + output crosses the strict threshold.
+            let server = Server::new(Mode::Reply)?;
+            let mut messages = cp["messages"].as_array().unwrap().clone();
+            messages.push(user("threshold preflight"));
+            let task = server.start_session(
+                request(provider, messages),
+                SessionInput {
+                    session_id: Some(cp["sessionId"].as_str().unwrap().into()),
+                    checkpoint: Some(high),
+                    ..Default::default()
+                },
+                Memory::new(provider),
+            )?;
+            wait(&task, ChatTask::is_finished);
+            assert_eq!(task.snapshot().status, "done");
+            let (next, stats, _) = task.take_session_result();
+            assert_eq!(
+                server.requests.lock().unwrap().len(),
+                2,
+                "window={window}, stats={}",
+                stats.unwrap()
+            );
+            let next = next.unwrap();
+            assert!(
+                next["fileEntries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["type"] == "compaction")
+            );
+            let mut high = cp.clone();
+            let last = high["fileEntries"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .rev()
+                .find(|e| e["type"] == "message" && e["message"]["role"] == "assistant")
+                .unwrap();
+            last["message"]["usage"]["input"] = json!(window - 16384);
+            last["message"]["usage"]["totalTokens"] = json!(window - 16382);
+            let server = Server::new(Mode::Reply)?;
+            let mut messages = cp["messages"].as_array().unwrap().clone();
+            messages.push(user("cancel at summary boundary"));
+            let task = server.start_session(
+                request(provider, messages),
+                SessionInput {
+                    session_id: Some(cp["sessionId"].as_str().unwrap().into()),
+                    checkpoint: Some(high),
+                    stop_after_compaction: true,
+                    ..Default::default()
+                },
+                Memory::new(provider),
+            )?;
+            wait(&task, ChatTask::is_finished);
+            assert_eq!(task.snapshot().status, "stopped");
+            assert_eq!(
+                server.requests.lock().unwrap().len(),
+                1,
+                "no request may begin after cancellation at compaction completion"
+            );
+            let next = task.take_session_result().0.unwrap();
+            assert!(
+                next["fileEntries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e["type"] == "compaction")
+            );
+            assert!(
+                !next["messages"]
+                    .to_string()
+                    .contains("cancel at summary boundary")
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn oversized_pending_input_on_short_history_is_context_full_without_inference() -> Result<()> {
+        let _serial = auth::TEST_ACCOUNT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let provider = Provider::Codex;
+        let cp = seed_checkpoint(provider)?;
+        let previous = cp["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .unwrap()
+            .clone();
+        let server = Server::new(Mode::Reply)?;
+        let mut request = request(
+            provider,
+            vec![user("short"), previous, user(&"x".repeat(1024 * 1024))],
+        );
+        request.model = "gpt-5.3-codex-spark".into();
+        let task = server.start(request, Memory::new(provider))?;
+        wait(&task, ChatTask::is_finished);
+        assert_eq!(task.snapshot().status, "context_full");
+        assert!(task.take_message().is_none());
+        assert_eq!(server.requests.lock().unwrap().len(), 0);
+        assert_eq!(
+            task.take_session_result().0.unwrap()["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["role"] == "user")
+                .count(),
+            1
+        );
+        Ok(())
     }
     #[test]
     fn large_native_images_cross_the_vm_envelope_and_full_blocks_are_bounded() -> Result<()> {

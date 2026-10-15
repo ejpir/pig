@@ -11,6 +11,7 @@ ui-test = ["pi_visual_ui/ui-test"]
 # Experimental provider accounts and backend fixture in a separate APK; never a production default.
 # The offline fixture additionally requires Android FLAG_DEBUGGABLE at runtime.
 quickjs-backend-test = ["ui-test", "dep:pi-quickjs-backend-poc"]
+bun-backend-test = ["quickjs-backend-test", "pi-quickjs-backend-poc/bun"]
 
 # The cdylib is what GpuiActivity loads (`libpi_android.so`); build the APK with
 # scripts/build_apk.py. The views compile on any host for tests and previews.

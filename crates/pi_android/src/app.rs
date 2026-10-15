@@ -593,6 +593,8 @@ impl PhoneApp {
             || std::env::temp_dir().join("pi-android"),
             Path::to_path_buf,
         );
+        #[cfg(feature = "bun-backend-test")]
+        crate::local_chat::configure(&data_dir);
         // On the phone the key is made at once, to show; elsewhere on connecting.
         let phone_key = prefs_path
             .is_some()
@@ -728,7 +730,14 @@ impl PhoneApp {
         };
         app.apply_theme(window, cx);
         app.apply_return_sends(cx);
-        if let Some(address) = computer {
+        #[cfg(feature="bun-backend-test")]
+        let prefer_local = app.data_dir.join("local-backend-preferred").is_file();
+        #[cfg(not(feature="bun-backend-test"))]
+        let prefer_local = false;
+        if prefer_local {
+            #[cfg(feature="bun-backend-test")]
+            app.select_local_backend(window, cx);
+        } else if let Some(address) = computer {
             app.address
                 .update(cx, |field, cx| field.set_text(address.clone(), cx));
             if sample {
@@ -840,8 +849,7 @@ impl PhoneApp {
     fn compact_available_for_session(&self, id: SessionId) -> bool {
         self.store
             .as_ref()
-            .and_then(|store| store.live.as_ref())
-            .is_some_and(|live| live.commands(id).is_some() && live.supports_compact(id))
+            .is_some_and(|store| store.supports_compact(id))
     }
 
     pub(crate) fn compact_pending(&self, id: SessionId) -> bool {
@@ -849,9 +857,12 @@ impl PhoneApp {
     }
 
     fn compact_for_session(&self, id: SessionId, draft: &str) -> Option<Option<String>> {
-        let live = self.store.as_ref()?.live.as_ref()?;
+        let store = self.store.as_ref()?;
+        if store.live.is_none() && !store.is_local() {
+            return None;
+        }
         let parsed = compact_instructions(draft, false)?;
-        let Some(commands) = live.commands(id) else {
+        let Some(commands) = store.commands(id) else {
             // Do not turn an action into model text while its possible session
             // shadow is still unknown. Live keeps the draft and asks to wait.
             return Some(parsed);
@@ -954,6 +965,9 @@ impl PhoneApp {
     }
 
     fn entered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Disposable QuickJS operations stop when leaving their screen. Durable
+        // Local owns its execution independently of which backend is displayed.
+        #[cfg(not(feature = "bun-backend-test"))]
         if !matches!(self.route(), Route::Thread(_))
             && let Some(store) = &self.store
         {
@@ -1261,6 +1275,11 @@ impl PhoneApp {
     pub(crate) fn preserve_local_drafts(&mut self, cx: &mut Context<Self>) {
         #[cfg(feature = "quickjs-backend-test")]
         if self.is_local() {
+            // Preserve the command before parking its cleared composer. Parked
+            // backend completions have no active composer/notification target.
+            for (_, (target, draft)) in std::mem::take(&mut self.pending_compacts) {
+                self.restore_compact_draft(target, &draft, cx);
+            }
             self.parked_local_start = Some(self.start.update(cx, |c, cx| {
                 c.cancel_imports(cx);
                 (c.area.read(cx).text().to_owned(), c.attachments().to_vec())
@@ -1277,6 +1296,7 @@ impl PhoneApp {
         if self.is_local()
             && let Some(mut previous) = self.store.take()
         {
+            #[cfg(not(feature = "bun-backend-test"))]
             previous.cancel_local();
             previous.retire_generation();
             let ids: Vec<_> = previous.sessions.iter().map(|s| s.id).collect();
@@ -1912,6 +1932,10 @@ impl PhoneApp {
 
     #[cfg(feature = "quickjs-backend-test")]
     pub(crate) fn select_local_backend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature="bun-backend-test")]
+        if !self.local_providers.is_synthetic() {
+            let _ = std::fs::write(self.data_dir.join("local-backend-preferred"), "local");
+        }
         self.close_sheet(cx);
         self.closing_sheet = None;
         self.cancel_connection_attempt();
@@ -2229,7 +2253,11 @@ impl PhoneApp {
             self.last_tick = now;
             return;
         };
-        if store.running().next().is_none() {
+        #[cfg(feature = "bun-backend-test")]
+        let local_idle = store.local.is_some();
+        #[cfg(not(feature = "bun-backend-test"))]
+        let local_idle = false;
+        if !local_idle && store.running().next().is_none() {
             self.last_tick = now;
             return;
         }
@@ -2254,6 +2282,19 @@ impl PhoneApp {
     }
 
     fn alert(&mut self, event: Event, cx: &mut Context<Self>) {
+        #[cfg(feature = "quickjs-backend-test")]
+        if let Event::Compacted(id, error) = &event {
+            if let Some((target, draft)) = self.pending_compacts.remove(id)
+                && error.is_some()
+            {
+                self.restore_compact_draft(target, &draft, cx);
+            }
+            self.notify_user(
+                error.clone().unwrap_or_else(|| "Context compacted".into()),
+                cx,
+            );
+            return;
+        }
         let prefs = self.prefs(cx).clone();
         let accent = theme(cx).accent_rgb();
         let Some(store) = &self.store else {
@@ -2264,6 +2305,8 @@ impl PhoneApp {
         }
         let computer = store.computer.name.clone();
         match event {
+            #[cfg(feature = "quickjs-backend-test")]
+            Event::Compacted(..) => {}
             Event::Deleted(id) => self.finish_deletion(id, cx),
             Event::NeedsYou(id) => {
                 if self.viewing(id) {
@@ -2410,6 +2453,7 @@ impl PhoneApp {
             if (self.is_local() || self.local_providers.visible) && !navigation {
                 return;
             }
+            #[cfg(not(feature = "bun-backend-test"))]
             if navigation && let Some(store) = &self.store {
                 store.cancel_local();
             }
@@ -3350,7 +3394,9 @@ impl PhoneApp {
     ) {
         if let Some(composer) = self.composer(target) {
             composer.update(cx, |composer, cx| {
-                if !composer.can_send(cx) {
+                // An in-flight attachment import disables Send even when a new
+                // draft exists. Never overwrite text/attachments composed later.
+                if composer.area.read(cx).text().is_empty() && composer.attachments().is_empty() {
                     composer.set_text(draft, cx);
                 }
             });
@@ -4397,6 +4443,8 @@ mod tests {
     fn local_reselection_retires_remote_generations_without_losing_conversations(
         cx: &mut gpui::TestAppContext,
     ) {
+        use super::Target;
+        use crate::store::Event;
         use pi_quickjs_backend_poc::auth::{Provider, Vault, VaultScope};
         struct EmptyVault;
         impl Vault for EmptyVault {
@@ -4433,6 +4481,40 @@ mod tests {
                 assert_ne!(app.connection_generation, attempt);
                 assert_eq!(app.store.as_ref().unwrap().generation, store);
                 assert_eq!(app.route(), route);
+                let id = app.model_session().unwrap();
+                assert!(app.compact_available_for_session(id));
+                assert_eq!(
+                    app.compact_for_session(id, "/compact keep decisions"),
+                    Some(Some("keep decisions".into()))
+                );
+                assert_eq!(app.compact_for_session(id, "/compactly"), None);
+                let composer = app.thread_composer(id, window, cx);
+                let target = Target::Thread(id);
+                composer.update(cx, |c, cx| c.set_text("/compact keep decisions", cx));
+                app.pending_compacts
+                    .insert(id, (target, "/compact keep decisions".into()));
+                composer.update(cx, |c, cx| c.clear(cx));
+                app.alert(Event::Compacted(id, Some("Nothing to compact".into())), cx);
+                assert!(!app.compact_pending(id));
+                assert_eq!(
+                    composer.read(cx).area.read(cx).text(),
+                    "/compact keep decisions"
+                );
+                app.pending_compacts
+                    .insert(id, (target, "/compact old command".into()));
+                composer.update(cx, |c, cx| c.set_text("new draft", cx));
+                let import = composer.update(cx, |c, cx| c.begin_import(cx));
+                app.alert(Event::Compacted(id, Some("Cancelled".into())), cx);
+                assert_eq!(
+                    composer.read(cx).area.read(cx).text(),
+                    "new draft",
+                    "disabled Send during import must not replace a later draft"
+                );
+                composer.update(cx, |c, cx| c.finish_import(import, cx));
+                app.pending_compacts.insert(id, (target, "/compact".into()));
+                app.alert(Event::Compacted(id, None), cx);
+                assert!(!app.compact_pending(id));
+                assert_eq!(composer.read(cx).area.read(cx).text(), "new draft");
                 assert_eq!(
                     super::prompt_with_capabilities(
                         "@Visualize make a calculator",
@@ -4443,6 +4525,90 @@ mod tests {
                     .unwrap()
                     .message,
                     "@Visualize make a calculator"
+                );
+            })
+        });
+    }
+    #[cfg(all(feature = "quickjs-backend-test", not(feature = "bun-backend-test")))]
+    #[gpui::test]
+    fn switching_backends_preserves_an_interrupted_compact_command(cx: &mut TestAppContext) {
+        use super::Target;
+        use crate::{
+            composer::ComposerEvent,
+            local_chat::tests::{ACCOUNT_TEST_LOCK, Memory, drain},
+        };
+        use pi_quickjs_backend_poc::{auth::Provider, chat_fixture::Mode};
+        let _serial = ACCOUNT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.visible = true;
+                app.window_active = true;
+                assert!(app.open_local_chat(Provider::Claude, Memory::new(), true, window, cx));
+                let id = app.model_session().unwrap();
+                for text in ["old facts ".repeat(10000), "recent facts ".repeat(10000)] {
+                    let store = app.store.as_mut().unwrap();
+                    store.send(id, text.as_str().into(), vec![]).unwrap();
+                    drain(store);
+                }
+                let before = app.store.as_ref().unwrap().session(id).unwrap().turns.len();
+                app.store.as_mut().unwrap().local.as_mut().unwrap().mode = Mode::Stall;
+                let composer = app.thread_composer(id, window, cx);
+                let draft = "/compact preserve decisions";
+                composer.update(cx, |c, cx| c.set_text(draft, cx));
+                app.composer_event(
+                    Target::Thread(id),
+                    &ComposerEvent::Send {
+                        text: draft.into(),
+                        attachments: vec![],
+                    },
+                    window,
+                    cx,
+                );
+                assert!(app.compact_pending(id));
+                assert_eq!(composer.read(cx).area.read(cx).text(), "");
+                // Let the real SDK start its summary, then park and cancel it.
+                std::thread::sleep(Duration::from_millis(900));
+                assert!(
+                    app.store
+                        .as_ref()
+                        .unwrap()
+                        .local
+                        .as_ref()
+                        .unwrap()
+                        .running()
+                );
+                app.open_sample(window, cx);
+                let deadline = Instant::now() + Duration::from_secs(15);
+                while app
+                    .parked_local
+                    .as_ref()
+                    .unwrap()
+                    .local
+                    .as_ref()
+                    .unwrap()
+                    .running()
+                {
+                    assert!(Instant::now() < deadline);
+                    app.tick(cx);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                app.select_local_backend(window, cx);
+                assert_eq!(composer.read(cx).area.read(cx).text(), draft);
+                assert!(!app.compact_pending(id));
+                assert_eq!(
+                    app.store.as_ref().unwrap().session(id).unwrap().turns.len(),
+                    before
+                );
+                assert!(
+                    !app.store
+                        .as_ref()
+                        .unwrap()
+                        .session(id)
+                        .unwrap()
+                        .state
+                        .is_running()
                 );
             })
         });

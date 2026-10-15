@@ -178,9 +178,13 @@ impl HttpHost {
     async fn fetch(&self, id: u32, request: &Value, tx: &SyncSender<Value>) -> Result<()> {
         ensure!(!self.is_cancelled(), "HTTP cancelled");
         let destination = self.destination(request)?;
-        let body = request["body"]
-            .as_str()
-            .context("expected a text request body")?;
+        let body = if let Some(encoded) = request["bodyBase64"].as_str() {
+            use base64::Engine;
+            ensure!(self.inference && encoded.len() <= self.body_limit().div_ceil(3) * 4, "binary request exceeds transport limit");
+            base64::engine::general_purpose::STANDARD.decode(encoded).context("invalid binary body")?
+        } else {
+            request["body"].as_str().context("expected a text request body")?.as_bytes().to_vec()
+        };
         // Images come through the same bounded native attachment importer as SSH.
         // Keep the smaller limit for auth and the separate workspace PoC.
         ensure!(
