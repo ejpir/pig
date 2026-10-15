@@ -98,6 +98,14 @@ pub enum Target {
     Review,
 }
 
+fn composer_target_active(target: Target, route: Route) -> bool {
+    match (target, route) {
+        (Target::Start, Route::Start) | (Target::Review, Route::Review(_)) => true,
+        (Target::Thread(id), Route::Thread(shown)) => id == shown,
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sheet {
     Details(SessionId),
@@ -364,6 +372,18 @@ pub struct PhoneApp {
     _retry: Option<Task<()>>,
     /// Where the key and settings live.
     pub(crate) data_dir: PathBuf,
+    #[cfg(feature = "local-backend")]
+    pub(crate) local_providers: crate::provider_accounts::Panel,
+    #[cfg(feature = "local-backend")]
+    pub(crate) local_frame: u64,
+    #[cfg(feature = "local-backend")]
+    pub(crate) local_private: bool,
+    #[cfg(feature = "local-backend")]
+    pub(crate) parked_local: Option<Store>,
+    #[cfg(feature = "local-backend")]
+    parked_local_threads: HashMap<SessionId, Entity<Composer>>,
+    #[cfg(feature = "local-backend")]
+    parked_local_start: Option<(String, Vec<crate::composer::Attachment>)>,
     /// Finds a folder or file in the project browser, or goes to a path.
     pub(crate) folder: Entity<TextArea>,
     reconnecting: bool,
@@ -543,6 +563,7 @@ impl PhoneApp {
             cx.observe_window_activation(window, |this, window, cx| {
                 this.window_active = window.is_window_active();
                 if !this.window_active {
+                    crate::scroll::cancel_motion();
                     this.visual_apps
                         .borrow_mut()
                         .projection_deferred(this.route(), false);
@@ -571,6 +592,8 @@ impl PhoneApp {
             || std::env::temp_dir().join("pi-android"),
             Path::to_path_buf,
         );
+        #[cfg(feature = "local-backend")]
+        crate::local_chat::configure(&data_dir);
         // On the phone the key is made at once, to show; elsewhere on connecting.
         let phone_key = prefs_path
             .is_some()
@@ -637,6 +660,18 @@ impl PhoneApp {
             resuming: None,
             _retry: None,
             data_dir,
+            #[cfg(feature = "local-backend")]
+            local_providers: Default::default(),
+            #[cfg(feature = "local-backend")]
+            local_frame: 0,
+            #[cfg(feature = "local-backend")]
+            local_private: false,
+            #[cfg(feature = "local-backend")]
+            parked_local: None,
+            #[cfg(feature = "local-backend")]
+            parked_local_threads: HashMap::new(),
+            #[cfg(feature = "local-backend")]
+            parked_local_start: None,
             folder,
             reconnecting: false,
             last_listed: Instant::now(),
@@ -692,7 +727,14 @@ impl PhoneApp {
         };
         app.apply_theme(window, cx);
         app.apply_return_sends(cx);
-        if let Some(address) = computer {
+        #[cfg(feature = "local-backend")]
+        let prefer_local = app.data_dir.join("local-backend-preferred").is_file();
+        #[cfg(not(feature = "local-backend"))]
+        let prefer_local = false;
+        if prefer_local {
+            #[cfg(feature = "local-backend")]
+            app.select_local_backend(window, cx);
+        } else if let Some(address) = computer {
             app.address
                 .update(cx, |field, cx| field.set_text(address.clone(), cx));
             if sample {
@@ -780,6 +822,9 @@ impl PhoneApp {
         project: usize,
         cx: &App,
     ) -> Option<Vec<SavedCommand>> {
+        if !self.backend_supports("workspace_browse") {
+            return Some(Vec::new());
+        }
         let path = self.store.as_ref()?.projects.get(project)?.path.clone();
         self.command_catalog_for_path(&path, cx)
     }
@@ -790,10 +835,10 @@ impl PhoneApp {
         cx: &App,
     ) -> Option<Vec<SavedCommand>> {
         let store = self.store.as_ref()?;
-        let live = store.live.as_ref()?;
-        if let Some(commands) = live.commands(id) {
+        if let Some(commands) = store.commands(id) {
             return Some(commands.iter().map(SavedCommand::from).collect());
         }
+        let live = store.live.as_ref()?;
         let path = live.session_cwd(id)?.to_owned();
         self.command_catalog_for_path(&path, cx)
     }
@@ -801,8 +846,7 @@ impl PhoneApp {
     fn compact_available_for_session(&self, id: SessionId) -> bool {
         self.store
             .as_ref()
-            .and_then(|store| store.live.as_ref())
-            .is_some_and(|live| live.commands(id).is_some() && live.supports_compact(id))
+            .is_some_and(|store| store.supports_compact(id))
     }
 
     pub(crate) fn compact_pending(&self, id: SessionId) -> bool {
@@ -810,9 +854,12 @@ impl PhoneApp {
     }
 
     fn compact_for_session(&self, id: SessionId, draft: &str) -> Option<Option<String>> {
-        let live = self.store.as_ref()?.live.as_ref()?;
+        let store = self.store.as_ref()?;
+        if store.live.is_none() && !store.is_local() {
+            return None;
+        }
         let parsed = compact_instructions(draft, false)?;
-        let Some(commands) = live.commands(id) else {
+        let Some(commands) = store.commands(id) else {
             // Do not turn an action into model text while its possible session
             // shadow is still unknown. Live keeps the draft and asks to wait.
             return Some(parsed);
@@ -938,6 +985,17 @@ impl PhoneApp {
     }
 
     pub(crate) fn open_sheet(&mut self, sheet: Sheet, cx: &mut Context<Self>) {
+        const RESOURCES: &str = "resources";
+        let required = match sheet {
+            Sheet::Resources => Some(RESOURCES),
+            Sheet::Project => Some("workspace_browse"),
+            Sheet::RestoreHistory(_, _) | Sheet::EnableJj(_) => Some("file_history"),
+            _ => None,
+        };
+        if required.is_some_and(|feature| !self.backend_supports(feature)) {
+            self.notify_user("This backend does not support that feature", cx);
+            return;
+        }
         self.closing_sheet = None;
         // A different sheet can be much taller than the last measured one. Until
         // this panel is laid out, use the viewport fallback so its first frame is
@@ -1081,6 +1139,13 @@ impl PhoneApp {
 
     /// One step back; false when there is nothing to go back to.
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        #[cfg(feature = "local-backend")]
+        if self.local_providers.visible {
+            self.close_provider_accounts();
+            self.tick_provider_accounts(cx);
+            cx.notify();
+            return true;
+        }
         if self.sheet.is_some() {
             self.close_sheet(cx);
             window.dismiss_virtual_keyboard();
@@ -1179,6 +1244,48 @@ impl PhoneApp {
 
     /// The sample sessions, for trying the app without a computer.
     pub(crate) fn open_store(&mut self, address: &str) {
+        self.install_store(Store::sample(Computer::from_address(address)));
+    }
+    pub(crate) fn install_store(&mut self, store: Store) {
+        self.replace_store(Some(store));
+    }
+    pub(crate) fn preserve_local_drafts(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "local-backend")]
+        if self.is_local() {
+            // Preserve the command before parking its cleared composer. Parked
+            // backend completions have no active composer/notification target.
+            for (_, (target, draft)) in std::mem::take(&mut self.pending_compacts) {
+                self.restore_compact_draft(target, &draft, cx);
+            }
+            self.parked_local_start = Some(self.start.update(cx, |c, cx| {
+                c.cancel_imports(cx);
+                (c.area.read(cx).text().to_owned(), c.attachments().to_vec())
+            }));
+            for composer in self.threads.values() {
+                composer.update(cx, |c, cx| c.cancel_imports(cx));
+            }
+        }
+        #[cfg(not(feature = "local-backend"))]
+        let _ = cx;
+    }
+    pub(crate) fn replace_store(&mut self, store: Option<Store>) {
+        #[cfg(feature = "local-backend")]
+        if store.as_ref().is_some_and(|store| store.local.is_none()) {
+            let _ = std::fs::remove_file(self.data_dir.join("local-backend-preferred"));
+        }
+        #[cfg(feature = "local-backend")]
+        if self.is_local()
+            && let Some(mut previous) = self.store.take()
+        {
+            previous.retire_generation();
+            let ids: Vec<_> = previous.sessions.iter().map(|s| s.id).collect();
+            self.parked_local_threads = ids
+                .into_iter()
+                .filter_map(|id| self.threads.remove(&id).map(|c| (id, c)))
+                .collect();
+            self.parked_local = Some(previous);
+        }
+        self.reconnecting = false;
         self.reset_inline_pages();
         self.reset_swarm_views();
         self.schedules.invalidate();
@@ -1186,8 +1293,12 @@ impl PhoneApp {
         self.project_files_generation += 1;
         self.project = 0;
         self.deferred_updates.clear();
-        self.store = Some(Store::sample(Computer::from_address(address)));
-        self.routes = vec![Route::Sessions];
+        self.routes = vec![if store.is_some() {
+            Route::Sessions
+        } else {
+            Route::Connect
+        }];
+        self.store = store;
         self.threads.clear();
         self.pending_compacts.clear();
         self.sample_models.clear();
@@ -1210,6 +1321,10 @@ impl PhoneApp {
     }
 
     pub(crate) fn open_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.preserve_local_drafts(cx);
+        if self.is_local() {
+            self.start.update(cx, |start, cx| start.clear(cx));
+        }
         self.cancel_connection_attempt();
         activity::cancel_notification(alerts::HELPER_UPDATE_ID);
         self.paused = false;
@@ -1221,6 +1336,7 @@ impl PhoneApp {
         };
         self.open_store(&address);
         self.start.update(cx, |start, _| {
+            start.set_workspace(true);
             start.use_files(None);
             start.use_commands(None);
         });
@@ -1255,6 +1371,7 @@ impl PhoneApp {
         self.schedules.invalidate();
         self.connection_generation = self.connection_generation.wrapping_add(1);
         self.connecting = false;
+        self.reconnecting = false;
         self.pairing_status = None;
         self.stop_resuming();
     }
@@ -1503,7 +1620,7 @@ impl PhoneApp {
         computer.pi_version = helper_release;
         let mut store = Store::live(computer, live);
         store.apply(vec![(None, Update::Listed(Ok(listed)))]);
-        self.project = prefs
+        let project = prefs
             .projects
             .get(&address.to_string())
             .map(|path| store.add_project(path))
@@ -1520,7 +1637,12 @@ impl PhoneApp {
         self.thread_list_offsets.clear();
         self.reset_swarm_views();
         self.reset_inline_pages();
-        self.store = Some(store);
+        self.preserve_local_drafts(cx);
+        if self.is_local() {
+            self.start.update(cx, |start, cx| start.clear(cx));
+        }
+        self.install_store(store);
+        self.project = project;
         self.routes = vec![Route::Sessions, Route::Projects];
         self.threads.clear();
         self.pending_compacts.clear();
@@ -1528,6 +1650,7 @@ impl PhoneApp {
         self.restoring_history = None;
         self.enabling_jj = None;
         self.start.update(cx, |start, _| {
+            start.set_workspace(true);
             start.use_files(Some(Vec::new()));
             start.use_commands(Some(Vec::new()));
         });
@@ -1786,6 +1909,76 @@ impl PhoneApp {
         .detach();
     }
 
+    #[cfg(feature = "local-backend")]
+    pub(crate) fn select_local_backend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "local-backend")]
+        if !self.local_providers.is_synthetic() {
+            let _ = std::fs::write(self.data_dir.join("local-backend-preferred"), "local");
+        }
+        self.close_sheet(cx);
+        self.closing_sheet = None;
+        self.cancel_connection_attempt();
+        if self.is_local() {
+            self.close_provider_accounts();
+            self.paused = false;
+            self.entered(window, cx);
+            return;
+        }
+        self.close_provider_accounts();
+        self.start.update(cx, |c, cx| c.clear(cx));
+        if let Some(backend) = self.parked_local.take() {
+            self.install_store(backend);
+        } else {
+            let synthetic = self.local_providers.is_synthetic();
+            let Some(vault) = crate::provider_accounts::vault(synthetic) else {
+                self.notify_user("Android credential storage is unavailable", cx);
+                return;
+            };
+            self.install_store(Store::local(crate::local_chat::Local::new(
+                pi_local::auth::Provider::Claude,
+                vault,
+                synthetic,
+            )));
+        }
+        if let Some((text, attachments)) = self.parked_local_start.take() {
+            self.start.update(cx, |c, cx| {
+                c.set_text(&text, cx);
+                for attachment in attachments {
+                    c.attach(attachment, cx);
+                }
+            });
+        }
+        self.threads
+            .extend(std::mem::take(&mut self.parked_local_threads));
+        self.paused = false;
+        self.start.update(cx, |c, _| {
+            c.set_workspace(true);
+            c.use_files(Some(Vec::new()));
+            c.use_commands(Some(Vec::new()));
+        });
+        if !self
+            .store
+            .as_ref()
+            .unwrap()
+            .local
+            .as_ref()
+            .unwrap()
+            .synthetic
+        {
+            self.local_private = true;
+        }
+        self.entered(window, cx);
+    }
+
+    pub(crate) fn backend_supports(&self, feature: &str) -> bool {
+        self.store
+            .as_ref()
+            .is_some_and(|backend| backend.supports(feature))
+    }
+    pub(crate) fn is_local(&self) -> bool {
+        self.store.as_ref().is_some_and(Store::is_local)
+    }
+
     pub(crate) fn model_session(&self) -> Option<SessionId> {
         match self.route() {
             Route::Thread(id)
@@ -1802,6 +1995,13 @@ impl PhoneApp {
 
     /// The current session's confirmed model, or defaults on New session.
     pub(crate) fn model_settings(&self, cx: &App) -> (String, String) {
+        if let Some(settings) = self
+            .store
+            .as_ref()
+            .and_then(|store| store.model_settings(self.model_session()))
+        {
+            return settings;
+        }
         if self.route() == Route::ScheduleEdit
             && let Some(draft) = &self.schedules.draft
         {
@@ -1836,20 +2036,21 @@ impl PhoneApp {
             cx.notify();
             return;
         }
-        if let Some(id) = self.model_session() {
-            let (_, thinking) = self.model_settings(cx);
-            if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
-                if let Err(error) = live.set_model(id, &provider, &model_id) {
-                    self.notify_user(error, cx);
-                }
-            } else {
-                self.sample_models.insert(id, (name, thinking));
+        let id = self.model_session();
+        let (_, thinking) = self.model_settings(cx);
+        if let Some(store) = self.store.as_mut().filter(|store| !store.is_sample()) {
+            if let Err(error) = store.set_model(id, &provider, &model_id) {
+                self.notify_user(error, cx);
+                return;
             }
+            if id.is_some() || store.is_local() {
+                cx.notify();
+                return;
+            }
+        } else if let Some(id) = id {
+            self.sample_models.insert(id, (name, thinking));
             cx.notify();
             return;
-        }
-        if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
-            live.model = format!("{provider}/{model_id}");
         }
         self.update_prefs(cx, |prefs| {
             prefs.model = name;
@@ -1859,26 +2060,30 @@ impl PhoneApp {
     }
 
     pub(crate) fn choose_thinking(&mut self, level: &str, cx: &mut Context<Self>) {
-        if let Some(id) = self.model_session() {
-            let (model, _) = self.model_settings(cx);
-            if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
-                if let Err(error) = live.set_thinking(id, level) {
-                    self.notify_user(error, cx);
-                }
-            } else {
-                self.sample_models.insert(id, (model, level.to_owned()));
+        let id = self.model_session();
+        let (model, _) = self.model_settings(cx);
+        if let Some(store) = self.store.as_mut().filter(|store| !store.is_sample()) {
+            if let Err(error) = store.set_thinking(id, level) {
+                self.notify_user(error, cx);
+                return;
             }
+            if id.is_some() || store.is_local() {
+                cx.notify();
+                return;
+            }
+        } else if let Some(id) = id {
+            self.sample_models.insert(id, (model, level.to_owned()));
             cx.notify();
             return;
-        }
-        if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
-            live.thinking = level.to_owned();
         }
         self.update_prefs(cx, |prefs| prefs.thinking = level.to_owned());
     }
 
     /// Leaves the computer: back to Connect, its host key forgotten.
     pub(crate) fn forget_computer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_local() {
+            self.start.update(cx, |start, cx| start.clear(cx));
+        }
         if let Some(host) = self.schedule_host() {
             self.schedules.caches.remove(&host);
         }
@@ -1957,7 +2162,15 @@ impl PhoneApp {
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "local-backend")]
+        if let Some(backend) = &mut self.parked_local {
+            let _ = backend.tick(Duration::ZERO);
+        }
         let _trace = gpui_android::trace::scope(c"pi.app.tick");
+        #[cfg(all(feature = "local-backend", feature = "ui-test"))]
+        self.tick_local_chat(cx);
+        #[cfg(feature = "local-backend")]
+        self.tick_provider_accounts(cx);
         // Framework duration-scale updates can arrive while we stay visible.
         // Poll at the existing low-frequency ticker, never on animation frames.
         #[cfg(target_os = "android")]
@@ -2017,7 +2230,11 @@ impl PhoneApp {
             self.last_tick = now;
             return;
         };
-        if store.running().next().is_none() {
+        #[cfg(feature = "local-backend")]
+        let local_idle = store.local.is_some();
+        #[cfg(not(feature = "local-backend"))]
+        let local_idle = false;
+        if !local_idle && store.running().next().is_none() {
             self.last_tick = now;
             return;
         }
@@ -2042,13 +2259,31 @@ impl PhoneApp {
     }
 
     fn alert(&mut self, event: Event, cx: &mut Context<Self>) {
+        #[cfg(feature = "local-backend")]
+        if let Event::Compacted(id, error) = &event {
+            if let Some((target, draft)) = self.pending_compacts.remove(id)
+                && error.is_some()
+            {
+                self.restore_compact_draft(target, &draft, cx);
+            }
+            self.notify_user(
+                error.clone().unwrap_or_else(|| "Context compacted".into()),
+                cx,
+            );
+            return;
+        }
         let prefs = self.prefs(cx).clone();
         let accent = theme(cx).accent_rgb();
         let Some(store) = &self.store else {
             return;
         };
+        if store.is_local() {
+            return;
+        }
         let computer = store.computer.name.clone();
         match event {
+            #[cfg(feature = "local-backend")]
+            Event::Compacted(..) => {}
             Event::Deleted(id) => self.finish_deletion(id, cx),
             Event::NeedsYou(id) => {
                 if self.viewing(id) {
@@ -2104,7 +2339,7 @@ impl PhoneApp {
         let notification = self
             .store
             .as_ref()
-            .filter(|_| wanted)
+            .filter(|store| wanted && !store.is_local())
             .and_then(|store| alerts::working(store.running(), &store.computer.name, accent));
         match notification {
             Some(notification) => {
@@ -2126,8 +2361,16 @@ impl PhoneApp {
         let visible = visibility.is_visible();
         let changed = self.visible != visible;
         self.visible = visible;
+        #[cfg(feature = "local-backend")]
+        self.tick_provider_accounts(cx);
         if !visible {
+            #[cfg(feature = "local-backend")]
+            if let Some(store) = &self.store {
+                store.cancel_local();
+            }
             // Cancel synchronously even if Hidden→Visible happens between ticks.
+            // Android may stop delivering scroll phases before the final Ended.
+            crate::scroll::cancel_motion();
             self.visual_apps
                 .borrow_mut()
                 .projection_deferred(self.route(), false);
@@ -2160,6 +2403,35 @@ impl PhoneApp {
 
     /// A `pi://` link from a notification.
     pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "local-backend")]
+        {
+            // Unknown/read-only test links must not terminate local chat or expose its frame.
+            let local_link = matches!(
+                url,
+                "pi://test/local-providers" | "pi://test/local-providers/synthetic"
+            );
+            let navigation = local_link
+                || url == "pi://helper-update"
+                || Link::parse(url).is_some()
+                || pi_core::pairing::Offer::parse(url).is_ok()
+                || url
+                    .strip_prefix("pi://preview/")
+                    .is_some_and(|name| crate::SCREENS.contains(&name));
+            if self.local_fixture_url(url, window, cx) {
+                return;
+            }
+            if (self.is_local() || self.local_providers.visible) && !navigation {
+                return;
+            }
+            self.close_provider_accounts();
+            window.dismiss_virtual_keyboard();
+            window.focus(&self.focus, cx);
+            cx.notify();
+            if self.provider_accounts_url(url, window, cx) {
+                return;
+            }
+            self.close_provider_accounts();
+        }
         if url == "pi://helper-update" {
             self.close_sheet(cx);
             self.routes = vec![Route::Sessions];
@@ -2433,7 +2705,7 @@ impl PhoneApp {
 
     pub(crate) fn stop(&mut self, id: SessionId, cx: &mut Context<Self>) {
         let Some(store) = &mut self.store else { return };
-        let live = store.live.is_some();
+        let live = !store.is_sample();
         if let Err(error) = store.stop(id) {
             self.notify_user(error, cx);
             return;
@@ -2577,7 +2849,11 @@ impl PhoneApp {
             {
                 "Session permanently deleted. Project files were kept."
             } else {
-                "Sample session removed. No computer files were changed."
+                if self.is_local() {
+                    "Local chat removed from this phone's memory."
+                } else {
+                    "Sample session removed. No computer files were changed."
+                }
             },
             cx,
         );
@@ -2590,6 +2866,9 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.backend_supports("file_review") {
+            return;
+        }
         self.review_file = file;
         self.review_lines.clear();
         self.review
@@ -2603,6 +2882,9 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.backend_supports("file_history") {
+            return;
+        }
         self.push(Route::History(id), window, cx);
         self.load_jj_history(id, cx);
     }
@@ -2620,6 +2902,9 @@ impl PhoneApp {
     }
 
     pub(crate) fn load_jj_history(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        if !self.backend_supports("file_history") {
+            return;
+        }
         let Some((connection, helper, path)) = self.store.as_ref().and_then(|store| {
             let live = store.live.as_ref()?;
             Some((
@@ -2939,9 +3224,14 @@ impl PhoneApp {
             return composer.clone();
         }
         let compact = self.compact_available_for_session(id);
+        let workspace = self.backend_supports("workspace_browse");
         let composer = cx.new(|cx| {
             let mut composer = Composer::new("Ask a follow-up…", cx);
             composer.set_session_commands(compact);
+            composer.set_workspace(true);
+            if !workspace {
+                composer.use_files(Some(Vec::new()));
+            }
             composer
         });
         let commands = self.command_catalog_for_session(id, cx);
@@ -3033,7 +3323,14 @@ impl PhoneApp {
         self.subscriptions.push(cx.subscribe_in(
             &composer,
             window,
-            move |this, _, event, window, cx| {
+            move |this, source, event, window, cx| {
+                if this
+                    .threads
+                    .get(&id)
+                    .is_none_or(|current| current != source)
+                {
+                    return;
+                }
                 this.composer_event(Target::Thread(id), event, window, cx)
             },
         ));
@@ -3057,7 +3354,9 @@ impl PhoneApp {
     ) {
         if let Some(composer) = self.composer(target) {
             composer.update(cx, |composer, cx| {
-                if !composer.can_send(cx) {
+                // An in-flight attachment import disables Send even when a new
+                // draft exists. Never overwrite text/attachments composed later.
+                if composer.area.read(cx).text().is_empty() && composer.attachments().is_empty() {
                     composer.set_text(draft, cx);
                 }
             });
@@ -3071,6 +3370,14 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.store.as_ref().is_some_and(|s| !s.is_sample()) {
+            let active = composer_target_active(target, self.route());
+            #[cfg(feature = "local-backend")]
+            let active = active && !self.local_providers.visible;
+            if !active || !self.visible || !self.window_active {
+                return;
+            }
+        }
         match event {
             ComposerEvent::Attach => self.open_sheet(Sheet::Attach(target), cx),
             ComposerEvent::ChooseModel => self.open_sheet(Sheet::Model, cx),
@@ -3125,7 +3432,12 @@ impl PhoneApp {
                 } else {
                     None
                 };
-                let prompt = match prompt_for(text, attachments, file.as_deref()) {
+                let prompt = match prompt_with_capabilities(
+                    text,
+                    attachments,
+                    file.as_deref(),
+                    store.supports("visualize"),
+                ) {
                     Ok(prompt) => prompt,
                     Err(error) => {
                         self.notify_user(error, cx);
@@ -3225,6 +3537,7 @@ impl PhoneApp {
         let Some(composer) = self.composer(target) else {
             return;
         };
+        let owner = self.store.as_ref().map(|s| s.generation);
         let generation = composer.update(cx, |composer, cx| composer.begin_import(cx));
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -3249,6 +3562,11 @@ impl PhoneApp {
                 Ok(Err(error)) => Some(vec![Err(format!("{error:#}"))]),
             };
             this.update(cx, |this, cx| {
+                if this.store.as_ref().map(|s| s.generation) != owner
+                    || this.composer(target).as_ref() != Some(&composer)
+                {
+                    return;
+                }
                 if !composer.update(cx, |composer, cx| composer.finish_import(generation, cx)) {
                     return;
                 }
@@ -3288,6 +3606,7 @@ impl PhoneApp {
         });
         match (image, item.text()) {
             (Some(image), _) => {
+                let owner = self.store.as_ref().map(|s| s.generation);
                 let generation = composer.update(cx, |composer, cx| composer.begin_import(cx));
                 cx.spawn(async move |this, cx| {
                     let attachment = cx
@@ -3300,6 +3619,11 @@ impl PhoneApp {
                         })
                         .await;
                     this.update(cx, |this, cx| {
+                        if this.store.as_ref().map(|s| s.generation) != owner
+                            || this.composer(target).as_ref() != Some(&composer)
+                        {
+                            return;
+                        }
                         if !composer
                             .update(cx, |composer, cx| composer.finish_import(generation, cx))
                         {
@@ -3368,13 +3692,26 @@ impl PhoneApp {
 }
 
 /// Encode the complete draft. No attachment may silently become just a label.
+#[cfg(test)]
 fn prompt_for(
     text: &str,
     attachments: &[Attachment],
     file: Option<&str>,
 ) -> Result<crate::prompt::Prompt, String> {
+    prompt_with_capabilities(text, attachments, file, true)
+}
+fn prompt_with_capabilities(
+    text: &str,
+    attachments: &[Attachment],
+    file: Option<&str>,
+    visualize: bool,
+) -> Result<crate::prompt::Prompt, String> {
     use base64::Engine;
-    let mut message = crate::visualize_prompt::expand(text);
+    let mut message = if visualize {
+        crate::visualize_prompt::expand(text)
+    } else {
+        text.to_owned()
+    };
     let mut images = Vec::new();
     for attachment in attachments {
         match attachment {
@@ -3416,11 +3753,20 @@ pub(crate) fn size_label(bytes: u64) -> String {
 impl Render for PhoneApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _trace = gpui_android::trace::scope(c"pi.root.build");
+        #[cfg(feature = "local-backend")]
+        {
+            self.local_frame = self.local_frame.wrapping_add(1);
+        }
+        #[cfg(feature = "local-backend")]
+        let backend_visible = self.local_providers.visible;
+        #[cfg(not(feature = "local-backend"))]
+        let backend_visible = false;
         // Route/sheet transitions cancel before a retained old surface can run
         // another callback. Do not wait for the next ticker or remote record.
         self.visual_apps.borrow_mut().projection_deferred(
             self.route(),
             self.visible
+                && !backend_visible
                 && self.window_active
                 && self.sheet.is_none()
                 && self.closing_sheet.is_none(),
@@ -3459,6 +3805,7 @@ impl Render for PhoneApp {
         let inline_slot = self.inline_pages.borrow().slot.clone();
         inline_slot.borrow_mut().take();
         let native_page_visible = self.visible
+            && !backend_visible
             && self.sheet.is_none()
             && self.closing_sheet.is_none()
             && self.notice.is_none();
@@ -3467,7 +3814,16 @@ impl Render for PhoneApp {
         if expanded_page.is_none() {
             self.inline_pages.borrow_mut().expanded = None;
         }
-        let screen = if let Some(expanded) = expanded_visual {
+        #[cfg(feature = "local-backend")]
+        let backend_screen = self
+            .local_providers
+            .visible
+            .then(|| self.provider_accounts_screen(cx).into_any_element());
+        #[cfg(not(feature = "local-backend"))]
+        let backend_screen: Option<gpui::AnyElement> = None;
+        let screen = if let Some(screen) = backend_screen {
+            screen
+        } else if let Some(expanded) = expanded_visual {
             expanded.into_any_element()
         } else if let Some(expanded) = expanded_page {
             expanded.into_any_element()
@@ -3810,6 +4166,29 @@ impl PhoneApp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn active_composer_contract_includes_review_and_rejects_stale_targets() {
+        use super::{Route, Target, composer_target_active};
+        use crate::model::SessionId;
+        assert!(composer_target_active(Target::Start, Route::Start));
+        assert!(composer_target_active(
+            Target::Review,
+            Route::Review(SessionId(1))
+        ));
+        assert!(composer_target_active(
+            Target::Thread(SessionId(1)),
+            Route::Thread(SessionId(1))
+        ));
+        assert!(!composer_target_active(
+            Target::Thread(SessionId(1)),
+            Route::Thread(SessionId(2))
+        ));
+        assert!(!composer_target_active(
+            Target::Review,
+            Route::Thread(SessionId(1))
+        ));
+        assert!(!composer_target_active(Target::Start, Route::Sessions));
+    }
     use super::{PhoneApp, RenderStats, sheet_scrim_opacity};
     use crate::{live::Update, model::SessionId};
     use gpui::{AppContext, TestAppContext};
@@ -3961,6 +4340,64 @@ mod tests {
     }
 
     #[gpui::test]
+    fn interrupted_scroll_does_not_freeze_updates_or_timer_after_foregrounding(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        app.update(cx, |app, _| {
+            app.store = Some(crate::store::Store::sample(
+                crate::model::Computer::from_address("sample@computer.local"),
+            ));
+        });
+        for hidden in [false, true] {
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+            let (id, elapsed) = app.update(cx, |app, cx| {
+                let session = app.store.as_ref().unwrap().running().next().unwrap();
+                let before = (session.id, session.elapsed);
+                crate::scroll::note_input(gpui::TouchPhase::Moved);
+                crate::scroll::note_movement(gpui::px(100.));
+                app.take_updates(
+                    vec![(Some(before.0), Update::Ended(1, "queued".into()))],
+                    cx,
+                );
+                assert!(app.projection_deferred());
+                assert!(app.deferred_flush_scheduled);
+                // A tick during a gesture must not change the projection.
+                app.last_tick = Instant::now() - Duration::from_secs(1);
+                app.tick(cx);
+                assert_eq!(
+                    app.store
+                        .as_ref()
+                        .unwrap()
+                        .session(before.0)
+                        .unwrap()
+                        .elapsed,
+                    before.1
+                );
+                before
+            });
+            // No TouchPhase::Ended arrives when the OS interrupts the gesture.
+            if hidden {
+                cx.simulate_visibility_change(gpui::WindowVisibility::Hidden);
+                cx.simulate_visibility_change(gpui::WindowVisibility::Visible);
+            } else {
+                cx.deactivate_window();
+                cx.update(|window, _| window.activate_window());
+            }
+            app.read_with(cx, |app, _| assert!(!app.projection_deferred()));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+            app.update(cx, |app, cx| {
+                assert!(!app.deferred_flush_scheduled);
+                assert!(app.deferred_updates.is_empty());
+                app.tick(cx);
+                assert!(app.store.as_ref().unwrap().session(id).unwrap().elapsed > elapsed);
+            });
+        }
+    }
+
+    #[gpui::test]
     fn a_later_batch_joins_an_existing_deferred_queue_in_order(cx: &mut TestAppContext) {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.update(|_, cx| {
@@ -4016,5 +4453,96 @@ mod tests {
         assert_eq!(sheet_scrim_opacity(false, 0.), 1.);
         assert_eq!(sheet_scrim_opacity(false, 0.5), 0.5);
         assert_eq!(sheet_scrim_opacity(false, 1.), 0.);
+    }
+    #[cfg(all(feature = "local-backend", target_os = "android"))]
+    #[gpui::test]
+    fn local_reselection_retires_remote_generations_without_losing_conversations(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::Target;
+        use crate::store::Event;
+        use pi_local::auth::{Provider, Vault, VaultScope};
+        struct EmptyVault;
+        impl Vault for EmptyVault {
+            fn scope(&self) -> VaultScope {
+                VaultScope::Synthetic
+            }
+            fn read(&self, _: Provider) -> anyhow::Result<serde_json::Value> {
+                Ok(serde_json::json!({"generation":"0","credential":null}))
+            }
+            fn write(&self, _: Provider, _: &str, _: &str) -> anyhow::Result<Option<String>> {
+                anyhow::bail!("unused")
+            }
+            fn clear(&self, _: Provider) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.open_local_chat(
+                    Provider::Claude,
+                    std::sync::Arc::new(EmptyVault),
+                    true,
+                    window,
+                    cx
+                ));
+                let store = app.store.as_ref().unwrap().generation;
+                let route = app.route();
+                let attempt = app.begin_connection_attempt();
+                app.reconnecting = true;
+                app.select_local_backend(window, cx);
+                assert!(!app.connecting && !app.reconnecting);
+                assert_ne!(app.connection_generation, attempt);
+                assert_eq!(app.store.as_ref().unwrap().generation, store);
+                assert_eq!(app.route(), route);
+                let id = app.model_session().unwrap();
+                assert!(app.compact_available_for_session(id));
+                assert_eq!(
+                    app.compact_for_session(id, "/compact keep decisions"),
+                    Some(Some("keep decisions".into()))
+                );
+                assert_eq!(app.compact_for_session(id, "/compactly"), None);
+                let composer = app.thread_composer(id, window, cx);
+                let target = Target::Thread(id);
+                composer.update(cx, |c, cx| c.set_text("/compact keep decisions", cx));
+                app.pending_compacts
+                    .insert(id, (target, "/compact keep decisions".into()));
+                composer.update(cx, |c, cx| c.clear(cx));
+                app.alert(Event::Compacted(id, Some("Nothing to compact".into())), cx);
+                assert!(!app.compact_pending(id));
+                assert_eq!(
+                    composer.read(cx).area.read(cx).text(),
+                    "/compact keep decisions"
+                );
+                app.pending_compacts
+                    .insert(id, (target, "/compact old command".into()));
+                composer.update(cx, |c, cx| c.set_text("new draft", cx));
+                let import = composer.update(cx, |c, cx| c.begin_import(cx));
+                app.alert(Event::Compacted(id, Some("Cancelled".into())), cx);
+                assert_eq!(
+                    composer.read(cx).area.read(cx).text(),
+                    "new draft",
+                    "disabled Send during import must not replace a later draft"
+                );
+                composer.update(cx, |c, cx| c.finish_import(import, cx));
+                app.pending_compacts.insert(id, (target, "/compact".into()));
+                app.alert(Event::Compacted(id, None), cx);
+                assert!(!app.compact_pending(id));
+                assert_eq!(composer.read(cx).area.read(cx).text(), "new draft");
+                assert_eq!(
+                    super::prompt_with_capabilities(
+                        "@Visualize make a calculator",
+                        &[],
+                        None,
+                        false
+                    )
+                    .unwrap()
+                    .message,
+                    "@Visualize make a calculator"
+                );
+            })
+        });
     }
 }

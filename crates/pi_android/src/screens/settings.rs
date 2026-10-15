@@ -202,13 +202,17 @@ impl PhoneApp {
                     .child(icon("chev_r", 16., colors.muted))
                     .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Models, cx))),
             )
-            .child(
-                ui::row("resources", false, &colors)
-                    .child(icon("layers", 20., colors.muted))
-                    .child(div().flex_1().child("Resources"))
-                    .child(icon("chev_r", 16., colors.muted))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Resources, cx))),
-            )
+            .when(self.backend_supports("resources"), |body| {
+                body.child(
+                    ui::row("resources", false, &colors)
+                        .child(icon("layers", 20., colors.muted))
+                        .child(div().flex_1().child("Resources"))
+                        .child(icon("chev_r", 16., colors.muted))
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Resources, cx)),
+                        ),
+                )
+            })
             .child(
                 ui::row("debug-log", false, &colors)
                     .child(icon("term", 20., colors.muted))
@@ -239,7 +243,7 @@ impl PhoneApp {
                             ui::card(&colors)
                                 .children(computers)
                                 .child(add)
-                                .when(live, |card| {
+                                .when(live && !self.is_local(), |card| {
                                     card.child(
                                         ui::row("forget", false, &colors)
                                             .text_color(colors.coral)
@@ -270,6 +274,7 @@ impl PhoneApp {
                                     (Some(fingerprint), true) => format!(
                                         "Connected over SSH with this phone's own key. {computer}'s host key is {fingerprint}; a different one is refused."
                                     ),
+                                    _ if self.is_local() => "Experimental Local: Bun + Durable run on this phone. Chats are saved in SQLite. Stock tools use Android sh, not GNU Bash or a Linux userland. Not sandboxed; background execution and mid-tool crash recovery are not guaranteed.".to_owned(),
                                     _ => "These are sample sessions: nothing runs on a computer. Add one above to follow its sessions."
                                         .to_owned(),
                                 },

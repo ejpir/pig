@@ -37,7 +37,7 @@ impl Host for PhoneApp {
         self.visible && self.window_active && self.sheet.is_none() && self.closing_sheet.is_none()
     }
     fn visual_persist(&self) -> bool {
-        !self.paused
+        !self.paused && self.backend_supports("persist_visual_state")
     }
     fn visual_changed(&mut self, (id, turn): Self::Target, _cx: &mut Context<Self>) {
         self.remeasure_thread_turn(id, turn);
@@ -148,6 +148,9 @@ impl PhoneApp {
     }
 
     pub(crate) fn visual_enabled(&self, session: &Session, turn: usize) -> bool {
+        if !session.supports("visualize") {
+            return false;
+        }
         session
             .turns
             .iter()

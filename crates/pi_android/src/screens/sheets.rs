@@ -213,7 +213,11 @@ impl PhoneApp {
                 .text_size(px(22.))
                 .line_height(px(28.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("Computers"),
+                .child(if cfg!(feature = "local-backend") {
+                    "Where Pi runs"
+                } else {
+                    "Computers"
+                }),
             _ => {
                 let title: SharedString = match sheet {
                     Sheet::Details(_) => "Details".into(),
@@ -406,13 +410,35 @@ impl PhoneApp {
                 .text_color(colors.muted)
                 .child(text)
         };
-        let computers = self
+        let known: Vec<_> = self
             .store
             .iter()
-            .flat_map(|store| store.computers.iter())
+            .filter(|s| !s.is_local())
+            .flat_map(|s| s.computers.iter().cloned())
+            .collect();
+        #[cfg(feature = "local-backend")]
+        let known = {
+            let mut known = known;
+            for address in self.prefs(cx).host_keys.keys() {
+                if !known.iter().any(|c| &c.address == address) {
+                    known.push(crate::model::Computer {
+                        name: address.clone(),
+                        address: address.clone(),
+                        pi_version: None,
+                        connected: false,
+                    });
+                }
+            }
+            known
+        };
+        let computers = known
+            .into_iter()
             .enumerate()
             .map(|(index, computer)| {
-                let current = index == 0;
+                let current = self
+                    .store
+                    .as_ref()
+                    .is_some_and(|s| !s.is_local() && s.computer.address == computer.address);
                 let address = computer.address.clone();
                 item(("computer", index).into())
                     .when(index > 0, |row| row.border_t_1())
@@ -470,6 +496,14 @@ impl PhoneApp {
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.close_sheet(cx);
+                            this.cancel_connection_attempt();
+                            this.preserve_local_drafts(cx);
+                            if this.is_local() {
+                                this.start.update(cx, |c, cx| c.clear(cx));
+                                this.replace_store(None);
+                            }
+                            #[cfg(feature = "local-backend")]
+                            this.close_provider_accounts();
                             this.address
                                 .update(cx, |field, cx| field.set_text(address.clone(), cx));
                             this.manual_setup = true;
@@ -486,54 +520,95 @@ impl PhoneApp {
                 .child(div().flex_1().child(text))
                 .child(icon("chev_r", 16., colors.faint))
         };
-        div()
-            .pb(px(8.))
-            .child(
-                div().mt(px(8.)).children(computers).child(
-                    item("pair-computer".into())
-                        .min_h(px(56.))
-                        .border_t_1()
-                        .text_color(colors.accent)
-                        .child(icon("plus", 20., colors.accent))
-                        .child(
-                            div()
-                                .flex_1()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child("Pair another computer"),
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.close_sheet(cx);
-                            this.manual_setup = false;
-                            this.push(Route::Connect, window, cx);
-                        })),
-                ),
-            )
-            .child(div().mt(px(8.)).mx(px(-20.)).h(px(1.)).bg(colors.line))
-            .when(self.store.is_some(), |menu| {
-                menu.child(
-                    link("open-schedules", "calendar", "Schedules")
-                        .debug_selector(|| "open-schedules".into())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_schedules(window, cx);
-                        })),
-                )
-            })
-            .child(
-                link("sample-sessions", "spark", "Try the sample sessions")
-                    .when(self.store.is_some(), |row| row.border_t_1())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.close_sheet(cx);
-                        this.open_sample(window, cx);
-                    })),
-            )
-            .child(
-                link("open-settings", "settings", "Settings")
+        let menu = div().pb(px(8.));
+        #[cfg(feature = "local-backend")]
+        let menu = menu.child(
+            item("backend-local".into())
+                .debug_selector(|| "backend-local".into())
+                .child(icon("pi", 20., colors.accent))
+                .child(ui::row_text(
+                    "Local",
+                    Some("Experimental · run Pi on this phone".into()),
+                    colors,
+                ))
+                .when(self.is_local(), |row| {
+                    row.child(icon("check", 20., colors.accent))
+                })
+                .on_click(cx.listener(|this, _, window, cx| this.select_local_backend(window, cx))),
+        );
+        menu.child(
+            div().mt(px(8.)).children(computers).child(
+                item("pair-computer".into())
+                    .min_h(px(56.))
                     .border_t_1()
+                    .text_color(colors.accent)
+                    .child(icon("plus", 20., colors.accent))
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Pair another computer"),
+                    )
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.close_sheet(cx);
-                        this.push(Route::Settings, window, cx);
+                        this.manual_setup = false;
+                        this.push(Route::Connect, window, cx);
+                    })),
+            ),
+        )
+        .child(div().mt(px(8.)).mx(px(-20.)).h(px(1.)).bg(colors.line))
+        .when(self.store.is_some() && !self.is_local(), |menu| {
+            menu.child(
+                link("open-schedules", "calendar", "Schedules")
+                    .debug_selector(|| "open-schedules".into())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_schedules(window, cx);
                     })),
             )
+        })
+        .when(self.is_local(), |menu| {
+            menu.child(
+                link("local-accounts", "settings", "Local providers").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        #[cfg(feature = "local-backend")]
+                        {
+                            let synthetic = this
+                                .store
+                                .as_ref()
+                                .and_then(|s| s.local.as_ref())
+                                .is_some_and(|l| l.synthetic);
+                            this.open_url(
+                                if synthetic {
+                                    "pi://test/local-providers/synthetic"
+                                } else {
+                                    "pi://test/local-providers"
+                                },
+                                window,
+                                cx,
+                            );
+                        }
+                        #[cfg(not(feature = "local-backend"))]
+                        let _ = (this, window, cx);
+                    },
+                )),
+            )
+        })
+        .child(
+            link("sample-sessions", "spark", "Try the sample sessions")
+                .when(self.store.is_some(), |row| row.border_t_1())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_sheet(cx);
+                    this.open_sample(window, cx);
+                })),
+        )
+        .child(
+            link("open-settings", "settings", "Settings")
+                .border_t_1()
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_sheet(cx);
+                    this.push(Route::Settings, window, cx);
+                })),
+        )
     }
 
     /// A session of the computer's, or a subagent's whose screen is open.
@@ -555,7 +630,7 @@ impl PhoneApp {
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(session.title.clone()))
                 .child(ui::hint(format!("{} · {}", session.project, self.computer_name()), colors).mt(px(4.))))
             .child(ui::hint(
-                if self.live() {
+                if self.is_local() {if cfg!(feature="local-backend") {"Hides this saved chat from the Local list. Its SQLite state and workspace files are retained."} else {"Removes this in-memory conversation from this phone. No workspace files exist for local chat."}} else if self.live() {
                     "Permanently deletes this session's conversation and execution history from the computer. This cannot be undone. Project files and edits are kept."
                 } else {
                     "Removes this sample conversation. No files on your computer are affected."
@@ -1389,9 +1464,8 @@ impl PhoneApp {
                 })
                 .collect();
         }
-        match self.store.as_ref().and_then(|store| store.live.as_ref()) {
-            Some(live) => live
-                .models
+        match self.store.as_ref().and_then(|store| store.models()) {
+            Some(models) => models
                 .iter()
                 .map(|model| {
                     let name = model.name.clone().unwrap_or_else(|| model.id.clone());
@@ -1626,9 +1700,11 @@ impl PhoneApp {
                             .min_w_0()
                             .text_color(colors.muted),
                     )
-                    .child(ui::tap("copy-file", "copy", colors).on_click(cx.listener(
-                        move |this, _, _, cx| this.copy(session_file.clone(), "the path", cx),
-                    ))),
+                    .when(!session.local, |row| {
+                        row.child(ui::tap("copy-file", "copy", colors).on_click(cx.listener(
+                            move |this, _, _, cx| this.copy(session_file.clone(), "the path", cx),
+                        )))
+                    }),
             );
         // The run line, with a key that names the stages.
         let times = session.turn().map(|turn| turn.times).unwrap_or_default();
@@ -1826,7 +1902,11 @@ impl PhoneApp {
                     "details-model",
                     "spark",
                     "Model",
-                    format!("{model} · {thinking}"),
+                    if thinking.is_empty() {
+                        model
+                    } else {
+                        format!("{model} · {thinking}")
+                    },
                     None,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.open_sheet(Sheet::Model, cx))),
@@ -1873,23 +1953,25 @@ impl PhoneApp {
                     })),
                 )
             })
-            .child(
-                row(
-                    "open-jj-history",
-                    "restore",
-                    "File history",
-                    match snapshots {
-                        0 => String::new(),
-                        1 => "1 point".into(),
-                        count => format!("{count} points"),
-                    },
-                    None,
+            .when(session.supports("file_history"), |body| {
+                body.child(
+                    row(
+                        "open-jj-history",
+                        "restore",
+                        "File history",
+                        match snapshots {
+                            0 => String::new(),
+                            1 => "1 point".into(),
+                            count => format!("{count} points"),
+                        },
+                        None,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.close_sheet(cx);
+                        this.open_history(id, window, cx);
+                    })),
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.close_sheet(cx);
-                    this.open_history(id, window, cx);
-                })),
-            )
+            })
     }
 
     fn attach_sheet(&self, target: Target, colors: &Theme, cx: &Context<Self>) -> Div {
@@ -1945,8 +2027,7 @@ impl PhoneApp {
             .or_else(|| {
                 self.store
                     .as_ref()
-                    .and_then(|store| store.live.as_ref())
-                    .and_then(|live| self.model_session().and_then(|id| live.current_model(id)))
+                    .and_then(|store| store.current_model(self.model_session()))
                     .map(|model| (model.provider.clone(), model.id.clone()))
                     .or_else(|| {
                         self.model_session()
@@ -1958,6 +2039,8 @@ impl PhoneApp {
                             .flatten()
                     })
             });
+        let owner = self.store.as_ref().map(|s| s.generation);
+        let session_owner = self.model_session();
         let models = offered
             .into_iter()
             .enumerate()
@@ -1970,6 +2053,7 @@ impl PhoneApp {
                 let provider = detail.clone();
                 ui::row(("model", index), index == 0, colors)
                     .debug_selector(move || format!("model-choice-{index}"))
+                    .child(crate::testing::probe(format!("model-choice-{index}")))
                     .child(ui::row_text(
                         name.clone(),
                         Some(format!("{detail} · {model_id}").into()),
@@ -1977,6 +2061,12 @@ impl PhoneApp {
                     ))
                     .when(on, |row| row.child(icon("check", 20., colors.accent)))
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.store.as_ref().map(|s| s.generation) != owner
+                            || this.model_session() != session_owner
+                            || this.sheet != Some(Sheet::Model)
+                        {
+                            return;
+                        }
                         this.choose_model(name.clone(), provider.clone(), model_id.clone(), cx);
                         this.close_sheet(cx);
                     }))
@@ -2067,9 +2157,10 @@ impl PhoneApp {
         let levels = self
             .store
             .as_ref()
-            .and_then(|store| store.live.as_ref())
-            .and_then(|live| self.model_session().and_then(|id| live.thinking_levels(id)))
+            .and_then(|store| store.thinking_levels(self.model_session()))
             .unwrap_or_else(|| THINKING.iter().map(|level| (*level).to_owned()).collect());
+        let owner = self.store.as_ref().map(|s| s.generation);
+        let session_owner = self.model_session();
         div().pb(px(8.))
             .child(ui::hint(format!("Reasoning effort for {model}"), colors).mb(px(12.)))
             .child(ui::card(colors).children(levels.into_iter().enumerate().map(|(index, level)| {
@@ -2083,10 +2174,12 @@ impl PhoneApp {
                 };
                 ui::row(("thinking", index), index == 0, colors)
                     .debug_selector(move || format!("thinking-choice-{index}"))
+                    .child(crate::testing::probe(format!("thinking-choice-{index}")))
                     .min_h(px(56.))
                     .child(ui::row_text(level.clone(), Some(detail.into()), colors))
                     .when(selected == level, |row| row.child(icon("check", 20., colors.accent)))
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.store.as_ref().map(|s|s.generation)!=owner || this.model_session()!=session_owner || this.sheet!=Some(Sheet::Thinking) {return;}
                         this.choose_thinking(&level, cx);
                         this.close_sheet(cx);
                     }))
@@ -2182,12 +2275,14 @@ impl PhoneApp {
                 Box::new(move |this, window, cx| this.open_review(id, 0, window, cx)),
             ));
         }
-        rows.push((
-            "clock",
-            "File history",
-            colors.muted,
-            Box::new(move |this, window, cx| this.open_history(id, window, cx)),
-        ));
+        if session.supports("file_history") {
+            rows.push((
+                "clock",
+                "File history",
+                colors.muted,
+                Box::new(move |this, window, cx| this.open_history(id, window, cx)),
+            ));
+        }
         rows.push((
             "info",
             if self.render_stats.visible {
@@ -2217,11 +2312,13 @@ impl PhoneApp {
         ));
         div()
             .pb(px(8.))
-            .child(
-                ui::card(colors)
-                    .mt(px(8.))
-                    .child(self.swarm_toggle_row(id, colors, cx)),
-            )
+            .when(session.supports("swarm"), |body| {
+                body.child(
+                    ui::card(colors)
+                        .mt(px(8.))
+                        .child(self.swarm_toggle_row(id, colors, cx)),
+                )
+            })
             .child(
                 ui::card(colors)
                     .mt(px(8.))
@@ -2262,7 +2359,8 @@ impl PhoneApp {
             )))
             .child(
                 ui::hint(
-                    if self.live() {
+                    if self.is_local() {"Bundled provider catalog; availability depends on your subscription. Sign-ins stay encrypted on this phone.".into()}
+                    else if self.live() {
                         format!("Models available on {computer}, loaded before starting a session. Sign-ins stay on {computer}.")
                     } else {
                         format!("A sample list. Sign-ins stay on {computer}: change them in Pi Desktop or Pi’s settings there.")

@@ -52,8 +52,27 @@ Pi's release binary is a Bun standalone executable (Bun 1.3.14 for Pi 1.2.0), so
 
 ## Experimental durable runner
 
-`backend/durable` pins `@earendil-works/pi-durable`, `pi-ai`, `chord` and `pi-coding-agent` 1.2.0 (MIT) through its npm lockfile. The coding-agent SDK supplies only the public model/auth runtime and credential locking; the runner does not start its agent or extension host. Its native standalone executable contains Bun 1.4.2; `licenses/DURABLE-BUN-LICENSE.md` is copied unmodified from `oven-sh/bun` tag `bun-v1.4.2`, and covers JavaScriptCore/WebKit relinking and runtime dependencies for this separate version. `backend/durable/build.ts` gathers full installed dependency notices plus the application and matching Bun notices into `artifacts/durable/NOTICES.txt`. `pi_remote` embeds/prints these with the optional `bundled-durable` feature. The faux-only test runner is not shipped. Normal release packaging still selects stock Pi pending the durable compatibility gates.
+`backend/durable` pins `@earendil-works/pi-durable`, `pi-ai`, `chord` and `pi-coding-agent` 1.2.0 (MIT) through its npm lockfile. The coding-agent SDK supplies only the public model/auth runtime and credential locking; the runner does not start its agent or extension host. Its native standalone executable contains Bun 1.4.2; `licenses/DURABLE-BUN-LICENSE.md` is copied unmodified from `oven-sh/bun` tag `bun-v1.4.2`, and covers JavaScriptCore/WebKit relinking and runtime dependencies for this separate version. `backend/durable/build.ts` gathers full installed dependency notices plus the application and matching Bun notices into `artifacts/durable/NOTICES.txt`. `pi_remote` embeds/prints these with the optional `bundled-durable` feature. The faux-only test runner is not shipped. Unix release helpers bundle Durable; Windows retains its existing stock Pi path.
 
 ## Design
 
 Colors, dimensions, terminology, and screen structure come from the provided `design/` studies. Fixture names, paths, and numbers are explicitly sample data. The SVG/PNG studies are references, not the rendered application.
+
+## Experimental Android Local
+
+Android Local embeds source-linked Bun 1.4.3 (MIT plus linked-library terms,
+including statically linked JavaScriptCore/WebKit LGPL-2), from Bun revision
+`c6da4a4d3010e5553438c60f6bd76d981976867c` and JSC revision
+`0c06faadf65bf8e8c8ad3a5a8aca83e1e9ed653f`. The APK carries Bun and SDK/OAuth
+notices; release runtime/relink archives preserve the source/build provenance
+and object-format relink inputs for replacing JSC. See
+[build and relinking](experiments/bun-embedding/README.md). Public Pi/Durable
+packages remain unchanged at 1.2.0. QuickJS is retained for native-owned OAuth,
+not the removed QuickJS agent/tool prototype.
+
+Bun's MPL-2.0 Rust dependencies carry their covered source form alongside the
+runtime notices/relink kit. Full standard terms are in `licenses/MPL-2.0.txt`
+(SPDX license-list-data v3.27.0, trailing whitespace normalized). Where a Rust
+crate omits its monorepo-root license from its published package, the runtime
+build collects the full upstream notice at the crate's recorded VCS revision
+and records the source URL and SHA-256.

@@ -14,6 +14,9 @@ use std::{collections::HashMap, time::Duration};
 pub enum Event {
     NeedsYou(SessionId),
     Finished(SessionId),
+    /// Local manual compaction settled after canonical checkpoint/VM teardown.
+    #[cfg(feature = "local-backend")]
+    Compacted(SessionId, Option<String>),
     Deleted(SessionId),
     /// Something went wrong, in a session or with the computer.
     Problem(Option<SessionId>, String),
@@ -41,6 +44,9 @@ impl Project {
 }
 
 pub struct Store {
+    pub(crate) generation: u64,
+    #[cfg(feature = "local-backend")]
+    pub(crate) local: Option<crate::local_chat::Local>,
     pub computer: Computer,
     /// Every computer the phone knows, the connected one first.
     pub computers: Vec<Computer>,
@@ -59,9 +65,20 @@ pub struct Store {
     pub(crate) sample_subagents: HashMap<String, pi_core::session::Session>,
 }
 
+fn generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 impl Store {
+    #[cfg(feature = "local-backend")]
+    pub(crate) fn retire_generation(&mut self) {
+        self.generation = generation();
+    }
     pub fn sample(computer: Computer) -> Self {
         Self {
+            generation: generation(),
+            #[cfg(feature = "local-backend")]
+            local: None,
             computers: demo::computers(computer.clone()),
             computer,
             sessions: demo::sessions(),
@@ -84,6 +101,9 @@ impl Store {
 
     pub fn live(computer: Computer, live: Live) -> Self {
         let mut store = Self {
+            generation: generation(),
+            #[cfg(feature = "local-backend")]
+            local: None,
             computers: vec![computer.clone()],
             computer,
             sessions: Vec::new(),
@@ -99,8 +119,143 @@ impl Store {
         store
     }
 
+    /// Shared UI contract. Local catalogs are authoritative; None retains the
+    /// existing SSH legacy/default or sample presentation behavior.
+    pub fn supports(&self, _feature: &str) -> bool {
+        #[cfg(feature = "local-backend")]
+        if let Some(backend) = &self.local {
+            return backend.supports(_feature);
+        }
+        true
+    }
+    pub fn commands(&self, id: SessionId) -> Option<&[pi_core::protocol::SlashCommand]> {
+        #[cfg(feature = "local-backend")]
+        if let Some(backend) = &self.local {
+            return backend.commands(id);
+        }
+        self.live.as_ref()?.commands(id)
+    }
+    pub fn models(&self) -> Option<&[pi_core::protocol::Model]> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &self.local {
+            return Some(local.models());
+        }
+        self.live.as_ref().map(|live| live.models.as_slice())
+    }
+    pub fn current_model(&self, id: Option<SessionId>) -> Option<&pi_core::protocol::Model> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &self.local {
+            return local.current_model(id);
+        }
+        self.live.as_ref()?.current_model(id?)
+    }
+    pub fn model_settings(&self, id: Option<SessionId>) -> Option<(String, String)> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &self.local {
+            return Some(local.model_settings(id));
+        }
+        self.live.as_ref()?.model_settings(id?)
+    }
+    pub fn thinking_levels(&self, id: Option<SessionId>) -> Option<Vec<String>> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &self.local {
+            return Some(local.thinking_levels(id));
+        }
+        self.live.as_ref()?.thinking_levels(id?)
+    }
+    pub fn set_model(
+        &mut self,
+        id: Option<SessionId>,
+        provider: &str,
+        model: &str,
+    ) -> Result<(), String> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &mut self.local {
+            local.set_model(id, provider, model)?;
+            if let Some(id) = id
+                && let Some(session) = self.sessions.iter_mut().find(|s| s.id == id)
+            {
+                *session = local.project(id);
+            }
+            return Ok(());
+        }
+        let live = self.live.as_mut().ok_or("No execution backend")?;
+        if let Some(id) = id {
+            live.set_model(id, provider, model)
+        } else {
+            live.model = format!("{provider}/{model}");
+            Ok(())
+        }
+    }
+    pub fn set_thinking(&mut self, id: Option<SessionId>, level: &str) -> Result<(), String> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &mut self.local {
+            local.set_thinking(id, level)?;
+            if let Some(id) = id
+                && let Some(session) = self.sessions.iter_mut().find(|s| s.id == id)
+            {
+                *session = local.project(id);
+            }
+            return Ok(());
+        }
+        let live = self.live.as_mut().ok_or("No execution backend")?;
+        if let Some(id) = id {
+            live.set_thinking(id, level)
+        } else {
+            live.thinking = level.into();
+            Ok(())
+        }
+    }
+
     pub fn is_sample(&self) -> bool {
-        self.live.is_none()
+        self.live.is_none() && !self.is_local()
+    }
+    pub fn is_local(&self) -> bool {
+        #[cfg(feature = "local-backend")]
+        {
+            self.local.is_some()
+        }
+        #[cfg(not(feature = "local-backend"))]
+        {
+            false
+        }
+    }
+    pub fn is_stopping(&self, id: SessionId) -> bool {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &self.local {
+            return local.stopping(id);
+        }
+        self.live.as_ref().is_some_and(|live| live.is_stopping(id))
+    }
+    #[cfg(feature = "local-backend")]
+    pub fn cancel_local(&self) {
+        if let Some(local) = &self.local {
+            local.cancel();
+        }
+    }
+    #[cfg(feature = "local-backend")]
+    pub fn local(local: crate::local_chat::Local) -> Self {
+        let computer = Computer {
+            name: "This phone".into(),
+            address: "local-bun".into(),
+            pi_version: None,
+            connected: true,
+        };
+        let sessions = local.restored();
+        Self {
+            generation: generation(),
+            computer: computer.clone(),
+            computers: vec![computer],
+            sessions,
+            earlier: 0,
+            projects: Vec::new(),
+            next_id: 1,
+            live: None,
+            local: Some(local),
+            recency: HashMap::new(),
+            observed_at: HashMap::new(),
+            sample_subagents: HashMap::new(),
+        }
     }
 
     pub fn session(&self, id: SessionId) -> Option<&Session> {
@@ -108,6 +263,10 @@ impl Store {
     }
 
     pub fn remove(&mut self, id: SessionId) {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &mut self.local {
+            local.remove(id);
+        }
         if let Some(live) = &mut self.live {
             live.remove(id);
         }
@@ -152,6 +311,10 @@ impl Store {
 
     /// Moves time on: sample runs advance; live timers count up.
     pub fn tick(&mut self, elapsed: Duration) -> Vec<Event> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &mut self.local {
+            return local.tick(&mut self.sessions, elapsed);
+        }
         if self.live.is_some() {
             let running: Vec<SessionId> = self.running().map(|session| session.id).collect();
             let mut events = Vec::new();
@@ -280,6 +443,9 @@ impl Store {
     }
 
     pub fn answer(&mut self, id: SessionId, answer: Answer) {
+        if self.is_local() {
+            return;
+        }
         if let Some(live) = &mut self.live {
             live.answer(id, answer);
             self.reproject(id);
@@ -298,6 +464,10 @@ impl Store {
     }
 
     pub fn stop(&mut self, id: SessionId) -> Result<(), String> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &self.local {
+            return local.stop(id);
+        }
         if let Some(live) = &mut self.live {
             return live.stop(id);
         }
@@ -323,6 +493,16 @@ impl Store {
         Ok(())
     }
 
+    pub fn supports_compact(&self, id: SessionId) -> bool {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &self.local {
+            return local.supports("manual_compaction") && local.commands(id).is_some();
+        }
+        self.live
+            .as_ref()
+            .is_some_and(|live| live.commands(id).is_some() && live.supports_compact(id))
+    }
+
     /// Manually compacts an existing live session without inserting slash text
     /// into its transcript.
     pub fn compact(
@@ -330,6 +510,15 @@ impl Store {
         id: SessionId,
         custom_instructions: Option<String>,
     ) -> Result<(), String> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &mut self.local {
+            let session = self
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == id)
+                .ok_or("Chat no longer available")?;
+            return local.compact(session, custom_instructions);
+        }
         let Some(live) = &mut self.live else {
             return Err("Compaction is available after connecting to a computer.".into());
         };
@@ -345,6 +534,15 @@ impl Store {
         prompt: crate::prompt::Prompt,
         attachments: Vec<String>,
     ) -> Result<(), String> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &mut self.local {
+            let session = self
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == id)
+                .ok_or("Chat no longer available")?;
+            return local.send(session, prompt, attachments);
+        }
         if let Some(live) = &mut self.live {
             live.prompt(id, prompt)?;
             self.reproject(id);
@@ -369,6 +567,16 @@ impl Store {
 
     #[cfg(test)]
     pub fn unqueue(&mut self, id: SessionId, index: usize) -> Result<(), String> {
+        #[cfg(feature = "local-backend")]
+        if self.local.is_some() {
+            let key = self
+                .session(id)
+                .and_then(|session| session.queued_keys.get(index))
+                .cloned()
+                .flatten()
+                .ok_or("This queued message has no confirmed durable identity")?;
+            return self.unqueue_key(id, &key);
+        }
         if let Some(live) = &mut self.live {
             live.unqueue(id, index)?;
             self.reproject(id);
@@ -387,6 +595,10 @@ impl Store {
 
     /// Cancels only the payload identified in the rendered snapshot.
     pub fn unqueue_key(&mut self, id: SessionId, key: &QueueKey) -> Result<(), String> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &mut self.local {
+            return local.unqueue_key(id, key);
+        }
         if let Some(live) = &mut self.live {
             live.unqueue_key(id, key)?;
             self.reproject(id);
@@ -406,6 +618,9 @@ impl Store {
     }
 
     fn start_queued(&mut self, id: SessionId) {
+        if !self.is_sample() {
+            return;
+        }
         if let Some(session) = self.session_mut(id)
             && session.state == State::Done
             && !session.queued.is_empty()
@@ -425,6 +640,17 @@ impl Store {
         prompt: crate::prompt::Prompt,
         attachments: Vec<String>,
     ) -> Result<SessionId, String> {
+        #[cfg(feature = "local-backend")]
+        if let Some(local) = &mut self.local {
+            let mut session = local.create()?;
+            let id = session.id;
+            if let Err(error) = local.send(&mut session, prompt, attachments) {
+                self.sessions.push(local.project(id));
+                return Err(error);
+            }
+            self.sessions.push(session);
+            return Ok(id);
+        }
         if let Some(live) = &mut self.live {
             let Some(project) = self.projects.get(project) else {
                 return Err("Choose a project folder on the computer first.".into());

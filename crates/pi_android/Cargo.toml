@@ -8,6 +8,10 @@ description = "Pi on an Android phone: follow sessions, answer questions, review
 [features]
 # Deterministic sample screens for the separate device-test APK.
 ui-test = ["pi_visual_ui/ui-test"]
+# Source-linked Bun Local runtime. APK packaging must supply its matching library.
+local-backend = ["dep:pi_local"]
+# Separately signed/package-preserving synthetic device fixtures, never release defaults.
+bun-backend-test = ["local-backend", "ui-test"]
 
 # The cdylib is what GpuiActivity loads (`libpi_android.so`); build the APK with
 # scripts/build_apk.py. The views compile on any host for tests and previews.
@@ -31,6 +35,7 @@ gpui_android = { path = "../gpui_android" }
 libc = "0.2"
 log = "0.4"
 pi_core = { path = "../pi_core" }
+pi_local = { path = "../pi_local", optional = true }
 pi_markdown = { path = "../pi_markdown" }
 pi_visual = { path = "../pi_visual" }
 pi_visual_ui = { path = "../pi_visual_ui", features = ["android"] }

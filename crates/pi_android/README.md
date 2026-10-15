@@ -239,6 +239,30 @@ adb logcat -s pi GpuiActivity
 
 The script is gpui_android's, which lists what it needs.
 
+## Android Local — experimental
+
+The release APK bundles source-linked **Bun 1.4.3** and the unchanged **Pi/Durable
+1.2.0** SDK. Choose **Local** from the Pi/computer selector, sign in with a Claude
+or Codex subscription, then use the shared session/thread/composer UI. Chats and
+request identities persist in app-private SQLite; stock coding tools, images,
+thinking, compaction and Stop use the same Durable engine as desktop/SSH.
+Switching Local ↔ Remote parks the Local session instead of aborting its tools.
+Native encrypted account storage exclusively owns OAuth refresh and HTTP leases.
+
+**Experimental, not sandboxed.** Tools use Android `/system/bin/sh`, not GNU Bash
+or a Linux userland. Background execution, Activity recreation, arbitrary
+mid-tool crash recovery and production runtime/credential isolation remain
+unproven. Saved completed sessions do not imply exactly-once external tool effects.
+
+The builder needs `--bun-library /path/to/libbunembeddingpoc.so` (or
+`PI_ANDROID_BUN_LIBRARY`) and the pinned license beside it. CI builds that real
+runtime from pinned source, bundles it into the release APK, validates the bundle,
+and publishes runtime/relink archives too. `--ssh-only` is a developer-only opt-out.
+The separate `--bun-backend-test` build keeps `dev.pi.android.quickjstest` and the
+existing debug signing/data, enabling synthetic UI fixtures; it is not the normal
+release package. See [device verification](scripts/BUN_LOCAL_VERIFICATION.md),
+[native runtime](../pi_local/README.md) and [Bun build](../../experiments/bun-embedding/README.md).
+
 ## On the desktop
 
 The views compile on any host, so a phone-sized window shows them without a

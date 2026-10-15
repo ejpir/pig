@@ -30,6 +30,34 @@ const FILES: usize = 3;
 const LARGE_THREAD_ITEMS: usize = 24;
 const THREAD_LOADING_PAINT: Duration = Duration::from_millis(80);
 
+/// Execution failures are not file-review features: even a text-only Local
+/// reply must explain why it failed, including when no assistant text exists.
+fn failure_card(session: &Session, colors: &Theme) -> Option<gpui::Stateful<Div>> {
+    (session.state == State::Failed).then(|| {
+        let hint = if session.local {
+            "The reply failed. This partial turn will not be included in later requests. Send again to retry."
+        } else {
+            "The run failed. Any changes already made remain on the computer. Ask again to retry."
+        };
+        ui::card(colors)
+            .id("run-failure")
+            .debug_selector(|| "run-failure".into())
+            .border_color(colors.coral.opacity(0.4))
+            .p(px(16.))
+            .flex()
+            .gap(px(12.))
+            .child(icon("alert", 16., colors.coral))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(14.))
+                    .child(capitalized(&session.status_line()))
+                    .child(ui::hint(hint, colors)),
+            )
+    })
+}
+
 fn new_thread_list_state(item_count: usize) -> gpui::ListState {
     // Accurate off-screen heights keep the draggable thumb mapped to the whole
     // conversation. Rows remain virtualized for painting after this first
@@ -41,22 +69,36 @@ fn thread_running(session: &Session, compacting: bool) -> bool {
     session.state.is_running() || compacting
 }
 
-fn composer_status(session: &Session, compacting: bool) -> &'static str {
+fn composer_status(session: &Session, compacting: bool) -> &str {
     if compacting {
         "Compacting"
     } else if session.state == State::NeedsYou {
         "Needs you"
     } else if session.details.background_compacting {
         "Compacting"
-    } else {
+    } else if session.activity.is_empty() {
         "Working"
+    } else {
+        &session.activity
     }
 }
 
-/// Background compaction is visible work, but must not make an idle parent
-/// busy or replace the action needed to answer a question.
+/// Control phases are not tool progress. Local and SSH use the same policy;
+/// a stale stage must not mask a retry, admission, stop, or configuration change.
 fn composer_shows_stage(session: &Session, compacting: bool) -> bool {
-    !compacting && !session.details.background_compacting && session.state != State::NeedsYou
+    !compacting
+        && !session.details.background_compacting
+        && session.state == State::Working
+        && !matches!(
+            session.activity.as_str(),
+            "Compacting"
+                | "Compacting…"
+                | "Retrying"
+                | "Stopping…"
+                | "Opening saved chat…"
+                | "Updating model settings…"
+                | "Admitting prompt…"
+        )
 }
 
 fn active_background_subagents(session: &Session) -> usize {
@@ -81,6 +123,9 @@ fn agents_at_work(count: usize) -> String {
 }
 
 fn thread_subtitle(session: &Session, computer_name: &str, compacting: bool) -> String {
+    if session.local {
+        return format!("{} · saved on this phone", session.project);
+    }
     if compacting {
         return format!("{} · {}", session.project, computer_name);
     }
@@ -469,7 +514,11 @@ impl PhoneApp {
             return div().into_any_element();
         };
         let computer_name = store.computer.name.clone();
-        let stopping = store.live.as_ref().is_some_and(|live| live.is_stopping(id));
+        let stopping = store.is_stopping(id);
+        let queues = store.supports("prompt_queue");
+        composer.update(cx, |composer, _| {
+            composer.set_send_blocked(!queues && session.state.is_running());
+        });
         let compacting = self.compact_pending(id)
             || store
                 .live
@@ -505,7 +554,9 @@ impl PhoneApp {
         let pages = session.turn().is_some_and(|turn| !turn.pages.is_empty());
         let area = composer.read(cx).area.clone();
         area.update(cx, |area, _| {
-            area.set_placeholder(if running {
+            area.set_placeholder(if !queues && running {
+                "Draft your next message…"
+            } else if running {
                 "Steer this run…"
             } else if pages {
                 "Ask for a change…"
@@ -764,8 +815,8 @@ impl PhoneApp {
         let live = index == last && running;
         let many = session.turns.len() > 1;
         // Review and the report card belong to the session the user runs.
-        let ending =
-            (index == last && !running && !read_only).then(|| self.ending(session, index, cx));
+        let ending = (index == last && !running && !read_only && session.supports("file_review"))
+            .then(|| self.ending(session, index, cx));
         // While Pi works its calls stream in between its words; a finished
         // run folds them under its line until Show brings them back.
         let streamed = turn.streams() && (live || self.expanded_streams.contains(&(id, index)));
@@ -779,6 +830,11 @@ impl PhoneApp {
                 turn.pt(px(24.)).border_t_1().border_color(colors.line)
             })
             .child(self.prompt(id, index, turn, live, many, colors, cx))
+            .children(
+                turn.excluded
+                    .as_ref()
+                    .map(|warning| ui::hint(warning.clone(), colors)),
+            )
             .when(live || !turn.stages.is_empty(), |column| {
                 column.child(if live && turn.streams() {
                     div()
@@ -816,6 +872,11 @@ impl PhoneApp {
                         .children(self.page_cards(id, index, turn, colors, cx))
                 }
             })
+            .children(
+                (index == last && !running)
+                    .then(|| failure_card(session, colors))
+                    .flatten(),
+            )
             .children(ending)
     }
 
@@ -1479,33 +1540,17 @@ impl PhoneApp {
                         this.open_review(id, index, window, cx)
                     }))
             });
-        let failure = (session.state == State::Failed).then(|| {
-            ui::card(&colors)
-                .border_color(colors.coral.opacity(0.4))
-                .p(px(16.))
-                .flex()
-                .gap(px(12.))
-                .child(icon("alert", 16., colors.coral))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(14.))
-                        .child(capitalized(&session.status_line()))
-                        .child(ui::hint(
-                            "The run failed. Any changes already made remain on the computer. Ask again to retry.",
-                            &colors,
-                        )),
-                )
-        });
         div()
             .flex()
             .flex_col()
             .gap(px(16.))
-            .children(failure)
             .when(session.state == State::Stopped, |ending| {
                 ending.child(ui::hint(
-                    "Stopped by you. Changes made before stopping stay on the computer.",
+                    if session.local {
+                        "Stopped. This partial turn will not be included in later requests."
+                    } else {
+                        "Stopped by you. Changes made before stopping stay on the computer."
+                    },
                     &colors,
                 ))
             })
@@ -2134,9 +2179,13 @@ fn working_strip(
     cx: &Context<PhoneApp>,
 ) -> Div {
     let id = session.id;
-    let waiting = !compacting && session.state == State::NeedsYou;
-    let status = composer_status(session, compacting);
-    let show_stage = composer_shows_stage(session, compacting);
+    let waiting = !stopping && !compacting && session.state == State::NeedsYou;
+    let status = if stopping {
+        "Stopping…"
+    } else {
+        composer_status(session, compacting)
+    };
+    let show_stage = !stopping && composer_shows_stage(session, compacting);
     let last = session.turns.len().saturating_sub(1);
     let stage = session
         .turns
@@ -2181,7 +2230,14 @@ fn working_strip(
     // made the stage, segments and hour-long timer compete with the fixed-size
     // actions, pushing Stop past the composer's border on phone-sized screens.
     let (label, hue) = match (!show_stage, &stage) {
-        (false, Some((_, kind))) => (kind.name(StageStatus::Live), ui::stage_hue(*kind, colors)),
+        (false, Some((_, kind))) => (
+            if session.activity.is_empty() {
+                kind.name(StageStatus::Live)
+            } else {
+                status
+            },
+            ui::stage_hue(*kind, colors),
+        ),
         _ => (status, if waiting { colors.wait } else { colors.read }),
     };
     let details = div()
@@ -2218,6 +2274,13 @@ fn working_strip(
                 .flex_1()
                 .min_w_0()
                 .py(px(4.))
+                // GPUI paints the live segment's 2 dp shadow outside its
+                // layout bounds. Reserve that gutter once for BOTH rows: the
+                // label starts at the first solid block, not the halo's edge.
+                // Keep it even when another stage is live or the rail becomes
+                // a status dot, so those transitions cannot move the label.
+                .pl(px(2.))
+                .debug_selector(|| "composer-working-content".into())
                 .flex()
                 .flex_col()
                 .child(
@@ -2229,11 +2292,17 @@ fn working_strip(
                         .line_height(px(20.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(hue)
-                        .child(label),
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .debug_selector(move || format!("composer-label-{label}"))
+                                .child(label.to_owned()),
+                        ),
                 )
                 .child(details),
         )
-        .when(stage.is_some() && !waiting, |strip| {
+        .when(show_stage && stage.is_some() && !waiting, |strip| {
             strip.child(
                 ui::tap("run-line", "chev_u", colors)
                     .size(px(40.))
@@ -2311,7 +2380,348 @@ mod tests {
                             cx,
                         ))
                     })
+                    // Intrinsic, untruncated reference for the timer-fit checks.
+                    .child(
+                        meta(duration_label(self.session.elapsed), &colors)
+                            .self_start()
+                            .flex_none()
+                            .debug_selector(|| "composer-timer-reference".into()),
+                    )
             })
+        }
+    }
+
+    #[gpui::test]
+    fn composer_rail_label_geometry_survives_stage_and_status_transitions(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = cx.new(|cx| PhoneApp::new(None, window, cx));
+            let mut session = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+            session.elapsed = Duration::from_secs(3_819);
+            WorkingFrame {
+                app,
+                session,
+                compacting: false,
+                active_subagents: 0,
+            }
+        });
+        let live_selectors = [
+            "composer-live-stage-0",
+            "composer-live-stage-1",
+            "composer-live-stage-2",
+            "composer-live-stage-3",
+        ];
+        let selectors = [
+            "composer-working-segment-0",
+            "composer-working-segment-1",
+            "composer-working-segment-2",
+            "composer-working-segment-3",
+        ];
+        for width in [320., 360., 393.] {
+            cx.simulate_resize(gpui::size(px(width), px(200.)));
+            for local in [false, true] {
+                let mut label_left = None;
+                let mut stop_left = None;
+                for live in StageKind::ALL {
+                    // Reuse the same rendered view: a fresh frame for every
+                    // case would miss jumps when the rail is replaced/restored.
+                    for (state, compacting, background) in [
+                        (State::Working, false, false),
+                        (State::Working, true, false),
+                        (State::NeedsYou, false, false),
+                        (State::Working, false, false),
+                        (State::Working, false, true),
+                        (State::Working, false, false),
+                    ] {
+                        cx.update(|_, cx| {
+                            view.update(cx, |view, cx| {
+                                view.session.local = local;
+                                view.session.state = state;
+                                view.session.activity = if compacting || background {
+                                    "Compacting"
+                                } else if state == State::NeedsYou {
+                                    "Needs you"
+                                } else {
+                                    "Working"
+                                }
+                                .into();
+                                view.compacting = compacting;
+                                view.session.details.background_compacting = background;
+                                for stage in &mut view.session.turns.last_mut().unwrap().stages {
+                                    stage.status = if stage.kind == live {
+                                        StageStatus::Live
+                                    } else if stage.kind.index() < live.index() {
+                                        StageStatus::Done
+                                    } else {
+                                        StageStatus::Planned
+                                    };
+                                }
+                                cx.notify();
+                            })
+                        });
+                        cx.run_until_parked();
+                        let context = format!(
+                            "width={width}, local={local}, live={live:?}, state={state:?}, \
+                             compacting={compacting}, background={background}"
+                        );
+                        let strip = cx.debug_bounds("composer-working-strip").unwrap();
+                        let content = cx.debug_bounds("composer-working-content").unwrap();
+                        let label = cx.debug_bounds("composer-working-status").unwrap();
+                        let text = cx
+                            .debug_bounds(if compacting || background {
+                                "composer-label-Compacting"
+                            } else if state == State::NeedsYou {
+                                "composer-label-Needs you"
+                            } else {
+                                "composer-label-Working"
+                            })
+                            .unwrap();
+                        assert_eq!(
+                            text.left(),
+                            label.left(),
+                            "actual label text shifted: {context}"
+                        );
+                        let elapsed = cx.debug_bounds("composer-working-elapsed").unwrap();
+                        let stop = cx.debug_bounds("composer-stop").unwrap();
+                        assert_eq!(label.left(), content.left() + px(2.), "{context}");
+                        assert_eq!(
+                            *label_left.get_or_insert(label.left()),
+                            label.left(),
+                            "{context}"
+                        );
+                        assert_eq!(
+                            *stop_left.get_or_insert(stop.left()),
+                            stop.left(),
+                            "{context}"
+                        );
+                        assert!(label.size.width > px(0.), "{context}");
+                        assert!(elapsed.size.width > px(0.), "{context}");
+                        assert!(label.bottom() <= elapsed.top(), "{context}");
+                        assert!(label.right() <= stop.left(), "{context}");
+                        assert!(elapsed.right() <= stop.left(), "{context}");
+                        assert!(stop.left() >= strip.left(), "{context}");
+                        assert!(stop.right() <= strip.right() - px(8.), "{context}");
+                        assert!(stop.top() >= strip.top(), "{context}");
+                        assert!(stop.bottom() <= strip.bottom(), "{context}");
+                        if !background {
+                            let timer = cx.debug_bounds("composer-timer-reference").unwrap();
+                            assert!(
+                                elapsed.size.width >= timer.size.width,
+                                "timer clipped: {context}"
+                            );
+                        }
+                        let has_rail = state == State::Working && !compacting && !background;
+                        let rail = cx.debug_bounds("composer-working-segments");
+                        assert_eq!(rail.is_some(), has_rail, "{context}");
+                        if let Some(rail) = rail {
+                            assert_eq!(rail.size.width, px(56.), "{context}");
+                            let mut previous_right = None;
+                            for (index, selector) in selectors.iter().enumerate() {
+                                let block = cx
+                                    .debug_bounds(if index == live.index() {
+                                        live_selectors[index]
+                                    } else {
+                                        selector
+                                    })
+                                    .unwrap();
+                                assert_eq!(block.size.height, px(4.), "{context}");
+                                assert!(block.size.width > px(0.), "{context}");
+                                if let Some(right) = previous_right {
+                                    assert_eq!(block.left() - right, px(3.), "{context}");
+                                } else {
+                                    // Bounds are the solid block, NOT the 2 dp
+                                    // painted halo. This catches aligning text
+                                    // to a selected-stage decoration instead.
+                                    assert_eq!(label.left(), block.left(), "{context}");
+                                    assert_eq!(block.left() - px(2.), content.left(), "{context}");
+                                }
+                                assert!(block.top() >= label.bottom(), "{context}");
+                                previous_right = Some(block.right());
+                            }
+                            assert_eq!(previous_right.unwrap(), rail.right(), "{context}");
+                            assert_eq!(elapsed.left(), rail.right() + px(8.), "{context}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn composer_rail_follows_projected_execution_and_inference_for_local_and_remote(
+        cx: &mut TestAppContext,
+    ) {
+        use serde_json::json;
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = cx.new(|cx| PhoneApp::new(None, window, cx));
+            WorkingFrame {
+                app,
+                session: crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new()),
+                compacting: false,
+                active_subagents: 0,
+            }
+        });
+        cx.simulate_resize(gpui::size(px(320.), px(200.)));
+        for local in [false, true] {
+            let mut pi = pi_core::session::Session::new("/offline".into());
+            pi.apply(&json!({"type":"message_end","message":{"role":"user","content":"offline rail test"}})).unwrap();
+            let cases = [
+                (
+                    json!({"type":"agent_start"}),
+                    "composer-label-Working",
+                    Some(0),
+                ),
+                (
+                    json!({"type":"message_end","message":{"role":"assistant","content":[
+                        {"type":"toolCall","id":"read","name":"read","arguments":{"path":"a.rs"}},
+                        {"type":"toolCall","id":"edit","name":"edit","arguments":{"path":"a.rs"}},
+                        {"type":"toolCall","id":"bash","name":"bash","arguments":{"command":"check"}}
+                    ]}}),
+                    "composer-label-Working",
+                    Some(0),
+                ),
+                (
+                    json!({"type":"tool_execution_start","toolCallId":"read","toolName":"read","args":{"path":"a.rs"}}),
+                    "composer-label-Reading a.rs",
+                    Some(0),
+                ),
+                (
+                    json!({"type":"tool_execution_end","toolCallId":"read","result":{"content":[]}}),
+                    "composer-label-Working",
+                    Some(0),
+                ),
+                (
+                    json!({"type":"tool_execution_start","toolCallId":"edit","toolName":"edit","args":{"path":"a.rs"}}),
+                    "composer-label-Editing a.rs",
+                    Some(1),
+                ),
+                (
+                    json!({"type":"tool_execution_end","toolCallId":"edit","result":{"content":[]}}),
+                    "composer-label-Working",
+                    Some(0),
+                ),
+                (
+                    json!({"type":"tool_execution_start","toolCallId":"bash","toolName":"bash","args":{"command":"check"}}),
+                    "composer-label-Running check",
+                    Some(2),
+                ),
+                (
+                    json!({"type":"tool_execution_end","toolCallId":"bash","result":{"content":[]}}),
+                    "composer-label-Working",
+                    Some(0),
+                ),
+                (
+                    json!({"type":"message_start","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Think"}]}}),
+                    "composer-label-Thinking",
+                    Some(0),
+                ),
+                (
+                    json!({"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":1}}),
+                    "composer-label-Writing",
+                    Some(0),
+                ),
+                (
+                    json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"js","name":"javascript","arguments":{"file":"inspect.cjs"}}]}}),
+                    "composer-label-Working",
+                    Some(0),
+                ),
+                (
+                    json!({"type":"tool_execution_start","toolCallId":"js","toolName":"javascript","args":{"file":"inspect.cjs"}}),
+                    "composer-label-Running inspect.cjs",
+                    Some(2),
+                ),
+                (
+                    json!({"type":"tool_execution_end","toolCallId":"js","result":{"content":[]}}),
+                    "composer-label-Working",
+                    Some(0),
+                ),
+                (
+                    json!({"type":"auto_retry_start","attempt":1}),
+                    "composer-label-Retrying",
+                    None,
+                ),
+                (
+                    json!({"type":"auto_retry_end","attempt":1}),
+                    "composer-label-Working",
+                    Some(0),
+                ),
+                (
+                    json!({"type":"compaction_start"}),
+                    "composer-label-Compacting",
+                    None,
+                ),
+                (
+                    json!({"type":"compaction_end"}),
+                    "composer-label-Working",
+                    Some(0),
+                ),
+            ];
+            for (record, label, live) in cases {
+                pi.apply(&record).unwrap();
+                let mut session = crate::projection::project(
+                    &pi,
+                    crate::projection::Facts {
+                        id: SessionId(1),
+                        cwd: "/offline",
+                        folder: "offline".into(),
+                        question: None,
+                        outbox: &[],
+                        key: "rail-test",
+                    },
+                );
+                session.local = local;
+                cx.update(|_, cx| {
+                    view.update(cx, |view, cx| {
+                        view.compacting = session.activity == "Compacting";
+                        view.session = session;
+                        cx.notify();
+                    })
+                });
+                cx.run_until_parked();
+                assert!(
+                    cx.debug_bounds(label).is_some(),
+                    "local={local}, event={record}, label={label}"
+                );
+                for (index, selector) in [
+                    "composer-live-stage-0",
+                    "composer-live-stage-1",
+                    "composer-live-stage-2",
+                    "composer-live-stage-3",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    assert_eq!(
+                        cx.debug_bounds(selector).is_some(),
+                        live == Some(index),
+                        "local={local}, event={record}, live={live:?}"
+                    );
+                }
+                assert!(cx.debug_bounds("composer-stop").is_some());
+            }
+            pi.apply(&json!({"type":"message_end","message":{"role":"assistant","content":"Done","stopReason":"stop"}})).unwrap();
+            pi.apply(&json!({"type":"agent_settled"})).unwrap();
+            let mut session = crate::projection::project(
+                &pi,
+                crate::projection::Facts {
+                    id: SessionId(1),
+                    cwd: "/offline",
+                    folder: "offline".into(),
+                    question: None,
+                    outbox: &[],
+                    key: "rail-test",
+                },
+            );
+            session.local = local;
+            cx.update(|_, cx| {
+                view.update(cx, |view, cx| {
+                    view.session = session;
+                    view.compacting = false;
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("composer-working-strip").is_none());
+            assert!(cx.debug_bounds("composer-stop").is_none());
         }
     }
 
@@ -2544,6 +2954,43 @@ mod tests {
                 [Some(crate::model::QueueKey::Local("sample-second".into()))]
             );
         });
+    }
+
+    struct FailedTurnFrame {
+        app: gpui::Entity<PhoneApp>,
+        session: Session,
+    }
+
+    impl Render for FailedTurnFrame {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.app.update(cx, |app, cx| {
+                div()
+                    .size_full()
+                    .child(app.turn(&self.session, 0, false, &theme(cx), cx))
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn local_failure_is_painted_without_file_review(cx: &mut TestAppContext) {
+        let (frame, cx) = cx.add_window_view(|window, cx| {
+            let app = cx.new(|cx| PhoneApp::new(None, window, cx));
+            let mut session = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+            session.local = true;
+            session.backend_features = Some(vec!["models".into(), "stop".into()]);
+            session.state = State::Failed;
+            session.failure = Some("Sign in to Claude in Local accounts, then send again.".into());
+            assert!(!session.supports("file_review"));
+            FailedTurnFrame { app, session }
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("run-failure").is_some());
+        frame.update(cx, |frame, cx| {
+            frame.session.state = State::Done;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("run-failure").is_none());
     }
 
     struct TallTurns {
@@ -2934,6 +3381,7 @@ mod tests {
         session.details.background_compacting = false;
         session.state = State::Working;
         assert!(composer_shows_stage(&session, false));
+        session.activity.clear();
         assert_eq!(composer_status(&session, false), "Working");
     }
 

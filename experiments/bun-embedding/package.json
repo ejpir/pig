@@ -1,0 +1,17 @@
+{
+  "name": "pi-bun-embedding-poc",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:durable-probe": "bun build durable-probe.js --target=bun --outfile=.work/durable-probe.bundle.js"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.2.0",
+    "@earendil-works/pi-ai": "1.2.0",
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-durable": "1.2.0"
+  },
+  "engines": {
+    "bun": ">=1.4.2"
+  }
+}

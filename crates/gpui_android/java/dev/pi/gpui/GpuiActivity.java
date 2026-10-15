@@ -57,6 +57,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class GpuiActivity extends NativeActivity {
     private static final String TAG = "GpuiActivity";
     private static final int QR_REQUEST = 0x6F10;
+    private final ProviderCodeInput providerCodeInput = new ProviderCodeInput(this);
     private final InlinePageHost inlinePages = new InlinePageHost(this);
     private android.content.BroadcastReceiver inlineInspector;
     private static native void nativeInlineTouch(long generation, int action, float x, float y);
@@ -105,7 +106,7 @@ public class GpuiActivity extends NativeActivity {
             currentConnection = null;
         }
         if (inlineInspector != null) unregisterReceiver(inlineInspector);
-        inlinePages.destroy(); super.onDestroy();
+        providerCodeInput.retire(); inlinePages.destroy(); super.onDestroy();
     }
 
     private static native void nativeImeState(long generation,
@@ -619,6 +620,29 @@ public class GpuiActivity extends NativeActivity {
         }
     }
 
+    /** Explicit user copy only. Suppress Android's clipboard content preview. */
+    public boolean copyProviderCode(String code) {
+        if (code == null || code.isEmpty() || code.length() > 64 || destroyed) return false;
+        try {
+            ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+            if (clipboard == null) return false;
+            ClipData clip = ClipData.newPlainText("Sign-in code", code);
+            android.os.PersistableBundle extras = new android.os.PersistableBundle();
+            // Literal also works on API 30–32, before EXTRA_IS_SENSITIVE was public.
+            extras.putBoolean("android.content.extra.IS_SENSITIVE", true);
+            clip.getDescription().setExtras(extras);
+            clipboard.setPrimaryClip(clip);
+            return true;
+        } catch (RuntimeException error) {
+            // Clipboard failures must not log the code or exception contents.
+            return false;
+        }
+    }
+
+    public boolean isDebugBuild() {
+        return (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+    }
+
     /** Copies an image, with optional text, served by {@link ClipboardProvider}. */
     public void setClipboardImage(byte[] bytes, String type, String extension, String text) {
         ClipboardManager clipboard = getSystemService(ClipboardManager.class);
@@ -880,13 +904,17 @@ public class GpuiActivity extends NativeActivity {
         }
     }
 
+    public ProviderVault providerVault(boolean synthetic) { return new ProviderVault(this, synthetic); }
+    public void showProviderCode(String request) { providerCodeInput.show(request); }
+    public String takeProviderCode(String request) { return providerCodeInput.take(request); }
+    public void dismissProviderCode(String request) { providerCodeInput.dismiss(request); }
     public void openUrl(String url) {
         runOnUiThread(
                 () -> {
                     try {
                         startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
                     } catch (ActivityNotFoundException e) {
-                        Log.w(TAG, "No app can open " + url, e);
+                        Log.w(TAG, "No app can open the requested link");
                     }
                 });
     }

@@ -408,6 +408,9 @@ impl PhoneApp {
     /// project rolled out and picked; after pairing it starts at home, with
     /// the folders down to the project rolled out.
     pub(crate) fn open_project_browser(&mut self, at_home: bool, cx: &mut Context<Self>) {
+        if !self.backend_supports("workspace_browse") {
+            return;
+        }
         if self.project_browser.root.is_some() {
             return;
         }
@@ -440,6 +443,9 @@ impl PhoneApp {
 
     /// Starts the tree at `path`.
     pub(crate) fn go_to_folder(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.backend_supports("workspace_browse") {
+            return;
+        }
         self.project_browser.root = Some(path.clone());
         if !self.project_browser.listed(&path) {
             self.load_folder(path.clone(), cx);
@@ -457,6 +463,9 @@ impl PhoneApp {
     }
 
     pub(crate) fn toggle_folder(&mut self, node: &Node, cx: &mut Context<Self>) {
+        if !self.backend_supports("workspace_browse") {
+            return;
+        }
         let browser = &mut self.project_browser;
         if !browser.open.remove(&node.path) {
             browser.open.insert(node.path.clone());
@@ -471,6 +480,9 @@ impl PhoneApp {
 
     /// Picks `path` and rolls out every folder down to it.
     pub(crate) fn reveal_folder(&mut self, path: &str, cx: &mut Context<Self>) {
+        if !self.backend_supports("workspace_browse") {
+            return;
+        }
         let browser = &mut self.project_browser;
         if let Some(root) = browser.root.clone() {
             let mut folder = parent(path);
@@ -484,6 +496,9 @@ impl PhoneApp {
     }
 
     pub(crate) fn retry_folder(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.backend_supports("workspace_browse") {
+            return;
+        }
         let browser = &mut self.project_browser;
         let project = matches!(browser.projects.get(&path), Some(Load::Failed(_)));
         browser
@@ -604,6 +619,9 @@ impl PhoneApp {
 
     /// Starts a session in the picked folder, or the one the tree starts at.
     pub(crate) fn use_picked_folder(&mut self, cx: &mut Context<Self>) {
+        if !self.backend_supports("workspace_browse") {
+            return;
+        }
         let browser = &self.project_browser;
         let Some(path) = browser.picked.clone().or_else(|| browser.root.clone()) else {
             return;
@@ -612,6 +630,9 @@ impl PhoneApp {
     }
 
     pub(crate) fn use_folder(&mut self, path: &str, cx: &mut Context<Self>) {
+        if !self.backend_supports("workspace_browse") {
+            return;
+        }
         let existing = self.store.as_ref().and_then(|store| {
             store
                 .projects
@@ -630,6 +651,9 @@ impl PhoneApp {
     }
 
     pub(crate) fn open_file(&mut self, node: &Node, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.backend_supports("workspace_browse") {
+            return;
+        }
         let Some(root) = node.root.clone() else {
             return;
         };
@@ -673,6 +697,9 @@ impl PhoneApp {
     }
 
     pub(crate) fn select_project(&mut self, index: usize, cx: &mut Context<Self>) {
+        if !self.backend_supports("workspace_browse") {
+            return;
+        }
         if self
             .store
             .as_ref()
@@ -710,6 +737,9 @@ impl PhoneApp {
     }
 
     pub(crate) fn load_project_files(&mut self, index: usize, cx: &mut Context<Self>) {
+        if !self.backend_supports("workspace_browse") {
+            return;
+        }
         self.project_files_generation += 1;
         let generation = self.project_files_generation;
         let Some(store) = &self.store else { return };

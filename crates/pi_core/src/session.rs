@@ -36,6 +36,10 @@ pub struct Tool {
     pub output: String,
     pub diff: Option<String>,
     pub finished: bool,
+    /// Execution observed, not merely an assistant's planned call. Missing on
+    /// older snapshots, whose unfinished tools retain the legacy behavior.
+    #[serde(default)]
+    pub started: Option<bool>,
     pub is_error: bool,
     /// Image blocks in its result, such as a screenshot it read. A durable
     /// session sends each with empty `data` and an `imageId` to fetch it by.
@@ -49,6 +53,10 @@ pub struct Tool {
 }
 
 impl Tool {
+    pub fn is_running(&self) -> bool {
+        !self.finished && self.started != Some(false)
+    }
+
     pub fn target(&self) -> String {
         self.args["path"]
             .as_str()
@@ -254,6 +262,16 @@ impl Session {
                 }
             }
             "agent_start" => {
+                // A fresh run must not inherit an interrupted call's activity.
+                // Repeated starts (including durable run/turn notifications)
+                // during the same run must not erase observed execution.
+                if self.run == RunState::Idle {
+                    for tool in &mut self.tools {
+                        if !tool.finished {
+                            tool.started = Some(false);
+                        }
+                    }
+                }
                 self.run = RunState::Running;
                 self.state.is_streaming = true;
                 self.state.is_compacting = false;
@@ -272,6 +290,13 @@ impl Session {
             }
             "compaction_end" => {
                 self.state.is_compacting = false;
+                if self.run == RunState::Compacting {
+                    self.run = if self.state.is_streaming {
+                        RunState::Running
+                    } else {
+                        RunState::Idle
+                    };
+                }
                 if record["result"].is_object() {
                     // Pre-compaction counts are no longer valid; wait for RPC stats.
                     self.stats.context_usage = None;
@@ -286,6 +311,15 @@ impl Session {
             }
             "auto_retry_end" => {
                 self.record_retry(record);
+                if self.run == RunState::Retrying {
+                    self.run = if self.state.is_compacting {
+                        RunState::Compacting
+                    } else if self.state.is_streaming {
+                        RunState::Running
+                    } else {
+                        RunState::Idle
+                    };
+                }
                 if let Some(error) = record["finalError"].as_str() {
                     self.error = Some(error.to_owned());
                 }
@@ -313,17 +347,20 @@ impl Session {
                 }));
             }
             "tool_execution_start" => {
-                self.upsert_tool(
-                    text(record, "toolCallId"),
-                    text(record, "toolName"),
-                    record["args"].clone(),
-                );
+                let id = text(record, "toolCallId");
+                self.upsert_tool(id.clone(), text(record, "toolName"), record["args"].clone());
+                if let Some(tool) = self.tools.iter_mut().find(|tool| tool.id == id) {
+                    tool.started = Some(true);
+                }
             }
             "tool_execution_update" | "tool_execution_end" => {
                 let finished = record["type"] == "tool_execution_end";
                 let id = text(record, "toolCallId");
                 if !self.tools.iter().any(|tool| tool.id == id) {
                     self.upsert_tool(id.clone(), text(record, "toolName"), record["args"].clone());
+                }
+                if let Some(tool) = self.tools.iter_mut().find(|tool| tool.id == id) {
+                    tool.started = Some(true);
                 }
                 self.tool_result(
                     &id,
@@ -530,6 +567,15 @@ impl Session {
                 let append = self.shell_snapshot_appends(data);
                 let previous = if append { self.messages.len() } else { 0 };
                 let messages: Vec<Value> = serde_json::from_value(data["messages"].clone())?;
+                // Transcript calls describe plans, not execution. Preserve only
+                // still-active IDs observed before this refresh; results below
+                // remain authoritative about completion.
+                let active: BTreeMap<_, _> = self
+                    .tools
+                    .iter()
+                    .filter(|tool| tool.is_running())
+                    .map(|tool| (tool.id.clone(), tool.started))
+                    .collect();
                 if self.shell.as_ref().is_some_and(|shell| shell.finished) {
                     self.shell = None;
                 }
@@ -547,6 +593,13 @@ impl Session {
                             self.finish_message(message, false);
                         }
                         visible += 1;
+                    }
+                }
+                for tool in &mut self.tools {
+                    if !tool.finished
+                        && let Some(started) = active.get(&tool.id)
+                    {
+                        tool.started = *started;
                     }
                 }
             }
@@ -601,6 +654,9 @@ impl Session {
 
     fn upsert_tool(&mut self, id: String, name: String, args: Value) {
         if let Some(tool) = self.tools.iter_mut().find(|tool| tool.id == id) {
+            if !name.is_empty() {
+                tool.name = name;
+            }
             if args.is_object() {
                 tool.args = args;
             }
@@ -612,6 +668,7 @@ impl Session {
                 output: String::new(),
                 diff: None,
                 finished: false,
+                started: Some(false),
                 is_error: false,
                 images: Vec::new(),
                 details: Value::Null,
@@ -621,6 +678,17 @@ impl Session {
 
     fn tool_result(&mut self, id: &str, result: &Value, finished: bool, is_error: bool) {
         if let Some(tool) = self.tools.iter_mut().find(|tool| tool.id == id) {
+            // Background subagents publish directory updates after their
+            // parent tool result. Their details remain live, not their execution.
+            if tool.name == crate::subagent::TOOL
+                && let Some(details) = result.as_object().and_then(|result| result.get("details"))
+            {
+                tool.details = details.clone();
+            }
+            // A delayed preview must not revive or overwrite a committed result.
+            if tool.finished && !finished {
+                return;
+            }
             tool.output = content_text(&result["content"]);
             tool.images = result["content"]
                 .as_array()
@@ -630,11 +698,6 @@ impl Session {
                 .cloned()
                 .collect();
             tool.diff = result["details"]["diff"].as_str().map(str::to_owned);
-            if tool.name == crate::subagent::TOOL
-                && let Some(details) = result.as_object().and_then(|result| result.get("details"))
-            {
-                tool.details = details.clone();
-            }
             tool.finished = finished;
             tool.is_error = is_error;
         }
@@ -864,5 +927,204 @@ mod tests {
         }))
         .unwrap();
         assert!(tool.images.is_empty());
+        assert_eq!(tool.started, None);
+        assert!(!tool.is_running());
+        let mut legacy = tool;
+        legacy.finished = false;
+        assert!(legacy.is_running());
+        for started in [None, Some(false), Some(true)] {
+            legacy.started = started;
+            let restored: Tool =
+                serde_json::from_value(serde_json::to_value(&legacy).unwrap()).unwrap();
+            assert_eq!(restored.started, started);
+            assert_eq!(restored.is_running(), started != Some(false));
+        }
+    }
+
+    fn planned_batch() -> Value {
+        json!({"role":"assistant","content":[
+            {"type":"toolCall","id":"read","name":"read","arguments":{"path":"src/main.rs"}},
+            {"type":"toolCall","id":"edit","name":"edit","arguments":{"path":"src/main.rs"}},
+            {"type":"toolCall","id":"bash","name":"bash","arguments":{"command":"check"}}
+        ]})
+    }
+
+    #[test]
+    fn ending_retry_or_compaction_restores_the_underlying_run_state() {
+        for start in ["auto_retry_start", "compaction_start"] {
+            let end = if start == "auto_retry_start" {
+                "auto_retry_end"
+            } else {
+                "compaction_end"
+            };
+            for running in [false, true] {
+                let mut session = Session::new("/offline".into());
+                if running {
+                    session.apply(&json!({"type":"agent_start"})).unwrap();
+                }
+                session.apply(&json!({"type":start})).unwrap();
+                session.apply(&json!({"type":end})).unwrap();
+                assert_eq!(
+                    session.run,
+                    if running {
+                        RunState::Running
+                    } else {
+                        RunState::Idle
+                    },
+                    "{start}, running={running}"
+                );
+                assert!(!session.state.is_compacting);
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_start_and_progress_do_not_revive_a_completed_call() {
+        let mut session = Session::new("/offline".into());
+        session.apply(&json!({"type":"tool_execution_start","toolCallId":"done","toolName":"bash","args":{"command":"test"}})).unwrap();
+        session.apply(&json!({"type":"tool_execution_end","toolCallId":"done","result":{"content":[{"type":"text","text":"final result"}]},"isError":true})).unwrap();
+        session
+            .apply(&json!({"type":"tool_execution_start","toolCallId":"done","toolName":"bash"}))
+            .unwrap();
+        session.apply(&json!({"type":"tool_execution_update","toolCallId":"done","partialResult":{"content":[{"type":"text","text":"stale"}]}})).unwrap();
+        assert!(!session.tools[0].is_running());
+        assert!(session.tools[0].finished);
+        assert!(session.tools[0].is_error);
+        assert_eq!(session.tools[0].output, "final result");
+    }
+
+    #[test]
+    fn sequential_batch_plans_are_not_running() {
+        let mut session = Session::default();
+        session.apply(&json!({"type":"agent_start"})).unwrap();
+        session
+            .apply(&json!({"type":"message_end","message":planned_batch()}))
+            .unwrap();
+        assert!(session.tools.iter().all(|tool| tool.started == Some(false)));
+        assert!(!session.tools.iter().any(Tool::is_running));
+        session
+            .apply(&json!({"type":"tool_execution_start","toolCallId":"read","toolName":"read"}))
+            .unwrap();
+        assert_eq!(
+            session
+                .tools
+                .iter()
+                .filter(|tool| tool.is_running())
+                .map(|tool| tool.id.as_str())
+                .collect::<Vec<_>>(),
+            ["read"]
+        );
+        session
+            .apply(
+                &json!({"type":"tool_execution_end","toolCallId":"read","result":{"content":[]}}),
+            )
+            .unwrap();
+        assert!(!session.tools.iter().any(Tool::is_running));
+        session
+            .apply(&json!({"type":"tool_execution_start","toolCallId":"edit","toolName":"edit"}))
+            .unwrap();
+        assert!(session.tools[1].is_running());
+        assert!(!session.tools[2].is_running());
+    }
+
+    #[test]
+    fn progress_before_call_preserves_observed_execution() {
+        let mut session = Session::default();
+        session
+            .apply(&json!({"type":"tool_execution_update","toolCallId":"read","partialResult":{"content":[{"type":"text","text":"partial"}]}}))
+            .unwrap();
+        assert!(session.tools[0].is_running());
+        session
+            .apply(&json!({"type":"message_end","message":planned_batch()}))
+            .unwrap();
+        let read = &session.tools[0];
+        assert_eq!(read.started, Some(true));
+        assert_eq!(read.name, "read");
+        assert_eq!(read.args["path"], "src/main.rs");
+        assert_eq!(read.output, "partial");
+        assert!(read.is_running());
+        assert!(!session.tools[1].is_running());
+    }
+
+    #[test]
+    fn execution_start_progress_and_end_track_running_state() {
+        let mut session = Session::default();
+        for kind in [
+            "tool_execution_start",
+            "tool_execution_update",
+            "tool_execution_end",
+        ] {
+            session
+                .apply(&json!({"type":kind,"toolCallId":"read","toolName":"read","args":{"path":"file"},
+                    "partialResult":{"content":[{"type":"text","text":"partial"}]},
+                    "result":{"content":[{"type":"text","text":"complete"}]}}))
+                .unwrap();
+            let tool = &session.tools[0];
+            assert_eq!(tool.started, Some(true));
+            assert_eq!(tool.finished, kind == "tool_execution_end");
+            assert_eq!(tool.is_running(), kind != "tool_execution_end");
+        }
+        assert_eq!(session.tools[0].output, "complete");
+        // An end without a preceding start is also execution evidence.
+        session
+            .apply(&json!({"type":"tool_execution_end","toolCallId":"other","toolName":"bash","result":{"content":[]}}))
+            .unwrap();
+        assert_eq!(session.tools[1].started, Some(true));
+        assert!(session.tools[1].finished);
+        assert!(!session.tools[1].is_running());
+    }
+
+    #[test]
+    fn fresh_run_clears_stale_execution_but_duplicate_start_preserves_it() {
+        let mut session = Session::default();
+        session.apply(&json!({"type":"agent_start"})).unwrap();
+        session
+            .apply(&json!({"type":"tool_execution_start","toolCallId":"old","toolName":"read"}))
+            .unwrap();
+        session.apply(&json!({"type":"agent_start"})).unwrap();
+        assert!(session.tools[0].is_running());
+        session.apply(&json!({"type":"agent_settled"})).unwrap();
+        session.apply(&json!({"type":"agent_start"})).unwrap();
+        assert_eq!(session.tools[0].started, Some(false));
+        assert!(
+            !session.tools[0].finished,
+            "do not fabricate a completed result"
+        );
+        assert!(!session.tools[0].is_running());
+    }
+
+    #[test]
+    fn get_messages_refresh_preserves_actual_active_ids_only() {
+        let mut session = Session::default();
+        session.apply(&json!({"type":"agent_start"})).unwrap();
+        session
+            .apply(&json!({"type":"message_end","message":planned_batch()}))
+            .unwrap();
+        for id in ["read", "removed"] {
+            session
+                .apply(&json!({"type":"tool_execution_update","toolCallId":id,"toolName":"read","partialResult":{"content":[]}}))
+                .unwrap();
+        }
+        let refresh = json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[planned_batch()]}});
+        session.apply(&refresh).unwrap();
+        assert_eq!(session.tools.len(), 3);
+        assert_eq!(session.tools[0].started, Some(true));
+        assert!(session.tools[0].is_running());
+        assert!(
+            session.tools[1..]
+                .iter()
+                .all(|tool| tool.started == Some(false))
+        );
+        session.apply(&refresh).unwrap();
+        assert!(
+            session.tools[0].is_running(),
+            "repeated refresh keeps evidence"
+        );
+        let completed = json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+            planned_batch(), {"role":"toolResult","toolCallId":"read","content":[]}
+        ]}});
+        session.apply(&completed).unwrap();
+        assert!(session.tools[0].finished);
+        assert!(!session.tools.iter().any(Tool::is_running));
     }
 }

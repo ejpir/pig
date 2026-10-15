@@ -452,7 +452,7 @@ test("opt-in validation rejects single/chain, peer count and explicit/preset uns
     { chain: [{ agent: "a", task: "t" }, { agent: "b", task: "t" }], swarm: true },
     { tasks: [{ agent: "a", task: "t" }], swarm: true },
     { tasks: Array.from({ length: 9 }, () => ({ agent: "a", task: "t" })), swarm: true },
-    ...["write", "edit", "bash", "grep", "find", "ls"].map((tool) => ({ tasks: [{ agent: "a", task: "t", tools: ["read", tool] }, { agent: "b", task: "t", tools: ["read"] }], swarm: true })),
+    ...["write", "edit", "bash", "javascript", "grep", "find", "ls"].map((tool) => ({ tasks: [{ agent: "a", task: "t", tools: ["read", tool] }, { agent: "b", task: "t", tools: ["read"] }], swarm: true })),
     { tasks: [{ agent: "unsafe", task: "t" }, { agent: "b", task: "t" }], swarm: true },
   ];
   let input = inputs[0];

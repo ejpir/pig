@@ -18,7 +18,7 @@ A native desktop app for the [pi](https://github.com/earendil-works/pi) coding a
 - **Changes** as split or unified diffs; each run that edits files can become a jj change you can undo.
 - **Files, terminal, language servers, models and settings** in the same window.
 - **Remote sessions over SSH** that keep running when you disconnect ([docs/remote.md](docs/remote.md)).
-- **[Pi for Android](crates/pi_android/README.md)**, which follows and starts sessions on your computer over SSH. Every phone session runs on [pi-durable](#durable-sessions-experimental), so it carries on while the phone is away. Get `pi-android-arm64.apk` from the [releases](https://github.com/ejpir/pig/releases).
+- **[Pi for Android](crates/pi_android/README.md)** follows sessions over SSH, or runs **experimental Local** chats on this phone with bundled Bun/Durable, Claude/Codex subscriptions and SQLite persistence. Local is not sandboxed; its tools use Android sh, not GNU Bash/Linux tools. Get `pi-android-arm64.apk` from the [releases](https://github.com/ejpir/pig/releases).
 
 ## Build and run
 
@@ -66,7 +66,7 @@ not an OS sandbox. See the [API and limitations](crates/pi_visual/README.md).
 
 ## Durable sessions (experimental)
 
-Pi Desktop can also run sessions with a durable engine built on pi-durable. A session's state lives in SQLite on the computer that runs it, so the session survives disconnects and crashes and resumes where it was. Use it for SSH sessions (**New session → SSH → Durable · experimental**). [Pi for Android](crates/pi_android/README.md) always uses it: every session the phone starts is a durable one on your computer.
+Pi Desktop can also run sessions with a durable engine built on pi-durable. A session's state lives in SQLite on the computer that runs it, so the session survives disconnects and crashes and resumes where it was. Use it for SSH sessions (**New session → SSH → Durable · experimental**). [Pi for Android](crates/pi_android/README.md) always uses it: SSH sessions run durably on your computer; experimental Local sessions persist on the phone.
 
 The macOS and Linux SSH helpers in the [releases](https://github.com/ejpir/pig/releases) (`pi-desktop-remote-*`) have the engine built in. Local sessions don't need it; the steps above are enough. To build the engine into the helper yourself, on the machine that will run the sessions (it needs npm and Bun 1.4.2):
 

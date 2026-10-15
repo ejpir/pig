@@ -1,6 +1,6 @@
 # Experimental durable SSH backend
 
-This is the first vertical slice, **not yet the default or a stock Pi replacement**. It pins pi-durable/pi-ai/chord and the stock Pi model/auth SDK at 1.0.2 and compiles the JavaScript and Bun 1.4.2 runtime into a standalone worker. Rust keeps ownership/SSH/files; SQLite owns recoverable execution state. No provider is called by the tests.
+This is the first vertical slice, **not yet the default or a stock Pi replacement**. It pins pi-durable/pi-ai/chord and the stock Pi model/auth SDK at 1.2.0 and compiles the JavaScript and Bun 1.4.2 runtime into a standalone worker. Rust keeps ownership/SSH/files; SQLite owns recoverable execution state. No provider is called by the tests.
 
 ## Build-machine Bun setup
 
@@ -14,6 +14,52 @@ export PATH="$tools/node_modules/.bin:$PATH"
 ```
 
 If `npm exec --package=bun@1.4.2` reports "Bun's postinstall script was not run", use this setup instead of the cached npm-exec wrapper.
+
+## JavaScript files (experimental)
+
+The shared runner includes a `javascript` tool; Android Local uses the same tool
+with its embedded Bun 1.4.3, without a Node installation or Bun CLI subprocess:
+
+```json
+{"file":"scripts/analyze.cjs","args":["input.json"],"timeout":30}
+```
+
+Entry files may be `.js`, `.mjs` or `.cjs` (up to 2 MiB). ESM/CommonJS and Node
+APIs such as `node:fs`, `node:path`, `node:crypto`, `Buffer` and promises run in a
+fresh Node-compatible Bun worker. Args are literal `process.argv.slice(2)`, not
+shell text. Relative imports resolve from the entry file. Npm packages must
+already be available to the script; desktop native addons, desktop commands and
+all Bun/Node APIs are **not** guaranteed on Android.
+
+**Working directory:** file parameters resolve against the conversation's
+workspace. Workers cannot `process.chdir()` and `process.cwd()` remains the
+runtime process cwd. Use `process.env.PI_JAVASCRIPT_CWD` or
+`require("node:worker_threads").workerData.cwd` for workspace-relative filesystem
+paths, or `__dirname` / `new URL("./input.json", import.meta.url)` for paths beside
+the script. Bun's CLI-only `import.meta.main` is false in a worker. Execution is
+noninteractive.
+
+Stdout/stderr stream to the tool result; structured output retains them separately
+with exit status and termination information. Combined decoded output is capped
+at 64 KiB; overflow stops the worker. Timeout defaults to 30 seconds (1–300), and
+Stop requests termination, including synchronous JS loops. Only one worker runs
+per runtime; unconfirmed termination blocks subsequent scripts until it exits.
+A blocked native call may not terminate promptly. Worker exit does not roll back
+files/network effects or guarantee that a spawned process stopped.
+
+Scripts run outside the SDK/auth **realm**, with no installed native account
+bridge and an allowlisted environment, but **this is not a security sandbox**:
+workers share the app process/permissions. Resource exhaustion or unsafe native
+APIs can still affect the app. Tool replay is explicitly `unsafe`: after a crash,
+Durable reports interruption instead of rerunning it. This is not exactly-once
+execution; inspect effects before explicitly retrying.
+
+Ordinary subagents inherit the tool by default; explicit tool lists grant only
+what they name. `javascript` is never added to a read-only list, and swarm peers
+continue to permit only `read` plus peer tools. Host regressions cover SDK output,
+SQLite crash/reopen non-replay, UTF-8 boundaries, cancellation and restrictions.
+`experiments/bun-embedding/javascript_tool_probe.ts` exercises the actual Android
+embedding and tool through the separate credential-free emulator probe package.
 
 ## Native recovery tests (including on a Mac)
 
@@ -119,7 +165,7 @@ The runner gives Pi a `subagent` tool, with the same parameters as stock Pi's su
 
 Subagents work in the background, so Pi is never blocked on them. The call returns at once and starts a crew: a background task of the session that runs them, each in a conversation it owns. Pi answers, and you can keep talking to it, while they work. When the last one finishes, the crew posts their answers to Pi as one message (`<subagent_report>`), which comes after Pi's current answer or starts a turn when Pi is idle. Pi's own turns and Esc don't reach the crew; stopping the session (`abort`) stops its subagents too.
 
-Each subagent starts as a copy of the session's agent, with its instructions, the model a preset names when this computer has it (else the session's, with a note), its tools among `read`, `write`, `edit` and `bash` (stock Pi's `grep`, `find` and `ls` become `bash`; without any, the session's), and no subagents of its own. After a restart the crew finds the same conversations and submissions instead of starting them again, reports only once, and a command a restart cut off is reported, never repeated by itself.
+Each subagent starts as a copy of the session's agent, with its instructions, the model a preset names when this computer has it (else the session's, with a note), its tools among `read`, `write`, `edit`, `bash` and `javascript` (stock Pi's `grep`, `find` and `ls` become `bash`; without any, the session's), and no subagents of its own. After a restart the crew finds the same conversations and submissions instead of starting them again, reports only once, and a command a restart cut off is reported, never repeated by itself.
 
 Progress is the session document `app.subagent-calls`, by call ID: per subagent its task, state, latest step, time, cost, model and the start of its answer, at most once a second. The snapshots carry it, and the apps show it on the call. A transcript never rides along: `get_subagent` returns one subagent's messages, and `stop_subagent` stops one while the others carry on. Both accept only the session's own subagents.
 

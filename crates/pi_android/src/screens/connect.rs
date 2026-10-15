@@ -316,6 +316,7 @@ impl PhoneApp {
             .min_h_0()
             .flex()
             .flex_col()
+
             .child(
                 scroll_area("connect", &scroll).child(
                     div()
@@ -325,8 +326,9 @@ impl PhoneApp {
                         .flex()
                         .flex_col()
                         .child(
-                            ui::tile_box(48., 14., colors.accent, &colors)
-                                .child(icon("pi", 24., colors.accent)),
+                            ui::tile_box(48., 14., colors.accent, &colors).id("computers")
+                                .child(icon("pi", 24., colors.accent))
+                                .on_click(cx.listener(|this,_,_,cx|this.open_sheet(crate::app::Sheet::Computers,cx))),
                         )
                         .child(
                             ui::serif("Where does Pi run?", 31.)
@@ -339,7 +341,7 @@ impl PhoneApp {
                                 .text_size(px(15.))
                                 .line_height(px(22.))
                                 .text_color(colors.secondary)
-                                .child("On your computer. This phone follows its sessions, answers its questions and reviews what it changed."),
+                                .child(if cfg!(feature="local-backend") {"Choose Local from the Pi logo to run on this phone, or connect a computer below."} else {"On your computer. This phone follows its sessions, answers its questions and reviews what it changed."}),
                         )
                         .child(
                             div()
@@ -362,6 +364,12 @@ impl PhoneApp {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
+                    .map(|panel| {
+                        #[cfg(feature = "local-backend")]
+                        let panel = panel.child(ui::button("open-local-providers", Button::Plain, None, "Local providers · Claude + Codex", false, &colors)
+                            .on_click(cx.listener(|this, _, window, cx| { this.provider_accounts_url("pi://test/local-providers", window, cx); })));
+                        panel
+                    })
                     .child(note)
                     .child(scan)
                     .child(

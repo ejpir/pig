@@ -345,6 +345,8 @@ pub use pi_markdown::ToolImage;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Turn {
+    /// Local partial/failed turns stay visible but never enter future inference context.
+    pub excluded: Option<String>,
     pub prompt: String,
     /// The local time it was sent: "09:41".
     pub at: String,
@@ -362,6 +364,8 @@ pub struct Turn {
     pub reported: bool,
     /// Stable projected user-message identity, independent of turn position.
     pub visual_identity: Option<String>,
+    /// Committed Durable user entry; UI association only, never execution authority.
+    pub durable_entry_id: Option<u64>,
     /// What Pi said and showed, in order: words between tools, then a
     /// picture it looked at, more words, a page, the closing words.
     pub flow: Vec<Flow>,
@@ -372,6 +376,7 @@ pub struct Turn {
 impl Turn {
     pub fn new(prompt: impl Into<String>, at: impl Into<String>) -> Self {
         Self {
+            excluded: None,
             prompt: prompt.into(),
             at: at.into(),
             attachments: Vec::new(),
@@ -382,6 +387,7 @@ impl Turn {
             handoffs: Vec::new(),
             reported: false,
             visual_identity: None,
+            durable_entry_id: None,
             flow: Vec::new(),
             times: [Duration::ZERO; 4],
         }
@@ -594,6 +600,10 @@ pub struct Details {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {
+    /// Execution origin only. Feature availability comes from backend metadata.
+    pub local: bool,
+    /// Optional authoritative UI capabilities; absent retains legacy-backend behavior.
+    pub backend_features: Option<Vec<String>>,
     pub id: SessionId,
     pub title: String,
     pub project: String,
@@ -622,6 +632,11 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn supports(&self, feature: &str) -> bool {
+        self.backend_features
+            .as_ref()
+            .is_none_or(|features| features.iter().any(|f| f == feature))
+    }
     pub fn turn(&self) -> Option<&Turn> {
         self.turns.last()
     }
@@ -636,6 +651,12 @@ impl Session {
 
     /// The line under the title in lists: what it is doing, or how it ended.
     pub fn status_line(&self) -> String {
+        if self.local {
+            return self
+                .failure
+                .clone()
+                .unwrap_or_else(|| self.activity.clone());
+        }
         match self.state {
             State::NeedsYou => self.question.as_ref().map_or_else(
                 || "Waiting for you".into(),

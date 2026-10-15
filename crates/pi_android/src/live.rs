@@ -4504,6 +4504,7 @@ mod tests {
             output: String::new(),
             diff: None,
             finished: true,
+            started: None,
             is_error: false,
             images: ids
                 .iter()

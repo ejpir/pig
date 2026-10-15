@@ -54,6 +54,11 @@ describe("subagent definitions", () => {
     expect(definition({ agent: "x", task: "t", tools: ["grep", "find", "ls", "web"] }, []).tools).toEqual(["bash"]);
   });
 
+  test("JavaScript is opt-in for explicit child policies, never added to read-only lists", () => {
+    expect(definition({agent:"x",task:"t",tools:["read","javascript"]},[]).tools).toEqual(["read","javascript"]);
+    expect(definition({agent:"x",task:"t",tools:["read"]},[]).tools).toEqual(["read"]);
+  });
+
   test("a step reads as going on, done or named", () => {
     expect(step("read", { path: "/repo/src/retry.ts" }, "now")).toBe("Reading retry.ts");
     expect(step("read", { path: "/repo/src/retry.ts" }, "done")).toBe("Read retry.ts");

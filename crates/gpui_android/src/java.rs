@@ -250,6 +250,28 @@ impl Java {
         });
     }
 
+    pub fn copy_provider_code(&self, code: &str) -> bool {
+        self.call("copyProviderCode", |env, activity| {
+            let code = env.new_string(code)?;
+            env.call_method(
+                activity,
+                jni_str!("copyProviderCode"),
+                jni_sig!("(Ljava/lang/String;)Z"),
+                &[JValue::Object(&code)],
+            )?
+            .z()
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn is_debug_build(&self) -> bool {
+        self.call("isDebugBuild", |env, activity| {
+            env.call_method(activity, jni_str!("isDebugBuild"), jni_sig!("()Z"), &[])?
+                .z()
+        })
+        .unwrap_or(false)
+    }
+
     /// The clipboard's image and its MIME type, if it holds one.
     pub fn clipboard_image(&self) -> Option<(String, Vec<u8>)> {
         self.call("clipboardImage", |env, activity| {
@@ -336,6 +358,66 @@ impl Java {
             Ok(())
         })
         .is_some()
+    }
+
+    pub(crate) fn provider_vault(
+        &self,
+        synthetic: bool,
+    ) -> Option<crate::secure_storage::ProviderVault> {
+        self.call("providerVault", |env, activity| {
+            let object = env
+                .call_method(
+                    activity,
+                    jni_str!("providerVault"),
+                    jni_sig!("(Z)Ldev/pi/gpui/ProviderVault;"),
+                    &[JValue::Bool(synthetic)],
+                )?
+                .l()?;
+            crate::secure_storage::ProviderVault::from_object(env, object)
+        })
+    }
+    pub fn show_provider_code(&self, request: &str) {
+        self.call("showProviderCode", |env, activity| {
+            let request = env.new_string(request)?;
+            env.call_method(
+                activity,
+                jni_str!("showProviderCode"),
+                jni_sig!("(Ljava/lang/String;)V"),
+                &[JValue::Object(&request)],
+            )?;
+            Ok(())
+        });
+    }
+    pub fn dismiss_provider_code(&self, request: &str) {
+        self.call("dismissProviderCode", |env, activity| {
+            let request = env.new_string(request)?;
+            env.call_method(
+                activity,
+                jni_str!("dismissProviderCode"),
+                jni_sig!("(Ljava/lang/String;)V"),
+                &[JValue::Object(&request)],
+            )?;
+            Ok(())
+        });
+    }
+    pub fn take_provider_code(&self, request: &str) -> Option<String> {
+        self.call("takeProviderCode", |env, activity| {
+            let request = env.new_string(request)?;
+            let result = env
+                .call_method(
+                    activity,
+                    jni_str!("takeProviderCode"),
+                    jni_sig!("(Ljava/lang/String;)Ljava/lang/String;"),
+                    &[JValue::Object(&request)],
+                )?
+                .l()?;
+            if result.is_null() {
+                Ok(None)
+            } else {
+                Ok(Some(env.cast_local::<JString>(result)?.try_to_string(env)?))
+            }
+        })
+        .flatten()
     }
 
     pub fn open_url(&self, url: &str) {
