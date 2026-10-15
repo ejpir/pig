@@ -201,12 +201,15 @@ export function phoneModels(engine, bridge, synthetic, control) {
               // Native release confirms all HTTP runtimes/sockets have torn down first.
               if (terminal) yield terminal;
             })();
-          } catch {
+          } catch (error) {
             await cleanup().catch(() => {});
+            const label = stock.id === "anthropic" ? "Claude" : "Codex";
             throw new Error(
               options.signal?.aborted
                 ? "Request cancelled"
-                : "Local account/provider request could not start",
+                : error?.code === "missing_account"
+                  ? `No ${label} account is signed in. Open Local accounts, sign in, then send again.`
+                  : "Local provider request could not start. Check Local accounts or connectivity.",
             );
           }
         });

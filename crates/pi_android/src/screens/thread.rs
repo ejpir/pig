@@ -30,6 +30,34 @@ const FILES: usize = 3;
 const LARGE_THREAD_ITEMS: usize = 24;
 const THREAD_LOADING_PAINT: Duration = Duration::from_millis(80);
 
+/// Execution failures are not file-review features: even a text-only Local
+/// reply must explain why it failed, including when no assistant text exists.
+fn failure_card(session: &Session, colors: &Theme) -> Option<gpui::Stateful<Div>> {
+    (session.state == State::Failed).then(|| {
+        let hint = if session.local {
+            "The reply failed. This partial turn will not be included in later requests. Send again to retry."
+        } else {
+            "The run failed. Any changes already made remain on the computer. Ask again to retry."
+        };
+        ui::card(colors)
+            .id("run-failure")
+            .debug_selector(|| "run-failure".into())
+            .border_color(colors.coral.opacity(0.4))
+            .p(px(16.))
+            .flex()
+            .gap(px(12.))
+            .child(icon("alert", 16., colors.coral))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(14.))
+                    .child(capitalized(&session.status_line()))
+                    .child(ui::hint(hint, colors)),
+            )
+    })
+}
+
 fn new_thread_list_state(item_count: usize) -> gpui::ListState {
     // Accurate off-screen heights keep the draggable thumb mapped to the whole
     // conversation. Rows remain virtualized for painting after this first
@@ -833,6 +861,11 @@ impl PhoneApp {
                         .children(self.page_cards(id, index, turn, colors, cx))
                 }
             })
+            .children(
+                (index == last && !running)
+                    .then(|| failure_card(session, colors))
+                    .flatten(),
+            )
             .children(ending)
     }
 
@@ -1496,30 +1529,10 @@ impl PhoneApp {
                         this.open_review(id, index, window, cx)
                     }))
             });
-        let failure = (session.state == State::Failed).then(|| {
-            ui::card(&colors)
-                .border_color(colors.coral.opacity(0.4))
-                .p(px(16.))
-                .flex()
-                .gap(px(12.))
-                .child(icon("alert", 16., colors.coral))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(14.))
-                        .child(capitalized(&session.status_line()))
-                        .child(ui::hint(
-                            if session.local {"The reply failed. This partial turn will not be included in later requests. Send again to retry."} else {"The run failed. Any changes already made remain on the computer. Ask again to retry."},
-                            &colors,
-                        )),
-                )
-        });
         div()
             .flex()
             .flex_col()
             .gap(px(16.))
-            .children(failure)
             .when(session.state == State::Stopped, |ending| {
                 ending.child(ui::hint(
                     if session.local {
@@ -2565,6 +2578,43 @@ mod tests {
                 [Some(crate::model::QueueKey::Local("sample-second".into()))]
             );
         });
+    }
+
+    struct FailedTurnFrame {
+        app: gpui::Entity<PhoneApp>,
+        session: Session,
+    }
+
+    impl Render for FailedTurnFrame {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.app.update(cx, |app, cx| {
+                div()
+                    .size_full()
+                    .child(app.turn(&self.session, 0, false, &theme(cx), cx))
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn local_failure_is_painted_without_file_review(cx: &mut TestAppContext) {
+        let (frame, cx) = cx.add_window_view(|window, cx| {
+            let app = cx.new(|cx| PhoneApp::new(None, window, cx));
+            let mut session = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+            session.local = true;
+            session.backend_features = Some(vec!["models".into(), "stop".into()]);
+            session.state = State::Failed;
+            session.failure = Some("Sign in to Claude in Local accounts, then send again.".into());
+            assert!(!session.supports("file_review"));
+            FailedTurnFrame { app, session }
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("run-failure").is_some());
+        frame.update(cx, |frame, cx| {
+            frame.session.state = State::Done;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("run-failure").is_none());
     }
 
     struct TallTurns {

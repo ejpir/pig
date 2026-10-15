@@ -250,7 +250,13 @@ const phone = {
     const item = pending.get(id);
     if (item) {
       pending.delete(id);
-      error ? item.reject(new Error(error)) : item.resolve(data);
+      if (error) {
+        const failure = new Error(
+          "Native account operation unavailable; check Local accounts or try again",
+        );
+        if (error?.code === "missing_account") failure.code = "missing_account";
+        item.reject(failure);
+      } else item.resolve(data);
     }
   },
   http(event) {

@@ -83,6 +83,27 @@ fn response(pi: &mut pi_core::session::Session, command: &str, data: Value) -> R
     pi.apply(&json!({"type":"response","command":command,"success":true,"data":data}))
         .map_err(|_| "Invalid Local protocol record".into())
 }
+/// Durable configuration events own model/thinking state. Read/configuration
+/// responses are acknowledgements, not stock Pi snapshots (get_state is {}).
+fn apply_local_response(
+    pi: &mut pi_core::session::Session,
+    setting: &mut Option<String>,
+    error: &mut Option<String>,
+    record: &Value,
+) -> anyhow::Result<()> {
+    let command = record["command"].as_str().unwrap_or("");
+    let configuration = matches!(command, "set_model" | "set_thinking_level");
+    if configuration && setting.is_some() && setting.as_deref() == record["id"].as_str() {
+        *setting = None;
+        *error = (record["success"] != true).then(|| {
+            "Model settings were not changed; wait for the chat to become idle and retry".into()
+        });
+    }
+    if !configuration && !matches!(command, "get_state" | "get_messages") {
+        pi.apply(record)?;
+    }
+    Ok(())
+}
 fn provider_id(id: &str) -> Option<Provider> {
     match id {
         "anthropic" => Some(Provider::Claude),
@@ -348,7 +369,9 @@ impl Local {
             .map_or_else(|| self.default_model.clone(), |m| m.id.clone())
     }
     pub fn model_settings(&self, id: Option<SessionId>) -> (String, String) {
-        let model = self.current_model(id).expect("local model");
+        let Some(model) = self.current_model(id) else {
+            return ("Loading model…".into(), "…".into());
+        };
         let thinking = id
             .and_then(|id| self.conversations.get(&id))
             .map_or(self.default_thinking.as_str(), |c| {
@@ -669,21 +692,6 @@ impl Local {
                             }
                         }
                         Some("response") => {
-                            if c.setting.as_deref() == record["id"].as_str() && c.setting.is_some()
-                            {
-                                if record["success"] != true {
-                                    c.setting = None;
-                                    c.error = Some("Model settings were not changed; wait for the chat to become idle and retry".into());
-                                } else if record["command"] == "get_state" {
-                                    c.pi.apply(&record)?;
-                                    c.setting = None;
-                                    c.error = None;
-                                } else {
-                                    // Re-read the committed/clamped configuration; never persist an optimistic selection.
-                                    c.engine
-                                        .send(json!({"type":"get_state","id":record["id"]}))?;
-                                }
-                            }
                             if record["command"] == "prompt" {
                                 c.admitting = false;
                                 if record["success"] == true {
@@ -718,11 +726,7 @@ impl Local {
                             if record["command"] == "get_session_stats" {
                                 pi_core::durable::discard_stale_stats(&mut record, &c.pi)?;
                             }
-                            if record["command"] != "get_state"
-                                && record["command"] != "get_messages"
-                            {
-                                c.pi.apply(&record)?;
-                            }
+                            apply_local_response(&mut c.pi, &mut c.setting, &mut c.error, &record)?;
                         }
                         Some("local_error") => {
                             c.loaded = true;
@@ -900,7 +904,14 @@ impl PhoneApp {
         for store in self.store.iter_mut().chain(self.parked_local.iter_mut()) {
             if let Some(backend) = store.local.as_mut().filter(|b| b.synthetic == synthetic) {
                 for c in backend.conversations.values_mut() {
-                    if provider_id(&c.pi.state.model.as_ref().unwrap().provider) == Some(provider) {
+                    if c.pi
+                        .state
+                        .model
+                        .as_ref()
+                        .and_then(|model| provider_id(&model.provider))
+                        .or_else(|| provider_id(&c.meta.provider))
+                        == Some(provider)
+                    {
                         let _ = c
                             .engine
                             .send(json!({"type":"abort","id":crate::prompt::request_id()}));
@@ -1007,6 +1018,85 @@ impl PhoneApp {
         );
         if visible {
             cx.notify();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configuration_acknowledgements_never_replace_committed_state() {
+        let mut pi = pi_core::session::Session::new("/offline".into());
+        response(
+            &mut pi,
+            "get_state",
+            json!({
+                "sessionId":"local-test", "model":{"provider":"anthropic","id":"before"},
+                "thinkingLevel":"high"
+            }),
+        )
+        .unwrap();
+        response(
+            &mut pi,
+            "get_messages",
+            json!({"messages":[{"role":"user","content":"kept"}]}),
+        )
+        .unwrap();
+        for (provider, model) in [("openai-codex", "codex"), ("anthropic", "claude")] {
+            let events = json!({"key":"local-test","events":[{"type":"agent_changed","agent":{
+                "model":{"provider":provider,"modelId":model},"thinkingLevel":"low"
+            }}]});
+            for event in pi_core::durable::events(&events, &pi, "local-test").unwrap() {
+                pi.apply(&event).unwrap();
+            }
+            let committed = serde_json::to_value(&pi.state).unwrap();
+            let mut pending = Some("selection".into());
+            let mut error = Some("previous error".into());
+            for command in [
+                "set_model",
+                "set_thinking_level",
+                "get_state",
+                "get_messages",
+            ] {
+                apply_local_response(&mut pi, &mut pending, &mut error, &json!({
+                    "type":"response","id":"selection","command":command,"success":true,"data":{}
+                })).unwrap();
+                assert_eq!(serde_json::to_value(&pi.state).unwrap(), committed);
+                assert_eq!(pi.messages.len(), 1);
+            }
+            assert!(pending.is_none());
+            assert!(error.is_none());
+            assert_eq!(pi.state.model.as_ref().unwrap().provider, provider);
+        }
+    }
+
+    #[test]
+    fn settings_failure_is_correlated_and_keeps_the_selected_model() {
+        let mut pi = pi_core::session::Session::new("/offline".into());
+        response(
+            &mut pi,
+            "get_state",
+            json!({"model":{"provider":"anthropic","id":"kept"}}),
+        )
+        .unwrap();
+        let mut pending = Some("current".into());
+        let mut error = None;
+        for id in ["old", "current"] {
+            apply_local_response(
+                &mut pi,
+                &mut pending,
+                &mut error,
+                &json!({
+                    "type":"response","id":id,"command":"set_model","success":false,
+                    "error":"must not expose arbitrary native details"
+                }),
+            )
+            .unwrap();
+            assert_eq!(pending.is_none(), id == "current");
+            assert_eq!(error.is_some(), id == "current");
+            assert_eq!(pi.state.model.as_ref().unwrap().id, "kept");
         }
     }
 }

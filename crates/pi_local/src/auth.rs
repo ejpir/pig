@@ -176,6 +176,31 @@ impl AccountLease {
     }
 }
 
+/// Only an explicit empty, valid Vault record means the user is signed out.
+/// Storage, refresh, revocation and malformed-record errors must stay generic.
+#[derive(Debug)]
+pub(crate) struct MissingAccount;
+impl std::fmt::Display for MissingAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("No Local account signed in")
+    }
+}
+impl std::error::Error for MissingAccount {}
+
+fn account_generation(record: &Value, handoff: bool) -> Result<String> {
+    let generation = record["generation"]
+        .as_str()
+        .ok_or_else(|| anyhow!("invalid vault record"))?;
+    if handoff {
+        match record.get("credential") {
+            Some(Value::Null) => return Err(MissingAccount.into()),
+            Some(Value::Object(_)) => {}
+            _ => return Err(anyhow!("invalid vault credential")),
+        }
+    }
+    Ok(generation.to_owned())
+}
+
 pub struct AuthTask {
     cancel: Cancellation,
     operation: Operation,
@@ -304,12 +329,7 @@ fn execute(
         EPOCH[slot].load(Ordering::Acquire) == epoch,
         "auth attempt revoked"
     );
-    let generation = Arc::new(Mutex::new(
-        record["generation"]
-            .as_str()
-            .ok_or_else(|| anyhow!("invalid vault record"))?
-            .to_owned(),
-    ));
+    let generation = Arc::new(Mutex::new(account_generation(&record, handoff)?));
     drop(record); // do not retain an unnecessary plaintext credential copy across the operation
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce).map_err(|_| anyhow!("OS randomness unavailable"))?;
@@ -443,6 +463,74 @@ pub fn allowed_browser_url(provider: Provider, url: &str) -> bool {
             url.host_str() == Some("auth.openai.com")
                 && url.path() == "/codex/device"
                 && url.query().is_none()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct OfflineVault(Option<Value>);
+    impl Vault for OfflineVault {
+        fn scope(&self) -> VaultScope {
+            VaultScope::Synthetic
+        }
+        fn read(&self, _: Provider) -> Result<Value> {
+            self.0
+                .clone()
+                .ok_or_else(|| anyhow!("offline storage unavailable"))
+        }
+        fn write(&self, _: Provider, _: &str, _: &str) -> Result<Option<String>> {
+            panic!("offline failure must not write credentials")
+        }
+        fn clear(&self, _: Provider) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn only_explicit_absence_is_missing_account_and_failed_prepare_releases_lease() {
+        let _serial = TEST_ACCOUNT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for provider in [Provider::Claude, Provider::Codex] {
+            for (record, missing) in [
+                (None, false),
+                (Some(json!({"credential":null})), false),
+                (Some(json!({"generation":"0"})), false),
+                (
+                    Some(json!({"generation":"0","credential":"malformed"})),
+                    false,
+                ),
+                (Some(json!({"generation":"0","credential":null})), true),
+            ] {
+                let lease = AccountLease::reserve(provider, VaultScope::Synthetic).unwrap();
+                let error = lease
+                    .prepare(
+                        provider,
+                        Arc::new(OfflineVault(record)),
+                        HttpHost::auth(provider),
+                    )
+                    .unwrap_err();
+                assert_eq!(error.is::<MissingAccount>(), missing);
+                drop(lease);
+                drop(AccountLease::reserve(provider, VaultScope::Synthetic).unwrap());
+            }
+            let vault: Arc<dyn Vault> = Arc::new(OfflineVault(Some(
+                json!({"generation":"0","credential":null}),
+            )));
+            let lease = AccountLease::reserve(provider, vault.scope()).unwrap();
+            assert!(
+                !AccountLease::reserve(provider, vault.scope())
+                    .err()
+                    .unwrap()
+                    .is::<MissingAccount>()
+            );
+            logout(provider, vault.as_ref()).unwrap();
+            assert!(
+                !lease
+                    .prepare(provider, vault, HttpHost::auth(provider))
+                    .unwrap_err()
+                    .is::<MissingAccount>()
+            );
         }
     }
 }

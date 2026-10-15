@@ -93,6 +93,65 @@ test("metadata checks never prepare inference auth", async () => {
   expect(preparations).toBe(0);
 });
 
+for (const provider of ["anthropic", "openai-codex"])
+  for (const reason of ["missing_account", "unknown", "cancelled"])
+    test(`${provider} prepare ${reason} is actionable, sanitized and unlocks the provider`, async () => {
+      let preparations = 0;
+      const controller = new AbortController();
+      const bridge = {
+        async call(engine, type) {
+          if (type === "account_status") return true;
+          if (type === "prepare") {
+            preparations++;
+            if (reason === "cancelled" && preparations === 1)
+              controller.abort();
+            throw Object.assign(
+              new Error("private-native-error-must-not-escape"),
+              {
+                code: reason === "cancelled" ? "missing_account" : reason,
+              },
+            );
+          }
+          throw Error(
+            "No HTTP or release ticket is permitted before authorization",
+          );
+        },
+        async fetch() {
+          throw Error("Unauthorized inference must never fetch");
+        },
+      };
+      installNativeFetch(bridge);
+      const models = phoneModels(9, bridge, false, { mode: "Reply" });
+      const model = (await models.getAvailable()).find(
+        (m) => m.provider === provider,
+      );
+      expect(model).toBeDefined();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const events = [];
+        for await (const event of models.streamSimple(
+          model,
+          { messages: [user], systemPrompt: "" },
+          attempt === 0 ? { signal: controller.signal } : {},
+        ))
+          events.push(event);
+        const terminal = events.find((e) => e.type === "error");
+        expect(terminal).toBeDefined();
+        const error = terminal.error.errorMessage;
+        if (reason === "cancelled" && attempt === 0)
+          expect(error).toBe("Request cancelled");
+        else if (reason !== "unknown")
+          expect(error).toBe(
+            `No ${provider === "anthropic" ? "Claude" : "Codex"} account is signed in. Open Local accounts, sign in, then send again.`,
+          );
+        else
+          expect(error).toBe(
+            "Local provider request could not start. Check Local accounts or connectivity.",
+          );
+        expect(JSON.stringify(events)).not.toContain("private-native-error");
+      }
+      expect(preparations).toBe(2);
+    });
+
 let previousFetch;
 beforeEach(() => {
   previousFetch = globalThis.fetch;

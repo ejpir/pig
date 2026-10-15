@@ -1,6 +1,6 @@
 //! Embedded Durable transport. Native OAuth and bounded HTTP retain their existing owners.
 use crate::{
-    auth::{AccountLease, Provider, Vault, VaultScope},
+    auth::{AccountLease, MissingAccount, Provider, Vault, VaultScope},
     bun_vm::Vm,
     http::{self, HttpHost, HttpJob},
 };
@@ -354,6 +354,17 @@ fn worker(input: mpsc::Receiver<Command>) {
                             prepared.request,
                             json!({"operation":id,"resolved":resolved}),
                             false,
+                        )?;
+                    }
+                    Err(error) if error.is::<MissingAccount>() => {
+                        // Only an allowlisted classification crosses this boundary;
+                        // never serialize native errors, Vault records or credentials.
+                        eval(
+                            &mut vm,
+                            "deliver",
+                            json!([
+                                prepared.request, null, {"code":"missing_account"}
+                            ]),
                         )?;
                     }
                     _ => deliver(&mut vm, prepared.request, Value::Null, true)?,
