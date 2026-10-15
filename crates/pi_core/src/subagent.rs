@@ -493,6 +493,7 @@ mod tests {
             output: String::new(),
             diff: None,
             finished: false,
+            started: None,
             is_error: false,
             images: Vec::new(),
             details: Value::Null,

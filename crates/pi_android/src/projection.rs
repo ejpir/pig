@@ -274,7 +274,7 @@ fn current_running_tool(pi: &Pi) -> Option<&Tool> {
         .rposition(|message| message["role"] == "user")
         .unwrap_or(0);
     pi.tools.iter().rev().find(|tool| {
-        !tool.finished
+        tool.is_running()
             && !pi.messages[..current_turn].iter().any(|message| {
                 message["content"]
                     .as_array()
@@ -301,7 +301,7 @@ fn name(path: &str) -> &str {
 fn kind(tool: &str) -> StageKind {
     match tool {
         "edit" | "write" => StageKind::Change,
-        "bash" => StageKind::Verify,
+        "bash" | "javascript" => StageKind::Verify,
         _ => StageKind::Understand,
     }
 }
@@ -501,6 +501,7 @@ fn add_tool(
             .as_str()
             .or_else(|| args["command"].as_str())
             .or_else(|| args["pattern"].as_str())
+            .or_else(|| args["file"].as_str())
             .unwrap_or("")
             .to_owned(),
         output: observed.map_or_else(String::new, |tool| tool.output.clone()),
@@ -519,7 +520,9 @@ fn add_tool(
     });
     turn.flow.push(step);
     let stage = turn.stage_mut(kind);
-    stage.status = StageStatus::Done;
+    if observed.is_some_and(|tool| tool.finished || tool.is_running()) {
+        stage.status = StageStatus::Done;
+    }
     let path = args["path"].as_str().map(|path| relative(path, cwd));
     match kind {
         StageKind::Understand => {
@@ -616,9 +619,14 @@ fn settle(turn: &mut Turn, state: State, pi: &Pi, cwd: &str, inherit_running_too
     {
         // Handed off: the stage Pi was in waits on its subagents.
         let stage = turn.stage_mut(
-            turn.stages
-                .last()
-                .map_or(StageKind::Understand, |stage| stage.kind),
+            turn.flow
+                .iter()
+                .rev()
+                .find_map(|piece| match piece {
+                    Flow::Tool(kind, _) => Some(*kind),
+                    _ => None,
+                })
+                .unwrap_or(StageKind::Understand),
         );
         stage.status = StageStatus::Live;
         stage.what = doing(tool);
@@ -627,35 +635,24 @@ fn settle(turn: &mut Turn, state: State, pi: &Pi, cwd: &str, inherit_running_too
         let running = inherit_running_tools
             .then(|| current_running_tool(pi))
             .flatten();
-        let live = running.map(|tool| kind(&tool.name)).or_else(|| {
-            // Between tools, Pi is reading its results or writing.
-            turn.stages.last().map(|stage| stage.kind)
-        });
-        match live {
-            Some(live) => {
-                if let Some(tool) = running {
-                    // Execution events can precede the assistant's toolCall.
-                    if !turn
-                        .stages
-                        .iter()
-                        .flat_map(|s| &s.tools)
-                        .any(|t| t.id == tool.id)
-                    {
-                        add_tool(turn, &tool.id, &tool.name, &tool.args, Some(tool), cwd);
-                    }
-                    let stage = turn.stage_mut(live);
-                    stage.status = StageStatus::Live;
-                    stage.what = doing(tool);
-                } else if let Some(stage) = turn.stages.iter_mut().find(|s| s.kind == live) {
-                    stage.status = StageStatus::Live;
-                }
-            }
-            None => {
-                let stage = turn.stage_mut(StageKind::Understand);
-                stage.status = StageStatus::Live;
-                stage.what = "Thinking".into();
+        // Finished edits/checks are history, not current execution. Inference
+        // between tool calls can revisit any stage; never infer it from the
+        // first-seen/sorted order of the stage buckets.
+        let live = running.map_or(StageKind::Understand, |tool| kind(&tool.name));
+        if let Some(tool) = running {
+            // Execution events can precede the assistant's toolCall.
+            if !turn
+                .stages
+                .iter()
+                .flat_map(|s| &s.tools)
+                .any(|t| t.id == tool.id)
+            {
+                add_tool(turn, &tool.id, &tool.name, &tool.args, Some(tool), cwd);
             }
         }
+        let stage = turn.stage_mut(live);
+        stage.status = StageStatus::Live;
+        stage.what = running.map_or_else(|| inference_activity(pi).into(), doing);
         turn.stage_mut(StageKind::HandOff).status = StageStatus::Planned;
     } else {
         let stopped = matches!(state, State::Stopped | State::Failed);
@@ -686,6 +683,10 @@ fn doing(tool: &Tool) -> String {
     match (tool.name.as_str(), path) {
         ("read", Some(path)) => format!("Reading {path}"),
         ("edit" | "write", Some(path)) => format!("Editing {path}"),
+        ("javascript", _) => format!(
+            "Running {}",
+            tool.args["file"].as_str().map(name).unwrap_or("JavaScript")
+        ),
         ("bash", _) => format!(
             "Running {}",
             one_line(tool.args["command"].as_str().unwrap_or(""), 40)
@@ -740,26 +741,40 @@ pub fn at_work(handoff: &pi_core::subagent::Handoff) -> String {
     }
 }
 
+/// A live assistant message is inference, not evidence that an old edit or
+/// check is still running. Follow the last block, including text -> thinking.
+fn inference_activity(pi: &Pi) -> &'static str {
+    let Some(message) = pi
+        .streaming_message_index()
+        .and_then(|index| pi.messages.get(index))
+    else {
+        return "Working";
+    };
+    if let Some(blocks) = message["content"].as_array() {
+        match blocks.last().and_then(|block| block["type"].as_str()) {
+            Some("text") => "Writing",
+            Some("toolCall") => "Preparing tool",
+            _ => "Thinking",
+        }
+    } else if !text_of(message).trim().is_empty() {
+        "Writing"
+    } else {
+        "Thinking"
+    }
+}
+
 fn activity(pi: &Pi) -> String {
-    // Compaction is the operation itself, even if the durable snapshot still
-    // contains an unfinished tool from the run whose context is being reduced.
+    // Control phases take priority over any lingering tool preview.
     if pi.run == pi_core::session::RunState::Compacting {
         return "Compacting".into();
-    }
-    if let Some(tool) = current_running_tool(pi) {
-        return doing(tool);
     }
     if pi.run == pi_core::session::RunState::Retrying {
         return "Retrying".into();
     }
-    match pi
-        .streaming_message_index()
-        .and_then(|index| pi.messages.get(index))
-    {
-        Some(message) if !text_of(message).trim().is_empty() => "Writing".into(),
-        Some(_) => "Thinking".into(),
-        None => "Working".into(),
+    if let Some(tool) = current_running_tool(pi) {
+        return doing(tool);
     }
+    inference_activity(pi).into()
 }
 
 /// Pi's closing words: the first sentence as the headline, the rest under it.
@@ -1318,6 +1333,101 @@ mod tests {
     }
 
     #[test]
+    fn rail_revisits_tools_and_returns_to_inference_instead_of_sticking_to_completed_edits() {
+        let mut pi = session(&[
+            json!({"type":"message_end","message":{"role":"user","content":"offline rail regression"}}),
+            json!({"type":"agent_start"}),
+        ]);
+        for (id, name, args, expected) in [
+            (
+                "read-1",
+                "read",
+                json!({"path":"a.rs"}),
+                StageKind::Understand,
+            ),
+            ("edit-1", "edit", json!({"path":"a.rs"}), StageKind::Change),
+            (
+                "run-1",
+                "bash",
+                json!({"command":"printf test"}),
+                StageKind::Verify,
+            ),
+            (
+                "read-2",
+                "read",
+                json!({"path":"b.rs"}),
+                StageKind::Understand,
+            ),
+            (
+                "write-2",
+                "write",
+                json!({"path":"b.rs","content":"test"}),
+                StageKind::Change,
+            ),
+            (
+                "js-1",
+                "javascript",
+                json!({"file":"inspect.cjs"}),
+                StageKind::Verify,
+            ),
+        ] {
+            pi.apply(&json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":id,"name":name,"arguments":args}],"stopReason":"toolUse"}})).unwrap();
+            pi.apply(
+                &json!({"type":"tool_execution_start","toolCallId":id,"toolName":name,"args":args}),
+            )
+            .unwrap();
+            let active = project(&pi, facts(&[]));
+            assert_eq!(active.turns[0].live_stage(), Some(expected), "{name}");
+            assert_eq!(
+                active.turns[0]
+                    .stages
+                    .iter()
+                    .filter(|stage| stage.status == StageStatus::Live)
+                    .count(),
+                1
+            );
+            if name == "javascript" {
+                assert_eq!(active.activity, "Running inspect.cjs");
+                assert!(
+                    active.turns[0]
+                        .stages
+                        .iter()
+                        .flat_map(|stage| &stage.tools)
+                        .any(|tool| tool.name == "javascript" && tool.target == "inspect.cjs")
+                );
+            }
+            pi.apply(&json!({"type":"tool_execution_end","toolCallId":id,"toolName":name,"result":{"content":[]},"isError":false})).unwrap();
+            pi.apply(&json!({"type":"message_start","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Inspecting the result"}]}})).unwrap();
+            let thinking = project(&pi, facts(&[]));
+            assert_eq!(thinking.turns[0].live_stage(), Some(StageKind::Understand));
+            assert_eq!(thinking.activity, "Thinking");
+            assert!(
+                thinking.turns[0]
+                    .stages
+                    .iter()
+                    .filter(|stage| stage.kind != StageKind::Understand)
+                    .all(|stage| stage.status != StageStatus::Live)
+            );
+            pi.apply(&json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Inspecting the result"}]}})).unwrap();
+        }
+    }
+
+    #[test]
+    fn inference_status_tracks_the_latest_stream_block_not_an_earlier_text_block() {
+        let mut pi = session(&[
+            json!({"type":"agent_start"}),
+            json!({"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"Some commentary"}]}}),
+        ]);
+        assert_eq!(project(&pi, facts(&[])).activity, "Writing");
+        pi.apply(&json!({"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":1}})).unwrap();
+        assert_eq!(project(&pi, facts(&[])).activity, "Thinking");
+        pi.apply(&json!({"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":2,"id":"next","toolName":"edit"}})).unwrap();
+        let preparing = project(&pi, facts(&[]));
+        assert_eq!(preparing.activity, "Preparing tool");
+        assert_eq!(preparing.turns[0].live_stage(), Some(StageKind::Understand));
+    }
+
+    #[test]
     fn an_unfinished_tool_from_an_earlier_turn_does_not_leak_into_a_follow_up() {
         let pi = session(&[
             json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
@@ -1485,6 +1595,7 @@ mod tests {
     fn a_running_write_previews_its_content() {
         let tool = Tool {
             id: "w".into(),
+            started: None,
             name: "write".into(),
             args: json!({"path":"src/new.rs","content":"first\nsecond"}),
             output: String::new(),

@@ -130,13 +130,20 @@ pub fn project(record: &Value, previous: &Session, key: &str) -> Result<Session>
     }
     if let Some(slots) = live["tools"].as_array() {
         for slot in slots {
-            if slot["status"] == "done" {
+            if matches!(slot["status"].as_str(), Some("pending" | "done")) {
                 continue;
             }
             let id = slot["callId"].as_str().context("Invalid durable tool ID")?;
-            if !model.tools.iter().any(|tool| tool.id == id) {
-                model.apply(&json!({"type":"tool_execution_start","toolCallId":id,"toolName":slot["name"],"args":{}}))?;
-            }
+            // A transcript call is only a plan. Every running slot (including
+            // legacy slots without status) supplies explicit execution evidence.
+            // Keep the transcript's arguments rather than replacing them with {}.
+            let args = model
+                .tools
+                .iter()
+                .find(|tool| tool.id == id)
+                .map(|tool| tool.args.clone())
+                .unwrap_or_else(|| json!({}));
+            model.apply(&json!({"type":"tool_execution_start","toolCallId":id,"toolName":slot["name"],"args":args}))?;
             model.apply(&json!({"type":"tool_execution_update","toolCallId":id,"toolName":slot["name"],"partialResult":{"content":[{"type":"text","text":slot["output"].as_str().unwrap_or("")}],"details":slot["details"]}}))?;
         }
     }
@@ -671,6 +678,52 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn snapshot_running_read_does_not_activate_pending_edit_or_bash() {
+        let previous = Session::default();
+        let mut record = json!({"key":"test","data":{
+            "entries":[{"model":[{"role":"assistant","content":[
+                {"type":"toolCall","id":"read","name":"read","arguments":{"path":"src/main.rs"}},
+                {"type":"toolCall","id":"edit","name":"edit","arguments":{"path":"src/main.rs"}},
+                {"type":"toolCall","id":"bash","name":"bash","arguments":{"command":"check"}},
+                {"type":"toolCall","id":"done","name":"read","arguments":{"path":"done"}}
+            ]}]}],
+            "docs":{"pi.live":{"run":{},"tools":[
+                {"callId":"read","name":"read","status":"running","output":"partial"},
+                {"callId":"edit","name":"edit","status":"pending"},
+                {"callId":"bash","name":"bash","status":"pending"},
+                {"callId":"done","name":"read","status":"done"}
+            ]}}
+        }});
+        let model = project(&record, &previous, "test").unwrap();
+        assert_eq!(
+            model
+                .tools
+                .iter()
+                .filter(|tool| tool.is_running())
+                .map(|tool| tool.id.as_str())
+                .collect::<Vec<_>>(),
+            ["read"]
+        );
+        assert_eq!(model.tools[0].started, Some(true));
+        assert_eq!(model.tools[0].args["path"], "src/main.rs");
+        assert_eq!(model.tools[0].output, "partial");
+        assert!(
+            model.tools[1..]
+                .iter()
+                .all(|tool| tool.started == Some(false))
+        );
+        // Old helpers omitted status on active slots.
+        record["data"]["docs"]["pi.live"]["tools"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("status");
+        let legacy = project(&record, &previous, "test").unwrap();
+        assert!(legacy.tools[0].is_running());
+        assert!(!legacy.tools[1].is_running());
+        assert!(!legacy.tools[2].is_running());
     }
 
     fn durable_target() -> SshTarget {

@@ -357,6 +357,7 @@ fn tail_line(line: String, newest: bool, colors: &Theme) -> Div {
 /// done in its colour, the live one ringed, those ahead plain.
 pub(crate) fn segments(turn: &Turn, colors: &Theme) -> Div {
     div()
+        .debug_selector(|| "composer-working-segments".into())
         .w(px(56.))
         .flex_none()
         .flex()
@@ -368,7 +369,17 @@ pub(crate) fn segments(turn: &Turn, colors: &Theme) -> Div {
                 .iter()
                 .find(|stage| stage.kind == kind)
                 .map_or(StageStatus::Planned, |stage| stage.status);
-            let segment = div().flex_1().h(px(4.)).rounded(px(2.));
+            let segment = div()
+                .debug_selector(move || {
+                    if status == StageStatus::Live {
+                        format!("composer-live-stage-{}", kind.index())
+                    } else {
+                        format!("composer-working-segment-{}", kind.index())
+                    }
+                })
+                .flex_1()
+                .h(px(4.))
+                .rounded(px(2.));
             match status {
                 StageStatus::Done => segment.bg(hue),
                 StageStatus::Live => segment.bg(hue).shadow(ui::ring(hue, 2., 0.25)),
