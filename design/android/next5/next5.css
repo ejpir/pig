@@ -1,0 +1,139 @@
+/* next5: proposed changes, on next4's tokens and proportions (../next4/next4.css).
+ *
+ *   the run line   what happened, in order and drawn to time: Looking (blue),
+ *                  Changing (orange) and Checking (grey) stretches. A check ends
+ *                  in its result; time waiting for you is dotted amber and ends
+ *                  in a hand.
+ *   hue            green and coral only for results, amber only for "needs you"
+ *   the inbox      Home lists what needs you: questions, results you haven't
+ *                  reviewed, and runs that stopped. Opening one clears it.
+ */
+:root, .evening {
+  --look: var(--h-read); --change: var(--h-edit); --pass: var(--green); --fail: var(--coral); --needs: var(--h-wait);
+}
+:root {
+  --checking: #949ca6;
+  /* Ink for text on a tint: "Needs you" was 3.25:1 and "Passed" 4.13:1. */
+  --needs-ink: #74510f; --pass-ink: #276b46;
+  /* Was #8a837c, 3.55:1 on the canvas. */
+  --faint: #77706a;
+}
+.evening { --checking: #6c7683; --needs-ink: var(--h-wait); --pass-ink: var(--green); --faint: #8d949c; }
+
+/* Top bar: the title opens Details, as Home's title opens Computers, so the
+ * info button goes. */
+.bar .title b i[data-i] { width: 16px; height: 16px; vertical-align: -2px; margin-left: 2px; color: var(--muted); }
+
+/* The run line */
+.rl { position: relative; height: 14px; flex: none; }
+.rl > b { position: absolute; top: 5px; height: 4px; border-radius: 2px; }
+.rl .rest { background: var(--raised); }
+.rl .look { background: var(--look); }
+.rl .change { background: var(--change); }
+.rl .check { background: var(--checking); }
+.rl .wait { top: 5px; height: 0; border-radius: 0; border-top: 4px dotted var(--needs); }
+.rl .look.live { box-shadow: 0 0 0 3px color-mix(in srgb, var(--look) 24%, transparent); }
+.rl .change.live { box-shadow: 0 0 0 3px color-mix(in srgb, var(--change) 24%, transparent); }
+.rl .check.live { box-shadow: 0 0 0 3px color-mix(in srgb, var(--checking) 30%, transparent); }
+/* A result or a question, where it happened: a disc with its glyph. */
+.mk { position: absolute; top: 0; width: 14px; height: 14px; border-radius: 7px; display: flex; align-items: center; justify-content: center;
+  color: #fff; box-shadow: 0 0 0 2px var(--canvas); }
+.mk i[data-i] { width: 10px; height: 10px; }
+.mk i[data-i] svg { stroke-width: 3.2; }
+.mk.ask i[data-i] svg { stroke-width: 2.6; }
+.mk.pass { background: var(--pass); } .mk.fail { background: var(--fail); } .mk.ask { background: var(--needs); }
+.evening .mk { color: var(--canvas); }
+.rl.sm { height: 10px; }
+.rl.sm > b { top: 3px; }
+.rl.sm .wait { top: 3px; border-top-width: 4px; }
+.rl.sm .mk { width: 10px; height: 10px; border-radius: 5px; box-shadow: 0 0 0 1.5px var(--canvas); }
+.rl.sm .mk i[data-i] { display: none; }
+.on-panel .mk { box-shadow: 0 0 0 2px var(--panel); }
+.on-panel .rl.sm .mk { box-shadow: 0 0 0 1.5px var(--panel); }
+
+/* The key under a finished line: each kind's icon, name and total. */
+.rlkey { display: flex; gap: 16px; margin-top: 10px; font-size: 13px; line-height: 20px; color: var(--secondary); white-space: nowrap; }
+.rlkey > span { display: inline-flex; align-items: center; gap: 6px; }
+.rlkey i[data-i] { width: 16px; height: 16px; color: var(--hue); }
+.rlkey .tm { color: var(--muted); font-size: var(--t1); font-variant-numeric: tabular-nums; }
+
+/* Badges carry ink that passes on their tint. */
+.badge.needs { background: color-mix(in srgb, var(--needs) 15%, transparent); color: var(--needs-ink); }
+.badge.pass { background: color-mix(in srgb, var(--pass) 15%, transparent); color: var(--pass-ink); }
+.badge.plain { background: var(--selected); color: var(--secondary); }
+
+/* The inbox: what you haven't seen is bold with a dot; what you have goes quiet. */
+.label .n { color: var(--muted); font-weight: 400; margin-left: 4px; }
+.new-dot { width: 8px; height: 8px; border-radius: 4px; background: var(--accent); flex: none; }
+.item.seen .t { font-weight: 400; color: var(--secondary); }
+.item .side { display: flex; align-items: center; gap: 8px; flex: none; }
+.lead .tile.sm { width: 28px; height: 28px; border-radius: 8px; }
+.lead .tile.sm i[data-i] { width: 15px; height: 15px; }
+
+/* A composer you aren't typing in is one line; the model and effort show
+ * when it has focus. */
+.composer.slim { display: flex; align-items: center; height: 56px; padding: 0 8px 0 4px; border-radius: 28px; }
+.composer.slim .draft { flex: 1; min-width: 0; min-height: 0; padding: 0 4px 0 0; }
+.composer.slim .send { margin: 0; }
+.strip + .composer.slim { border-radius: 0 0 24px 24px; }
+
+/* Answers are the buttons themselves: each says what it does. */
+.opt { min-height: 48px; display: flex; align-items: center; gap: 12px; padding: 0 16px; border-radius: 24px; border: 1px solid var(--line-strong);
+  background: var(--composer); font-weight: 600; color: var(--text); }
+.opt .grow { font-weight: 600; }
+.opt i[data-i] { color: var(--muted); width: 18px; height: 18px; }
+.opt.other { border-style: dashed; color: var(--secondary); font-weight: 400; }
+
+/* Pi's own pointers to what deserves a look. */
+.look-row { display: flex; gap: 12px; padding: 12px 0; align-items: flex-start; }
+.look-row + .look-row { border-top: 1px solid var(--line); }
+.look-row > i[data-i] { width: 16px; height: 16px; margin-top: 2px; color: var(--accent); }
+.look-row .t { font-weight: 600; font-size: 14px; line-height: 20px; }
+.look-row .t code { font-size: 12.5px; font-weight: 400; color: var(--secondary); }
+.look-row .d { font-size: 13px; line-height: 18px; color: var(--secondary); margin-top: 2px; }
+.look-row > .go { width: 16px; height: 16px; margin-top: 2px; color: var(--faint); }
+
+/* A note from Pi pinned above the lines it is about. */
+.note { margin: 0 var(--g) 12px; padding: 12px 14px; border-radius: var(--r2); background: color-mix(in srgb, var(--accent) 9%, var(--canvas));
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); }
+.note .h { display: flex; align-items: center; gap: 8px; font-size: var(--t1); line-height: 16px; font-weight: 600; color: var(--accent); }
+.note .h i[data-i] { width: 14px; height: 14px; }
+.note p { margin-top: 6px; font-size: 14px; line-height: 20px; color: var(--secondary); }
+.note p code { font-size: 12.5px; color: var(--text); }
+.code .l.flag { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* Door cards on first run. */
+.door { display: flex; gap: 14px; align-items: flex-start; padding: 16px; }
+.door + .door { border-top: 1px solid var(--line); }
+.door .tile { margin-top: 2px; }
+.door .t { font-weight: 600; font-size: 16px; line-height: 22px; }
+.door .d { font-size: 14px; line-height: 20px; color: var(--secondary); margin-top: 4px; }
+.door > i[data-i] { width: 18px; height: 18px; color: var(--faint); margin-top: 3px; }
+
+/* Outside the app: the lock screen, notifications and the share sheet,
+ * drawn plainly as context. */
+.lock { background: linear-gradient(180deg, #2b3546 0%, #131922 100%); color: #f1eeea; }
+.lock .status { color: #f1eeea; }
+.lock .gesture::after { background: #f1eeea; }
+.clock { font: 300 84px/1 var(--sans); letter-spacing: -.02em; }
+.note-card { background: #f3f1ee; color: #252f3d; border-radius: 28px; padding: 14px 16px 14px; }
+.note-card .app { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #665f59; }
+.note-card .app .av { width: 22px; height: 22px; border-radius: 11px; background: #4b607c; color: #fff; display: flex; align-items: center; justify-content: center; }
+.note-card .app .av i[data-i] { width: 14px; height: 14px; }
+.note-card .ttl { margin-top: 8px; font-weight: 600; font-size: 15px; line-height: 20px; }
+.note-card .txt { margin-top: 2px; font-size: 14px; line-height: 20px; color: #3e4753; }
+.note-card .acts { display: flex; gap: 8px; margin-top: 12px; }
+.note-card .act { height: 36px; padding: 0 16px; border-radius: 18px; display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600;
+  background: #e4ded8; color: #252f3d; }
+.note-card .act.primary { background: #4b607c; color: #fff; }
+.note-card .act i[data-i] { width: 14px; height: 14px; }
+.chip-live { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px 0 6px; border-radius: 10px; background: var(--accent); color: var(--on-accent);
+  font-size: 12px; font-weight: 600; margin-left: 8px; font-variant-numeric: tabular-nums; }
+.chip-live i[data-i] { width: 12px !important; height: 12px !important; margin: 0 !important; }
+/* Android 16's ProgressStyle: coloured segments, points, and a tracker. */
+.ps { position: relative; height: 22px; margin-top: 12px; }
+.ps > b { position: absolute; top: 8px; height: 6px; border-radius: 3px; }
+.ps .pt { position: absolute; top: 6px; width: 10px; height: 10px; border-radius: 5px; box-shadow: 0 0 0 2px #f3f1ee; }
+.ps .tracker { position: absolute; top: 0; width: 22px; height: 22px; border-radius: 11px; background: #4b607c; color: #fff; display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 2px #f3f1ee; }
+.ps .tracker i[data-i] { width: 14px; height: 14px; }

@@ -10,6 +10,12 @@
 
 Peers communicate through a durable broker on the computer, not by sharing every conversation. Eight proposed screens make agent states, questions, delivery receipts, dependencies and artifact handoffs visible, including a grouped 24-agent swarm and honest offline state. Local interactions are samples only; peer messaging and this native UI are not implemented.
 
+## next5 proposal
+
+**[Open the before/after gallery](next5/index.html)** · [Why, and what it would take](next5/README.md) · [Overview PNG](next5/overview.png)
+
+Twelve screens on top of next4. Home becomes an inbox of questions, unreviewed results and stopped runs. The run line shows what happened in order, with each check's result where it happened. Answers are buttons. Review ends in **Looks good** or **Undo this turn**. A Live Update and a share target let the phone reach you while the app is closed. First run, Home, Working, the question, the Live Update, Details and the run line are [built](next5/README.md#built); review's decisions and the share target are not yet.
+
 ## Scheduling proposal
 
 **[Open the self-contained scheduling HTML](schedules/index.html)** · [Notes and interaction contract](schedules/README.md) · [Overview PNG](schedules/overview.png)

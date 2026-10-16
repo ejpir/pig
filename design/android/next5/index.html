@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi in your pocket, next5</title>
+<style>
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-Regular.ttf"); font-weight: 400; }
+  @font-face { font-family: "Plex"; src: url("../../../assets/fonts/IBMPlexSans-SemiBold.ttf"); font-weight: 600; }
+  :root { --bg:#ece7e1; --card:#faf9f7; --text:#252f3d; --muted:#665f59; --line:#ddd7d0; --accent:#4b607c; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#0d1116; --card:#161d27; --text:#ebe7e4; --muted:#9ca2aa; --line:#363d46; --accent:#8caecb; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 "Plex", "IBM Plex Sans", system-ui, sans-serif; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 48px 24px 80px; }
+  h1 { font: italic 400 44px/1.1 Georgia, "DejaVu Serif", serif; margin: 0 0 12px; letter-spacing: -.01em; }
+  .lede { font-size: 17px; color: var(--muted); max-width: 760px; margin: 0 0 8px; }
+  .links a { color: var(--accent); margin-right: 16px; }
+  .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr); gap: 20px; align-items: start; padding: 28px 0; border-top: 1px solid var(--line); }
+  .pair:first-of-type { margin-top: 32px; }
+  figure { margin: 0; }
+  figure img { width: 100%; display: block; border-radius: 22px; border: 1px solid var(--line); background: var(--card); }
+  figure.none { aspect-ratio: 412 / 915; border: 1px dashed var(--line); border-radius: 22px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 14px; }
+  figcaption { margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .note b { display: block; font-size: 17px; margin-bottom: 6px; }
+  .note p { margin: 0; color: var(--muted); }
+  @media (max-width: 720px) {
+    .pair { grid-template-columns: 1fr 1fr; }
+    .note { grid-column: 1 / -1; order: -1; }
+  }
+</style></head>
+<body>
+<div class="wrap">
+  <h1>Pi in your pocket, next5</h1>
+  <p class="lede">A proposal on top of next4: Home becomes an inbox of what needs you, the run line shows what happened in order, answers are the buttons themselves, review ends in a decision, and the phone can reach you while the app is closed.</p>
+  <p class="links"><a href="README.md">Why, and what it would take</a><a href="overview.png">Overview PNG</a><a href="../next4/index.html">next4</a></p>
+  <div id="pairs"></div>
+</div>
+<script>
+  // [next5 screen, title, what changed, the screen it replaces (or null)]
+  const pairs = [
+    ["01-first-run", "First run", "Two doors that say what they mean, on your computer or on this phone, and the sample sessions in plain sight. Local was behind the logo; the samples were behind the SSH-key link.", "../next4/screens/01-pair.png"],
+    ["02-home", "Home", "An inbox: questions answered in place, results you haven't reviewed and runs that stopped, each with a dot until you open it. Working runs show what happened in order.", "../next4/screens/02-home.png"],
+    ["03-caught-up", "Caught up", "When nothing needs you, Home says so. The answered question stays on its run's track as a hand.", null],
+    ["04-working", "Working", "The strip's run line drawn in order, so the failed type check shows where it happened. The title opens Details; the composer is one line until you type.", "../stream/screens/02-verifying.png"],
+    ["05-question", "A question", "Each choice is a button that answers. All of an extension's choices are shown; today the app drops any after the third.", "../next4/screens/05-answer.png"],
+    ["06-done", "Done", "The run as it happened; Worth a look, Pi's pointers to what to check and what it couldn't test; the check that failed once, then passed.", "../next4/screens/06-done.png"],
+    ["07-review", "Review", "Pi's note above the lines it's about. Looks good marks the run reviewed; Undo this turn restores the files from before it.", "../next4/screens/07-review.png"],
+    ["08-lock-screen", "Lock screen", "A working run as an Android 16 Live Update, its run line drawn by ProgressStyle. The questions and the result under it.", "../screens/10-alerts.png"],
+    ["09-share", "Share to Pi", "Pi in the share sheet, with recent sessions as Direct Share targets. The status bar carries the Live Update chip.", null],
+    ["10-details", "Details", "Each stretch in order with what it did, and each check with its result.", "../next4/screens/08-details.png"],
+    ["11-evening", "Evening", "Done in the dark theme.", "../next4/screens/12-evening.png"],
+    ["12-palette", "Palette check", "Before and after, as most people see them and simulated for deuteranopia and protanopia.", null],
+  ];
+  const shot = (src, label) => src
+    ? `<figure><a href="${src.replace(".png", ".html")}"><img src="${src}" alt="${label}" loading="lazy"></a><figcaption>${label}</figcaption></figure>`
+    : `<figure class="none">New</figure>`;
+  document.getElementById("pairs").innerHTML = pairs.map(([file, title, note, before]) => `
+    <div class="pair">
+      ${shot(before, "Before")}
+      ${shot(`screens/${file}.png`, "next5")}
+      <div class="note"><b>${file.slice(0, 2)} ${title}</b><p>${note}</p></div>
+    </div>`).join("");
+</script>
+</body></html>

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>09 Share to Pi</title>
+<link rel="stylesheet" href="../../next4/next4.css"><link rel="stylesheet" href="../next5.css">
+<style>
+  /* Another app behind the share sheet: a CI log in a browser, drawn plainly. */
+  .browser { background: #ffffff; color: #1f2328; }
+  .url { margin: 4px 12px 0; height: 44px; border-radius: 22px; background: #eef0f2; display: flex; align-items: center; gap: 10px; padding: 0 14px;
+    font-size: 14px; color: #3e4753; }
+  .url i[data-i] { width: 16px; height: 16px; color: #665f59; }
+  .log { margin: 16px 16px 0; font-family: var(--mono); font-size: 11.5px; line-height: 19px; color: #3f4854; white-space: pre; }
+  .log .bad { color: #a44835; } .log .dim { color: #8a837c; }
+  .share { position: absolute; left: 0; right: 0; bottom: 0; background: #f3f1ee; color: #252f3d; border-radius: 28px 28px 0 0; padding: 8px 20px 16px; box-shadow: var(--lift); }
+  .shot { width: 44px; height: 88px; border-radius: 8px; background: #fff; border: 1px solid #ddd7d0; padding: 10px 5px; display: flex; flex-direction: column; gap: 4px; flex: none; }
+  .shot span { height: 3px; border-radius: 2px; background: #cbc3bb; }
+  .shot span.bad { background: #a44835; width: 70%; }
+  .targets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 8px; margin-top: 12px; }
+  .target { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; font-size: 12.5px; line-height: 16px; color: #3e4753; }
+  .av { width: 56px; height: 56px; border-radius: 28px; display: flex; align-items: center; justify-content: center; position: relative; font-weight: 600; font-size: 18px; }
+  .av i[data-i] { width: 24px; height: 24px; }
+  .av .badge-app { position: absolute; right: -2px; bottom: -2px; width: 22px; height: 22px; border-radius: 11px; background: #4b607c; color: #fff;
+    display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 2px #f3f1ee; }
+  .av .badge-app i[data-i] { width: 13px; height: 13px; }
+  .pi-av { background: color-mix(in srgb, #4b607c 14%, #f3f1ee); color: #4b607c; }
+  .app-av { background: #e4ded8; color: #3e4753; }
+  .target b { font-weight: 600; color: #252f3d; }
+</style></head>
+<body>
+<div class="phone browser" data-live="3:12">
+  <main class="content">
+    <div class="url"><i data-i="tabs"></i><span class="grow ell">github.com/ejpir/pi/actions/runs/18421</span><i data-i="dots"></i></div>
+    <div class="log"><span class="dim">Run pnpm test --filter @pi/ai</span>
+<span class="dim">  RUN  v3.2.4 packages/ai</span>
+  ✓ anthropic › rejects a missing signature
+  ✓ anthropic › keeps a valid signature
+<span class="bad">  ✗ deepseek › accepts an empty signature</span>
+<span class="bad">    AssertionError: expected "Missing signature"</span>
+<span class="bad">    to be undefined</span>
+<span class="dim">     at deepseek.test.ts:22:5</span>
+
+<span class="dim">  Tests  1 failed | 13 passed (14)</span>
+<span class="bad">Error: Process completed with exit code 1.</span></div>
+    <div class="scrim"></div>
+    <div class="share">
+      <div class="handle"></div>
+      <div class="row g12">
+        <span class="shot"><span></span><span style="width:80%"></span><span></span><span class="bad"></span><span class="bad" style="width:55%"></span><span style="width:60%"></span></span>
+        <div class="grow"><div class="strong">Screenshot</div><div class="meta" style="color:#665f59">1080 × 2400 · PNG</div></div>
+        <span class="tap" style="color:#3e4753"><i data-i="copy"></i></span>
+      </div>
+      <div class="hair" style="margin:16px -20px 0;background:#ddd7d0"></div>
+      <div class="label" style="margin-top:14px;color:#665f59">Pi</div>
+      <div class="targets">
+        <div class="target"><span class="av pi-av"><i data-i="plus"></i><span class="badge-app"><i data-i="pi"></i></span></span><span><b>New session</b><br>pi</span></div>
+        <div class="target"><span class="av pi-av"><i data-i="diff"></i><span class="badge-app"><i data-i="pi"></i></span></span><span><b>Qwen signatures</b></span></div>
+        <div class="target"><span class="av pi-av"><i data-i="term"></i><span class="badge-app"><i data-i="pi"></i></span></span><span><b>Kimi K3 default</b></span></div>
+        <div class="target"><span class="av pi-av"><i data-i="hand"></i><span class="badge-app"><i data-i="pi"></i></span></span><span><b>Streaming retry</b></span></div>
+      </div>
+      <div class="hair" style="margin:16px -20px 0;background:#ddd7d0"></div>
+      <div class="targets" style="margin-top:16px">
+        <div class="target"><span class="av app-av"><i data-i="pi"></i></span><span>Pi</span></div>
+        <div class="target"><span class="av app-av"><i data-i="message"></i></span><span>Messages</span></div>
+        <div class="target"><span class="av app-av">G</span><span>Gmail</span></div>
+        <div class="target"><span class="av app-av"><i data-i="folder"></i></span><span>Files</span></div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../../next4/next4.js"></script><script src="../icons.js"></script>
+</body></html>

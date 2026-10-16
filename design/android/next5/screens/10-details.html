@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>10 Details</title>
+<link rel="stylesheet" href="../../next4/next4.css"><link rel="stylesheet" href="../next5.css">
+<style>
+  .st { gap: 12px; }
+  .st .body { padding-top: 3px; }
+  .st .to { top: 30px; bottom: -14px; }
+  .st .what { font-size: 13px; line-height: 18px; color: var(--muted); margin-top: 2px; }
+  .st .what code { font-size: 12px; color: var(--secondary); }
+  .st .what.fail { color: var(--fail); }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content" data-v5="done">
+    <div class="scrim"></div>
+    <div class="sheet" style="padding-bottom:8px">
+      <div class="handle"></div>
+      <div class="row">
+        <div class="grow"><div class="t4">Qwen signatures</div><div class="meta" style="margin-top:4px">pi · studio-mac · 4:31 · $0.41 · 14 turns</div></div>
+        <span class="tap" style="margin-right:-12px"><i data-i="x"></i></span>
+      </div>
+      <div style="margin-top:16px" id="line"></div>
+      <div class="col" style="gap:14px;margin-top:20px">
+        <div class="st" style="--hue:var(--look)">
+          <span class="stn"><i data-i="eye"></i></span><span class="to"></span>
+          <div class="body"><div class="row"><span class="strong grow">Looked</span><span class="meta">0:40</span></div>
+            <div class="what">Read 5 files · searched twice</div></div>
+        </div>
+        <div class="st" style="--hue:var(--change)">
+          <span class="stn"><i data-i="pencil"></i></span><span class="to"></span>
+          <div class="body"><div class="row"><span class="strong grow">Changed</span><span class="meta">1:10</span></div>
+            <div class="what"><code>openai-completions.ts</code> · created <code>qwen.test.ts</code></div></div>
+        </div>
+        <div class="st" style="--hue:var(--checking)">
+          <span class="stn"><i data-i="term"></i></span><span class="to"></span>
+          <div class="body"><div class="row g8"><span class="strong grow">Checked</span><span class="badge" style="--hue:var(--fail)">Failed</span><span class="meta">0:14</span></div>
+            <div class="what fail"><code>pnpm tsc --noEmit</code> · 'model' is possibly undefined</div></div>
+        </div>
+        <div class="st" style="--hue:var(--change)">
+          <span class="stn"><i data-i="pencil"></i></span><span class="to"></span>
+          <div class="body"><div class="row"><span class="strong grow">Changed</span><span class="meta">0:25</span></div>
+            <div class="what"><code>qwen.test.ts</code> +1 −1</div></div>
+        </div>
+        <div class="st" style="--hue:var(--checking)">
+          <span class="stn"><i data-i="term"></i></span><span class="to"></span>
+          <div class="body"><div class="row g8"><span class="strong grow">Checked</span><span class="badge pass">Passed</span><span class="meta">1:32</span></div>
+            <div class="what"><code>pnpm test --filter @pi/ai</code> · 14 tests</div></div>
+        </div>
+        <div class="st" style="--hue:var(--look)">
+          <span class="stn"><i data-i="eye"></i></span>
+          <div class="body"><div class="row"><span class="strong grow">Wrote the hand-off</span><span class="meta">0:30</span></div></div>
+        </div>
+      </div>
+      <div class="list" style="margin-top:12px;border-top:1px solid var(--line)">
+        <div class="item one"><i data-i="layers" class="muted"></i><span class="grow">Context</span><span class="meta">62k of 200k · compacts at 80%</span><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="item one"><i data-i="spark" class="muted"></i><span class="grow">Model</span><span class="meta">Opus 5.5 · High</span><i data-i="chev-r" class="sm faint"></i></div>
+        <div class="item one"><i data-i="restore" class="muted"></i><span class="grow">File history</span><span class="meta">4 points</span><i data-i="chev-r" class="sm faint"></i></div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../frag.js"></script>
+<script>document.getElementById("line").innerHTML = RUN(QWEN, { width: 372, total: 271 });</script>
+<script src="../../next4/next4.js"></script><script src="../icons.js"></script>
+</body></html>

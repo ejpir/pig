@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>12 Palette check</title>
+<link rel="stylesheet" href="../../next4/next4.css"><link rel="stylesheet" href="../next5.css">
+<style>
+  .sec { margin-top: 18px; padding-bottom: 6px; border-bottom: 1px solid var(--line); font-size: var(--t1); line-height: 16px; font-weight: 600; color: var(--muted); }
+  .vis { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .vis .who { width: 80px; flex: none; font-size: 12.5px; line-height: 16px; color: var(--muted); }
+  .vis .sample { flex: 1; min-width: 0; }
+  .old { display: flex; gap: 2px; height: 14px; align-items: center; }
+  .old b { height: 3px; border-radius: 2px; flex: none; }
+  .keys { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; font-size: 12px; line-height: 16px; color: var(--secondary); }
+  .keys > span { display: inline-flex; align-items: center; gap: 5px; }
+  .sw { width: 10px; height: 10px; border-radius: 5px; flex: none; }
+  .ln { width: 16px; height: 4px; border-radius: 2px; flex: none; }
+  .ln.dotted { height: 0; border-radius: 0; border-top: 4px dotted var(--needs); }
+  .keys .mk { position: static; width: 12px; height: 12px; box-shadow: none; }
+  .keys .mk i[data-i] { width: 8px; height: 8px; }
+  .facts { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .fact { display: flex; gap: 10px; font-size: 13px; line-height: 18px; color: var(--secondary); }
+  .fact b { color: var(--text); font-weight: 600; }
+  .fact .n { width: 18px; height: 18px; border-radius: 9px; flex: none; background: var(--selected); color: var(--secondary); font-size: 11px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; }
+</style></head>
+<body>
+<div class="phone" data-chrome="none">
+  <main class="content" style="padding:24px var(--g) 16px">
+    <div class="label">Palette check</div>
+    <h1 class="headline" style="font-size:26px;line-height:32px;margin-top:6px">The run line, before and after</h1>
+    <p class="prose" style="font-size:14px;line-height:20px;margin-top:6px">As most people see it, then simulated for deuteranopia and protanopia (Machado, 2009).</p>
+    <div class="sec">Before · next4</div>
+    <div id="before"></div>
+    <div class="sec">After · next5</div>
+    <div id="after"></div>
+    <div class="facts">
+      <div class="fact"><span class="n">1</span><span><b>Changing and Waiting</b> were ΔE 9.5 apart (1.5 with deuteranopia). Waiting is now dotted and ends in a hand.</span></div>
+      <div class="fact"><span class="n">2</span><span><b>Verify was the green of Passed</b>, and every bash command counted as Verify. A check is grey until its result.</span></div>
+      <div class="fact"><span class="n">3</span><span><b>Understand and Hand off</b> were both blue (ΔE 14.3; 7.2 in Evening). Pi's closing words now count as Looking.</span></div>
+      <div class="fact"><span class="n">4</span><span><b>Needs you</b> text was 3.25:1 on its tint, <b>Passed</b> 4.13:1. Now 5.73:1 and 5.00:1.</span></div>
+    </div>
+  </main>
+</div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="deutan" color-interpolation-filters="linearRGB"><feColorMatrix type="matrix"
+    values="0.367322 0.860646 -0.227968 0 0  0.280085 0.672501 0.047413 0 0  -0.011820 0.042940 0.968881 0 0  0 0 0 1 0"/></filter>
+  <filter id="protan" color-interpolation-filters="linearRGB"><feColorMatrix type="matrix"
+    values="0.152286 1.052583 -0.204868 0 0  0.114503 0.786281 0.099216 0 0  -0.003882 -0.048116 1.051998 0 0  0 0 0 1 0"/></filter>
+</svg>
+<script src="../frag.js"></script>
+<script>
+  const vision = [["Typical", ""], ["Deuteranopia", "url(#deutan)"], ["Protanopia", "url(#protan)"]];
+  // next4: four stages in a fixed order, each its own colour, plus waiting and passed.
+  const before = `
+      <div class="old"><b style="width:40px;background:var(--h-read)"></b><b style="width:119px;background:var(--h-edit)"></b><b style="width:93px;background:var(--h-check)"></b><b style="width:20px;background:var(--accent)"></b></div>
+      <div class="keys"><span><span class="sw" style="background:var(--h-edit)"></span>Change</span><span><span class="sw" style="background:var(--h-wait)"></span>Waiting</span><span><span class="sw" style="background:var(--h-check)"></span>Verify</span><span><span class="badge" style="--hue:var(--green);height:18px;padding:0 7px;font-size:11px">Passed</span></span><span><span class="sw" style="background:var(--h-read)"></span>Understand</span><span><span class="sw" style="background:var(--accent)"></span>Hand off</span></div>`;
+  const after = `
+      ${RUN(QWEN, { width: 278, total: 271 })}
+      <div class="keys"><span><span class="ln" style="background:var(--look)"></span>Looking</span><span><span class="ln" style="background:var(--change)"></span>Changing</span><span><span class="ln" style="background:var(--checking)"></span>Checking</span><span><span class="ln dotted"></span><span class="mk ask"><i data-i="hand"></i></span>Waiting</span><span><span class="mk pass"><i data-i="check"></i></span>Passed</span><span><span class="mk fail"><i data-i="x"></i></span>Failed</span></div>`;
+  const rows = (sample) => vision.map(([who, filter]) =>
+    `<div class="vis"><span class="who">${who}</span><div class="sample" style="filter:${filter || "none"}">${sample}</div></div>`).join("");
+  document.getElementById("before").outerHTML = rows(before);
+  document.getElementById("after").outerHTML = rows(after);
+</script>
+<script src="../../next4/next4.js"></script><script src="../icons.js"></script>
+</body></html>

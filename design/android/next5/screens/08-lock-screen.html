@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>08 Lock screen</title>
+<link rel="stylesheet" href="../../next4/next4.css"><link rel="stylesheet" href="../next5.css">
+<style>
+  .note-card .mono { font-family: var(--mono); font-size: 12.5px; color: #3e4753; }
+  .note-card .live-tag { margin-left: auto; font-variant-numeric: tabular-nums; color: #3e4753; font-weight: 600; }
+</style></head>
+<body>
+<div class="phone lock">
+  <main class="content" style="padding:0 16px">
+    <div style="padding:24px 12px 22px">
+      <div class="clock">9:41</div>
+      <div style="font-size:17px;margin-top:10px;opacity:.85">Friday, October 16</div>
+    </div>
+    <div class="col g8">
+      <div class="note-card">
+        <div class="app"><span class="av"><i data-i="pi"></i></span>Pi · studio-mac<span class="live-tag">3:12</span></div>
+        <div class="ttl">Kimi K3 default · checking again</div>
+        <div class="txt">A type check failed once and Pi fixed it. Now running the tests.</div>
+        <div id="ps"></div>
+        <div class="acts"><span class="act"><i data-i="stop"></i>Stop</span><span class="act">Open</span></div>
+      </div>
+      <div class="note-card">
+        <div class="app"><span class="av" style="background:#a57514"><i data-i="hand"></i></span>Pi · zed · 2m</div>
+        <div class="ttl">Gutter blame width asks</div>
+        <div class="txt">Clear the incremental build cache?</div>
+        <div class="mono" style="margin-top:2px">rm -rf target/debug/incremental</div>
+        <div class="acts"><span class="act">No</span><span class="act primary">Yes</span></div>
+      </div>
+      <div class="note-card">
+        <div class="app"><span class="av" style="background:#a57514"><i data-i="hand"></i></span>Pi · pi · now</div>
+        <div class="ttl">Streaming retry needs you</div>
+        <div class="txt">Where should the jitter go? 4 choices</div>
+        <div class="acts"><span class="act">Choose</span></div>
+      </div>
+      <div class="note-card">
+        <div class="app"><span class="av"><i data-i="pi"></i></span>Pi · pi · 9:46</div>
+        <div class="ttl">Qwen signatures is ready to review</div>
+        <div class="txt">2 files · checks passed · 2 things worth a look</div>
+        <div class="acts"><span class="act primary"><i data-i="diff"></i>Review</span></div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../frag.js"></script>
+<script>document.getElementById("ps").outerHTML = PS(KIMI, { width: 348, total: 300 });</script>
+<script src="../../next4/next4.js"></script><script src="../icons.js"></script>
+</body></html>

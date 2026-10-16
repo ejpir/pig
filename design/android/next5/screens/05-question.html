@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>05 A question</title>
+<link rel="stylesheet" href="../../next4/next4.css"><link rel="stylesheet" href="../../stream/stream.css"><link rel="stylesheet" href="../next5.css">
+<style>
+  .ask { background: var(--composer); border: 1px solid color-mix(in srgb, var(--needs) 50%, var(--line)); border-radius: 24px;
+    padding: 16px 16px 8px; box-shadow: var(--lift); }
+  .badge i[data-i] { width: 13px; height: 13px; }
+</style></head>
+<body>
+<div class="phone">
+  <main class="content">
+    <div class="bar">
+      <span class="tap"><i data-i="back"></i></span>
+      <div class="title"><b>Streaming retry<i data-i="chev-d"></i></b><span>pi · studio-mac</span></div>
+      <span class="tap"><i data-i="dots"></i></span>
+    </div>
+    <div class="scroll col g16" style="justify-content:flex-end;padding-bottom:16px">
+      <div class="you">Add jitter to the streaming retry backoff so parallel sessions don't retry in lockstep</div>
+      <p class="say" style="margin-top:8px">I'll find the backoff and what shares it.</p>
+      <div class="calls">
+        <div class="call two" style="--hue:var(--look)">
+          <span class="ic"><i data-i="file"></i></span>
+          <span class="what"><span class="ln"><b>Read</b> 3 files</span><span class="sub">retry.ts, opencode.ts, +1</span></span>
+          <span class="tm">0:07</span><i data-i="chev-d"></i>
+        </div>
+        <div class="call" style="--hue:var(--look)">
+          <span class="ic"><i data-i="search"></i></span>
+          <span class="what"><span class="ln"><b>Searched</b> “backoff” · 9 in 3 files</span></span>
+          <span class="tm">0:02</span>
+        </div>
+      </div>
+      <p class="say">Three providers share this backoff, so I'll ask before changing all of them.</p>
+    </div>
+    <div class="dock">
+      <div class="ask">
+        <div class="row g8">
+          <span class="badge needs"><i data-i="hand"></i>Needs you</span>
+          <span class="meta grow ell" style="text-align:right">Pi is paused · 2:04</span>
+        </div>
+        <div class="t3" style="margin-top:12px">Where should the jitter go?</div>
+        <p class="secondary" style="margin-top:4px;font-size:14px;line-height:20px"><code>retry.ts</code> is shared by OpenCode, OpenRouter and Anthropic, so jitter there changes all three.</p>
+        <div class="col g8" style="margin-top:14px">
+          <span class="opt"><span class="grow">In the shared backoff</span></span>
+          <span class="opt"><span class="grow">Only for OpenCode</span></span>
+          <span class="opt"><span class="grow">As a setting, on by default</span></span>
+          <span class="opt"><span class="grow">Leave the backoff alone</span></span>
+        </div>
+        <div class="row" style="margin-top:4px">
+          <span class="btn quiet" style="padding:0 12px;margin-left:-4px">Later</span>
+          <span class="grow"></span><span class="meta" style="padding-right:4px">Tap one to answer</span>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="../../next4/next4.js"></script><script src="../icons.js"></script>
+</body></html>
