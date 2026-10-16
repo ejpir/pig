@@ -7,10 +7,11 @@ computer, answer Pi's questions, review its changes and start new work.
 The phone connects to a computer over SSH with its own key and uses Pi
 Desktop's helper there (`pi-desktop-remote`). Sessions it starts are
 **durable**: their state lives in a database on the computer, so they carry on
-while the phone is away and pick up where they were. Sample sessions that run
-on their own, with no computer, are under “Set up with an SSH key instead” on
-the first screen, and in the computer switcher (tap the computer's name on
-Home).
+while the phone is away and pick up where they were. The first screen asks
+where Pi should work: **On your computer** leads to pairing, and **On this
+phone** to Local where the app is built with it. Sample sessions that run on
+their own, with no computer, are **Look around with sample sessions** there,
+and in the computer switcher (tap the computer's name on Home).
 
 ## Set up the computer
 
@@ -78,7 +79,7 @@ The easiest first connection is QR pairing. On the computer, run:
 ~/.pi/desktop/bin/pi-desktop-remote pair
 ```
 
-Then tap **Scan computer QR** in the Android app, scan the terminal code, and
+Then tap **On your computer** and **Scan computer QR** in the Android app, scan the terminal code, and
 compare the six-digit confirmation code shown on both devices. Press Enter on
 the computer to allow it. The QR expires after two minutes and its one-use key
 is replaced with the phone's permanent Ed25519 key only after confirmation.
@@ -121,9 +122,18 @@ shows an update message and leaves recent projects available.
   configuring a provider. This requires the helper's `models` command.
   Stop lives in the composer toolbar. In an existing
   session, those choices change that session, not the default for new tasks.
-- **Questions:** a stock Pi session's confirm or select dialog opens as a
-  sheet and is answered from the phone. Durable sessions have no extensions,
-  so they don't ask.
+- **Questions:** a stock Pi session's confirm or select dialog takes the
+  composer's place, and each choice is a button that answers: a confirm's No
+  and Yes side by side, a select's options one under another, all of them.
+  **Later** leaves it waiting. Home answers a yes-or-no question in place,
+  with its command shown whole, and so does its notification, after
+  unlocking. Durable sessions have no extensions, so they don't ask.
+- **Home as an inbox:** **Needs you** comes first: questions, then runs that
+  finished, stopped or failed since you last looked, each with a dot until you
+  open it (“ready to review · 3 files · checks passed”). What you've seen
+  folds into **Seen today** while something needs you; when nothing does,
+  Home says so. The phone keeps when you last looked at each session on each
+  computer, from the first time it connects.
 - **Native swarm observation:** an opted-in handoff opens **Map / Exchanges /
   Agents / Results**, in Moonstone or Evening. The map keeps real roster slots
   stable and draws only recorded, directed peer exchanges; dashed coordinator
@@ -160,8 +170,14 @@ shows an update message and leaves recent projects available.
   reach it, the app shows why and tries again after 5, 10, 20, then every 30
   seconds. **Use a different computer** goes to setup.
 - **Back, notifications, links, selecting text, settings:** as in the sample.
+  While the app is away, the run that moved last is an ongoing notification:
+  on Android 16 a Live Update, its run line drawn as the progress bar, on the
+  lock screen and as a status bar chip counting up. It updates while the app
+  is still running.
 - **Computers, sheets and the dock:** Home's title is the computer; tap it to
   switch computers, pair another, try the sample sessions or reach Settings.
+  A session's title opens its Details. Its composer is one line until you
+  type in it; the model and effort show with the draft.
   What moves work forward sits at the bottom: the start bar on Home, Working
   and Stop on the composer, Pi's question in the composer's place, Review over
   the follow-up. Swipe down from a sheet's handle (or its content when
@@ -183,6 +199,14 @@ shows an update message and leaves recent projects available.
   requirement without deleting anything; legacy stock-Pi history is managed
   on the computer. A server-side tombstone prevents stale clients recreating
   a deleted session; daemon and writer locks protect the deletion.
+- **The run line:** what a run's time went on, in the order it happened:
+  looking (blue), changing (orange) and checking (grey), each check ending in
+  its result, and a wait for you dotted amber. A call's own time comes from
+  when its result was stamped. Tests, builds and linters are checks; commands
+  that only look around (`rg`, `git log`) are looking. It is drawn under a
+  finished run with a key of each kind's time, folded into the working strip,
+  on Home's shared track, and in Details, where each stretch is listed with
+  what it did and opens its first call.
 - **Readable conversations:** numbered user turns, full Markdown replies,
   copyable code blocks, and an activity rail that expands after completion.
   Tap a stage for commands, full tool output and file details. Live commentary

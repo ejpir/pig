@@ -946,10 +946,18 @@ public class GpuiActivity extends NativeActivity {
             String[] actionLabels,
             String[] actionUrls,
             boolean ongoing,
-            int color) {
+            int color,
+            int[] segmentLengths,
+            int[] segmentColors,
+            int[] pointPositions,
+            int[] pointColors,
+            int progress,
+            boolean promoted,
+            long started) {
         Notifications.post(
                 this, channel, channelName, importance, id, title, text, subtext, url,
-                actionLabels, actionUrls, ongoing, color);
+                actionLabels, actionUrls, ongoing, color, segmentLengths, segmentColors,
+                pointPositions, pointColors, progress, promoted, started);
     }
 
     public void cancelNotification(int id) {

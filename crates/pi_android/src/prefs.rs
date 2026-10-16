@@ -52,6 +52,38 @@ pub struct Prefs {
     pub thinking: String,
     /// Long lines of code and output wrap; off, they scroll sideways.
     pub wrap_lines: bool,
+    /// What you have seen on each computer, by its address. Home lists what
+    /// finished since as needing you.
+    pub seen: BTreeMap<String, Seen>,
+}
+
+/// What you have seen on one computer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Seen {
+    /// Seconds since 1970 when the phone started keeping track: sessions that
+    /// ended before then count as seen.
+    pub since: u64,
+    /// Each session's `updated` when you last looked, by its key.
+    pub sessions: BTreeMap<String, u64>,
+}
+
+impl Seen {
+    /// The sessions you looked at most recently: a phone that follows a
+    /// computer for months keeps a bounded record, and the rest count as
+    /// seen up to when it dropped them.
+    pub const KEPT: usize = 300;
+
+    pub fn trim(&mut self) {
+        if self.sessions.len() <= Self::KEPT {
+            return;
+        }
+        let mut times: Vec<u64> = self.sessions.values().copied().collect();
+        times.sort_unstable_by(|a, b| b.cmp(a));
+        let cut = times[Self::KEPT - 1];
+        self.since = self.since.max(cut);
+        self.sessions.retain(|_, seen| *seen > cut);
+    }
 }
 
 impl gpui::Global for Prefs {}
@@ -62,7 +94,8 @@ impl Default for Prefs {
             appearance: Appearance::System,
             notify_questions: true,
             notify_finished: true,
-            notify_working: false,
+            // The ongoing notification is how a run reaches the lock screen.
+            notify_working: true,
             return_sends: false,
             computer: None,
             sample: false,
@@ -74,6 +107,7 @@ impl Default for Prefs {
             model_id: None,
             thinking: "High".into(),
             wrap_lines: true,
+            seen: BTreeMap::new(),
         }
     }
 }

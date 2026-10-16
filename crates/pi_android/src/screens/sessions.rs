@@ -4,7 +4,7 @@
 use super::scroll_area;
 use crate::{
     app::{PhoneApp, Route, Sheet},
-    model::{Session, State, duration_label},
+    model::{Answer, CheckResult, Session, State, duration_label},
     motion::SwipeMotion,
     remote::HelperUpdateState,
     theme::{Theme, theme},
@@ -167,15 +167,16 @@ impl PhoneApp {
                 || session.title.to_lowercase().contains(&query)
                 || session.project.to_lowercase().contains(&query)
         };
-        let [needs, working, finished] = store
-            .grouped()
-            .map(|group| group.into_iter().filter(matches).collect::<Vec<_>>());
+        let inbox = store.inbox();
+        let needs: Vec<&Session> = inbox.needs.into_iter().filter(matches).collect();
+        let working: Vec<&Session> = inbox.working.into_iter().filter(matches).collect();
+        let finished: Vec<&Session> = inbox.seen.into_iter().filter(matches).collect();
         let found = !(needs.is_empty() && working.is_empty() && finished.is_empty());
         // Working runs share one track: five minutes wide, or the longest run.
         let span = working
             .iter()
             .filter_map(|session| session.turn())
-            .map(|turn| turn.times.iter().sum::<std::time::Duration>())
+            .map(|turn| turn.run_time())
             .max()
             .unwrap_or_default()
             .max(std::time::Duration::from_secs(300));
@@ -186,6 +187,14 @@ impl PhoneApp {
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors.muted)
                 .child(text)
+        };
+        // A section's name and how many are in it: "Needs you 4".
+        let section = |text: &'static str, count: usize| {
+            label(text).flex().gap(px(4.)).child(
+                div()
+                    .font_weight(FontWeight::NORMAL)
+                    .child(count.to_string()),
+            )
         };
         let helper_update = store
             .live
@@ -263,6 +272,85 @@ impl PhoneApp {
                 )
                 .child(icon("chev_r", 16., colors.accent))
         });
+        // Nothing needs you: say so, so an empty inbox reads as done, not as
+        // something missing.
+        let caught_up = (needs.is_empty() && found && !self.searching).then(|| {
+            div()
+                .debug_selector(|| "caught-up".into())
+                .pt(px(4.))
+                .pb(px(8.))
+                .flex()
+                .items_start()
+                .gap(px(12.))
+                .child(ui::tile_box(40., 12., colors.accent, &colors).child(icon(
+                    "inbox",
+                    18.,
+                    colors.accent,
+                )))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(ui::serif("Nothing needs you.", 22.).line_height(px(28.)))
+                        .child(
+                            div()
+                                .mt(px(4.))
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .text_color(colors.muted)
+                                .child("When a run asks something, finishes or stops, it shows up here."),
+                        ),
+                )
+        });
+        // What you've seen folds away while something needs you.
+        let fold_seen = !needs.is_empty() && !self.searching && !finished.is_empty();
+        let seen_open = !fold_seen || self.seen_open;
+        let seen_fold = fold_seen.then(|| {
+            div()
+                .id("seen-today")
+                .debug_selector(|| "seen-today".into())
+                .relative()
+                .child(crate::testing::probe("seen-today"))
+                .min_h(px(56.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .border_t_1()
+                .border_color(colors.line)
+                .text_color(colors.accent)
+                .active(|style| style.bg(colors.selected))
+                .child(
+                    div()
+                        .w(px(32.))
+                        .flex_none()
+                        .flex()
+                        .justify_center()
+                        .child(icon("check", 16., colors.accent)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Seen today"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(colors.muted)
+                        .child(finished.len().to_string()),
+                )
+                .child(icon(
+                    if self.seen_open { "chev_u" } else { "chev_d" },
+                    16.,
+                    colors.accent,
+                ))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.seen_open = !this.seen_open;
+                    cx.notify();
+                }))
+        });
+        let calm = caught_up.is_some();
         let list = div()
             .px(px(20.))
             .pt(px(12.))
@@ -270,29 +358,61 @@ impl PhoneApp {
             .flex()
             .flex_col()
             .children(helper_update)
-            .children(needs.iter().enumerate().map(|(index, session)| {
-                self.home_question(session, &colors, cx)
-                    .when(index > 0, |card| card.mt(px(12.)))
-            }))
-            .when(!working.is_empty(), |list| {
-                list.child(label("Working").mt(px(if needs.is_empty() { 4. } else { 24. })))
-                    .children(working.iter().map(|session| {
-                        self.session_row(session, true, span, row_width, &colors, cx)
+            .children(caught_up)
+            .when(!needs.is_empty(), |list| {
+                list.child(section("Needs you", needs.len()).mb(px(8.)))
+                    .children(needs.iter().enumerate().map(|(index, session)| {
+                        // Rows are ruled from the row above, not from a card.
+                        let rule = index > 0 && !answered_here(needs[index - 1]);
+                        if session.state == State::NeedsYou {
+                            self.home_question(session, rule, &colors, cx)
+                                .when(index > 0 && answered_here(session), |card| card.mt(px(12.)))
+                                .into_any_element()
+                        } else {
+                            self.session_row(session, true, !rule, span, row_width, &colors, cx)
+                                .into_any_element()
+                        }
                     }))
             })
-            .when(!finished.is_empty() || earlier.is_some(), |list| {
+            .when(!working.is_empty(), |list| {
                 list.child(
-                    label("Today").mt(px(if needs.is_empty() && working.is_empty() {
+                    section("Working", working.len()).mt(px(if needs.is_empty() && !calm {
                         4.
                     } else {
-                        16.
+                        24.
                     })),
                 )
-                .children(finished.iter().enumerate().map(|(index, session)| {
-                    self.session_row(session, index == 0, span, row_width, &colors, cx)
+                .children(working.iter().map(|session| {
+                    self.session_row(session, false, true, span, row_width, &colors, cx)
                 }))
-                .children(earlier)
             })
+            .children(seen_fold)
+            .when(
+                seen_open && (!finished.is_empty() || earlier.is_some()),
+                |list| {
+                    list.when(!fold_seen, |list| {
+                        list.child(label("Today").mt(px(
+                            if needs.is_empty() && working.is_empty() && !calm {
+                                4.
+                            } else {
+                                16.
+                            },
+                        )))
+                    })
+                    .children(finished.iter().enumerate().map(|(index, session)| {
+                        self.session_row(
+                            session,
+                            false,
+                            index == 0 && !fold_seen,
+                            span,
+                            row_width,
+                            &colors,
+                            cx,
+                        )
+                    }))
+                    .children(earlier)
+                },
+            )
             .when(!found || !store.is_sample() && !self.searching, |list| {
                 list.child(
                     ui::hint(
@@ -412,16 +532,84 @@ impl PhoneApp {
         )
     }
 
-    /// Pi's question first on Home, with its command and Answer.
+    /// Pi's question on Home. A yes-or-no question is answered right here,
+    /// its command shown whole; any other opens its session, where each of
+    /// its choices is a button.
     fn home_question(
         &self,
         session: &Session,
+        rule: bool,
         colors: &Theme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = session.id;
         let question = session.question.as_ref();
         let open = cx.listener(move |this, _, window, cx| this.show_session(id, window, cx));
+        let meta = |text: String| {
+            div()
+                .text_size(px(12.5))
+                .line_height(px(16.))
+                .text_color(colors.muted)
+                .truncate()
+                .child(text)
+        };
+        let Some(question) = question.filter(|question| super::thread::is_yes_no(question)) else {
+            let asks = question.map_or_else(
+                || "waiting for you".to_owned(),
+                |question| match question.choices.len() {
+                    0 | 1 => question.title.clone(),
+                    choices => format!("{} · {choices} choices", question.title),
+                },
+            );
+            return div()
+                .id(("answer", id.0 as usize))
+                .debug_selector(move || format!("question-row-{}", id.0))
+                .relative()
+                .child(crate::testing::probe(format!("question-card-{}", id.0)))
+                .min_h(px(64.))
+                .py(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .when(rule, |row| row.border_t_1().border_color(colors.line))
+                .active(|style| style.bg(colors.selected))
+                .child(div().w(px(32.)).flex_none().flex().justify_center().child(
+                    ui::tile_box(28., 8., colors.wait, colors).child(icon(
+                        "hand",
+                        15.,
+                        colors.wait,
+                    )),
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(session.title.clone()),
+                        )
+                        .child(meta(format!("{} · {asks}", session.project)).mt(px(2.))),
+                )
+                .child(icon("chev_r", 16., colors.faint))
+                .on_click(open);
+        };
+        let reply = |choice: Answer| {
+            cx.listener(move |this, _, window, cx| {
+                // The card opens its session; its answers answer.
+                cx.stop_propagation();
+                this.answer(id, choice, window, cx);
+            })
+        };
+        let label = |wanted: Answer| {
+            question
+                .choices
+                .iter()
+                .find(|choice| choice.answer == wanted)
+                .map(|choice| choice.label.clone())
+                .unwrap_or_default()
+        };
         div()
             .id(("question-card", id.0 as usize))
             .relative()
@@ -451,67 +639,83 @@ impl PhoneApp {
                                     .truncate()
                                     .child(session.title.clone()),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(12.5))
-                                    .line_height(px(16.))
-                                    .text_color(colors.muted)
-                                    .truncate()
-                                    .child(format!("{} · waiting for you", session.project)),
-                            ),
+                            .child(meta(format!("{} · Pi is paused", session.project))),
                     ),
             )
-            .child(div().mt(px(12.)).line_height(px(22.)).child(
-                question.map_or_else(|| "Pi is waiting for you".to_owned(), |q| q.title.clone()),
-            ))
+            .child(
+                div()
+                    .mt(px(12.))
+                    .line_height(px(22.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(question.title.clone()),
+            )
+            .when(!question.body.is_empty(), |card| {
+                card.child(
+                    div()
+                        .mt(px(2.))
+                        .text_size(px(14.))
+                        .line_height(px(20.))
+                        .text_color(colors.secondary)
+                        .child(question.body.clone()),
+                )
+            })
+            .when(!question.command.is_empty(), |card| {
+                // The command whole: it is what you are agreeing to.
+                card.child(
+                    div()
+                        .mt(px(8.))
+                        .px(px(12.))
+                        .py(px(9.))
+                        .rounded(px(12.))
+                        .bg(colors.panel)
+                        .child(
+                            ui::mono(question.command.clone(), 12.5).text_color(colors.secondary),
+                        ),
+                )
+            })
             .child(
                 div()
                     .mt(px(12.))
                     .flex()
-                    .items_center()
                     .gap(px(8.))
-                    .children(question.filter(|q| !q.command.is_empty()).map(|question| {
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h(px(40.))
-                            .px(px(12.))
-                            .flex()
-                            .items_center()
-                            .rounded(px(12.))
-                            .bg(colors.panel)
-                            .child(
-                                ui::mono(question.command.clone(), 12.5)
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(colors.secondary),
-                            )
-                    }))
-                    .when(question.is_none_or(|q| q.command.is_empty()), |row| {
-                        row.child(div().flex_1())
-                    })
                     .child(
                         ui::button(
-                            ("answer", id.0 as usize),
-                            Button::Primary,
+                            ("answer-no", id.0 as usize),
+                            Button::Plain,
                             None,
-                            "Answer",
+                            label(Answer::Deny),
                             true,
                             colors,
                         )
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                this.show_session(id, window, cx)
-                            }),
-                        ),
+                        .debug_selector(move || format!("answer-no-{}", id.0))
+                        .flex_1()
+                        .on_click(reply(Answer::Deny)),
+                    )
+                    .child(
+                        ui::button(
+                            ("answer-yes", id.0 as usize),
+                            Button::Primary,
+                            None,
+                            label(Answer::AllowOnce),
+                            true,
+                            colors,
+                        )
+                        .debug_selector(move || format!("answer-yes-{}", id.0))
+                        .flex_1()
+                        .on_click(reply(Answer::AllowOnce)),
                     ),
             )
             .on_click(open)
     }
 
+    /// A session in Home's lists. `new` marks one that ended since you
+    /// looked: a tinted tile, a bold title and a dot until you open it. One
+    /// you've seen goes quiet.
+    #[allow(clippy::too_many_arguments)]
     fn session_row(
         &self,
         session: &Session,
+        new: bool,
         first: bool,
         span: std::time::Duration,
         width: gpui::Pixels,
@@ -524,11 +728,22 @@ impl PhoneApp {
         let working = session.is_working();
         let leading = if working {
             ui::ring_dot(colors.read).into_any_element()
+        } else if new {
+            let (glyph, hue) = match session.state {
+                State::Done if !session.files.is_empty() => ("diff", colors.accent),
+                State::Done => ("chat", colors.accent),
+                State::Failed => ("alert", colors.coral),
+                State::Stopped => ("stop", colors.muted),
+                State::NeedsYou | State::Working => ("hand", colors.wait),
+            };
+            ui::tile_box(28., 8., hue, colors)
+                .child(icon(glyph, 15., hue))
+                .into_any_element()
         } else {
             match session.state {
                 State::NeedsYou => ui::ring_dot(colors.wait).into_any_element(),
                 State::Working => ui::ring_dot(colors.read).into_any_element(),
-                State::Done => icon("check", 16., colors.green).into_any_element(),
+                State::Done => icon("check", 16., colors.muted).into_any_element(),
                 State::Stopped => icon("stop", 16., colors.muted).into_any_element(),
                 State::Failed => icon("alert", 16., colors.coral).into_any_element(),
             }
@@ -560,6 +775,8 @@ impl PhoneApp {
                 session.project,
                 crate::projection::at_work(handoff)
             )
+        } else if new && session.state == State::Done && !session.files.is_empty() {
+            format!("{} · {}", session.project, review_line(session))
         } else {
             format!("{} · {}", session.project, session.status_line())
         }
@@ -643,7 +860,7 @@ impl PhoneApp {
                                     .child(meta(time.into())),
                             )
                             .children(session.turn().map(|turn| {
-                                ui::track(&turn.times, turn.live_stage(), span, colors)
+                                ui::track(&turn.run, session.state.is_running(), span, colors)
                                     .mt(px(8.))
                                     .debug_selector(move || format!("session-track-{}", id.0))
                             }))
@@ -681,7 +898,13 @@ impl PhoneApp {
                                     .child(
                                         div()
                                             .truncate()
-                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .map(|title| {
+                                                if new {
+                                                    title.font_weight(FontWeight::SEMIBOLD)
+                                                } else {
+                                                    title.text_color(colors.secondary)
+                                                }
+                                            })
                                             .child(session.title.clone()),
                                     )
                                     .child(
@@ -701,7 +924,23 @@ impl PhoneApp {
                                             .child(meta(detail).flex_1().min_w_0()),
                                     ),
                             )
-                            .child(meta(time.into()).flex_none())
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .when(new, |side| {
+                                        side.child(
+                                            div()
+                                                .debug_selector(move || format!("new-{}", id.0))
+                                                .size(px(8.))
+                                                .rounded_full()
+                                                .bg(colors.accent),
+                                        )
+                                    })
+                                    .child(meta(time.into())),
+                            )
                     })
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.show_session(id, window, cx)),
@@ -744,4 +983,28 @@ impl PhoneApp {
                 }),
             )
     }
+}
+
+/// A question Home answers in place: a yes-or-no question, as a card.
+fn answered_here(session: &Session) -> bool {
+    session.state == State::NeedsYou
+        && session
+            .question
+            .as_ref()
+            .is_some_and(super::thread::is_yes_no)
+}
+
+/// What came of a finished run, briefly: "ready to review · 3 files · checks passed".
+fn review_line(session: &Session) -> String {
+    let files = match session.files.len() {
+        1 => "1 file".to_owned(),
+        count => format!("{count} files"),
+    };
+    let check = match session.check.as_ref().map(|check| check.result) {
+        Some(CheckResult::Passed) => " · checks passed",
+        Some(CheckResult::Failed) => " · checks failed",
+        Some(CheckResult::NotRun) => " · checks not run",
+        None => "",
+    };
+    format!("ready to review · {files}{check}")
 }

@@ -119,6 +119,9 @@ pub struct Composer {
     session_commands: bool,
     /// A child-conversation composer exposes only text and Send.
     message_only: bool,
+    /// A session's composer is one line while you aren't typing in it; the
+    /// model and effort show once it has focus or a draft.
+    compact_when_idle: bool,
     send_blocked: bool,
     /// The exact child payload remains visible but cannot be sent twice in flight.
     sending: bool,
@@ -156,6 +159,7 @@ impl Composer {
             command_button: false,
             session_commands: false,
             message_only: false,
+            compact_when_idle: false,
             send_blocked: false,
             sending: false,
             draft_height: 24.,
@@ -237,6 +241,11 @@ impl Composer {
         self.session_commands = false;
         self.files = Some(Vec::new());
         self.commands = Some(Vec::new());
+    }
+
+    /// One line until you type: see `compact_when_idle`.
+    pub fn set_compact_when_idle(&mut self) {
+        self.compact_when_idle = true;
     }
 
     pub fn set_send_blocked(&mut self, blocked: bool) {
@@ -519,12 +528,16 @@ impl Render for Composer {
         // Sheets move focus away from the editor. Avoid rescanning and
         // lowercasing a large project file list on every overlay animation
         // frame when no suggestion can be accepted.
-        let suggestions = area
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window)
-            .then(|| self.suggestions(cx))
-            .flatten();
+        let focused = area.read(cx).focus_handle(cx).is_focused(window);
+        let suggestions = focused.then(|| self.suggestions(cx)).flatten();
+        // Not typing, nothing drafted: one line, the model and effort away.
+        let compact = self.compact_when_idle
+            && !self.message_only
+            && !focused
+            && area.read(cx).is_empty()
+            && self.attachments.is_empty()
+            && self.imports == 0
+            && !self.sending;
         // Leave room for the conversation and Send even with a tall keyboard
         // or in landscape. The rest of a long draft scrolls inside the field.
         let lines = (f32::from(window.fully_visible_bounds().size.height) * 0.3 / 22.) as usize;
@@ -532,15 +545,27 @@ impl Render for Composer {
             area.set_max_lines(lines.clamp(2, 8));
             // The padded editor is interactive, stopping at the action row
             // so Send and the optional selection controls keep their own targets.
-            area.set_touch_target(
-                px(self.draft_height),
-                Edges {
-                    top: px(12.),
-                    right: px(16.),
-                    bottom: px(4.),
-                    left: px(16.),
-                },
-            );
+            if compact {
+                area.set_touch_target(
+                    px(24.),
+                    Edges {
+                        top: px(15.),
+                        right: px(8.),
+                        bottom: px(15.),
+                        left: px(0.),
+                    },
+                );
+            } else {
+                area.set_touch_target(
+                    px(self.draft_height),
+                    Edges {
+                        top: px(12.),
+                        right: px(16.),
+                        bottom: px(4.),
+                        left: px(16.),
+                    },
+                );
+            }
         });
         // Keep the visual control compact while preserving Android's 48 dp
         // touch target around it.
@@ -799,51 +824,72 @@ impl Render for Composer {
         let attached = strip.is_some() || lines_strip.is_some() || self.joined;
         // Child input is the regular composer minus its selection controls,
         // not a separate compact editor. Keep spacing and Send placement shared.
-        let body = div()
-            .flex()
-            .flex_col()
-            .pl(px(16.))
-            .pr(px(8.))
-            .pt(px(12.))
-            .pb(px(4.))
-            .children(attachments)
-            .child(
-                div()
-                    .id("draft-box")
-                    .debug_selector(|| "composer-draft".into())
-                    .relative()
-                    .child(crate::testing::probe("draft"))
-                    .pr(px(8.))
-                    .child(area),
-            )
-            .child(
-                div()
-                    .mt(px(4.))
-                    .ml(px(-12.))
-                    .flex()
-                    .items_center()
-                    .when(!self.message_only, |row| {
-                        row.child(clip)
-                            .when(self.command_button && self.has_commands(), |row| {
-                                row.child(
-                                    ui::tap("command", "slash", &colors)
-                                        .debug_selector(|| "composer-command".into())
-                                        .w(px(40.))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.start_command(window, cx)
-                                        })),
-                                )
-                            })
-                            .child(model)
-                            .child(thinking)
-                    })
-                    .child(div().flex_1())
-                    .when(self.sending, |row| row.child(ui::hint("Sending…", &colors)))
-                    .when(self.imports > 0, |row| {
-                        row.child(ui::hint("Preparing…", &colors))
-                    })
-                    .child(send),
-            );
+        let body = if compact {
+            div()
+                .debug_selector(|| "composer-compact".into())
+                .min_h(px(54.))
+                .px(px(4.))
+                .flex()
+                .items_center()
+                .child(clip)
+                .child(
+                    div()
+                        .id("draft-box")
+                        .debug_selector(|| "composer-draft".into())
+                        .relative()
+                        .child(crate::testing::probe("draft"))
+                        .flex_1()
+                        .min_w_0()
+                        .child(area),
+                )
+                .child(send)
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .pl(px(16.))
+                .pr(px(8.))
+                .pt(px(12.))
+                .pb(px(4.))
+                .children(attachments)
+                .child(
+                    div()
+                        .id("draft-box")
+                        .debug_selector(|| "composer-draft".into())
+                        .relative()
+                        .child(crate::testing::probe("draft"))
+                        .pr(px(8.))
+                        .child(area),
+                )
+                .child(
+                    div()
+                        .mt(px(4.))
+                        .ml(px(-12.))
+                        .flex()
+                        .items_center()
+                        .when(!self.message_only, |row| {
+                            row.child(clip)
+                                .when(self.command_button && self.has_commands(), |row| {
+                                    row.child(
+                                        ui::tap("command", "slash", &colors)
+                                            .debug_selector(|| "composer-command".into())
+                                            .w(px(40.))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.start_command(window, cx)
+                                            })),
+                                    )
+                                })
+                                .child(model)
+                                .child(thinking)
+                        })
+                        .child(div().flex_1())
+                        .when(self.sending, |row| row.child(ui::hint("Sending…", &colors)))
+                        .when(self.imports > 0, |row| {
+                            row.child(ui::hint("Preparing…", &colors))
+                        })
+                        .child(send),
+                )
+        };
         div()
             .flex()
             .flex_col()

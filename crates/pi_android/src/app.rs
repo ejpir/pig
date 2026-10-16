@@ -336,6 +336,8 @@ pub struct PhoneApp {
     pub(crate) subagent_composers: HashMap<(SessionId, String), Entity<Composer>>,
     /// Questions put off with Later: the composer shows instead of the card.
     pub(crate) questions_later: HashSet<SessionId>,
+    /// Home shows what you've seen while something needs you.
+    pub(crate) seen_open: bool,
     /// Report cards showing every changed file, not just the first few.
     pub(crate) all_files: HashSet<SessionId>,
     /// Hand-off cards, by session, turn and hand-off: folded to their header,
@@ -348,8 +350,6 @@ pub struct PhoneApp {
     pub(crate) swarm_views: HashMap<(SessionId, CrewPick), crate::screens::swarm::SwarmScreenState>,
     /// A sheet transition gives focus back to the app once, before its fields can focus.
     sheet_focus_pending: bool,
-    /// The answer picked in the question sheet; sent only with Answer.
-    pub(crate) choice: Option<Answer>,
     /// Open disclosures in the details sheet.
     pub(crate) expanded: HashSet<&'static str>,
     pub(crate) notice: Option<SharedString>,
@@ -371,6 +371,8 @@ pub struct PhoneApp {
     pub(crate) key_refused: bool,
     /// The connect screen shows manual SSH key setup instead of QR pairing.
     pub(crate) manual_setup: bool,
+    /// First run chose "On your computer": the pairing steps, then the QR.
+    pub(crate) pairing: bool,
     /// Set while the app gets back to the saved computer; the connect screen
     /// then shows that instead of first-run setup.
     pub(crate) resuming: Option<Resume>,
@@ -646,6 +648,7 @@ impl PhoneApp {
             subagent_projected_revisions: HashMap::new(),
             subagent_composers: HashMap::new(),
             questions_later: HashSet::new(),
+            seen_open: false,
             all_files: HashSet::new(),
             folded_handoffs: HashSet::new(),
             all_subagents: HashSet::new(),
@@ -654,7 +657,6 @@ impl PhoneApp {
             swarm_peer_bindings: HashMap::new(),
             swarm_views: HashMap::new(),
             sheet_focus_pending: false,
-            choice: None,
             expanded: HashSet::new(),
             notice: None,
             notice_generation: 0,
@@ -669,6 +671,7 @@ impl PhoneApp {
             phone_key,
             key_refused: false,
             manual_setup: false,
+            pairing: false,
             resuming: None,
             _retry: None,
             data_dir,
@@ -997,8 +1000,42 @@ impl PhoneApp {
             activity::cancel_notification(alerts::finished_id(id));
             // A question waiting in the session takes the composer's place.
             self.questions_later.remove(&id);
+            self.note_seen(id, cx);
         }
         cx.notify();
+    }
+
+    /// You have looked at a session as it is now: what ended there leaves
+    /// Home's Needs you.
+    pub(crate) fn note_seen(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        let Some(store) = &mut self.store else {
+            return;
+        };
+        if store.mark_seen(id) && !store.is_sample() && !store.is_local() {
+            self.save_seen(cx);
+        }
+    }
+
+    /// Keeps what you have seen on this computer for the next time the app opens.
+    fn save_seen(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = &mut self.store else {
+            return;
+        };
+        let mut seen = crate::prefs::Seen {
+            since: store.seen_since,
+            sessions: store
+                .seen
+                .iter()
+                .map(|(key, at)| (key.clone(), *at))
+                .collect(),
+        };
+        seen.trim();
+        store.seen_since = seen.since;
+        store.seen.retain(|key, _| seen.sessions.contains_key(key));
+        let address = store.computer.address.clone();
+        self.update_prefs(cx, |prefs| {
+            prefs.seen.insert(address, seen);
+        });
     }
 
     pub(crate) fn open_sheet(&mut self, sheet: Sheet, cx: &mut Context<Self>) {
@@ -1218,6 +1255,12 @@ impl PhoneApp {
             cx.notify();
             return true;
         }
+        // From the pairing steps back to where Pi should work.
+        if self.route() == Route::Connect && self.pairing && self.resuming.is_none() {
+            self.pairing = false;
+            cx.notify();
+            return true;
+        }
         if self.routes.len() > 1 {
             let left = self.routes.pop();
             if left == Some(Route::ScheduleConfirm) {
@@ -1325,6 +1368,8 @@ impl PhoneApp {
             self.parked_local = Some(previous);
         }
         self.reconnecting = false;
+        // Connected: the next first-run screen starts from where Pi should work.
+        self.pairing = false;
         self.reset_inline_pages();
         self.reset_swarm_views();
         self.schedules.invalidate();
@@ -1553,6 +1598,8 @@ impl PhoneApp {
         self.connect_error = None;
         self.key_refused = false;
         self.manual_setup = false;
+        // To pair another computer, straight to its steps.
+        self.pairing = true;
         cx.notify();
     }
 
@@ -1601,6 +1648,8 @@ impl PhoneApp {
         let generation = self.begin_connection_attempt();
         self.key_refused = false;
         self.connect_error = None;
+        // A code from the system camera too: its progress is on the pairing step.
+        self.pairing = true;
         self.pairing_status = Some(format!("Confirm {code} on the computer").into());
         window.dismiss_virtual_keyboard();
         window.focus(&self.focus, cx);
@@ -1664,6 +1713,14 @@ impl PhoneApp {
         let mut computer = Computer::from_address(&address.to_string());
         computer.pi_version = helper_release;
         let mut store = Store::live(computer, live);
+        let first_look = match prefs.seen.get(&store.computer.address) {
+            Some(seen) => {
+                store.seen = seen.sessions.clone().into_iter().collect();
+                store.seen_since = seen.since;
+                false
+            }
+            None => true,
+        };
         store.apply(vec![(None, Update::Listed(Ok(listed)))]);
         let project = prefs
             .projects
@@ -1687,6 +1744,10 @@ impl PhoneApp {
             self.start.update(cx, |start, cx| start.clear(cx));
         }
         self.install_store(store);
+        // Sessions that end while the phone is away are new to you then.
+        if first_look {
+            self.save_seen(cx);
+        }
         self.project = project;
         self.routes = vec![Route::Sessions, Route::Projects];
         self.threads.clear();
@@ -2334,7 +2395,6 @@ impl PhoneApp {
                 if self.viewing(id) {
                     // The question card takes the composer's place.
                     self.questions_later.remove(&id);
-                    self.choice = None;
                 } else if prefs.notify_questions
                     && let Some(notification) = store
                         .session(id)
@@ -2350,8 +2410,10 @@ impl PhoneApp {
             }
             Event::Finished(id) => {
                 activity::cancel_notification(alerts::question_id(id));
-                if !self.viewing(id)
-                    && prefs.notify_finished
+                if self.viewing(id) {
+                    // You watched it end.
+                    self.note_seen(id, cx);
+                } else if prefs.notify_finished
                     && let Some(session) = store.session(id)
                 {
                     activity::notify(&alerts::finished(session, &computer, accent));
@@ -2381,14 +2443,25 @@ impl PhoneApp {
     fn update_working_notification(&mut self, cx: &mut Context<Self>) {
         let wanted = self.prefs(cx).notify_working && !self.visible;
         let accent = theme(cx).accent_rgb();
+        // The run that moved last leads, as on Home.
         let notification = self
             .store
             .as_ref()
             .filter(|store| wanted && !store.is_local())
-            .and_then(|store| alerts::working(store.running(), &store.computer.name, accent));
+            .and_then(|store| {
+                alerts::working(
+                    store.inbox().working.into_iter(),
+                    &store.computer.name,
+                    accent,
+                )
+            });
         match notification {
             Some(notification) => {
-                let text = format!("{}\n{}", notification.title, notification.text);
+                // Its bar moves in whole steps; post again when it does.
+                let text = format!(
+                    "{}\n{}\n{:?}",
+                    notification.title, notification.text, notification.progress
+                );
                 if self.working_posted.as_ref() != Some(&text) {
                     activity::notify(&notification);
                     self.working_posted = Some(text);
@@ -2701,8 +2774,11 @@ impl PhoneApp {
             log::warn!("Ignoring the link {url}");
             return;
         };
-        let (Link::Session(id) | Link::Question(id) | Link::AllowOnce(id) | Link::Review(id)) =
-            link;
+        let (Link::Session(id)
+        | Link::Question(id)
+        | Link::AllowOnce(id)
+        | Link::Decline(id)
+        | Link::Review(id)) = link;
         let Some(store) = &mut self.store else {
             return;
         };
@@ -2712,12 +2788,33 @@ impl PhoneApp {
         };
         let waiting = session.state == State::NeedsYou;
         match link {
-            Link::AllowOnce(_) if waiting => {
-                store.answer(id, Answer::AllowOnce);
+            Link::AllowOnce(_) | Link::Decline(_) if waiting => {
+                let answer = if matches!(link, Link::Decline(_)) {
+                    Answer::Deny
+                } else {
+                    Answer::AllowOnce
+                };
+                let label = session
+                    .question
+                    .as_ref()
+                    .and_then(|question| {
+                        question
+                            .choices
+                            .iter()
+                            .find(|choice| choice.answer == answer)
+                    })
+                    .map(|choice| choice.label.clone());
+                store.answer(id, answer);
                 activity::cancel_notification(alerts::question_id(id));
                 self.show_session(id, window, cx);
                 self.close_sheet(cx);
-                self.notify_user("Allowed once", cx);
+                self.notify_user(
+                    match label {
+                        Some(label) => format!("Answered “{label}”"),
+                        None => "Answered".into(),
+                    },
+                    cx,
+                );
             }
             Link::Review(_) => {
                 self.show_session(id, window, cx);
@@ -2729,17 +2826,21 @@ impl PhoneApp {
 
     // Acting on sessions
 
-    pub(crate) fn answer(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(choice) = self.choice.take() else {
-            return;
-        };
+    /// Answers Pi's question with the choice tapped: the choices are the buttons.
+    pub(crate) fn answer(
+        &mut self,
+        id: SessionId,
+        choice: Answer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(store) = &mut self.store {
             store.answer(id, choice);
         }
         activity::cancel_notification(alerts::question_id(id));
         self.close_sheet(cx);
-        // "Tell Pi why in the next message."
-        if choice == Answer::Deny {
+        // "Tell Pi why in the next message", where the session is on screen.
+        if choice == Answer::Deny && self.route() == Route::Thread(id) {
             self.sheet_focus_pending = false;
             let composer = self.thread_composer(id, window, cx);
             let area = composer.read(cx).area.clone();
@@ -3286,6 +3387,7 @@ impl PhoneApp {
         let composer = cx.new(|cx| {
             let mut composer = Composer::new("Ask a follow-up…", cx);
             composer.set_session_commands(compact);
+            composer.set_compact_when_idle();
             composer.set_workspace(true);
             if !workspace {
                 composer.use_files(Some(Vec::new()));

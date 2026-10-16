@@ -110,12 +110,11 @@ def story(demo, icon):
     demo.back()
     time.sleep(0.5)
 
-    # Pi asks before running the tests; allow it and watch them pass.
+    # Pi asks before running the tests: Home's row opens the question, and
+    # "Allow once" answers it. Watch them pass.
     demo.press('NamedInteger("answer", 1)')
     time.sleep(1.2)
-    demo.press_at("question-card", 107, 165)  # "Allow once"
-    time.sleep(0.3)
-    demo.press('Name("answer")')
+    demo.press('NamedInteger("choice", 0)')
     time.sleep(1.8)
     demo.link("pi://test/advance/8")
     time.sleep(1.6)

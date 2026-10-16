@@ -68,31 +68,27 @@ impl StageKind {
         self as usize
     }
 
-    /// The stage's name in a key: "Understand".
-    pub fn title(self) -> &'static str {
-        self.name(StageStatus::Planned)
-    }
-
     pub fn glyph(self) -> &'static str {
         match self {
             Self::Understand => "eye",
             Self::Change => "pencil",
-            Self::Verify => "shield",
+            Self::Verify => "term",
             Self::HandOff => "send",
         }
     }
 
+    /// Named as the run line names its stretches: looking, changing, checking.
     pub fn name(self, status: StageStatus) -> &'static str {
         match (self, status) {
-            (Self::Understand, StageStatus::Done) => "Understood",
-            (Self::Understand, StageStatus::Live) => "Understanding",
-            (Self::Understand, _) => "Understand",
+            (Self::Understand, StageStatus::Done) => "Looked",
+            (Self::Understand, StageStatus::Live) => "Looking",
+            (Self::Understand, _) => "Look",
             (Self::Change, StageStatus::Done) => "Changed",
             (Self::Change, StageStatus::Live) => "Changing",
             (Self::Change, _) => "Change",
             (Self::Verify, StageStatus::Done) => "Checked",
-            (Self::Verify, StageStatus::Live) => "Verifying",
-            (Self::Verify, _) => "Verify",
+            (Self::Verify, StageStatus::Live) => "Checking",
+            (Self::Verify, _) => "Check",
             (Self::HandOff, StageStatus::Done) => "Handed off",
             (Self::HandOff, StageStatus::Live) => "Handing off",
             (Self::HandOff, _) => "Hand off",
@@ -108,6 +104,70 @@ impl StageKind {
             Self::HandOff => "Summary and changes",
         }
     }
+}
+
+/// What a stretch of a run went on: the run line's colours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StretchKind {
+    /// Reading, searching and looking around, and Pi's own words between calls.
+    Look,
+    /// Edits and writes.
+    Change,
+    /// Tests, builds, type checks and linters, until their result.
+    Check,
+    /// Waiting for an answer from you.
+    Wait,
+}
+
+impl StretchKind {
+    /// What a stage's calls count as. Pi's closing words are it looking the
+    /// work over, so the hand-off is looking too.
+    pub fn of(stage: StageKind) -> Self {
+        match stage {
+            StageKind::Change => Self::Change,
+            StageKind::Verify => Self::Check,
+            StageKind::Understand | StageKind::HandOff => Self::Look,
+        }
+    }
+
+    /// "Looking", for a key.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Look => "Looking",
+            Self::Change => "Changing",
+            Self::Check => "Checking",
+            Self::Wait => "Waiting for you",
+        }
+    }
+
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Look => "eye",
+            Self::Change => "pencil",
+            Self::Check => "term",
+            Self::Wait => "hand",
+        }
+    }
+}
+
+/// How a stretch ended, drawn where it ended: a check's result, or a
+/// question you answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    Passed,
+    Failed,
+    Answered,
+}
+
+/// A stretch of a run, in the order things happened: what it went on, for how
+/// long, how it ended, and the calls made in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stretch {
+    pub kind: StretchKind,
+    pub time: Duration,
+    pub mark: Option<Mark>,
+    /// Its calls, as `Flow::Tool` names them.
+    pub calls: Vec<(StageKind, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -369,8 +429,8 @@ pub struct Turn {
     /// What Pi said and showed, in order: words between tools, then a
     /// picture it looked at, more words, a page, the closing words.
     pub flow: Vec<Flow>,
-    /// Working time spent in each stage, in `StageKind::ALL` order: the run line's stretches.
-    pub times: [Duration; 4],
+    /// The run line: what the time went on, in the order it happened.
+    pub run: Vec<Stretch>,
 }
 
 impl Turn {
@@ -389,17 +449,79 @@ impl Turn {
             visual_identity: None,
             durable_entry_id: None,
             flow: Vec::new(),
-            times: [Duration::ZERO; 4],
+            run: Vec::new(),
         }
     }
 
-    /// The working time spent in a stage.
+    /// The time spent on what a stage's calls do, over the whole turn. The
+    /// hand-off's closing words count as looking.
     pub fn time(&self, kind: StageKind) -> Duration {
-        self.times[kind.index()]
+        if kind == StageKind::HandOff {
+            return Duration::ZERO;
+        }
+        self.spent(StretchKind::of(kind))
     }
 
-    pub fn add_time(&mut self, kind: StageKind, time: Duration) {
-        self.times[kind.index()] += time;
+    /// The time one kind of stretch took, in all.
+    pub fn spent(&self, kind: StretchKind) -> Duration {
+        self.run
+            .iter()
+            .filter(|stretch| stretch.kind == kind)
+            .map(|stretch| stretch.time)
+            .sum()
+    }
+
+    /// The whole run line's time, waits included.
+    pub fn run_time(&self) -> Duration {
+        self.run.iter().map(|stretch| stretch.time).sum()
+    }
+
+    /// Time on what Pi is doing now: the stretch under way grows, or the next
+    /// one starts. A stretch that has ended, such as a check with its result,
+    /// takes no more time.
+    pub fn add_time(&mut self, kind: StretchKind, time: Duration) {
+        self.stretch(kind).time += time;
+    }
+
+    /// Notes a call in the stretch under way of its kind, starting one if needed.
+    pub fn add_call(&mut self, kind: StretchKind, call: (StageKind, usize)) {
+        let stretch = self.stretch(kind);
+        if !stretch.calls.contains(&call) {
+            stretch.calls.push(call);
+        }
+    }
+
+    /// Ends the stretch under way, if it is of this kind, with how it ended.
+    pub fn end_stretch(&mut self, kind: StretchKind, mark: Mark) {
+        if let Some(last) = self.run.last_mut()
+            && last.kind == kind
+            && last.mark.is_none()
+        {
+            last.mark = Some(mark);
+        }
+    }
+
+    fn stretch(&mut self, kind: StretchKind) -> &mut Stretch {
+        let open = self
+            .run
+            .last()
+            .is_some_and(|last| last.kind == kind && last.mark.is_none());
+        // A stretch with no time, call or result yet says nothing: what came
+        // next takes its place instead of leaving a sliver on the line.
+        let empty = self.run.last().is_some_and(|last| {
+            last.time.is_zero() && last.mark.is_none() && last.calls.is_empty()
+        });
+        if !open && empty {
+            self.run.last_mut().expect("a stretch").kind = kind;
+        } else if !open {
+            self.run.push(Stretch {
+                kind,
+                time: Duration::ZERO,
+                mark: None,
+                calls: Vec::new(),
+            });
+        }
+        self.run.last_mut().expect("a stretch")
     }
 
     /// The stage Pi is in now, if the turn is running.
@@ -570,9 +692,13 @@ pub fn subagent_details_summary(turns: &[Turn]) -> Option<String> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Answer {
+    /// Yes to a `confirm`.
     AllowOnce,
     AllowSession,
+    /// No to a `confirm`.
     Deny,
+    /// One of a `select`'s options, by its place in the list.
+    Pick(usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -626,6 +752,9 @@ pub struct Session {
     pub elapsed: Duration,
     /// When it finished, as local time.
     pub finished_at: Option<String>,
+    /// Seconds since 1970 when it last started or ended; 0 if unknown. Home
+    /// compares it with when you last looked.
+    pub updated: u64,
     pub turns: Vec<Turn>,
     pub files: Vec<FileChange>,
     pub check: Option<Check>,
@@ -768,8 +897,46 @@ mod tests {
     #[test]
     fn stages_are_named_by_their_status() {
         assert_eq!(StageKind::Change.name(StageStatus::Live), "Changing");
-        assert_eq!(StageKind::Understand.name(StageStatus::Done), "Understood");
+        assert_eq!(StageKind::Understand.name(StageStatus::Done), "Looked");
+        assert_eq!(StageKind::Verify.name(StageStatus::Live), "Checking");
         assert_eq!(StageKind::HandOff.name(StageStatus::Planned), "Hand off");
+    }
+
+    #[test]
+    fn a_run_keeps_its_order_and_each_checks_result() {
+        let seconds = Duration::from_secs;
+        let mut turn = Turn::new("", "");
+        turn.add_time(StretchKind::Look, seconds(40));
+        turn.add_time(StretchKind::Change, seconds(50));
+        turn.add_time(StretchKind::Change, seconds(20));
+        turn.add_time(StretchKind::Check, seconds(14));
+        turn.end_stretch(StretchKind::Check, Mark::Failed);
+        turn.add_time(StretchKind::Change, seconds(25));
+        turn.add_time(StretchKind::Check, seconds(92));
+        turn.end_stretch(StretchKind::Check, Mark::Passed);
+        // A second check after a result starts a stretch of its own.
+        turn.add_time(StretchKind::Check, seconds(5));
+        turn.end_stretch(StretchKind::Look, Mark::Passed);
+        let run: Vec<_> = turn
+            .run
+            .iter()
+            .map(|stretch| (stretch.kind, stretch.time.as_secs(), stretch.mark))
+            .collect();
+        assert_eq!(
+            run,
+            [
+                (StretchKind::Look, 40, None),
+                (StretchKind::Change, 70, None),
+                (StretchKind::Check, 14, Some(Mark::Failed)),
+                (StretchKind::Change, 25, None),
+                (StretchKind::Check, 92, Some(Mark::Passed)),
+                (StretchKind::Check, 5, None),
+            ]
+        );
+        assert_eq!(turn.spent(StretchKind::Check), seconds(111));
+        assert_eq!(turn.time(StageKind::Change), seconds(95));
+        assert_eq!(turn.time(StageKind::HandOff), Duration::ZERO);
+        assert_eq!(turn.run_time(), seconds(246));
     }
 
     #[test]

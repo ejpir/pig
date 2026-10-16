@@ -7,8 +7,8 @@
 use crate::{
     app::{PhoneApp, Route, Sheet},
     model::{
-        CheckResult, Flow, Reference, Session, SessionId, Stage, StageKind, StageStatus, State,
-        Turn, duration_label,
+        Answer, CheckResult, Flow, Reference, Session, SessionId, Stage, StageKind, StageStatus,
+        State, Stretch, StretchKind, Turn, duration_label,
     },
     theme::{MONO, Theme, theme},
     ui::{self, Button, icon},
@@ -221,22 +221,15 @@ fn tool_layout_changed(
 }
 
 /// Time text itself paints within a fixed line. Geometry changes only when
-/// real timings add that line, or when a page turn's two-column key gains or
-/// loses rows because some stages have no reported duration.
-fn timing_layout_signature(turn: &Turn) -> (bool, usize) {
-    let (times, show_times) = run_times(turn);
-    let key_rows = if turn.pages.is_empty() {
-        0
-    } else {
-        turn.stages
-            .iter()
-            .filter(|stage| {
-                stage.status == StageStatus::Done && !times[stage.kind.index()].is_zero()
-            })
-            .count()
-            .div_ceil(2)
-    };
-    (show_times, key_rows)
+/// the line appears, or when its key gains a kind or its times, which can
+/// wrap it onto a second row.
+fn timing_layout_signature(turn: &Turn) -> (bool, u8, bool) {
+    let run = shown_run(turn);
+    let kinds = run
+        .iter()
+        .fold(0u8, |kinds, stretch| kinds | 1 << stretch.kind as u8);
+    let timed = run.iter().any(|stretch| !stretch.time.is_zero());
+    (!run.is_empty(), kinds, timed)
 }
 
 fn failed_prompt_layouts(failed: &[crate::live::FailedPrompt]) -> Vec<(String, String)> {
@@ -455,10 +448,55 @@ impl PhoneApp {
         let back = ui::tap("back", "back", colors).on_click(cx.listener(|this, _, window, cx| {
             this.back(window, cx);
         }));
-        ui::appbar(back, title, Some(subtitle.into()), colors)
-            .child(ui::tap("details", "info", colors).on_click(
-                cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::Details(id), cx)),
-            ))
+        // The title opens Details, as Home's title opens Computers.
+        let title = div()
+            .id("details")
+            .debug_selector(|| "thread-title".into())
+            .relative()
+            .child(crate::testing::probe("details"))
+            .flex_1()
+            .min_w_0()
+            .min_h(px(48.))
+            .px(px(4.))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .rounded(px(12.))
+            .active(|style| style.bg(colors.selected))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(18.))
+                            .line_height(px(24.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(icon("chev_d", 16., colors.muted)),
+            )
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .line_height(px(16.))
+                    .text_color(colors.muted)
+                    .truncate()
+                    .child(subtitle),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::Details(id), cx)));
+        div()
+            .h(px(56.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .px(px(4.))
+            .child(back)
+            .child(title)
             .child(
                 ui::tap("more", "dots", colors).on_click(
                     cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
@@ -1305,8 +1343,8 @@ impl PhoneApp {
         )
     }
 
-    /// A finished run as one line, with each stretch's time under it, or a key
-    /// that says what each did when nothing else does (a page). Tapping it
+    /// A finished run as one line, in the order things happened, with each
+    /// check's result on it and a key of what the time went on. Tapping it
     /// opens the stations.
     pub(crate) fn turn_activity(
         &self,
@@ -1325,20 +1363,11 @@ impl PhoneApp {
             .get(&(id, index))
             .copied()
             .unwrap_or(live);
-        let (times, timed) = run_times(turn);
-        let summary = if turn.pages.is_empty() {
-            ui::run_line(&times, timed, colors)
-        } else {
-            let entries = turn
-                .stages
-                .iter()
-                .filter(|stage| {
-                    stage.status == StageStatus::Done && !times[stage.kind.index()].is_zero()
-                })
-                .map(|stage| (stage.kind, key_label(stage)))
-                .collect();
-            ui::run_line(&times, false, colors).child(ui::run_key(entries, &times, colors))
-        };
+        let run = shown_run(turn);
+        let summary = div()
+            .debug_selector(|| "turn-run-line".into())
+            .child(ui::run_line(&run, live, 14., colors))
+            .child(ui::run_key(&run, colors));
         div()
             .min_w_0()
             .child(
@@ -1605,7 +1634,9 @@ impl PhoneApp {
     }
 
     /// Pi's question in the composer's place, so the run so far stays
-    /// readable. Only Answer answers.
+    /// readable. Each choice is a button that answers: a yes-or-no question's
+    /// No and Yes side by side, any other question's options one under
+    /// another, all of them. Later leaves it waiting.
     fn question_card(
         &self,
         session: &Session,
@@ -1617,55 +1648,82 @@ impl PhoneApp {
         let Some(question) = session.question.as_ref() else {
             return div().into_any_element();
         };
-        let choices = question.choices.iter().enumerate().map(|(index, choice)| {
-            let on = self.choice == Some(choice.answer);
-            let answer = choice.answer;
+        let yes_no = is_yes_no(question);
+        let answer = |choice: Answer| {
+            cx.listener(move |this, _, window, cx| this.answer(id, choice, window, cx))
+        };
+        let answers = if yes_no {
+            let find = |wanted: Answer| {
+                question
+                    .choices
+                    .iter()
+                    .find(|choice| choice.answer == wanted)
+            };
             div()
-                .id(("choice", index))
-                .min_h(px(48.))
-                .px(px(12.))
-                .py(px(6.))
+                .mt(px(14.))
                 .flex()
-                .items_center()
-                .gap(px(12.))
-                .rounded(px(12.))
-                .when(on, |row| row.bg(colors.selected))
-                .active(|style| style.bg(colors.selected))
-                .child(
+                .gap(px(8.))
+                .children(find(Answer::Deny).map(|choice| {
+                    ui::button(
+                        "answer-no",
+                        Button::Plain,
+                        None,
+                        choice.label.clone(),
+                        false,
+                        colors,
+                    )
+                    .debug_selector(|| "answer-no".into())
+                    .flex_1()
+                    .on_click(answer(Answer::Deny))
+                }))
+                .children(find(Answer::AllowOnce).map(|choice| {
+                    ui::button(
+                        "answer-yes",
+                        Button::Primary,
+                        None,
+                        choice.label.clone(),
+                        false,
+                        colors,
+                    )
+                    .debug_selector(|| "answer-yes".into())
+                    .flex_1()
+                    .on_click(answer(Answer::AllowOnce))
+                }))
+        } else {
+            div().mt(px(14.)).flex().flex_col().gap(px(8.)).children(
+                question.choices.iter().enumerate().map(|(index, choice)| {
                     div()
-                        .size(px(20.))
-                        .flex_none()
-                        .rounded(px(10.))
-                        .border(px(if on { 6. } else { 2. }))
-                        .border_color(if on {
-                            colors.accent
-                        } else {
-                            colors.line_strong
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(choice.label.clone())
+                        .id(("choice", index))
+                        .debug_selector(move || format!("choice-{index}"))
+                        .relative()
+                        .child(crate::testing::probe(format!("choice-{index}")))
+                        .min_h(px(48.))
+                        .px(px(16.))
+                        .py(px(8.))
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .rounded(px(24.))
+                        .bg(colors.composer)
+                        .border_1()
+                        .border_color(colors.line_strong)
+                        .active(|style| style.bg(colors.selected))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .line_height(px(20.))
+                                .child(choice.label.clone()),
+                        )
                         .children(choice.detail.clone().map(|detail| {
                             div()
                                 .text_size(px(12.5))
                                 .line_height(px(16.))
                                 .text_color(colors.muted)
                                 .child(detail)
-                        })),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.choice = Some(answer);
-                    cx.notify();
-                }))
-        });
-        let answer = ui::button("answer", Button::Primary, None, "Answer", false, colors).flex_1();
-        let answer = if self.choice.is_some() {
-            answer.on_click(cx.listener(move |this, _, window, cx| this.answer(id, window, cx)))
-        } else {
-            ui::disabled(answer, colors)
+                        }))
+                        .on_click(answer(choice.answer))
+                }),
+            )
         };
         div()
             .id("question-card")
@@ -1675,7 +1733,7 @@ impl PhoneApp {
             .occlude()
             .pt(px(16.))
             .px(px(16.))
-            .pb(px(12.))
+            .pb(px(8.))
             .rounded(px(24.))
             .bg(colors.composer)
             .border_1()
@@ -1721,6 +1779,16 @@ impl PhoneApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(question.title.clone()),
             )
+            .when(!question.body.is_empty(), |card| {
+                card.child(
+                    div()
+                        .mt(px(4.))
+                        .text_size(px(14.))
+                        .line_height(px(20.))
+                        .text_color(colors.secondary)
+                        .child(question.body.clone()),
+                )
+            })
             .when(!question.command.is_empty(), |card| {
                 card.child(
                     div()
@@ -1738,55 +1806,61 @@ impl PhoneApp {
                         .child(question.command.clone()),
                 )
             })
+            .child(answers)
             .child(
                 div()
-                    .mt(px(12.))
-                    .mx(px(-4.))
+                    .mt(px(4.))
                     .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .children(choices),
-            )
-            .child(
-                div()
-                    .mt(px(12.))
-                    .flex()
-                    .gap(px(8.))
+                    .items_center()
                     .child(
                         ui::button("later", Button::Quiet, None, "Later", false, colors)
-                            .px(px(20.))
+                            .px(px(12.))
+                            .ml(px(-4.))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.questions_later.insert(id);
                                 cx.notify();
                             })),
                     )
-                    .child(answer),
+                    .child(div().flex_1())
+                    .when(!yes_no, |row| {
+                        row.child(ui::hint("Tap one to answer", colors).pr(px(4.)))
+                    }),
             )
             .into_any_element()
     }
 }
 
-/// Each stage's time, or equal stretches for the stages done when the
-/// computer gave no times.
-fn run_times(turn: &Turn) -> ([Duration; 4], bool) {
-    if turn.times.iter().any(|time| !time.is_zero()) {
-        return (turn.times, true);
-    }
-    let mut times = [Duration::ZERO; 4];
-    for stage in &turn.stages {
-        if stage.status == StageStatus::Done {
-            times[stage.kind.index()] = Duration::from_secs(1);
-        }
-    }
-    (times, false)
+/// A yes-or-no question: an extension's `confirm`, answered with Yes or No.
+pub(crate) fn is_yes_no(question: &crate::model::Question) -> bool {
+    question.choices.len() == 2
+        && question
+            .choices
+            .iter()
+            .any(|choice| choice.answer == Answer::AllowOnce)
+        && question
+            .choices
+            .iter()
+            .any(|choice| choice.answer == Answer::Deny)
 }
 
-/// What a stage did, for a key under a finished line: "Wrote aurora.html".
-fn key_label(stage: &Stage) -> SharedString {
-    match stage.kind {
-        StageKind::HandOff => stage.kind.name(StageStatus::Done).into(),
-        _ => stage.what.clone().into(),
+/// The run line as drawn: the run, or an untimed stretch for each stage Pi
+/// got through when the computer reported no times.
+pub(crate) fn shown_run(turn: &Turn) -> std::borrow::Cow<'_, [Stretch]> {
+    if !turn.run.is_empty() {
+        return std::borrow::Cow::Borrowed(&turn.run);
     }
+    std::borrow::Cow::Owned(
+        turn.stages
+            .iter()
+            .filter(|stage| stage.status == StageStatus::Done && stage.kind != StageKind::HandOff)
+            .map(|stage| Stretch {
+                kind: StretchKind::of(stage.kind),
+                time: Duration::ZERO,
+                mark: None,
+                calls: Vec::new(),
+            })
+            .collect(),
+    )
 }
 
 /// A 28 dp chip for a file or a search.
@@ -2268,6 +2342,8 @@ fn working_strip(
     // Keep the status and timing in one shrinkable column. A one-row layout
     // made the stage, segments and hour-long timer compete with the fixed-size
     // actions, pushing Stop past the composer's border on phone-sized screens.
+    // The folded run line beside the timer carries the stage's colour; the
+    // label stays in the text colour, so a grey check still reads.
     let (label, hue) = match (!show_stage, &stage) {
         (false, Some((_, kind))) => (
             if session.activity.is_empty() {
@@ -2275,7 +2351,7 @@ fn working_strip(
             } else {
                 status
             },
-            ui::stage_hue(*kind, colors),
+            colors.text,
         ),
         _ => (status, if waiting { colors.wait } else { colors.read }),
     };
@@ -2443,18 +2519,6 @@ mod tests {
                 active_subagents: 0,
             }
         });
-        let live_selectors = [
-            "composer-live-stage-0",
-            "composer-live-stage-1",
-            "composer-live-stage-2",
-            "composer-live-stage-3",
-        ];
-        let selectors = [
-            "composer-working-segment-0",
-            "composer-working-segment-1",
-            "composer-working-segment-2",
-            "composer-working-segment-3",
-        ];
         for width in [320., 360., 393.] {
             cx.simulate_resize(gpui::size(px(width), px(200.)));
             for local in [false, true] {
@@ -2553,30 +2617,26 @@ mod tests {
                         assert_eq!(rail.is_some(), has_rail, "{context}");
                         if let Some(rail) = rail {
                             assert_eq!(rail.size.width, px(56.), "{context}");
-                            let mut previous_right = None;
-                            for (index, selector) in selectors.iter().enumerate() {
-                                let block = cx
-                                    .debug_bounds(if index == live.index() {
-                                        live_selectors[index]
-                                    } else {
-                                        selector
-                                    })
-                                    .unwrap();
+                            // The run so far, in order: its first stretch starts
+                            // where the label does, its last ends with the rail.
+                            let count = view.read_with(cx, |view, _| {
+                                view.session.turns.last().unwrap().run.len()
+                            });
+                            let first = cx.debug_bounds("composer-stretch-0").unwrap();
+                            let last_name: &'static str = Box::leak(
+                                format!("composer-stretch-{}", count - 1).into_boxed_str(),
+                            );
+                            let last = cx.debug_bounds(last_name).unwrap();
+                            for block in [first, last] {
                                 assert_eq!(block.size.height, px(4.), "{context}");
                                 assert!(block.size.width > px(0.), "{context}");
-                                if let Some(right) = previous_right {
-                                    assert_eq!(block.left() - right, px(3.), "{context}");
-                                } else {
-                                    // Bounds are the solid block, NOT the 2 dp
-                                    // painted halo. This catches aligning text
-                                    // to a selected-stage decoration instead.
-                                    assert_eq!(label.left(), block.left(), "{context}");
-                                    assert_eq!(block.left() - px(2.), content.left(), "{context}");
-                                }
                                 assert!(block.top() >= label.bottom(), "{context}");
-                                previous_right = Some(block.right());
                             }
-                            assert_eq!(previous_right.unwrap(), rail.right(), "{context}");
+                            // Bounds are the solid block, NOT the 2 dp painted
+                            // halo. This catches aligning text to a decoration.
+                            assert_eq!(label.left(), first.left(), "{context}");
+                            assert_eq!(first.left() - px(2.), content.left(), "{context}");
+                            assert!(last.right() <= rail.right(), "{context}");
                             assert_eq!(elapsed.left(), rail.right() + px(8.), "{context}");
                         }
                     }
@@ -2666,7 +2726,7 @@ mod tests {
                 (
                     json!({"type":"tool_execution_start","toolCallId":"js","toolName":"javascript","args":{"file":"inspect.cjs"}}),
                     "composer-label-Running inspect.cjs",
-                    Some(2),
+                    Some(0),
                 ),
                 (
                     json!({"type":"tool_execution_end","toolCallId":"js","result":{"content":[]}}),
@@ -2721,10 +2781,10 @@ mod tests {
                     "local={local}, event={record}, label={label}"
                 );
                 for (index, selector) in [
-                    "composer-live-stage-0",
-                    "composer-live-stage-1",
-                    "composer-live-stage-2",
-                    "composer-live-stage-3",
+                    "composer-stretch-live-0",
+                    "composer-stretch-live-1",
+                    "composer-stretch-live-2",
+                    "composer-stretch-live-3",
                 ]
                 .into_iter()
                 .enumerate()
@@ -3478,10 +3538,11 @@ mod tests {
     #[test]
     fn retained_thread_layout_skips_time_only_remeasurement() {
         let mut before = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
-        before.turns[0].times[0] = Duration::from_secs(1);
+        before.turns[0].run.clear();
+        before.turns[0].add_time(StretchKind::Look, Duration::from_secs(1));
         let mut after = before.clone();
         after.elapsed = Duration::from_secs(10);
-        after.turns[0].times[0] = Duration::from_secs(10);
+        after.turns[0].add_time(StretchKind::Look, Duration::from_secs(9));
 
         let changes = thread_layout_changes(&before, &after);
         assert!(changes.turns.is_empty());
@@ -3518,9 +3579,11 @@ mod tests {
 
     #[test]
     fn first_real_timing_line_remeasures_the_finished_turn() {
-        let before = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+        let mut before = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+        before.turns[0].run.clear();
+        before.turns[0].add_time(StretchKind::Look, Duration::ZERO);
         let mut after = before.clone();
-        after.turns[0].times[0] = Duration::from_secs(1);
+        after.turns[0].add_time(StretchKind::Look, Duration::from_secs(1));
 
         assert_eq!(thread_layout_changes(&before, &after).turns, [0]);
     }

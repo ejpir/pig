@@ -201,6 +201,9 @@ impl PhoneApp {
                 )
                 .into_any_element();
         }
+        if !self.pairing {
+            return self.doors_screen(cx);
+        }
         let scan = {
             let button = ui::button(
                 "scan-computer",
@@ -311,41 +314,40 @@ impl PhoneApp {
                         .child("Check both screens show the same six digits"),
                 ),
             );
+        // Pairing: the steps, then the scanner, in the thumb's reach.
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-
+            .child(ui::appbar(
+                ui::tap("pair-back", "back", &colors).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.back(window, cx);
+                    },
+                )),
+                "Pair with your computer",
+                None,
+                &colors,
+            ))
             .child(
                 scroll_area("connect", &scroll).child(
                     div()
                         .px(px(20.))
-                        .pt(px(64.))
+                        .pt(px(8.))
                         .pb(px(12.))
                         .flex()
                         .flex_col()
                         .child(
-                            ui::tile_box(48., 14., colors.accent, &colors).id("computers")
-                                .child(icon("pi", 24., colors.accent))
-                                .on_click(cx.listener(|this,_,_,cx|this.open_sheet(crate::app::Sheet::Computers,cx))),
-                        )
-                        .child(
-                            ui::serif("Where does Pi run?", 31.)
-                                .mt(px(24.))
-                                .line_height(px(36.)),
-                        )
-                        .child(
                             div()
-                                .mt(px(12.))
                                 .text_size(px(15.))
                                 .line_height(px(22.))
                                 .text_color(colors.secondary)
-                                .child(if cfg!(feature="local-backend") {"Choose Local from the Pi logo to run on this phone, or connect a computer below."} else {"On your computer. This phone follows its sessions, answers its questions and reviews what it changed."}),
+                                .child("Pi works there and keeps going while your phone is away. This phone follows its sessions."),
                         )
                         .child(
                             div()
-                                .mt(px(32.))
+                                .mt(px(24.))
                                 .text_size(px(12.5))
                                 .line_height(px(16.))
                                 .font_weight(FontWeight::SEMIBOLD)
@@ -364,12 +366,6 @@ impl PhoneApp {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .map(|panel| {
-                        #[cfg(feature = "local-backend")]
-                        let panel = panel.child(ui::button("open-local-providers", Button::Plain, None, "Local providers · Claude + Codex", false, &colors)
-                            .on_click(cx.listener(|this, _, window, cx| { this.provider_accounts_url("pi://test/local-providers", window, cx); })));
-                        panel
-                    })
                     .child(note)
                     .child(scan)
                     .child(
@@ -393,6 +389,166 @@ impl PhoneApp {
 }
 
 impl PhoneApp {
+    /// 01 First run: where Pi should work, as two doors that say what each
+    /// means, and the sample sessions in plain sight.
+    fn doors_screen(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = theme(cx);
+        let scroll = self.scroll(Route::Connect);
+        let door = |id: &'static str,
+                    glyph: &'static str,
+                    title: &'static str,
+                    badge: &'static str,
+                    detail: &'static str| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .relative()
+                .child(crate::testing::probe(id))
+                .p(px(16.))
+                .flex()
+                .items_start()
+                .gap(px(14.))
+                .active(|style| style.bg(colors.selected))
+                .child(
+                    ui::tile_box(40., 12., colors.accent, &colors)
+                        .mt(px(2.))
+                        .child(icon(glyph, 20., colors.accent)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .text_size(px(16.))
+                                        .line_height(px(22.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .h(px(24.))
+                                        .px(px(10.))
+                                        .flex()
+                                        .items_center()
+                                        .rounded_full()
+                                        .bg(colors.selected)
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(colors.secondary)
+                                        .child(badge),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mt(px(4.))
+                                .text_size(px(14.))
+                                .line_height(px(20.))
+                                .text_color(colors.secondary)
+                                .child(detail),
+                        ),
+                )
+                .child(div().mt(px(3.)).child(icon("chev_r", 18., colors.faint)))
+        };
+        let doors = ui::card(&colors).mt(px(32.)).child(
+            door(
+                "door-computer",
+                "computer",
+                "On your computer",
+                "Recommended",
+                "Pi keeps working while your phone is away. Pair once by running a command there and scanning its code.",
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.pairing = true;
+                cx.notify();
+            })),
+        );
+        #[cfg(feature = "local-backend")]
+        let doors = doors.child(
+            door(
+                "door-phone",
+                "phone",
+                "On this phone",
+                "Experimental",
+                "Sign in with Claude or Codex. Tools run in Android's shell, without a sandbox.",
+            )
+            .border_t_1()
+            .border_color(colors.line)
+            .on_click(cx.listener(|this, _, window, cx| this.select_local_backend(window, cx))),
+        );
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                scroll_area("connect", &scroll).child(
+                    div()
+                        .px(px(20.))
+                        .pt(px(64.))
+                        .pb(px(12.))
+                        .flex()
+                        .flex_col()
+                        .child(ui::tile_box(48., 14., colors.accent, &colors).child(icon(
+                            "pi",
+                            24.,
+                            colors.accent,
+                        )))
+                        .child(
+                            ui::serif("Where should Pi work?", 31.)
+                                .mt(px(24.))
+                                .line_height(px(36.)),
+                        )
+                        .child(
+                            div()
+                                .mt(px(12.))
+                                .text_size(px(15.))
+                                .line_height(px(22.))
+                                .text_color(colors.secondary)
+                                .child("Pi does the work. This phone follows it, answers its questions and reviews what it changed."),
+                        )
+                        .child(doors),
+                ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(20.))
+                    .pt(px(12.))
+                    .pb(px(16.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        ui::button(
+                            "sample",
+                            Button::Quiet,
+                            None,
+                            "Look around with sample sessions",
+                            false,
+                            &colors,
+                        )
+                        .w_full()
+                        .on_click(cx.listener(|this, _, window, cx| this.open_sample(window, cx))),
+                    )
+                    .child(
+                        div()
+                            .text_center()
+                            .text_size(px(12.5))
+                            .line_height(px(16.))
+                            .text_color(colors.muted)
+                            .child("No computer or account needed"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// Opening with a saved computer: getting back to it, or why it can't.
     fn resume_screen(&mut self, resume: Resume, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme(cx);

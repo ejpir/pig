@@ -96,6 +96,10 @@ def main():
     def choose_model(provider):
         model = "claude-sonnet-4-6" if provider == "anthropic" else "gpt-5.5"
         before = state()
+        # An idle session composer is one line; typing in it shows the model.
+        if "composer-model" not in before["bounds"]:
+            tap("draft")
+            time.sleep(.65)
         tap("composer-model")
         tap("model-search")
         time.sleep(.65)

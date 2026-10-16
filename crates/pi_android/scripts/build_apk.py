@@ -28,10 +28,12 @@ PI = build_apk.App(
     library="pi_android",
     cargo=["-p", "pi_android", "--lib"],
     output="",
-    # SSH to the computer; questions and finished sessions arrive as notifications.
+    # SSH to the computer; questions and finished sessions arrive as notifications,
+    # and a working run as a Live Update on Android 16.
     permissions=(
         "android.permission.INTERNET",
         "android.permission.POST_NOTIFICATIONS",
+        "android.permission.POST_PROMOTED_NOTIFICATIONS",
         "android.permission.CAMERA",
     ),
     profileable=True,

@@ -6,7 +6,7 @@
 
 use crate::{
     app::{PhoneApp, Sheet},
-    model::{Flow, Session, SessionId, StageKind, StageStatus, ToolActivity, Turn},
+    model::{Flow, Session, SessionId, StageKind, ToolActivity, Turn},
     theme::{MONO, Theme},
     ui::{self, icon},
 };
@@ -101,7 +101,7 @@ fn code_target(name: &str) -> bool {
 }
 
 /// The line of a failed call's output that says what went wrong.
-fn failure(tool: &ToolActivity) -> String {
+pub(crate) fn failure(tool: &ToolActivity) -> String {
     let output = tool.output_for_display();
     let lines: Vec<&str> = output
         .lines()
@@ -377,39 +377,18 @@ fn tail_line(line: String, newest: bool, colors: &Theme) -> Div {
         .child(output_text(&line, colors))
 }
 
-/// The run line folded to four segments, for the working strip: each stage
-/// done in its colour, the live one ringed, those ahead plain.
+/// The run line folded into the working strip: what happened so far, in
+/// order, with each check's result and the stretch under way ringed.
 pub(crate) fn segments(turn: &Turn, colors: &Theme) -> Div {
     div()
         .debug_selector(|| "composer-working-segments".into())
         .w(px(56.))
         .flex_none()
-        .flex()
-        .gap(px(3.))
-        .children(StageKind::ALL.into_iter().map(|kind| {
-            let hue = ui::stage_hue(kind, colors);
-            let status = turn
-                .stages
-                .iter()
-                .find(|stage| stage.kind == kind)
-                .map_or(StageStatus::Planned, |stage| stage.status);
-            let segment = div()
-                .debug_selector(move || {
-                    if status == StageStatus::Live {
-                        format!("composer-live-stage-{}", kind.index())
-                    } else {
-                        format!("composer-working-segment-{}", kind.index())
-                    }
-                })
-                .flex_1()
-                .h(px(4.))
-                .rounded(px(2.));
-            match status {
-                StageStatus::Done => segment.bg(hue),
-                StageStatus::Live => segment.bg(hue).shadow(ui::ring(hue, 2., 0.25)),
-                StageStatus::Planned | StageStatus::Skipped => segment.bg(colors.raised),
-            }
-        }))
+        .child(if turn.run.is_empty() {
+            div().h(px(4.)).rounded(px(2.)).bg(colors.raised)
+        } else {
+            ui::run_line_named(&turn.run, true, 6., Some("composer-stretch"), colors)
+        })
 }
 
 impl PhoneApp {

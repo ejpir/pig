@@ -63,17 +63,24 @@ enum Beat {
 }
 
 /// The stage a tool's calls belong to, as the projection files them.
-fn stage_of(tool: &str) -> StageKind {
+fn stage_of(tool: &str, target: &str) -> StageKind {
     match tool {
         "edit" | "write" => StageKind::Change,
-        "bash" => StageKind::Verify,
+        "bash" if crate::projection::is_check(target) => StageKind::Verify,
         _ => StageKind::Understand,
     }
 }
 
+/// Seconds since 1970, for when a sample run starts or ends.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
 /// A call in a sample turn, in its stage and in the turn's flow.
 fn call(turn: &mut Turn, name: &str, target: &str, finished: bool) -> usize {
-    let kind = stage_of(name);
+    let kind = stage_of(name, target);
     let stage = turn.stage_mut(kind);
     stage.tools.push(ToolActivity {
         id: format!("{name}-{}", stage.tools.len()),
@@ -102,6 +109,10 @@ fn finish_calls(turn: &mut Turn, kind: Option<StageKind>) {
         }
     }
 }
+
+/// The sample's finished sessions you have already looked at: Kimi's answer
+/// and the aurora. Mistral's change and the stopped restore are new to you.
+pub(crate) const SEEN: [u32; 2] = [5, 7];
 
 pub const PROJECTS: [(&str, &str); 3] = [
     ("pi", "~/repos/pi"),
@@ -165,6 +176,7 @@ pub(crate) fn new_session(
         activity: String::new(),
         elapsed: Duration::ZERO,
         finished_at: None,
+        updated: now_secs(),
         turns: Vec::new(),
         files: Vec::new(),
         check: None,
@@ -225,6 +237,7 @@ pub(crate) fn begin_turn(session: &mut Session, prompt: String, attachments: Vec
     session.turns.push(turn);
     session.state = State::Working;
     session.finished_at = None;
+    session.updated = now_secs();
     session.details.turns += 1;
     let mut follow_ups = session
         .script
@@ -319,15 +332,17 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
                 }
             }
             Beat::Fail => {
-                if let Some(tool) = session
-                    .turn_mut()
-                    .stages
-                    .iter_mut()
-                    .flat_map(|stage| &mut stage.tools)
-                    .find(|tool| !tool.finished)
-                {
+                let turn = session.turn_mut();
+                let failed = turn.stages.iter_mut().find_map(|stage| {
+                    let kind = stage.kind;
+                    let tool = stage.tools.iter_mut().find(|tool| !tool.finished)?;
                     tool.finished = true;
                     tool.failed = true;
+                    Some(kind)
+                });
+                // A check that fails ends its stretch with the result.
+                if failed == Some(StageKind::Verify) {
+                    turn.end_stretch(StretchKind::Check, Mark::Failed);
                 }
             }
             Beat::Said(text) => {
@@ -340,11 +355,22 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
             Beat::Ask(question, _) => {
                 session.question = Some(question);
                 session.state = State::NeedsYou;
+                // The wait shows on the run line from now; it isn't working time.
+                session
+                    .turn_mut()
+                    .add_time(StretchKind::Wait, Duration::ZERO);
                 event = Some(Event::NeedsYou(session.id));
-                // Waiting for an answer is not working time.
                 break;
             }
             Beat::Check(command, result) => {
+                let mark = match result {
+                    CheckResult::Passed => Some(Mark::Passed),
+                    CheckResult::Failed => Some(Mark::Failed),
+                    CheckResult::NotRun => None,
+                };
+                if let Some(mark) = mark {
+                    session.turn_mut().end_stretch(StretchKind::Check, mark);
+                }
                 session.check = Some(Check {
                     command: command.into(),
                     result,
@@ -367,6 +393,7 @@ pub(crate) fn advance(session: &mut Session, elapsed: Duration) -> Option<Event>
                 session.state = State::Done;
                 session.activity = "Done".into();
                 session.finished_at = Some(clock_now());
+                session.updated = now_secs();
                 event = Some(Event::Finished(session.id));
                 break;
             }
@@ -415,11 +442,24 @@ fn answer(reading: &'static str, read: &'static str, reply: &str) -> Vec<Beat> {
     beats
 }
 
-/// Working time goes to the stage Pi is in.
+/// Working time goes to what Pi is doing, as on a computer: the call that is
+/// running, or else the stage Pi is in.
 fn spend(session: &mut Session, time: Duration) {
     let turn = session.turn_mut();
-    if let Some(kind) = turn.live_stage() {
-        turn.add_time(kind, time);
+    let running = turn.flow.iter().rev().find_map(|step| match step {
+        Flow::Tool(kind, index) => turn
+            .tool(*kind, *index)
+            .filter(|tool| !tool.finished)
+            .map(|_| (*kind, *index)),
+        _ => None,
+    });
+    let Some(kind) = running.map(|(kind, _)| kind).or_else(|| turn.live_stage()) else {
+        return;
+    };
+    let stretch = StretchKind::of(kind);
+    turn.add_time(stretch, time);
+    if let Some(call) = running {
+        turn.add_call(stretch, call);
     }
 }
 
@@ -468,6 +508,8 @@ fn session(id: u32, title: &str, project: usize, state: State, turn: Turn) -> Se
         activity: String::new(),
         elapsed: Duration::ZERO,
         finished_at: None,
+        // Before the phone looked: Home's sample decides which it has seen.
+        updated: 1,
         turns: vec![turn],
         files: Vec::new(),
         check: None,
@@ -495,8 +537,17 @@ fn session(id: u32, title: &str, project: usize, state: State, turn: Turn) -> Se
     }
 }
 
-fn times(seconds: [u64; 4]) -> [Duration; 4] {
-    seconds.map(Duration::from_secs)
+/// A run line from what each stretch went on, its seconds and how it ended.
+fn run(stretches: &[(StretchKind, u64, Option<Mark>)]) -> Vec<Stretch> {
+    stretches
+        .iter()
+        .map(|&(kind, seconds, mark)| Stretch {
+            kind,
+            time: Duration::from_secs(seconds),
+            mark,
+            calls: Vec::new(),
+        })
+        .collect()
 }
 
 fn line(kind: LineKind, number: u32, text: &str) -> DiffLine {
@@ -577,7 +628,19 @@ fn qwen(id: SessionId) -> Session {
     let tool = &mut turn.stage_mut(Change).tools[edit];
     tool.added = 3;
     tool.removed = 1;
-    turn.times = times([21, 51, 0, 0]);
+    turn.run = run(&[
+        (StretchKind::Look, 21, None),
+        (StretchKind::Change, 51, None),
+    ]);
+    // Each stretch's calls: what Pi read and searched, then the edit under way.
+    for (stretch, kind) in turn.run.iter_mut().zip([Understand, Change]) {
+        let count = turn
+            .stages
+            .iter()
+            .find(|stage| stage.kind == kind)
+            .map_or(0, |stage| stage.tools.len());
+        stretch.calls = (0..count).map(|index| (kind, index)).collect();
+    }
     let mut session = session(id.0, "Qwen signatures", 0, State::Working, turn);
     session.activity = "Editing a file".into();
     session.elapsed = Duration::from_secs(72);
@@ -621,7 +684,7 @@ fn qwen(id: SessionId) -> Session {
     {
         use Beat::*;
         session.script = Some(Script::new(vec![
-            Wait(4),
+            Wait(3),
             Diff(vec![
                 line(Context, 210, "const signature = block.signature;"),
                 line(Removed, 211, "if (!signature) {"),
@@ -629,13 +692,14 @@ fn qwen(id: SessionId) -> Session {
                 line(Added, 212, "  signatures.push(signature);"),
             ]),
             Changed("openai-completions.ts", 1, 0),
-            Wait(5),
+            Wait(3),
             Call("write", "packages/ai/test/qwen.test.ts"),
             Changed("qwen.test.ts", 18, 0),
             Wait(1),
             Call("bash", "pnpm tsc --noEmit"),
             Output("> @pi/ai@0.9.2 typecheck"),
             Output("> tsc --noEmit"),
+            Wait(2),
             Output(""),
             Output("test/qwen.test.ts:14:22 - error TS18048: 'model' is possibly 'undefined'."),
             Output(""),
@@ -645,6 +709,7 @@ fn qwen(id: SessionId) -> Session {
             Fail,
             Call("edit", "packages/ai/test/qwen.test.ts"),
             Changed("qwen.test.ts", 1, 1),
+            Wait(1),
             Files(vec![qwen_completions(), qwen_test()]),
             Stage(Change, Done, "Edited 2 files"),
             Stage(Verify, Live, "Waiting for you"),
@@ -807,7 +872,10 @@ fn streaming_retry(id: SessionId) -> Session {
         Stage::planned(Verify),
         Stage::planned(HandOff),
     ];
-    turn.times = times([24, 136, 0, 0]);
+    turn.run = run(&[
+        (StretchKind::Look, 24, None),
+        (StretchKind::Change, 136, None),
+    ]);
     let mut session = session(id.0, "Streaming retry", 0, State::Working, turn);
     session.activity = "Changing · 2 files so far".into();
     session.elapsed = Duration::from_secs(160);
@@ -831,7 +899,7 @@ fn streaming_retry(id: SessionId) -> Session {
             ]),
             Wait(35),
             Stage(Change, Done, "Edited 2 files"),
-            Activity("Verifying · pnpm test"),
+            Activity("Checking · pnpm test"),
             Stage(Verify, Live, "pnpm test --filter @pi/ai -- stream"),
             Wait(20),
             Stage(Verify, Done, "Stream tests passed"),
@@ -872,9 +940,13 @@ fn gutter_blame(id: SessionId) -> Session {
         stage(Verify, Live, "cargo test -p editor gutter"),
         Stage::planned(HandOff),
     ];
-    turn.times = times([12, 24, 16, 0]);
+    turn.run = run(&[
+        (StretchKind::Look, 12, None),
+        (StretchKind::Change, 24, None),
+        (StretchKind::Check, 16, None),
+    ]);
     let mut session = session(id.0, "Gutter blame width", 1, State::Working, turn);
-    session.activity = "Verifying · cargo test".into();
+    session.activity = "Checking · cargo test".into();
     session.elapsed = Duration::from_secs(52);
     session.files = vec![small_change("crates/editor/src/blame.rs", 12, 4)];
     {
@@ -946,7 +1018,15 @@ fn mistral(id: SessionId) -> Session {
         stage(Verify, Done, "Provider tests passed"),
         stage(HandOff, Done, "Summary and 3 changed files"),
     ];
-    turn.times = times([60, 200, 100, 28]);
+    // The tests failed once; Pi fixed the parser and they passed.
+    turn.run = run(&[
+        (StretchKind::Look, 60, None),
+        (StretchKind::Change, 150, None),
+        (StretchKind::Check, 40, Some(Mark::Failed)),
+        (StretchKind::Change, 50, None),
+        (StretchKind::Check, 60, Some(Mark::Passed)),
+        (StretchKind::Look, 28, None),
+    ]);
     let mut session = session(id.0, "Mistral thinking", 0, State::Done, turn);
     session.elapsed = Duration::from_secs(388);
     session.files = vec![
@@ -983,7 +1063,7 @@ fn kimi(id: SessionId) -> Session {
         stage(Verify, Skipped, "Nothing to check"),
         stage(HandOff, Done, "Answered"),
     ];
-    turn.times = times([30, 0, 0, 11]);
+    turn.run = run(&[(StretchKind::Look, 41, None)]);
     let mut session = session(id.0, "Kimi K3 default", 0, State::Done, turn);
     session.elapsed = Duration::from_secs(41);
     // A conversation to carry on: whatever is asked next, these answer it.
@@ -1065,7 +1145,10 @@ fn aurora(id: SessionId) -> Session {
         ),
         Flow::Page(0),
     ];
-    turn.times = times([0, 40, 0, 14]);
+    turn.run = run(&[
+        (StretchKind::Change, 40, None),
+        (StretchKind::Look, 14, None),
+    ]);
     let mut session = session(id.0, "Aurora", 0, State::Done, turn);
     session.elapsed = Duration::from_secs(54);
     finished(
@@ -1093,7 +1176,7 @@ fn snapshot_restore(id: SessionId) -> Session {
         Stage::planned(Verify),
         Stage::planned(HandOff),
     ];
-    turn.times = times([95, 0, 0, 0]);
+    turn.run = run(&[(StretchKind::Look, 95, None)]);
     let mut session = session(id.0, "VM snapshot restore", 2, State::Failed, turn);
     session.elapsed = Duration::from_secs(95);
     session.finished_at = Some("09:15".into());
@@ -1135,11 +1218,30 @@ mod tests {
         assert_eq!(session.state, State::Done);
         assert_eq!(session.check.as_ref().unwrap().result, CheckResult::Passed);
         assert_eq!(session.status_line(), "2 files changed · checks passed");
-        // Each stage's working time, for the run line.
+        // The run line in order: the type check that failed, the fix, the
+        // wait for you, the tests that passed and the closing words.
+        let run: Vec<_> = session
+            .turn()
+            .unwrap()
+            .run
+            .iter()
+            .map(|stretch| (stretch.kind, stretch.time.as_secs(), stretch.mark))
+            .collect();
         assert_eq!(
-            session.turn().unwrap().times,
-            [21, 61, 6, 3].map(Duration::from_secs)
+            run,
+            [
+                (StretchKind::Look, 21, None),
+                (StretchKind::Change, 58, None),
+                (StretchKind::Check, 2, Some(Mark::Failed)),
+                (StretchKind::Change, 1, None),
+                (StretchKind::Wait, 30, Some(Mark::Answered)),
+                (StretchKind::Check, 6, Some(Mark::Passed)),
+                (StretchKind::Look, 3, None),
+            ]
         );
+        // The type check's call is in its stretch.
+        let check = &session.turn().unwrap().run[2];
+        assert_eq!(check.calls, [(StageKind::Verify, 0)]);
     }
 
     #[test]

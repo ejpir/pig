@@ -226,6 +226,7 @@ mod tests {
             finished: true,
             started: None,
             is_error: false,
+            ended_at: None,
             images: Vec::new(),
             details,
         }

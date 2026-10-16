@@ -55,6 +55,26 @@ pub struct Notification {
     pub ongoing: bool,
     /// The accent for the icon and actions, as 0xRRGGBB.
     pub color: u32,
+    /// A bar of coloured segments with points on it, as Android 16 draws a
+    /// journey in a progress notification. Earlier versions show a plain bar.
+    pub progress: Option<Progress>,
+    /// Asks Android 16 to show an ongoing notification as a Live Update: on
+    /// the lock screen, at the top of the shade and as a status bar chip.
+    pub promoted: bool,
+    /// When what an ongoing notification follows started, in milliseconds
+    /// since 1970: it counts up from then, in the shade and on the chip.
+    pub started: Option<u64>,
+}
+
+/// A progress notification's bar.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Progress {
+    /// Each segment's length and colour (0xRRGGBB), in order along the bar.
+    pub segments: Vec<(u32, u32)>,
+    /// Points on the bar: a position along it, and a colour.
+    pub points: Vec<(u32, u32)>,
+    /// How far along the bar it is now; what lies past it is drawn faded.
+    pub position: u32,
 }
 
 /// Posts or replaces a notification. Returns false if it could not be posted;

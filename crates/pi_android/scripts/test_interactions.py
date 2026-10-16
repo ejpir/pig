@@ -468,6 +468,8 @@ def input_and_selectors(phone):
 
 def pairing_scanner(phone):
     phone.fixture("connect")
+    # First run asks where Pi should work; the computer leads to pairing.
+    phone.tap("door-computer")
     phone.bounds("scan-computer")
     phone.capture("pairing-connect")
     phone.run("shell", "pm", "grant", PACKAGE, "android.permission.CAMERA")

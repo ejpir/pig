@@ -8,6 +8,7 @@ pub(crate) use files::language;
 mod history;
 mod pages;
 pub(crate) use pages::ShownImage;
+pub(crate) use thread::is_yes_no;
 mod projects;
 mod review;
 mod schedules;

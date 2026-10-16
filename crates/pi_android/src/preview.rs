@@ -24,6 +24,7 @@ pub(crate) const SWARM_RESULT_MARKDOWN: &str = "## Findings\n\n- **Preserve Unic
 /// Every state `PhoneApp::preview` knows.
 pub const SCREENS: &[&str] = &[
     "connect",
+    "pair",
     "reconnecting",
     "unreachable",
     "sessions",
@@ -194,7 +195,8 @@ impl PhoneApp {
         window.dismiss_virtual_keyboard();
         window.focus(&self.focus, cx);
         self.manual_setup = false;
-        if name == "connect" {
+        self.pairing = name == "pair";
+        if matches!(name, "connect" | "pair") {
             self.address
                 .update(cx, |address, cx| address.set_text(ADDRESS, cx));
             cx.notify();
@@ -640,7 +642,6 @@ impl PhoneApp {
                     store.tick(Duration::from_secs(10));
                 }
                 self.show_session(QWEN, window, cx);
-                self.choice = Some(Answer::AllowOnce);
             }
             "html-page" => self.show_session(crate::model::SessionId(7), window, cx),
             "media-sample" => {
@@ -1762,7 +1763,7 @@ mod tests {
                 cx.run_until_parked();
                 app.read_with(cx, |app, _| {
                     let expected = match *name {
-                        "connect" | "reconnecting" | "unreachable" => Route::Connect,
+                        "connect" | "pair" | "reconnecting" | "unreachable" => Route::Connect,
                         "schedules"
                         | "schedules-evening"
                         | "schedules-offline"
@@ -2911,6 +2912,13 @@ mod tests {
         for name in ["done", "review", "follow-up-input"] {
             cx.update(|window, cx| app.update(cx, |app, cx| app.preview(name, window, cx)));
             cx.run_until_parked();
+            // An idle session composer is one line: typing in it shows the model.
+            if let Some(draft) = cx.debug_bounds("composer-compact") {
+                assert!(cx.debug_bounds("composer-model").is_none(), "{name}");
+                cx.simulate_click(draft.center(), gpui::Modifiers::none());
+                cx.run_until_parked();
+                assert!(cx.debug_bounds("composer-compact").is_none(), "{name}");
+            }
             let picker = cx.debug_bounds("composer-model").unwrap();
             let send = cx.debug_bounds("send").unwrap();
             assert!(send.bottom() < gpui::px(854.));
@@ -2929,6 +2937,122 @@ mod tests {
                 );
             });
         }
+    }
+
+    #[gpui::test]
+    fn each_choice_answers_at_once_and_a_select_shows_every_option(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("waiting", window, cx)));
+        cx.run_until_parked();
+        // Five options, not the first three, and no separate Answer to tap.
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let store = app.store.as_mut().unwrap();
+                let session = store.sessions.iter_mut().find(|s| s.id == QWEN).unwrap();
+                session.question = crate::projection::question(&serde_json::json!({
+                    "id": "q", "method": "select", "title": "Where should the jitter go?",
+                    "options": ["Shared", "OpenCode only", "A setting", "Leave it", "Something else"]
+                }));
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("choice-4").is_some());
+        assert!(cx.debug_bounds("answer-yes").is_none());
+        let pick = cx.debug_bounds("choice-3").unwrap();
+        cx.simulate_click(pick.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let session = app.store.as_ref().unwrap().session(QWEN).unwrap();
+            assert_eq!(session.state, State::Working);
+            assert!(session.question.is_none());
+            assert!(app.questions_later.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn home_answers_a_yes_or_no_question_in_place(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("sessions", window, cx)));
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let store = app.store.as_mut().unwrap();
+                store.tick(Duration::from_secs(10));
+                let session = store.sessions.iter_mut().find(|s| s.id == QWEN).unwrap();
+                assert_eq!(session.state, State::NeedsYou);
+                session.question = crate::projection::question(&serde_json::json!({
+                    "id": "q", "method": "confirm", "title": "Clear the build cache?",
+                    "message": "Stale entries are why the blame tests disagree."
+                }));
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let yes = cx.debug_bounds("answer-yes-1").unwrap();
+        cx.simulate_click(yes.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let session = app.store.as_ref().unwrap().session(QWEN).unwrap();
+            assert_eq!(session.state, State::Working);
+            // Answered right there: Home stays.
+            assert_eq!(app.route(), Route::Sessions);
+        });
+    }
+
+    #[gpui::test]
+    fn opening_a_finished_run_clears_it_from_needs_you(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("sessions", window, cx)));
+        cx.run_until_parked();
+        // Mistral's change and the stopped restore are new to you.
+        let mistral = SessionId(4);
+        assert!(cx.debug_bounds("new-4").is_some());
+        assert!(cx.debug_bounds("new-6").is_some());
+        assert!(cx.debug_bounds("caught-up").is_none());
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.show_session(mistral, window, cx);
+                app.back(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("new-4").is_none());
+        assert!(cx.debug_bounds("new-6").is_some());
+        // With the restore seen too, and the runs that are still going
+        // (which would ask or finish as the test's clock runs) set aside,
+        // nothing needs you, and Home says so.
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.show_session(SessionId(6), window, cx);
+                app.back(window, cx);
+                let store = app.store.as_mut().unwrap();
+                store.sessions.retain(|session| !session.state.is_running());
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("new-6").is_none());
+        assert!(cx.debug_bounds("caught-up").is_some());
+    }
+
+    #[gpui::test]
+    fn the_title_opens_details(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("done", window, cx)));
+        cx.run_until_parked();
+        let title = cx.debug_bounds("thread-title").unwrap();
+        cx.simulate_click(title.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.sheet, Some(Sheet::Details(QWEN)))
+        });
     }
 
     #[gpui::test]

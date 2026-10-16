@@ -73,6 +73,28 @@ pub struct Store {
     hydrated_lru: VecDeque<SessionId>,
     /// The sample's subagents, by conversation: a live computer sends its own.
     pub(crate) sample_subagents: HashMap<String, pi_core::session::Session>,
+    /// When you last looked at each session, by `session_key`: its `updated`
+    /// then. Home lists what finished since as needing you.
+    pub(crate) seen: HashMap<String, u64>,
+    /// Sessions that last changed before this were there before the phone
+    /// kept track, and count as seen.
+    pub(crate) seen_since: u64,
+}
+
+/// Home's sessions, sorted by what you can do.
+pub struct Inbox<'a> {
+    /// Questions, then what finished, stopped or failed since you looked.
+    pub needs: Vec<&'a Session>,
+    pub working: Vec<&'a Session>,
+    /// Finished, and seen.
+    pub seen: Vec<&'a Session>,
+}
+
+/// Seconds since 1970.
+pub(crate) fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 fn generation() -> u64 {
@@ -108,6 +130,13 @@ impl Store {
             hydrated: HashSet::new(),
             hydrated_lru: VecDeque::new(),
             sample_subagents: HashMap::new(),
+            // You have seen Kimi's answer and the aurora; Mistral's change and
+            // the stopped restore are new.
+            seen: demo::SEEN
+                .iter()
+                .map(|id| (format!("sample/{id}"), u64::MAX))
+                .collect(),
+            seen_since: 0,
         }
     }
 
@@ -128,6 +157,8 @@ impl Store {
             hydrated: HashSet::new(),
             hydrated_lru: VecDeque::new(),
             sample_subagents: HashMap::new(),
+            seen: HashMap::new(),
+            seen_since: now_secs(),
         };
         store.refresh_projects();
         store
@@ -271,6 +302,8 @@ impl Store {
             hydrated: HashSet::new(),
             hydrated_lru: VecDeque::new(),
             sample_subagents: HashMap::new(),
+            seen: HashMap::new(),
+            seen_since: now_secs(),
         }
     }
 
@@ -325,6 +358,59 @@ impl Store {
         groups
     }
 
+    /// Home's sessions: what needs you first, a question or something that
+    /// ended since you looked, then what is working, then what you've seen.
+    pub fn inbox(&self) -> Inbox<'_> {
+        let [questions, working, finished] = self.grouped();
+        let (unseen, seen): (Vec<_>, Vec<_>) = finished
+            .into_iter()
+            .partition(|session| self.unseen(session));
+        Inbox {
+            needs: questions.into_iter().chain(unseen).collect(),
+            working,
+            seen,
+        }
+    }
+
+    /// A session's lasting name for what you have seen: the computer's own
+    /// key for a session there; its place here for this phone's and the sample's.
+    pub fn session_key(&self, id: SessionId) -> String {
+        if let Some(target) = self.live.as_ref().and_then(|live| live.target(id)) {
+            return target.key;
+        }
+        if self.is_local() {
+            format!("local/{}", id.0)
+        } else {
+            format!("sample/{}", id.0)
+        }
+    }
+
+    /// Whether a session finished, stopped or failed since you last looked.
+    pub fn unseen(&self, session: &Session) -> bool {
+        !session.state.is_running()
+            && !session.is_working()
+            && session.updated
+                > self
+                    .seen
+                    .get(&self.session_key(session.id))
+                    .copied()
+                    .unwrap_or(self.seen_since)
+    }
+
+    /// Notes that you have seen a session as it is now. Returns whether that
+    /// changed anything worth keeping.
+    pub fn mark_seen(&mut self, id: SessionId) -> bool {
+        let Some(updated) = self.session(id).map(|session| session.updated) else {
+            return false;
+        };
+        let seen = self.seen.entry(self.session_key(id)).or_insert(0);
+        if *seen >= updated {
+            return false;
+        }
+        *seen = updated;
+        true
+    }
+
     pub fn running(&self) -> impl Iterator<Item = &Session> {
         self.sessions.iter().filter(|session| session.is_working())
     }
@@ -341,20 +427,27 @@ impl Store {
             // every message, diff, and tool output here made active composers
             // and scrolling pay a full projection even without new content.
             for session in &mut self.sessions {
-                if session.state != State::Working {
-                    continue;
-                }
-                session.elapsed += elapsed;
-                if let Some(turn) = session.turns.last_mut()
-                    && let Some(stage) = turn.live_stage()
-                {
-                    turn.add_time(stage, elapsed);
+                match session.state {
+                    // A question's wait grows on the run line, not the working time.
+                    State::NeedsYou => session.turn_mut().add_time(StretchKind::Wait, elapsed),
+                    State::Working => {
+                        session.elapsed += elapsed;
+                        if let Some(turn) = session.turns.last_mut()
+                            && let Some(stage) = turn.live_stage()
+                        {
+                            turn.add_time(StretchKind::of(stage), elapsed);
+                        }
+                    }
+                    _ => {}
                 }
             }
             return Vec::new();
         }
         let mut events = Vec::new();
         for session in &mut self.sessions {
+            if session.state == State::NeedsYou {
+                session.turn_mut().add_time(StretchKind::Wait, elapsed);
+            }
             if session.state != State::Working {
                 continue;
             }
@@ -543,6 +636,9 @@ impl Store {
             return;
         }
         session.state = State::Working;
+        session
+            .turn_mut()
+            .end_stretch(StretchKind::Wait, Mark::Answered);
         if answer == Answer::Deny {
             demo::decline(session);
         }

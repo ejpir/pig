@@ -4,7 +4,10 @@
 
 use crate::{
     app::{PhoneApp, Route, Sheet, Target},
-    model::{Reference, Session, SessionId, Stage, StageKind, StageStatus, Turn},
+    model::{
+        Mark, Reference, Session, SessionId, Stage, StageKind, StageStatus, Stretch, StretchKind,
+        Turn, duration_label,
+    },
     theme::{MONO, Theme, theme},
     ui::{self, Button, icon},
 };
@@ -1707,19 +1710,21 @@ impl PhoneApp {
                         )))
                     }),
             );
-        // The run line, with a key that names the stages.
-        let times = session.turn().map(|turn| turn.times).unwrap_or_default();
-        let run = (times.iter().any(|time| !time.is_zero())).then(|| {
-            let entries = StageKind::ALL
-                .into_iter()
-                .filter(|kind| !times[kind.index()].is_zero())
-                .map(|kind| (kind, SharedString::from(kind.title())))
-                .collect();
-            div()
-                .mt(px(20.))
-                .child(ui::run_line(&times, false, colors))
-                .child(ui::run_key(entries, &times, colors))
-        });
+        // The run line, then each stretch of it in the order it happened.
+        let running = session.state.is_running();
+        let run = session
+            .turn()
+            .filter(|turn| !turn.run.is_empty())
+            .map(|turn| {
+                let turn_index = session.turns.len() - 1;
+                div()
+                    .mt(px(20.))
+                    .child(ui::run_line(&turn.run, running, 14., colors))
+                    .child(
+                        self.run_stretches(id, turn_index, turn, running, colors, cx)
+                            .mt(px(20.)),
+                    )
+            });
         let stat = |label: &'static str, value: String| {
             div()
                 .flex_1()
@@ -2438,6 +2443,254 @@ fn shorten(path: &str) -> String {
             }
         }
         _ => path.to_owned(),
+    }
+}
+
+impl PhoneApp {
+    /// Each stretch of a run in the order it happened (09 Details): what it
+    /// went on and did, how long it took, and how each check ended. A stretch
+    /// with calls opens its first one.
+    pub(crate) fn run_stretches(
+        &self,
+        id: SessionId,
+        turn_index: usize,
+        turn: &Turn,
+        running: bool,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let count = turn.run.len();
+        let timed = turn.run.iter().any(|stretch| !stretch.time.is_zero());
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .children(turn.run.iter().enumerate().map(|(index, stretch)| {
+                let last = index + 1 == count;
+                let live = running && last;
+                let hue = ui::stretch_hue(stretch.kind, colors);
+                let (title, detail) = stretch_words(stretch, turn, live, last);
+                let failed = stretch.mark == Some(Mark::Failed);
+                let first_call = stretch.calls.first().copied();
+                let row = div()
+                    .id(("stretch", index))
+                    .debug_selector(move || format!("run-stretch-{index}"))
+                    .relative()
+                    .child(crate::testing::probe(format!("run-stretch-{index}")))
+                    .flex()
+                    .gap(px(12.))
+                    .rounded(px(12.))
+                    .when(!last, |row| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .top(px(32.))
+                                .bottom(px(-12.))
+                                .left(px(12.5))
+                                .w(px(3.))
+                                .rounded(px(2.))
+                                .bg(hue),
+                        )
+                    })
+                    .child(ui::station(
+                        stretch.kind.glyph(),
+                        hue,
+                        if live {
+                            StageStatus::Live
+                        } else {
+                            StageStatus::Done
+                        },
+                        colors,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pt(px(3.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(title),
+                                    )
+                                    .children(stretch.mark.and_then(|mark| match mark {
+                                        Mark::Passed => {
+                                            Some(result_badge("Passed", colors.green, colors))
+                                        }
+                                        Mark::Failed => {
+                                            Some(result_badge("Failed", colors.coral, colors))
+                                        }
+                                        Mark::Answered => None,
+                                    }))
+                                    .when(timed, |row| {
+                                        row.child(
+                                            div()
+                                                .flex_none()
+                                                .text_size(px(12.5))
+                                                .text_color(colors.muted)
+                                                .child(duration_label(stretch.time)),
+                                        )
+                                    }),
+                            )
+                            .children(detail.map(|detail| {
+                                div()
+                                    .mt(px(2.))
+                                    .text_size(px(13.))
+                                    .line_height(px(18.))
+                                    .text_color(if failed { colors.coral } else { colors.muted })
+                                    .when(stretch.kind == StretchKind::Check, |line| {
+                                        line.font_family(MONO).text_size(px(12.))
+                                    })
+                                    .truncate()
+                                    .child(detail)
+                            })),
+                    );
+                match first_call {
+                    Some((kind, tool)) => row
+                        .active(|style| style.bg(colors.selected))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_sheet(Sheet::Call(id, turn_index, kind, tool), cx)
+                        }))
+                        .into_any_element(),
+                    None => row.into_any_element(),
+                }
+            }))
+    }
+}
+
+/// A check's result beside its stretch.
+fn result_badge(text: &'static str, hue: gpui::Hsla, colors: &Theme) -> Div {
+    div()
+        .h(px(22.))
+        .px(px(8.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded_full()
+        .bg(colors.tint(hue))
+        .text_color(hue)
+        .text_size(px(12.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(text)
+}
+
+/// A stretch's name and what it did, from its calls: "Looked" and "Read 5
+/// files · searched twice"; "Checked" and the command, or why it failed.
+fn stretch_words(
+    stretch: &Stretch,
+    turn: &Turn,
+    live: bool,
+    last: bool,
+) -> (SharedString, Option<String>) {
+    let tools: Vec<&crate::model::ToolActivity> = stretch
+        .calls
+        .iter()
+        .filter_map(|(kind, index)| turn.tool(*kind, *index))
+        .collect();
+    let named = |done: &'static str, doing: &'static str| -> SharedString {
+        if live { doing } else { done }.into()
+    };
+    match stretch.kind {
+        StretchKind::Look if tools.is_empty() && last && !live => {
+            ("Wrote the hand-off".into(), None)
+        }
+        StretchKind::Look => {
+            let count = |names: &[&str]| {
+                tools
+                    .iter()
+                    .filter(|tool| names.contains(&tool.name.as_str()))
+                    .count()
+            };
+            let parts: Vec<String> = [
+                (count(&["read"]), "read", "file", "files"),
+                (count(&["grep", "find"]), "searched", "time", "times"),
+                (count(&["ls"]), "listed", "folder", "folders"),
+                (count(&["bash", "javascript"]), "ran", "command", "commands"),
+            ]
+            .into_iter()
+            .filter(|(count, ..)| *count > 0)
+            .map(|(count, verb, one, many)| match (verb, count) {
+                ("searched", 1) => "searched once".to_owned(),
+                ("searched", 2) => "searched twice".to_owned(),
+                (verb, 1) => format!("{verb} 1 {one}"),
+                (verb, count) => format!("{verb} {count} {many}"),
+            })
+            .collect();
+            let detail = if parts.is_empty() {
+                "Thinking".to_owned()
+            } else {
+                let mut detail = parts.join(" · ");
+                detail[..1].make_ascii_uppercase();
+                detail
+            };
+            (named("Looked", "Looking"), Some(detail))
+        }
+        StretchKind::Change => {
+            let mut names: Vec<&str> = Vec::new();
+            for tool in &tools {
+                let name = tool.target.rsplit('/').next().unwrap_or(&tool.target);
+                if !name.is_empty() && !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            let (added, removed) = tools.iter().fold((0, 0), |(added, removed), tool| {
+                (added + tool.added, removed + tool.removed)
+            });
+            let mut detail = match names.len() {
+                0 => String::new(),
+                1 | 2 => names.join(", "),
+                more => format!("{}, +{}", names[..2].join(", "), more - 2),
+            };
+            if added > 0 || removed > 0 {
+                if !detail.is_empty() {
+                    detail.push_str(" · ");
+                }
+                detail.push_str(&match (added, removed) {
+                    (added, 0) => format!("+{added}"),
+                    (0, removed) => format!("−{removed}"),
+                    (added, removed) => format!("+{added} −{removed}"),
+                });
+            }
+            (
+                named("Changed", "Changing"),
+                (!detail.is_empty()).then_some(detail),
+            )
+        }
+        StretchKind::Check => {
+            let command = tools
+                .first()
+                .map(|tool| tool.target.lines().next().unwrap_or("").trim().to_owned());
+            let failure = tools
+                .iter()
+                .find(|tool| tool.failed)
+                .map(|tool| crate::screens::stream::failure(tool));
+            let detail = match (command, failure) {
+                (Some(command), Some(failure)) => Some(format!(
+                    "{command} · {}",
+                    failure.trim_start_matches("Failed · ")
+                )),
+                (command, failure) => command.or(failure),
+            };
+            (named("Checked", "Checking"), detail)
+        }
+        StretchKind::Wait => (
+            named("Waited for you", "Waiting for you"),
+            Some(
+                if live {
+                    "Pi is waiting for your answer"
+                } else {
+                    "You answered"
+                }
+                .to_owned(),
+            ),
+        ),
     }
 }
 

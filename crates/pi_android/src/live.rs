@@ -4545,6 +4545,7 @@ mod tests {
             finished: true,
             started: None,
             is_error: false,
+            ended_at: None,
             images: ids
                 .iter()
                 .map(|id| json!({"type":"image","data":"","imageId":id,"mimeType":"image/png"}))

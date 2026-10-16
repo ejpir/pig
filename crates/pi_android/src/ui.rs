@@ -3,7 +3,7 @@
 
 use crate::{
     assets::icon_path,
-    model::{DiffLine, LineKind, StageKind, StageStatus},
+    model::{DiffLine, LineKind, Mark, StageKind, StageStatus, Stretch, StretchKind},
     theme::{MONO, SERIF, Theme},
 };
 use gpui::{
@@ -336,8 +336,28 @@ pub fn stage_hue(kind: StageKind, colors: &Theme) -> Hsla {
     match kind {
         StageKind::Understand => colors.read,
         StageKind::Change => colors.edit,
-        StageKind::Verify => colors.check,
+        StageKind::Verify => colors.checking,
         StageKind::HandOff => colors.accent,
+    }
+}
+
+/// A run line stretch's colour: blue looking, orange changing, grey checking
+/// and amber waiting for you. Green and coral are left for results.
+pub fn stretch_hue(kind: StretchKind, colors: &Theme) -> Hsla {
+    match kind {
+        StretchKind::Look => colors.read,
+        StretchKind::Change => colors.edit,
+        StretchKind::Check => colors.checking,
+        StretchKind::Wait => colors.wait,
+    }
+}
+
+/// A mark's colour and glyph: a pass, a failure, a question you answered.
+pub fn mark_style(mark: Mark, colors: &Theme) -> (Hsla, &'static str) {
+    match mark {
+        Mark::Passed => (colors.green, "check"),
+        Mark::Failed => (colors.coral, "x"),
+        Mark::Answered => (colors.wait, "hand"),
     }
 }
 
@@ -636,156 +656,198 @@ pub fn ring_dot(hue: Hsla) -> Div {
         .child(div().size(px(8.)).rounded(px(4.)).bg(hue))
 }
 
-/// One working run on Home's shared track: each stage as long as it took, on
-/// a track `span` wide, so a run that has gone on longer shows longer.
-pub fn track(
-    times: &[std::time::Duration; 4],
-    live: Option<StageKind>,
-    span: std::time::Duration,
-    colors: &Theme,
-) -> Div {
-    let mut left = 1f32;
-    div()
-        .h(px(4.))
-        .w_full()
-        .flex()
-        .gap(px(2.))
-        .rounded(px(2.))
-        .bg(colors.raised)
-        .children(StageKind::ALL.into_iter().filter_map(|kind| {
-            let time = times[kind.index()];
-            if time.is_zero() && live != Some(kind) {
-                return None;
-            }
-            let fraction = (time.as_secs_f32() / span.as_secs_f32())
-                .max(0.02)
-                .min(left);
-            left -= fraction;
-            let hue = stage_hue(kind, colors);
-            Some(
-                div()
-                    .h(px(4.))
-                    .w(relative(fraction))
-                    .flex_none()
-                    .rounded(px(2.))
-                    .bg(hue)
-                    .when(live == Some(kind), |segment| {
-                        segment.shadow(ring(hue, 2., 0.28))
-                    }),
-            )
-        }))
-}
-
-/// The stages a finished run went through, with the share of time each took.
-pub fn stretches(times: &[std::time::Duration; 4]) -> Vec<(StageKind, f32)> {
-    let total: f32 = times.iter().map(|time| time.as_secs_f32()).sum();
-    if total <= 0. {
-        return Vec::new();
+/// A stretch's bar: solid in its colour, or a row of dots for a wait for you,
+/// so a wait reads as one without its colour. `live` rings the stretch under way.
+fn stretch_bar(kind: StretchKind, live: bool, colors: &Theme) -> Div {
+    let hue = stretch_hue(kind, colors);
+    let bar = div().size_full().rounded(px(2.));
+    if kind == StretchKind::Wait {
+        bar.overflow_hidden()
+            .flex()
+            .gap(px(2.))
+            .children((0..96).map(|_| div().w(px(4.)).h_full().flex_none().rounded(px(1.)).bg(hue)))
+    } else {
+        bar.bg(hue)
+            .when(live, |bar| bar.shadow(ring(hue, 2., 0.28)))
     }
-    StageKind::ALL
-        .into_iter()
-        .filter(|kind| !times[kind.index()].is_zero())
-        .map(|kind| (kind, times[kind.index()].as_secs_f32() / total))
-        .collect()
 }
 
-/// The least width of a stretch, so its time fits under it.
-const STRETCH: f32 = 36.;
-
-/// A finished run as one line: each stretch in its stage's colour and as long
-/// as the stage took, with its time under its start.
-pub fn run_line(times: &[std::time::Duration; 4], show_times: bool, colors: &Theme) -> Div {
-    let stretches = stretches(times);
-    let count = stretches.len();
+/// Where a stretch ended: a disc in the result's colour, ringed in the canvas
+/// so it stands off the line, with its glyph when there is room for one.
+fn end_mark(mark: Mark, size: f32, colors: &Theme) -> Div {
+    let (hue, glyph) = mark_style(mark, colors);
     div()
+        .size(px(size))
+        .flex_none()
         .flex()
-        .flex_col()
-        .child(
-            div()
-                .h(px(12.))
-                .flex()
-                .items_center()
-                .gap(px(2.))
-                .children(stretches.iter().map(|(kind, share)| {
-                    div()
-                        .h(px(3.))
-                        .w(relative(*share))
-                        .min_w(px(STRETCH))
-                        .rounded(px(2.))
-                        .bg(stage_hue(*kind, colors))
-                })),
-        )
-        .when(show_times, |line| {
-            line.child(
-                div()
-                    .mt(px(4.))
-                    .flex()
-                    .gap(px(2.))
-                    .text_size(px(12.5))
-                    .line_height(px(16.))
-                    .text_color(colors.muted)
-                    .children(stretches.iter().enumerate().map(|(index, (kind, share))| {
-                        div()
-                            .w(relative(*share))
-                            .min_w(px(STRETCH))
-                            .flex()
-                            .whitespace_nowrap()
-                            // The last time ends with its stretch, so a short one stays inside.
-                            .when(index + 1 == count && count > 1, |time| time.justify_end())
-                            .child(crate::model::duration_label(times[kind.index()]))
-                    })),
-            )
+        .items_center()
+        .justify_center()
+        .rounded(px(size / 2.))
+        .bg(hue)
+        .shadow(ring(colors.canvas, (size / 7.).clamp(1., 2.), 1.))
+        .when(size > 12., |disc| {
+            disc.child(icon(glyph, size - 4., colors.composer))
         })
 }
 
-/// A key under a run line: each stage's icon with a label and its time.
-pub fn run_key(
-    entries: Vec<(StageKind, SharedString)>,
-    times: &[std::time::Duration; 4],
+/// The mark a stretch ends in at this size: a small mark leaves out the
+/// answered question, which the dotted wait already shows.
+fn shown_mark(stretch: &Stretch, live: bool, size: f32) -> Option<Mark> {
+    let mark = stretch
+        .mark
+        .or((live && stretch.kind == StretchKind::Wait).then_some(Mark::Answered));
+    mark.filter(|mark| size >= 10. || *mark != Mark::Answered)
+}
+
+/// A stretch on a line, 4 dp tall: its bar, and how it ended at its right
+/// end. A question still waiting shows its hand there already.
+fn stretch_piece(stretch: &Stretch, live: bool, mark: f32, colors: &Theme) -> Div {
+    let end = shown_mark(stretch, live, mark);
+    div()
+        .relative()
+        .h(px(4.))
+        .child(stretch_bar(stretch.kind, live, colors))
+        .children(end.map(|end| {
+            div()
+                .absolute()
+                .top(px(2. - mark / 2.))
+                .right(px(-1. - mark / 2.))
+                .child(end_mark(end, mark, colors))
+        }))
+}
+
+/// One run on Home's shared track: each stretch as long as it took, in the
+/// order it happened, on a track `span` wide, so a run that has gone on
+/// longer shows longer. The stretch under way is ringed.
+pub fn track(run: &[Stretch], live: bool, span: std::time::Duration, colors: &Theme) -> Div {
+    let mut left = 1f32;
+    let count = run.len();
+    div().h(px(10.)).w_full().flex().items_center().child(
+        div()
+            .w_full()
+            .h(px(4.))
+            .flex()
+            .gap(px(2.))
+            .rounded(px(2.))
+            .bg(colors.raised)
+            .children(run.iter().enumerate().map(|(index, stretch)| {
+                let fraction = (stretch.time.as_secs_f32() / span.as_secs_f32().max(1.))
+                    .max(0.02)
+                    .min(left.max(0.));
+                left -= fraction;
+                stretch_piece(stretch, live && index + 1 == count, 10., colors)
+                    .w(relative(fraction))
+                    .flex_none()
+            })),
+    )
+}
+
+/// A run as one line: each stretch in its colour, as long as it took and in
+/// the order it happened, each check ending in its result. A run whose times
+/// weren't reported gets equal stretches. `mark` is the size of the marks:
+/// 14 dp with glyphs on a full line, 10 dp folded into the working strip.
+pub fn run_line(run: &[Stretch], live: bool, mark: f32, colors: &Theme) -> Div {
+    run_line_named(run, live, mark, None, colors)
+}
+
+/// The run line with each stretch named for tests: `{name}-{index}`, and the
+/// one under way also `{name}-live-{kind}`, by its place in `StretchKind`.
+pub fn run_line_named(
+    run: &[Stretch],
+    live: bool,
+    mark: f32,
+    name: Option<&'static str>,
     colors: &Theme,
 ) -> Div {
-    let entry = |(kind, label): (StageKind, SharedString)| {
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .text_size(px(13.))
-            .line_height(px(20.))
-            .text_color(colors.secondary)
-            .child(icon(kind.glyph(), 16., stage_hue(kind, colors)))
-            .child(div().min_w_0().truncate().child(label))
-            .child(
-                div()
-                    .ml_auto()
-                    .flex_none()
-                    .text_size(px(12.5))
-                    .text_color(colors.muted)
-                    .child(crate::model::duration_label(times[kind.index()])),
-            )
-    };
-    let mut entries = entries.into_iter();
-    let mut rows = Vec::new();
-    while let Some(first) = entries.next() {
-        let second = entries.next();
-        rows.push(
-            div()
-                .flex()
-                .gap(px(24.))
-                .child(entry(first))
-                .child(match second {
-                    Some(second) => entry(second).into_any_element(),
-                    None => div().flex_1().into_any_element(),
-                }),
-        );
-    }
+    let total: f32 = run.iter().map(|stretch| stretch.time.as_secs_f32()).sum();
+    let count = run.len();
     div()
-        .mt(px(12.))
+        .h(px(mark.max(10.)))
+        .w_full()
         .flex()
-        .flex_col()
-        .gap(px(8.))
-        .children(rows)
+        .items_center()
+        .gap(px(2.))
+        .children(run.iter().enumerate().map(|(index, stretch)| {
+            let share = if total > 0. {
+                stretch.time.as_secs_f32() / total
+            } else {
+                1. / count as f32
+            };
+            let now = live && index + 1 == count;
+            let kind = stretch.kind as usize;
+            // A stretch that ends in a mark is wide enough to show it whole.
+            let least = if shown_mark(stretch, now, mark).is_some() {
+                mark + 4.
+            } else {
+                4.
+            };
+            let piece = stretch_piece(stretch, now, mark, colors)
+                .when_some(name.filter(|_| now), |piece, name| {
+                    piece.debug_selector(move || format!("{name}-live-{kind}"))
+                });
+            div()
+                .h(px(4.))
+                .w(relative(share))
+                .min_w(px(least))
+                .when_some(name, |outer, name| {
+                    outer.debug_selector(move || format!("{name}-{index}"))
+                })
+                .child(piece.w_full())
+        }))
+}
+
+/// The key under a finished line: each kind's icon, its name and the time it
+/// took in all. Times are left out when the computer gave none.
+pub fn run_key(run: &[Stretch], colors: &Theme) -> Div {
+    let timed = run.iter().any(|stretch| !stretch.time.is_zero());
+    div()
+        .mt(px(10.))
+        .flex()
+        .flex_wrap()
+        .gap_x(px(16.))
+        .gap_y(px(4.))
+        .children(
+            [
+                StretchKind::Look,
+                StretchKind::Change,
+                StretchKind::Check,
+                StretchKind::Wait,
+            ]
+            .into_iter()
+            // Each kind there was; when the run is timed, each that took time.
+            .filter(|kind| {
+                run.iter()
+                    .any(|stretch| stretch.kind == *kind && (!timed || !stretch.time.is_zero()))
+            })
+            .map(|kind| {
+                let time: std::time::Duration = run
+                    .iter()
+                    .filter(|stretch| stretch.kind == kind)
+                    .map(|stretch| stretch.time)
+                    .sum();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .whitespace_nowrap()
+                    .text_size(px(13.))
+                    .line_height(px(20.))
+                    .text_color(colors.secondary)
+                    .child(icon(kind.glyph(), 16., stretch_hue(kind, colors)))
+                    .child(match kind {
+                        StretchKind::Wait => "Waiting",
+                        kind => kind.title(),
+                    })
+                    .when(timed, |entry| {
+                        entry.child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(colors.muted)
+                                .child(crate::model::duration_label(time)),
+                        )
+                    })
+            }),
+        )
 }
 
 /// A run line station: the stage's icon in a 28 dp circle; tinted when done,

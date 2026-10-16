@@ -41,6 +41,10 @@ pub struct Tool {
     #[serde(default)]
     pub started: Option<bool>,
     pub is_error: bool,
+    /// When it finished, in milliseconds since 1970, from its result message.
+    /// Live previews and older snapshots leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
     /// Image blocks in its result, such as a screenshot it read. A durable
     /// session sends each with empty `data` and an `imageId` to fetch it by.
     /// Snapshots from helpers older than this field leave it out.
@@ -670,6 +674,7 @@ impl Session {
                 finished: false,
                 started: Some(false),
                 is_error: false,
+                ended_at: None,
                 images: Vec::new(),
                 details: Value::Null,
             });
@@ -700,6 +705,9 @@ impl Session {
             tool.diff = result["details"]["diff"].as_str().map(str::to_owned);
             tool.finished = finished;
             tool.is_error = is_error;
+            if finished && let Some(at) = result["timestamp"].as_u64() {
+                tool.ended_at = Some(at);
+            }
         }
     }
 

@@ -55,6 +55,9 @@ pub struct Theme {
     pub edit: Hsla,
     pub check: Hsla,
     pub wait: Hsla,
+    /// The run line's checks: grey until a result says how it went, so a
+    /// check is never mistaken for a pass.
+    pub checking: Hsla,
     pub scrim: Hsla,
     pub shadow: Hsla,
 }
@@ -97,6 +100,7 @@ impl Theme {
             edit: color(0xe3a35c, 0xb0661a),
             check: color(0x80bf95, 0x2e7950),
             wait: color(0xe5bd73, 0xa57514),
+            checking: color(0x6c7683, 0x949ca6),
             scrim: alpha(0x00000080, 0x252f3d52),
             shadow: alpha(0x00000066, 0x252f3d24),
         }

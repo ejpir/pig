@@ -495,6 +495,7 @@ mod tests {
             finished: false,
             started: None,
             is_error: false,
+            ended_at: None,
             images: Vec::new(),
             details: Value::Null,
         };

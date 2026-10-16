@@ -15,6 +15,8 @@ import android.graphics.Path;
 import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Build;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Notifications whose taps and actions open URLs in the app.
@@ -46,6 +48,10 @@ final class Notifications {
     /**
      * Posts or replaces notification {@code id}. Importance is a {@code NotificationManager}
      * importance; a channel keeps the importance it was first created with.
+     *
+     * <p>Segments, when there are any, draw a progress bar: see {@link #showProgress}. An
+     * ongoing notification that started at {@code started} (milliseconds since 1970, or 0)
+     * counts up from then, and {@code promoted} asks Android 16 to show it as a Live Update.
      */
     static void post(
             Activity activity,
@@ -60,7 +66,14 @@ final class Notifications {
             String[] actionLabels,
             String[] actionUrls,
             boolean ongoing,
-            int color) {
+            int color,
+            int[] segmentLengths,
+            int[] segmentColors,
+            int[] pointPositions,
+            int[] pointColors,
+            int progress,
+            boolean promoted,
+            long started) {
         NotificationManager manager = activity.getSystemService(NotificationManager.class);
         manager.createNotificationChannel(
                 new NotificationChannel(channel, channelName, importance));
@@ -85,7 +98,80 @@ final class Notifications {
                                     icon(activity), actionLabels[i], open(activity, actionUrls[i]))
                             .build());
         }
+        if (ongoing && started > 0) {
+            builder.setWhen(started).setUsesChronometer(true).setShowWhen(true);
+        }
+        if (segmentLengths.length > 0) {
+            showProgress(builder, segmentLengths, segmentColors, pointPositions, pointColors, progress);
+        }
+        if (promoted) {
+            promote(builder);
+        }
         manager.notify(id, builder.build());
+    }
+
+    /**
+     * A bar of coloured segments with points on it, as Android 16 draws a journey: what is past
+     * {@code progress} is faded. Earlier versions, and any failure here, get a plain bar. The
+     * style is reached by reflection, so the app builds against an older platform.
+     */
+    private static void showProgress(
+            Notification.Builder builder,
+            int[] lengths,
+            int[] colors,
+            int[] positions,
+            int[] pointColors,
+            int progress) {
+        int max = 0;
+        for (int length : lengths) {
+            max += length;
+        }
+        if (Build.VERSION.SDK_INT >= 36) {
+            try {
+                Class<?> style = Class.forName("android.app.Notification$ProgressStyle");
+                Class<?> segment = Class.forName("android.app.Notification$ProgressStyle$Segment");
+                Class<?> point = Class.forName("android.app.Notification$ProgressStyle$Point");
+                Object progressStyle = style.getConstructor().newInstance();
+                List<Object> segments = new ArrayList<>();
+                for (int i = 0; i < lengths.length; i++) {
+                    Object piece = segment.getConstructor(int.class).newInstance(lengths[i]);
+                    segment.getMethod("setColor", int.class).invoke(piece, colors[i]);
+                    segments.add(piece);
+                }
+                List<Object> points = new ArrayList<>();
+                for (int i = 0; i < positions.length; i++) {
+                    Object mark = point.getConstructor(int.class).newInstance(positions[i]);
+                    point.getMethod("setColor", int.class).invoke(mark, pointColors[i]);
+                    points.add(mark);
+                }
+                style.getMethod("setProgressSegments", List.class).invoke(progressStyle, segments);
+                style.getMethod("setProgressPoints", List.class).invoke(progressStyle, points);
+                style.getMethod("setStyledByProgress", boolean.class).invoke(progressStyle, true);
+                style.getMethod("setProgress", int.class).invoke(progressStyle, progress);
+                builder.setStyle((Notification.Style) progressStyle);
+                return;
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+                // The plain bar below still shows how far along the run is.
+            }
+        }
+        builder.setProgress(max, Math.min(progress, max), false);
+    }
+
+    /**
+     * Asks Android 16 to promote an ongoing notification to a Live Update. Without the method,
+     * the extra it sets is asked for directly; earlier versions ignore both.
+     */
+    private static void promote(Notification.Builder builder) {
+        if (Build.VERSION.SDK_INT < 36) {
+            return;
+        }
+        try {
+            Notification.Builder.class
+                    .getMethod("setRequestPromotedOngoing", boolean.class)
+                    .invoke(builder, true);
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+            builder.getExtras().putBoolean("android.requestPromotedOngoing", true);
+        }
     }
 
     static void cancel(Activity activity, int id) {

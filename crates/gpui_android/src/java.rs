@@ -14,7 +14,7 @@ use crate::{
 use android_activity::{AndroidApp, AndroidAppWaker};
 use jni::{
     Env, EnvUnowned, JValue, JavaVM, jni_sig, jni_str,
-    objects::{JByteArray, JClass, JObject, JObjectArray, JString},
+    objects::{JByteArray, JClass, JIntArray, JObject, JObjectArray, JString},
     refs::Global,
     sys::{jfloat, jint, jlong, jobject, jstring},
 };
@@ -653,11 +653,18 @@ impl Java {
             let url = JString::from_str(env, &notification.url)?;
             let labels = string_array(env, notification.actions.iter().map(|(label, _)| label.as_str()))?;
             let urls = string_array(env, notification.actions.iter().map(|(_, url)| url.as_str()))?;
+            // A bar without progress has no segments, which Java leaves out.
+            let progress = notification.progress.clone().unwrap_or_default();
+            let opaque = |rgb: u32| (0xFF00_0000 | rgb) as jint;
+            let lengths = int_array(env, progress.segments.iter().map(|(length, _)| *length as jint))?;
+            let colors = int_array(env, progress.segments.iter().map(|(_, rgb)| opaque(*rgb)))?;
+            let positions = int_array(env, progress.points.iter().map(|(at, _)| *at as jint))?;
+            let point_colors = int_array(env, progress.points.iter().map(|(_, rgb)| opaque(*rgb)))?;
             env.call_method(
                 activity,
                 jni_str!("postNotification"),
                 jni_sig!(
-                    "(Ljava/lang/String;Ljava/lang/String;IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;ZI)V"
+                    "(Ljava/lang/String;Ljava/lang/String;IILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;ZI[I[I[I[IIZJ)V"
                 ),
                 &[
                     JValue::Object(&channel),
@@ -671,7 +678,14 @@ impl Java {
                     JValue::Object(&labels),
                     JValue::Object(&urls),
                     JValue::Bool(notification.ongoing),
-                    JValue::Int((0xFF00_0000 | notification.color) as jint),
+                    JValue::Int(opaque(notification.color)),
+                    JValue::Object(&lengths),
+                    JValue::Object(&colors),
+                    JValue::Object(&positions),
+                    JValue::Object(&point_colors),
+                    JValue::Int(progress.position as jint),
+                    JValue::Bool(notification.promoted),
+                    JValue::Long(notification.started.unwrap_or(0) as jlong),
                 ],
             )?;
             Ok(())
@@ -945,6 +959,16 @@ pub extern "system" fn Java_dev_pi_gpui_GpuiActivity_nativeInlineFailed<'caller>
 }
 
 /// A `String[]` for Java.
+fn int_array<'local>(
+    env: &mut Env<'local>,
+    items: impl ExactSizeIterator<Item = jint>,
+) -> jni::errors::Result<JIntArray<'local>> {
+    let items: Vec<jint> = items.collect();
+    let array = env.new_int_array(items.len())?;
+    array.set_region(env, 0, &items)?;
+    Ok(array)
+}
+
 fn string_array<'local, 'a>(
     env: &mut Env<'local>,
     items: impl ExactSizeIterator<Item = &'a str>,

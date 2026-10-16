@@ -54,7 +54,7 @@ pub fn project_queue_keys(
     visible: impl Fn(usize) -> bool,
     key: impl Fn(usize) -> Option<QueueKey>,
 ) -> Session {
-    let turns = turns(pi, facts.cwd);
+    let (turns, accounted) = turns(pi, facts.cwd);
     let working = pi.busy() || !facts.outbox.is_empty();
     let last = pi.messages.iter().rev().find(|m| m["role"] == "assistant");
     let stop = last.and_then(|m| m["stopReason"].as_str()).unwrap_or("");
@@ -92,12 +92,21 @@ pub fn project_queue_keys(
     }
     if let Some(turn) = turns.last_mut() {
         settle(turn, state, pi, facts.cwd, optimistic.is_none());
-        // The stage Pi is in has gone on since the last message.
+        // What Pi is doing has gone on since the last message; a question
+        // has waited for you since then.
+        let now_doing = if state == State::NeedsYou {
+            Some(StretchKind::Wait)
+        } else {
+            turn.live_stage().map(StretchKind::of)
+        };
+        // Untimed messages still put what Pi is doing at the end of the line.
         if state.is_running()
-            && let Some(live) = turn.live_stage()
-            && let Some(since) = pi.messages.iter().rev().find_map(timestamp)
+            && let Some(kind) = now_doing
         {
-            turn.add_time(live, now().saturating_sub(since));
+            turn.add_time(
+                kind,
+                accounted.map_or(Duration::ZERO, |since| now().saturating_sub(since)),
+            );
         }
     }
     let started = pi
@@ -169,6 +178,12 @@ pub fn project_queue_keys(
         },
         elapsed,
         finished_at: (!state.is_running()).then(|| ended.map(clock_at)).flatten(),
+        updated: pi
+            .messages
+            .iter()
+            .rev()
+            .find_map(timestamp)
+            .map_or(0, |at| at.as_secs()),
         turns,
         files: files(pi, facts.cwd),
         check: check(pi),
@@ -212,6 +227,7 @@ pub fn listed(id: SessionId, listed: &crate::remote::Listed, folder: String) -> 
         elapsed: Duration::ZERO,
         finished_at: (!state.is_running() && listed.updated > 0)
             .then(|| clock_at(Duration::from_secs(listed.updated))),
+        updated: listed.updated,
         turns: Vec::new(),
         files: Vec::new(),
         check: None,
@@ -301,31 +317,69 @@ fn name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-fn kind(tool: &str) -> StageKind {
+/// What a call is for: edits change; tests, builds and linters check; the
+/// rest, commands that only look around included, is looking.
+fn kind(tool: &str, args: &Value) -> StageKind {
     match tool {
         "edit" | "write" => StageKind::Change,
-        "bash" | "javascript" => StageKind::Verify,
+        "bash" if args["command"].as_str().is_some_and(is_check) => StageKind::Verify,
         _ => StageKind::Understand,
     }
 }
 
-fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
+/// Where a call is filed in a turn, by its id.
+fn call_of(turn: &Turn, id: &str) -> Option<(StageKind, usize)> {
+    turn.stages.iter().find_map(|stage| {
+        stage
+            .tools
+            .iter()
+            .position(|tool| tool.id == id)
+            .map(|index| (stage.kind, index))
+    })
+}
+
+/// What the run line's time goes to, between the moments Pi stamps: its
+/// messages, and when each call ended.
+#[derive(Default)]
+struct RunClock {
+    /// The last moment accounted for.
+    at: Option<Duration>,
+    /// The last call whose end wasn't stamped: the time until the next
+    /// message is its, then its result.
+    pending: Option<(StretchKind, Option<Mark>)>,
+    /// Work handed to subagents, until the next message: not Pi's own time.
+    handed_off: bool,
+}
+
+impl RunClock {
+    /// Ends the call still pending with its result, with no more time.
+    fn settle(&mut self, turn: &mut Turn) {
+        if let Some((kind, Some(mark))) = self.pending.take() {
+            turn.end_stretch(kind, mark);
+        }
+    }
+}
+
+/// The turns, and the last moment the run line accounts for, from which a
+/// running session's live stretch goes on.
+fn turns(pi: &Pi, cwd: &str) -> (Vec<Turn>, Option<Duration>) {
     let mut turns: Vec<Turn> = Vec::new();
     let mut pages = pi_markdown::Pages::default();
-    // The run line's stretches: the time up to each message goes to what that
-    // message did, and a tool's result to the tool's stage.
-    let mut clock: Option<Duration> = None;
-    let mut last_kind = StageKind::Understand;
+    // The run line, in order: the time before a message goes to what it is
+    // about to do, and a call's time up to its stamped end to what the call
+    // was for. A check's result ends its stretch.
+    let mut clock = RunClock::default();
     for message in &pi.messages {
         let at = timestamp(message);
-        let spent = at
-            .zip(clock)
-            .map_or(Duration::ZERO, |(at, clock)| at.saturating_sub(clock));
-        if at.is_some() {
-            clock = at;
-        }
         match message["role"].as_str() {
             Some("user") => {
+                if let Some(turn) = turns.last_mut() {
+                    clock.settle(turn);
+                }
+                clock = RunClock {
+                    at,
+                    ..RunClock::default()
+                };
                 let text = crate::visualize_prompt::label(&text_of(message));
                 let reported = pi_core::subagent::report(&text).map(str::to_owned);
                 // A `/skill:` prompt arrives expanded; it reads as it was typed.
@@ -382,14 +436,6 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                 let turn = turns.last_mut().expect("a turn");
                 turn.flow.push(crate::model::Flow::Compacted(summary));
             }
-            // Time handed off isn't a stage of Pi's own.
-            Some("toolResult") if message["toolName"] == pi_core::subagent::TOOL => {}
-            Some("toolResult") => {
-                let tool = message["toolName"].as_str().map_or(last_kind, kind);
-                if let Some(turn) = turns.last_mut() {
-                    turn.add_time(tool, spent);
-                }
-            }
             Some("assistant") => {
                 if turns.is_empty() {
                     let mut turn = Turn::new("", "");
@@ -402,11 +448,26 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                     .into_iter()
                     .flatten()
                     .find(|block| block["type"] == "toolCall")
-                    .map(|block| kind(block["name"].as_str().unwrap_or("")));
-                if let Some(first_tool) = first_tool {
-                    last_kind = first_tool;
+                    .map(|block| kind(block["name"].as_str().unwrap_or(""), &block["arguments"]));
+                let gap = at
+                    .zip(clock.at)
+                    .map_or(Duration::ZERO, |(at, since)| at.saturating_sub(since));
+                if std::mem::take(&mut clock.handed_off) {
+                    // Subagents' time is theirs.
+                } else if let Some((kind, mark)) = clock.pending.take() {
+                    // A call whose end wasn't stamped ran until this message.
+                    turn.add_time(kind, gap);
+                    if let Some(mark) = mark {
+                        turn.end_stretch(kind, mark);
+                    }
+                } else {
+                    // Thinking before a call goes to what the call is for;
+                    // words with no call are Pi looking the work over.
+                    turn.add_time(first_tool.map_or(StretchKind::Look, StretchKind::of), gap);
                 }
-                turn.add_time(first_tool.unwrap_or(StageKind::HandOff), spent);
+                if at.is_some() {
+                    clock.at = at;
+                }
                 // Redacted reasoning carries no text, so it shows nothing.
                 let thinking = message["content"]
                     .as_array()
@@ -448,10 +509,46 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
                         turn.flow
                             .push(crate::model::Flow::Handoff(turn.handoffs.len()));
                         turn.handoffs.push(handoff);
+                        // Time handed off isn't Pi's own.
+                        clock.settle(turn);
+                        match observed.and_then(|tool| tool.ended_at) {
+                            Some(end) => clock.at = Some(Duration::from_millis(end)),
+                            None => clock.handed_off = true,
+                        }
                         continue;
                     }
                     let args = observed.map_or(&block["arguments"], |tool| &tool.args);
                     add_tool(turn, id, name, args, observed, cwd);
+                    // The call's own time, up to its stamped end, and a
+                    // check's result.
+                    if let Some(&Flow::Tool(stage, index)) = turn.flow.last() {
+                        let stretch = StretchKind::of(stage);
+                        let result = observed
+                            .filter(|tool| stage == StageKind::Verify && tool.finished)
+                            .map(|tool| {
+                                if tool.is_error {
+                                    Mark::Failed
+                                } else {
+                                    Mark::Passed
+                                }
+                            });
+                        clock.settle(turn);
+                        turn.add_call(stretch, (stage, index));
+                        match observed.and_then(|tool| tool.ended_at) {
+                            Some(end) => {
+                                let end = Duration::from_millis(end);
+                                let time = clock
+                                    .at
+                                    .map_or(Duration::ZERO, |since| end.saturating_sub(since));
+                                turn.add_time(stretch, time);
+                                if let Some(mark) = result {
+                                    turn.end_stretch(stretch, mark);
+                                }
+                                clock.at = Some(end);
+                            }
+                            None => clock.pending = Some((stretch, result)),
+                        }
+                    }
                     // What a call returned follows the call.
                     if let Some(observed) = observed {
                         let path = observed.args["path"].as_str();
@@ -480,7 +577,10 @@ fn turns(pi: &Pi, cwd: &str) -> Vec<Turn> {
             _ => {}
         }
     }
-    turns
+    if let Some(turn) = turns.last_mut() {
+        clock.settle(turn);
+    }
+    (turns, clock.at)
 }
 
 fn add_tool(
@@ -491,7 +591,7 @@ fn add_tool(
     observed: Option<&Tool>,
     cwd: &str,
 ) {
-    let kind = kind(name);
+    let kind = kind(name, args);
     let lines = observed.map(tool_lines).unwrap_or_default();
     let added = lines.iter().filter(|l| l.kind == LineKind::Added).count() as u32;
     let removed = lines.iter().filter(|l| l.kind == LineKind::Removed).count() as u32;
@@ -543,10 +643,16 @@ fn add_tool(
                 Reference::File(_) => (f + 1, s),
                 Reference::Search(_) => (f, s + 1),
             });
+            // Commands that only look around, such as `rg` or `git log`.
+            let commands = stage
+                .tools
+                .iter()
+                .filter(|tool| matches!(tool.name.as_str(), "bash" | "javascript"))
+                .count();
             let read = match files {
                 0 => None,
-                1 => Some("Read 1 file".to_owned()),
-                count => Some(format!("Read {count} files")),
+                1 => Some("read 1 file".to_owned()),
+                count => Some(format!("read {count} files")),
             };
             let searched = match searches {
                 0 => None,
@@ -554,15 +660,18 @@ fn add_tool(
                 2 => Some("searched twice".to_owned()),
                 count => Some(format!("searched {count} times")),
             };
-            stage.what = match (read, searched) {
-                (Some(read), Some(searched)) => format!("{read} · {searched}"),
-                (Some(read), None) => read,
-                (None, Some(searched)) => {
-                    let mut searched = searched;
-                    searched[..1].make_ascii_uppercase();
-                    searched
-                }
-                (None, None) => "Looked around".into(),
+            let ran = match commands {
+                0 => None,
+                1 => Some("ran 1 command".to_owned()),
+                count => Some(format!("ran {count} commands")),
+            };
+            let parts: Vec<String> = [read, searched, ran].into_iter().flatten().collect();
+            stage.what = if parts.is_empty() {
+                "Looked around".into()
+            } else {
+                let mut what = parts.join(" · ");
+                what[..1].make_ascii_uppercase();
+                what
             };
         }
         StageKind::Change => {
@@ -641,7 +750,7 @@ fn settle(turn: &mut Turn, state: State, pi: &Pi, cwd: &str, inherit_running_too
         // Finished edits/checks are history, not current execution. Inference
         // between tool calls can revisit any stage; never infer it from the
         // first-seen/sorted order of the stage buckets.
-        let live = running.map_or(StageKind::Understand, |tool| kind(&tool.name));
+        let live = running.map_or(StageKind::Understand, |tool| kind(&tool.name, &tool.args));
         if let Some(tool) = running {
             // Execution events can precede the assistant's toolCall.
             if !turn
@@ -651,6 +760,9 @@ fn settle(turn: &mut Turn, state: State, pi: &Pi, cwd: &str, inherit_running_too
                 .any(|t| t.id == tool.id)
             {
                 add_tool(turn, &tool.id, &tool.name, &tool.args, Some(tool), cwd);
+            }
+            if let Some(call) = call_of(turn, &tool.id) {
+                turn.add_call(StretchKind::of(live), call);
             }
         }
         let stage = turn.stage_mut(live);
@@ -966,15 +1078,35 @@ fn files(pi: &Pi, cwd: &str) -> Vec<FileChange> {
     files
 }
 
-/// Commands that check work, as opposed to looking around.
-fn is_check(command: &str) -> bool {
+/// Commands that check work, as opposed to looking around: some part of the
+/// command runs a test, build or linter. `rg test` or `git commit -m "test"`
+/// only mention one.
+pub(crate) fn is_check(command: &str) -> bool {
     const WORDS: [&str; 14] = [
         "test", "check", "clippy", "lint", "build", "tsc", "pytest", "jest", "vitest", "vet",
         "fmt", "make", "eslint", "mypy",
     ];
-    command
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-        .any(|word| WORDS.contains(&word))
+    /// Programs that read, search or describe, whatever their arguments say.
+    const LOOKS: [&str; 26] = [
+        "rg", "grep", "egrep", "fgrep", "ag", "cat", "less", "head", "tail", "ls", "find", "fd",
+        "tree", "wc", "sed", "awk", "echo", "printf", "git", "cd", "pwd", "which", "file", "stat",
+        "diff", "jq",
+    ];
+    command.split(['&', ';', '|', '\n']).any(|part| {
+        let mut words = part
+            .split_whitespace()
+            // Environment assignments come before the program: `CI=1 pnpm test`.
+            .skip_while(|word| word.contains('=') && !word.starts_with('-'));
+        let Some(program) = words.next() else {
+            return false;
+        };
+        let program = program.rsplit('/').next().unwrap_or(program);
+        !LOOKS.contains(&program)
+            && std::iter::once(program)
+                .chain(words)
+                .flat_map(|word| word.split(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+                .any(|word| WORDS.contains(&word))
+    })
 }
 
 /// The last check of the last turn, and whether it passed.
@@ -1080,13 +1212,14 @@ pub fn question(request: &Value) -> Option<Question> {
                 detail: None,
             },
         ],
+        // Every option, by its place: the answer names the one picked.
         "select" => request["options"]
             .as_array()?
             .iter()
-            .filter_map(Value::as_str)
-            .zip([Answer::AllowOnce, Answer::AllowSession, Answer::Deny])
-            .map(|(label, answer)| Choice {
-                answer,
+            .enumerate()
+            .filter_map(|(index, option)| Some((index, option.as_str()?)))
+            .map(|(index, label)| Choice {
+                answer: Answer::Pick(index),
                 label: label.to_owned(),
                 detail: None,
             })
@@ -1107,12 +1240,18 @@ pub fn answer(request: &Value, answer: Answer) -> Value {
     match request["method"].as_str() {
         Some("confirm") => response["confirmed"] = (answer != Answer::Deny).into(),
         _ => {
+            // A select's choices name their option; the permission words are
+            // its first and second option, and No picks none.
             let index = match answer {
-                Answer::AllowOnce => 0,
-                Answer::AllowSession => 1,
-                Answer::Deny => 2,
+                Answer::Pick(index) => Some(index),
+                Answer::AllowOnce => Some(0),
+                Answer::AllowSession => Some(1),
+                Answer::Deny => None,
             };
-            match request["options"].get(index).and_then(Value::as_str) {
+            match index
+                .and_then(|index| request["options"].get(index))
+                .and_then(Value::as_str)
+            {
                 Some(value) => response["value"] = value.into(),
                 None => response["cancelled"] = true.into(),
             }
@@ -1224,6 +1363,97 @@ mod tests {
         assert_eq!(shown.details.tools, ["read", "grep", "edit", "bash"]);
         assert_eq!(shown.details.context_percent, None);
         assert_eq!(shown.details.context_tokens, "Not reported");
+    }
+
+    #[test]
+    fn the_run_line_keeps_order_and_each_checks_result() {
+        let at = |seconds: u64| 1_759_600_000_000u64 + seconds * 1000;
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":"Accept empty signatures","timestamp":at(0)},
+                {"role":"assistant","content":[{"type":"toolCall","id":"r","name":"read","arguments":{"path":"src/a.ts"}}],"stopReason":"toolUse","timestamp":at(10)},
+                {"role":"toolResult","toolCallId":"r","toolName":"read","content":[],"isError":false,"timestamp":at(12)},
+                {"role":"assistant","content":[{"type":"toolCall","id":"s","name":"bash","arguments":{"command":"rg test src"}}],"stopReason":"toolUse","timestamp":at(14)},
+                {"role":"toolResult","toolCallId":"s","toolName":"bash","content":[],"isError":false,"timestamp":at(15)},
+                {"role":"assistant","content":[{"type":"toolCall","id":"e","name":"edit","arguments":{"path":"src/a.ts"}}],"stopReason":"toolUse","timestamp":at(30)},
+                {"role":"toolResult","toolCallId":"e","toolName":"edit","content":[],"isError":false,"timestamp":at(35)},
+                {"role":"assistant","content":[{"type":"toolCall","id":"c","name":"bash","arguments":{"command":"pnpm tsc --noEmit"}}],"stopReason":"toolUse","timestamp":at(40)},
+                {"role":"toolResult","toolCallId":"c","toolName":"bash","content":[{"type":"text","text":"Command exited with code 2"}],"isError":true,"timestamp":at(46)},
+                {"role":"assistant","content":[{"type":"toolCall","id":"f","name":"edit","arguments":{"path":"src/a.test.ts"}}],"stopReason":"toolUse","timestamp":at(60)},
+                {"role":"toolResult","toolCallId":"f","toolName":"edit","content":[],"isError":false,"timestamp":at(62)},
+                {"role":"assistant","content":[{"type":"toolCall","id":"t","name":"bash","arguments":{"command":"CI=1 pnpm test --filter @pi/ai"}}],"stopReason":"toolUse","timestamp":at(70)},
+                {"role":"toolResult","toolCallId":"t","toolName":"bash","content":[],"isError":false,"timestamp":at(100)},
+                {"role":"assistant","content":[{"type":"text","text":"Done."}],"stopReason":"stop","timestamp":at(110)}
+            ]}}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        let turn = &shown.turns[0];
+        let run: Vec<_> = turn
+            .run
+            .iter()
+            .map(|stretch| (stretch.kind, stretch.time.as_secs(), stretch.mark))
+            .collect();
+        // What happened, in order: the type check that failed, the fix, then
+        // the tests that passed and the closing words.
+        assert_eq!(
+            run,
+            [
+                (StretchKind::Look, 15, None),
+                (StretchKind::Change, 20, None),
+                (StretchKind::Check, 11, Some(Mark::Failed)),
+                (StretchKind::Change, 16, None),
+                (StretchKind::Check, 38, Some(Mark::Passed)),
+                (StretchKind::Look, 10, None),
+            ]
+        );
+        // `rg test` only looked: it is in the first stretch, with the read.
+        assert_eq!(
+            turn.run[0].calls,
+            [(StageKind::Understand, 0), (StageKind::Understand, 1)]
+        );
+        assert_eq!(turn.run[2].calls, [(StageKind::Verify, 0)]);
+        assert_eq!(turn.stages[0].what, "Read 1 file · ran 1 command");
+        assert_eq!(shown.updated, at(110) / 1000);
+    }
+
+    #[test]
+    fn checks_run_something_rather_than_mention_it() {
+        for command in [
+            "cargo test -p app",
+            "pnpm --filter @pi/ai test",
+            "cd packages/ai && pnpm test",
+            "CI=1 npm run lint",
+            "npx tsc --noEmit",
+            "make",
+            "go vet ./...",
+        ] {
+            assert!(is_check(command), "{command}");
+        }
+        for command in [
+            "rg test src",
+            "git commit -m 'add a test'",
+            "printf test",
+            "cat test.txt",
+            "ls tests",
+            "grep -rn check .",
+        ] {
+            assert!(!is_check(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_select_offers_every_option_and_answers_the_one_picked() {
+        let request = json!({"type":"extension_ui_request","id":"q","method":"select",
+            "title":"Where should the jitter go?",
+            "options":["In the shared backoff","Only for OpenCode","As a setting","Leave it alone","Something else"]});
+        let question = question(&request).unwrap();
+        // All five, not the first three.
+        assert_eq!(question.choices.len(), 5);
+        assert_eq!(question.choices[4].label, "Something else");
+        let reply = answer(&request, question.choices[3].answer);
+        assert_eq!(reply["value"], "Leave it alone");
+        // No to a select picks none of its options.
+        assert_eq!(answer(&request, Answer::Deny)["cancelled"], true);
     }
 
     #[test]
@@ -1352,7 +1582,7 @@ mod tests {
             (
                 "run-1",
                 "bash",
-                json!({"command":"printf test"}),
+                json!({"command":"cargo test -p app"}),
                 StageKind::Verify,
             ),
             (
@@ -1371,7 +1601,7 @@ mod tests {
                 "js-1",
                 "javascript",
                 json!({"file":"inspect.cjs"}),
-                StageKind::Verify,
+                StageKind::Understand,
             ),
         ] {
             pi.apply(&json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":id,"name":name,"arguments":args}],"stopReason":"toolUse"}})).unwrap();
@@ -1605,6 +1835,7 @@ mod tests {
             diff: None,
             finished: false,
             is_error: false,
+            ended_at: None,
             images: Vec::new(),
             details: Value::Null,
         };
