@@ -243,8 +243,6 @@ type CrewInput = {
   mode: SubagentDetails["mode"];
   swarm?: true;
   items: (Item & { definition: Definition })[];
-  /** First input of the run that made the tool call: stable across that run's turns. */
-  runInput?: number;
 };
 type CrewState = { phase: "run" } | { phase: "report"; text: string };
 
@@ -273,6 +271,12 @@ export function definition(item: Item, agents: readonly AgentDefinition[]): Defi
  * `harness` is read when a crew runs, after the Harness opened. `resources`
  * gives the agents, read again for each call.
  */
+export function submitSubagentReport(
+  pi: Pick<Conversation, "submit">, content: string, requestId: string, context: Context,
+) {
+  return pi.submit({ type: "input", content, whenBusy: "steer", requestId }, context);
+}
+
 export function subagentExtension(models: Models, harness: () => Harness, resources: () => Resources): Extension {
   // Owned by Pi's conversation, and background: Pi's turns, idle waits and Esc
   // leave it alone; stopping the whole session reaches it.
@@ -285,9 +289,10 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
         const text = await new CrewRun(runtime, context, harness(), models, extension, crew.input).execute();
         await runtime.commit(() => ({ status: "running", checkpoint: { phase: "report", text } }), context);
       },
-      // Admission and the run-identity check share one Session-line commit, so
-      // the delegating run cannot end and be replaced between checking and
-      // queueing. The public submit API has no targeted-run option.
+      // Admission and the live-run check share one Session-line commit. A
+      // report is trusted internal context: steer whichever parent run is live
+      // so it is available at that run's next model boundary, rather than
+      // making the user wait for an otherwise redundant follow-up turn.
       report: async (crew, runtime, context) => {
         const requestId = `subagent-report-${crew.id}`;
         let finished = false;
@@ -298,9 +303,7 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
           }
           const live = await tx.doc(LiveDoc, runtime.conversationId);
           if (live.run === undefined) return undefined;
-          const mode = crew.input.runInput !== undefined && Number(live.run.inputs[0]) === crew.input.runInput
-            ? "steer" as const
-            : "followUp" as const;
+          const mode = "steer" as const;
           const inbox = await tx.doc(InboxDoc, runtime.conversationId);
           const submission = await tx.createSubmission({
             conversationId: runtime.conversationId, requestId, type: "input", status: "queued",
@@ -310,10 +313,11 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
           return { status: "terminal", outcome: { status: "completed", result: null } };
         }, context);
         if (finished) return;
-        // Idle at the atomic check: start a dedicated report turn, or safely
-        // queue behind a user run that began before submit gets the Session line.
+        // Idle at the atomic check: start a dedicated report turn. If a user
+        // run wins the Session line before this submit does, steer that newly
+        // active run rather than turning the report into a later follow-up.
         const pi = (await runtime.conversation(runtime.conversationId, context))!;
-        await pi.submit({ type: "input", content: crew.state.checkpoint.text, whenBusy: "followUp", requestId }, context);
+        await submitSubagentReport(pi, crew.state.checkpoint.text, requestId, context);
         await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
       },
     },
@@ -406,10 +410,8 @@ export function subagentExtension(models: Models, harness: () => Harness, resour
           if (Object.hasOwn(calls, api.callId)) return true;
           if (swarm && !swarmEnabled(await tx.doc(Metadata, api.conversationId))) return false;
           calls[api.callId] = JSON.parse(JSON.stringify(details));
-          const runInput = (await tx.doc(LiveDoc, api.conversationId)).run?.inputs[0];
           const input: CrewInput = JSON.parse(JSON.stringify({
             callId: api.callId, mode, ...(swarm ? { swarm: true } : {}), items: items.map((item) => ({ ...item, definition: definition(item, agents) })),
-            ...(runInput === undefined ? {} : { runInput: Number(runInput) }),
           }));
           const crewId = await tx.createTask(Crew, input, { ownership: { kind: "conversation" }, background: true });
           if (swarm) (await tx.doc(Children, crewId)).swarm = swarm;

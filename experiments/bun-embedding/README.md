@@ -2,14 +2,14 @@
 
 Android Local is integrated into the shared UI with native Claude/Codex accounts,
 stock Durable tools and persistent SQLite sessions. **Bun 1.4.3** is source-linked
-as a genuine shared library; Pi/Durable stays pinned and unchanged at **1.2.0**.
+as a genuine shared library; Pi/Durable stays pinned and unchanged at **1.3.0**.
 Bun's CLI `main` is never called. The stock shell tool may spawn Android sh.
 
 ## Release/CI build
 
 `.github/workflows/desktop.yml` source-builds the pinned ARM64 runtime in a separate
 job with LLVM 23, NDK **29.0.14206865**, nightly **2026-09-15** Rust/rust-src and
-bootstrap Bun **1.4.2**. `prepare.py` checks the source archive SHA-256 and adds the
+bootstrap Bun **1.4.3**. `prepare.py` checks the source archive SHA-256 and adds the
 explicit embedding module. Upstream `--ci=ON --lto=OFF` embeds built-in JavaScript;
 matching JSC is pinned at `0c06faadf65bf8e8c8ad3a5a8aca83e1e9ed653f`.
 The public Bun source revision is `c6da4a4d3010e5553438c60f6bd76d981976867c`.

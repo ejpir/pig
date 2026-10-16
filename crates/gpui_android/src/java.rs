@@ -704,6 +704,15 @@ impl Java {
         });
     }
 
+    /// Android's configured touch-and-hold delay, in milliseconds.
+    pub fn long_press_timeout_ms(&self) -> Option<i32> {
+        self.call("longPressTimeout", |env, activity| {
+            env.call_method(activity, jni_str!("longPressTimeout"), jni_sig!("()I"), &[])?
+                .i()
+        })
+        .filter(|timeout| *timeout > 0)
+    }
+
     pub fn long_press_feedback(&self) {
         self.call("longPressFeedback", |env, activity| {
             env.call_method(

@@ -68,7 +68,7 @@ not an OS sandbox. See the [API and limitations](crates/pi_visual/README.md).
 
 Pi Desktop can also run sessions with a durable engine built on pi-durable. A session's state lives in SQLite on the computer that runs it, so the session survives disconnects and crashes and resumes where it was. Use it for SSH sessions (**New session → SSH → Durable · experimental**). [Pi for Android](crates/pi_android/README.md) always uses it: SSH sessions run durably on your computer; experimental Local sessions persist on the phone.
 
-The macOS and Linux SSH helpers in the [releases](https://github.com/ejpir/pig/releases) (`pi-desktop-remote-*`) have the engine built in. Local sessions don't need it; the steps above are enough. To build the engine into the helper yourself, on the machine that will run the sessions (it needs npm and Bun 1.4.2):
+The macOS and Linux SSH helpers in the [releases](https://github.com/ejpir/pig/releases) (`pi-desktop-remote-*`) have the engine built in. Local sessions don't need it; the steps above are enough. To build the engine into the helper yourself, on the machine that will run the sessions (it needs npm and Bun 1.4.3):
 
 ```sh
 (cd backend/durable && npm ci --ignore-scripts && bun run build)

@@ -45,8 +45,20 @@ const TASK_BUDGET: Duration = Duration::from_millis(2);
 const INPUT_BUDGET: Duration = Duration::from_millis(2);
 const INPUT_BATCH: usize = 64;
 
-/// Android's `ViewConfiguration` defaults, so touches feel native.
-struct AndroidGestures;
+const DEFAULT_LONG_PRESS_MS: i32 = 400;
+
+fn long_press_duration(timeout_ms: Option<i32>) -> Duration {
+    Duration::from_millis(
+        timeout_ms
+            .filter(|timeout| *timeout > 0)
+            .unwrap_or(DEFAULT_LONG_PRESS_MS) as u64,
+    )
+}
+
+/// Android's `ViewConfiguration`, including the user's touch-and-hold delay.
+struct AndroidGestures {
+    long_press_duration: Duration,
+}
 
 impl PlatformGestures for AndroidGestures {
     fn tuning(&self) -> GestureTuning {
@@ -54,7 +66,7 @@ impl PlatformGestures for AndroidGestures {
             touch_slop: px(8.),
             multi_tap_interval: Duration::from_millis(300),
             multi_tap_slop: px(100.),
-            long_press_duration: Duration::from_millis(400),
+            long_press_duration: self.long_press_duration,
             scroll_physics: ScrollPhysics::android(),
             // Android may batch moves while GPUI is painting. We deliberately
             // coalesce those samples because replaying them without their
@@ -566,7 +578,9 @@ impl Platform for AndroidPlatform {
     }
 
     fn gestures(&self) -> Option<Rc<dyn PlatformGestures>> {
-        Some(Rc::new(AndroidGestures))
+        Some(Rc::new(AndroidGestures {
+            long_press_duration: long_press_duration(self.java.long_press_timeout_ms()),
+        }))
     }
 
     /// Launches once the activity has a window, then runs until Android
@@ -949,4 +963,20 @@ pub fn init_logging(tag: &str, level: log::LevelFilter) {
         log::error!("{info}");
         default_hook(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_press_timeout_uses_android_setting_with_native_fallback() {
+        assert_eq!(long_press_duration(Some(250)), Duration::from_millis(250));
+        assert_eq!(
+            long_press_duration(Some(1_500)),
+            Duration::from_millis(1_500)
+        );
+        assert_eq!(long_press_duration(None), Duration::from_millis(400));
+        assert_eq!(long_press_duration(Some(0)), Duration::from_millis(400));
+    }
 }

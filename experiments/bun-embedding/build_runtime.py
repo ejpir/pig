@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build pinned Bun Android ARM64 and publish bounded runtime + object relink kits.
 
-Linux x86_64 host; bootstrap Bun 1.4.2, NDK 29, LLVM 23 and the pinned Rust
+Linux x86_64 host; bootstrap Bun 1.4.3, NDK 29, LLVM 23 and the pinned Rust
 nightly (including rust-src) must already be installed. No tool installation.
 The relink kit's copy of this script also implements the offline `relink` command.
 """
@@ -721,8 +721,8 @@ def build(args):
         raise ValueError("--out-dir must be empty (use a new directory after failure)")
     tools = ndk_tools(ndk)
     bun = shutil.which("bun")
-    if not bun or capture([bun, "--version"]) != "1.4.2":
-        raise ValueError("Bootstrap Bun 1.4.2 required on PATH")
+    if not bun or capture([bun, "--version"]) != "1.4.3":
+        raise ValueError("Bootstrap Bun 1.4.3 required on PATH")
     env = {
         **os.environ,
         "RUSTUP_TOOLCHAIN": RUST,
@@ -922,7 +922,7 @@ Bun source: https://github.com/oven-sh/bun/tree/{BUN_COMMIT}
 The bridge patch is native embedding.rs plus `mod pi_embedding;` in runtime
 lib.rs; patched-runtime-lib.rs is included. Build/relink/prepare scripts and
 exact commands are included. Rebuilding from source additionally requires Bun
-1.4.2 and {RUST} + rust-src, NASM, Git, CMake and normal Bun build prerequisites.
+1.4.3 and {RUST} + rust-src, NASM, Git, CMake and normal Bun build prerequisites.
 Release contents are deterministic tar/gzip headers, not a claim of bit-for-bit
 compiler reproducibility across different host paths or toolchain revisions.
 """
@@ -960,7 +960,7 @@ compiler reproducibility across different host paths or toolchain revisions.
                 "license_sha256": sha256(icu_license),
             },
             "tools": {
-                "bootstrap_bun": "1.4.2",
+                "bootstrap_bun": "1.4.3",
                 "rust": capture(["rustc", "--version"], env=env),
                 "rust_toolchain": RUST,
                 "ndk": (ndk / "source.properties").read_text(),

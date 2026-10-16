@@ -17,7 +17,7 @@ const SHOWN: usize = 100;
 /// What a search lists at most.
 const FOUND: usize = 40;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Node {
     pub name: String,
     /// On the computer.
@@ -145,6 +145,7 @@ pub(crate) enum Children<'a> {
 }
 
 /// One line of the tree as drawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Row {
     Node {
         node: Node,
@@ -153,6 +154,7 @@ pub(crate) enum Row {
     },
     Loading {
         depth: usize,
+        path: String,
     },
     Failed {
         depth: usize,
@@ -167,7 +169,20 @@ pub(crate) enum Row {
     /// The computer listed only part of the folder.
     Partial {
         depth: usize,
+        path: String,
     },
+}
+
+impl Row {
+    pub(crate) fn key(&self) -> String {
+        match self {
+            Self::Node { node, .. } => format!("node:{}", node.path),
+            Self::Loading { path, .. } => format!("loading:{path}"),
+            Self::Failed { path, .. } => format!("failed:{path}"),
+            Self::More { path, .. } => format!("more:{path}"),
+            Self::Partial { path, .. } => format!("partial:{path}"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -252,7 +267,10 @@ impl ProjectBrowser {
 
     fn push_rows(&self, path: &str, depth: usize, rows: &mut Vec<Row>) {
         match self.children(path) {
-            None | Some(Children::Loading) => rows.push(Row::Loading { depth }),
+            None | Some(Children::Loading) => rows.push(Row::Loading {
+                depth,
+                path: path.to_owned(),
+            }),
             Some(Children::Failed(error)) => rows.push(Row::Failed {
                 depth,
                 path: path.to_owned(),
@@ -287,7 +305,10 @@ impl ProjectBrowser {
                     });
                 }
                 if truncated {
-                    rows.push(Row::Partial { depth });
+                    rows.push(Row::Partial {
+                        depth,
+                        path: path.to_owned(),
+                    });
                 }
             }
         }

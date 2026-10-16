@@ -101,7 +101,7 @@ def validate_local_apk(apk: Path) -> dict:
                     "status": "experimental",
                     "engine": "bun",
                     "bun": "1.4.3",
-                    "sdk": "1.2.0",
+                    "sdk": "1.3.0",
                     "abi": "arm64-v8a",
                 }.items()
             ):

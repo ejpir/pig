@@ -9,15 +9,15 @@ import {
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 
-if (Bun.version !== "1.4.2")
-  throw new Error(`Use Bun 1.4.2, not ${Bun.version}`);
+if (Bun.version !== "1.4.3")
+  throw new Error(`Use Bun 1.4.3, not ${Bun.version}`);
 const result = await Bun.build({
   entrypoints: ["js/encoding.js", "js/platform.js", "js/auth.js"],
   outdir: "generated",
   target: "browser",
   format: "iife",
   // Bundler-opaque fallback in upstream's OAuth loader is never used after registration.
-  // Bun 1.4.2 otherwise leaves import.meta.url in a classic-script IIFE.
+  // Bun 1.4.3 otherwise leaves import.meta.url in a classic-script IIFE.
   define: { "import.meta.url": JSON.stringify("file:///pi-ai-auth.js") },
   plugins: [
     {

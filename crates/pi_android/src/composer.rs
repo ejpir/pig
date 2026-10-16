@@ -515,8 +515,16 @@ impl Render for Composer {
         let colors = theme(cx);
         let prefs = cx.global::<Prefs>().clone();
         let can_send = self.can_send(cx);
-        let suggestions = self.suggestions(cx);
         let area = self.area.clone();
+        // Sheets move focus away from the editor. Avoid rescanning and
+        // lowercasing a large project file list on every overlay animation
+        // frame when no suggestion can be accepted.
+        let suggestions = area
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+            .then(|| self.suggestions(cx))
+            .flatten();
         // Leave room for the conversation and Send even with a tall keyboard
         // or in landscape. The rest of a long draft scrolls inside the field.
         let lines = (f32::from(window.fully_visible_bounds().size.height) * 0.3 / 22.) as usize;

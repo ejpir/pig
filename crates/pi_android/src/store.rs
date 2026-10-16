@@ -7,7 +7,14 @@ use crate::{
     live::{Live, Update},
     model::*,
 };
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    time::Duration,
+};
+
+/// Keep a few fully hydrated transcripts warm after their idle SSH channels
+/// are released. Older entries fall back to lightweight listing rows.
+const HYDRATED_SESSION_CACHE: usize = 3;
 
 /// What happened, for notifications and notices.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +68,9 @@ pub struct Store {
     recency: HashMap<SessionId, u64>,
     /// Phone receipt time of accepted session data; never advanced by repaint or disconnect.
     pub(crate) observed_at: HashMap<SessionId, u64>,
+    /// Fully projected live transcripts retained across idle channel release.
+    hydrated: HashSet<SessionId>,
+    hydrated_lru: VecDeque<SessionId>,
     /// The sample's subagents, by conversation: a live computer sends its own.
     pub(crate) sample_subagents: HashMap<String, pi_core::session::Session>,
 }
@@ -95,6 +105,8 @@ impl Store {
             live: None,
             recency: HashMap::new(),
             observed_at: HashMap::new(),
+            hydrated: HashSet::new(),
+            hydrated_lru: VecDeque::new(),
             sample_subagents: HashMap::new(),
         }
     }
@@ -113,6 +125,8 @@ impl Store {
             live: Some(live),
             recency: HashMap::new(),
             observed_at: HashMap::new(),
+            hydrated: HashSet::new(),
+            hydrated_lru: VecDeque::new(),
             sample_subagents: HashMap::new(),
         };
         store.refresh_projects();
@@ -254,8 +268,14 @@ impl Store {
             local: Some(local),
             recency: HashMap::new(),
             observed_at: HashMap::new(),
+            hydrated: HashSet::new(),
+            hydrated_lru: VecDeque::new(),
             sample_subagents: HashMap::new(),
         }
+    }
+
+    pub(crate) fn is_hydrated(&self, id: SessionId) -> bool {
+        self.hydrated.contains(&id)
     }
 
     pub fn session(&self, id: SessionId) -> Option<&Session> {
@@ -273,6 +293,8 @@ impl Store {
         self.sessions.retain(|session| session.id != id);
         self.recency.remove(&id);
         self.observed_at.remove(&id);
+        self.hydrated.remove(&id);
+        self.hydrated_lru.retain(|cached| *cached != id);
     }
 
     fn session_mut(&mut self, id: SessionId) -> Option<&mut Session> {
@@ -285,7 +307,7 @@ impl Store {
         for session in &self.sessions {
             let group = match session.state {
                 State::NeedsYou => 0,
-                State::Working => 1,
+                _ if session.is_working() => 1,
                 _ => 2,
             };
             groups[group].push(session);
@@ -304,9 +326,7 @@ impl Store {
     }
 
     pub fn running(&self) -> impl Iterator<Item = &Session> {
-        self.sessions
-            .iter()
-            .filter(|session| session.state == State::Working)
+        self.sessions.iter().filter(|session| session.is_working())
     }
 
     /// Moves time on: sample runs advance; live timers count up.
@@ -316,12 +336,22 @@ impl Store {
             return local.tick(&mut self.sessions, elapsed);
         }
         if self.live.is_some() {
-            let running: Vec<SessionId> = self.running().map(|session| session.id).collect();
-            let mut events = Vec::new();
-            for id in running {
-                events.extend(self.reproject(id));
+            // Remote records already carry every transcript mutation. The
+            // one-second clock only advances fixed-size time labels; rebuilding
+            // every message, diff, and tool output here made active composers
+            // and scrolling pay a full projection even without new content.
+            for session in &mut self.sessions {
+                if session.state != State::Working {
+                    continue;
+                }
+                session.elapsed += elapsed;
+                if let Some(turn) = session.turns.last_mut()
+                    && let Some(stage) = turn.live_stage()
+                {
+                    turn.add_time(stage, elapsed);
+                }
             }
-            return events;
+            return Vec::new();
         }
         let mut events = Vec::new();
         for session in &mut self.sessions {
@@ -370,6 +400,9 @@ impl Store {
         for id in changed {
             events.extend(self.reproject(id));
         }
+        // A listing can release several now-idle watches after their snapshots
+        // were retained. Retry eviction once those watches are gone.
+        self.trim_hydrated(None);
         events
     }
 
@@ -379,6 +412,15 @@ impl Store {
         let Some(live) = &self.live else {
             return Vec::new();
         };
+        let has_snapshot = live.has_snapshot(id);
+        let recency = live.recency(id);
+        // Releasing an idle SSH channel must not replace an already hydrated
+        // transcript with its lightweight listing row. Reopening can paint this
+        // bounded cache immediately while a fresh authoritative attach catches up.
+        if self.hydrated.contains(&id) && !has_snapshot && live.target(id).is_some() {
+            self.recency.insert(id, recency);
+            return Vec::new();
+        }
         let Some(session) = live.session(id) else {
             if self.session(id).is_some() {
                 self.remove(id);
@@ -386,13 +428,15 @@ impl Store {
             }
             return Vec::new();
         };
-        let recency = live.recency(id);
         self.recency.insert(id, recency);
         let before = self.session(id).map(|session| session.state);
         let after = session.state;
         match self.session_mut(id) {
             Some(shown) => *shown = session,
             None => self.sessions.push(session),
+        }
+        if has_snapshot {
+            self.retain_hydrated(id);
         }
         match (before, after) {
             (Some(before), after) if before == after => Vec::new(),
@@ -401,6 +445,38 @@ impl Store {
                 vec![Event::Finished(id)]
             }
             _ => Vec::new(),
+        }
+    }
+
+    fn retain_hydrated(&mut self, id: SessionId) {
+        self.hydrated.insert(id);
+        self.hydrated_lru.retain(|cached| *cached != id);
+        self.hydrated_lru.push_back(id);
+        self.trim_hydrated(Some(id));
+    }
+
+    fn trim_hydrated(&mut self, protected: Option<SessionId>) {
+        while self.hydrated.len() > HYDRATED_SESSION_CACHE {
+            let Some(index) = self.hydrated_lru.iter().position(|candidate| {
+                Some(*candidate) != protected
+                    && self
+                        .live
+                        .as_ref()
+                        .is_none_or(|live| !live.is_watched(*candidate))
+            }) else {
+                break;
+            };
+            let victim = self.hydrated_lru.remove(index).unwrap();
+            self.hydrated.remove(&victim);
+            let listed = self
+                .live
+                .as_ref()
+                .and_then(|live| live.listed_session(victim));
+            if let Some(listed) = listed
+                && let Some(shown) = self.session_mut(victim)
+            {
+                *shown = listed;
+            }
         }
     }
 
@@ -440,6 +516,15 @@ impl Store {
         if let Some(live) = &mut self.live {
             live.watch(id);
         }
+    }
+
+    pub(crate) fn show(&mut self, id: Option<SessionId>) {
+        if let Some(live) = &mut self.live {
+            live.show(id);
+        }
+        // Navigation can release idle watches immediately, without waiting for
+        // another remote record to trigger projection and cache maintenance.
+        self.trim_hydrated(None);
     }
 
     pub fn answer(&mut self, id: SessionId, answer: Answer) {
@@ -708,6 +793,87 @@ mod queue_tests {
         store.remove(SessionId(1));
         assert!(!store.observed_at.contains_key(&SessionId(1)));
         assert_eq!(store.observed_at[&SessionId(2)], 456);
+    }
+
+    #[test]
+    fn background_subagents_keep_a_finished_parent_in_working() {
+        let mut store = sample_queue();
+        let id = SessionId(2);
+        let session = store.session_mut(id).unwrap();
+        session.state = State::Done;
+        let mut handoff = pi_core::subagent::Handoff::from_args(&serde_json::json!({
+            "agent": "scout",
+            "task": "Keep working"
+        }));
+        handoff.background = true;
+        session.turn_mut().handoffs.push(handoff);
+
+        let [_, working, _] = store.grouped();
+        assert!(working.iter().any(|session| session.id == id));
+        assert!(store.running().any(|session| session.id == id));
+        assert_eq!(
+            store.session(id).unwrap().status_line(),
+            "1 subagent working"
+        );
+
+        store.session_mut(id).unwrap().turn_mut().handoffs[0].subagents[0].status =
+            pi_core::subagent::Status::Done;
+        let [_, working, finished] = store.grouped();
+        assert!(!working.iter().any(|session| session.id == id));
+        assert!(finished.iter().any(|session| session.id == id));
+    }
+
+    #[test]
+    fn hydrated_cache_is_lru_bounded_and_deletion_safe() {
+        let mut store = sample_queue();
+        for id in [SessionId(1), SessionId(2), SessionId(3)] {
+            store.retain_hydrated(id);
+        }
+        assert_eq!(
+            store.hydrated_lru,
+            [SessionId(1), SessionId(2), SessionId(3)]
+        );
+
+        // A cache hit refreshes recency. Adding a fourth transcript therefore
+        // evicts the least recently reopened one, not simply the lowest ID.
+        store.retain_hydrated(SessionId(1));
+        store.retain_hydrated(SessionId(4));
+        assert_eq!(
+            store.hydrated_lru,
+            [SessionId(3), SessionId(1), SessionId(4)]
+        );
+        assert!(!store.is_hydrated(SessionId(2)));
+        assert!(store.is_hydrated(SessionId(1)));
+        assert!(store.is_hydrated(SessionId(3)));
+        assert!(store.is_hydrated(SessionId(4)));
+
+        store.remove(SessionId(3));
+        assert!(!store.is_hydrated(SessionId(3)));
+        assert!(!store.hydrated_lru.contains(&SessionId(3)));
+        assert!(store.session(SessionId(3)).is_none());
+    }
+
+    #[test]
+    fn hydrated_cache_retries_eviction_after_watches_are_released() {
+        let mut store = sample_queue();
+        // This is the state left when four hydrated transcripts were all
+        // protected by active watches. Once those watches are released, the
+        // oldest entry must be evicted even if no transcript changes again.
+        store.hydrated = [SessionId(1), SessionId(2), SessionId(3), SessionId(4)]
+            .into_iter()
+            .collect();
+        store.hydrated_lru = [SessionId(1), SessionId(2), SessionId(3), SessionId(4)]
+            .into_iter()
+            .collect();
+
+        store.trim_hydrated(None);
+
+        assert_eq!(store.hydrated.len(), HYDRATED_SESSION_CACHE);
+        assert_eq!(
+            store.hydrated_lru,
+            [SessionId(2), SessionId(3), SessionId(4)]
+        );
+        assert!(!store.is_hydrated(SessionId(1)));
     }
 
     #[test]

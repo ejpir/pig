@@ -24,7 +24,7 @@ Home).
 
    ```sh
    cd backend/durable && npm ci --ignore-scripts \
-     && npm exec --yes --package=bun@1.4.2 -- bun run build && cd ../..
+     && npm exec --yes --package=bun@1.4.3 -- bun run build && cd ../..
    PI_DESKTOP_DURABLE_BINARY="$PWD/artifacts/durable/pi-desktop-durable" \
      cargo build --release -p pi_remote --features bundled-durable
    target/release/pi-desktop-remote activate
@@ -242,7 +242,7 @@ The script is gpui_android's, which lists what it needs.
 ## Android Local — experimental
 
 The release APK bundles source-linked **Bun 1.4.3** and the unchanged **Pi/Durable
-1.2.0** SDK. Choose **Local** from the Pi/computer selector, sign in with a Claude
+1.3.0** SDK. Choose **Local** from the Pi/computer selector, sign in with a Claude
 or Codex subscription, then use the shared session/thread/composer UI. Chats and
 request identities persist in app-private SQLite; stock coding tools, images,
 thinking, compaction and Stop use the same Durable engine as desktop/SSH.

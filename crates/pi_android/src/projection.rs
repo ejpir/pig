@@ -121,11 +121,14 @@ pub fn project_queue_keys(
         .filter(|(index, _)| visible(*index))
         .map(|(index, text)| {
             queued_keys.push(key(index));
-            text
+            (text, index < pi.steering.len())
         })
-        // Subagents' answers wait for Pi like a follow-up, but nobody typed them.
-        .map(|text| match pi_core::subagent::report(text) {
-            Some(_) => "Subagents reported back".to_owned(),
+        // Nobody typed an internal report. Say whether it is joining the live
+        // run or waiting for a separate turn instead of making both look like
+        // an ordinary queued follow-up.
+        .map(|(text, steering)| match pi_core::subagent::report(text) {
+            Some(_) if steering => "Subagents reported back · steering this run".to_owned(),
+            Some(_) => "Subagents reported back · next turn".to_owned(),
             None => crate::visualize_prompt::label(text),
         })
         .collect();
@@ -2027,6 +2030,21 @@ mod tests {
                 .map(|s| s.agent.as_str())
                 .collect::<Vec<_>>(),
             ["scout", "planner"]
+        );
+    }
+
+    #[test]
+    fn queued_subagent_reports_name_whether_they_steer_or_follow_up() {
+        let report = "<subagent_report call=\"hand\">\nreport\n</subagent_report>".to_owned();
+        let mut pi = Pi::default();
+        pi.steering.push(report.clone());
+        pi.follow_up.push(report);
+        assert_eq!(
+            project(&pi, facts(&[])).queued,
+            [
+                "Subagents reported back · steering this run",
+                "Subagents reported back · next turn",
+            ]
         );
     }
 

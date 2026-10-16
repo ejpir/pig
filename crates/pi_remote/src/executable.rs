@@ -46,7 +46,7 @@ pub fn validate(path: &Path, os: &str, arch: &str) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "Durable runner is not a native {os}/{arch} executable: {}. Build the PRODUCTION runner with 'npm exec --yes --package=bun@1.4.2 -- bun run build' in backend/durable on a matching OS/CPU, then rebuild the helper. Building pi-desktop-durable-fixture does not update the production runner.",
+                "Durable runner is not a native {os}/{arch} executable: {}. Build the PRODUCTION runner with 'npm exec --yes --package=bun@1.4.3 -- bun run build' in backend/durable on a matching OS/CPU, then rebuild the helper. Building pi-desktop-durable-fixture does not update the production runner.",
                 path.display()
             ),
         ))

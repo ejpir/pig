@@ -1,7 +1,7 @@
 # Android Local runtime (experimental)
 
 The Android Local backend embeds **Bun 1.4.3** in-process and uses the unchanged
-public **Pi/Durable 1.2.0** SDK and the shared desktop Durable runner. This crate
+public **Pi/Durable 1.3.0** SDK and the shared desktop Durable runner. This crate
 owns the native VM thread, bounded HTTP transport, writer locks and native
 Claude/Codex account leases. It is an opt-in Android/Linux Cargo workspace so
 ordinary desktop/Windows builds do not compile an Android embedding runtime.
@@ -31,7 +31,7 @@ source is preserved at `archive/quickjs-before-bun-cleanup`
 
 ## Offline checks
 
-Requires the repository Rust toolchain, npm and bootstrap **Bun 1.4.2**.
+Requires the repository Rust toolchain, npm and bootstrap **Bun 1.4.3**.
 
 ```sh
 (cd crates/pi_local && npm ci --ignore-scripts && bun run build)

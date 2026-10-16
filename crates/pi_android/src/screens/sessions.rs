@@ -220,7 +220,7 @@ impl PhoneApp {
                             .text_color(hue)
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(icon(if required { "alert" } else { "info" }, 18., hue))
-                            .child(update.title(&store.computer.name)),
+                            .child(update.title()),
                     )
                     .child(
                         div()
@@ -519,20 +519,26 @@ impl PhoneApp {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = session.id;
-        let working = session.state == State::Working;
-        let leading = match session.state {
-            State::NeedsYou => ui::ring_dot(colors.wait).into_any_element(),
-            State::Working => ui::ring_dot(colors.read).into_any_element(),
-            State::Done => icon("check", 16., colors.green).into_any_element(),
-            State::Stopped => icon("stop", 16., colors.muted).into_any_element(),
-            State::Failed => icon("alert", 16., colors.coral).into_any_element(),
+        let parent_working = session.state == State::Working;
+        let background_working = session.background_subagents_at_work() > 0;
+        let working = session.is_working();
+        let leading = if working {
+            ui::ring_dot(colors.read).into_any_element()
+        } else {
+            match session.state {
+                State::NeedsYou => ui::ring_dot(colors.wait).into_any_element(),
+                State::Working => ui::ring_dot(colors.read).into_any_element(),
+                State::Done => icon("check", 16., colors.green).into_any_element(),
+                State::Stopped => icon("stop", 16., colors.muted).into_any_element(),
+                State::Failed => icon("alert", 16., colors.coral).into_any_element(),
+            }
         };
         let time = if working {
             duration_label(session.elapsed)
         } else {
             session.finished_at.clone().unwrap_or_default()
         };
-        let detail: SharedString = if working {
+        let detail: SharedString = if parent_working {
             let stage = session
                 .turn()
                 .and_then(|turn| turn.live_stage())
@@ -543,6 +549,8 @@ impl PhoneApp {
                 }
                 _ => format!("{} · {}", session.project, session.activity),
             }
+        } else if background_working && working {
+            format!("{} · {}", session.project, session.status_line())
         } else if let Some(handoff) = super::subagents::at_work(&session.turns)
             && session.state == crate::model::State::Done
         {

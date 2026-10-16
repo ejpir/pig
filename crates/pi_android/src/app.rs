@@ -12,7 +12,7 @@ use crate::{
     model::{Answer, Computer, SessionId, StageKind, State},
     motion::SwipeMotion,
     prefs::{Prefs, SavedCommand},
-    projects::{FileView, ProjectBrowser},
+    projects::{FileView, ProjectBrowser, Row as ProjectRow},
     remote,
     ssh::{self, Address, Connection, Identity},
     store::{Event, Store},
@@ -20,8 +20,8 @@ use crate::{
     theme::{Appearance, SANS, Theme, theme},
 };
 use gpui::{
-    Animation, AnimationExt, App, Context, Edges, Entity, FocusHandle, Focusable,
-    PathPromptOptions, Pixels, Role, ScrollHandle, SharedString, Subscription, Task,
+    Animation, AnimationExt, App, Context, Edges, Entity, FocusHandle, Focusable, ListAlignment,
+    ListState, PathPromptOptions, Pixels, Role, ScrollHandle, SharedString, Subscription, Task,
     TextInputAction, TextInputConfiguration, Window, WindowAppearance, WindowVisibility, actions,
     div, prelude::*, px, relative,
 };
@@ -326,7 +326,12 @@ pub struct PhoneApp {
     /// Subagents whose screen was opened, drawn like a session: an ID of the
     /// phone's own for each (session, conversation), and how it is now.
     pub(crate) subagent_ids: HashMap<(SessionId, String), SessionId>,
+    /// Synthetic child IDs descend monotonically so deleting one child cannot
+    /// make a later child reuse an ID still retained by another virtual list.
+    pub(crate) next_subagent_session_id: u32,
     pub(crate) subagent_sessions: HashMap<SessionId, crate::model::Session>,
+    /// Last fetched child revision projected into each synthetic session.
+    pub(crate) subagent_projected_revisions: HashMap<SessionId, u64>,
     /// Drafts belong to exact child conversations, never to the parent composer.
     pub(crate) subagent_composers: HashMap<(SessionId, String), Entity<Composer>>,
     /// Questions put off with Later: the composer shows instead of the card.
@@ -402,6 +407,11 @@ pub struct PhoneApp {
     pub(crate) start_visible_height: Option<gpui::Pixels>,
     pub(crate) project: usize,
     pub(crate) project_browser: ProjectBrowser,
+    /// Retained rows for the project sheet; only the viewport is laid out.
+    pub(crate) project_list: ListState,
+    pub(crate) project_tree_rows: Vec<ProjectRow>,
+    pub(crate) project_overview_shape: Option<(usize, bool)>,
+    pub(crate) project_list_offset: Pixels,
     pub(crate) file_view: Option<FileView>,
     /// Tool images decoded once, by key.
     pub(crate) tool_images: std::cell::RefCell<HashMap<String, crate::screens::ShownImage>>,
@@ -631,7 +641,9 @@ impl PhoneApp {
             expanded_streams: HashSet::new(),
             expanded_calls: HashSet::new(),
             subagent_ids: HashMap::new(),
+            next_subagent_session_id: u32::MAX,
             subagent_sessions: HashMap::new(),
+            subagent_projected_revisions: HashMap::new(),
             subagent_composers: HashMap::new(),
             questions_later: HashSet::new(),
             all_files: HashSet::new(),
@@ -686,6 +698,11 @@ impl PhoneApp {
             start_visible_height: None,
             project: 0,
             project_browser: ProjectBrowser::default(),
+            project_list: ListState::new(0, ListAlignment::Top, px(240.))
+                .with_uniform_item_height(px(48.)),
+            project_tree_rows: Vec::new(),
+            project_overview_shape: None,
+            project_list_offset: px(0.),
             file_view: None,
             tool_images: Default::default(),
             tool_image_demands: Default::default(),
@@ -952,8 +969,8 @@ impl PhoneApp {
             | Route::Subagent(id, _) => Some(id),
             _ => None,
         };
-        if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
-            live.show(shown);
+        if let Some(store) = &mut self.store {
+            store.show(shown);
         }
     }
 
@@ -1008,6 +1025,11 @@ impl PhoneApp {
                 .update(cx, |area, cx| area.set_text("", cx));
         }
         self.sheet = Some(sheet);
+        // The attachment chooser has only two rows; animating it used to
+        // rebuild the potentially huge route underneath for dozens of frames.
+        if matches!(sheet, Sheet::Attach(_)) {
+            self.sheet_motion.finish();
+        }
         self.image_zoom = 1.;
         self.image_pan = gpui::Point::default();
         if sheet == Sheet::Project {
@@ -1021,6 +1043,9 @@ impl PhoneApp {
         if let Some(sheet) = self.sheet.take() {
             self.closing_sheet = Some(sheet);
             self.sheet_motion.settle(1.);
+            if matches!(sheet, Sheet::Attach(_)) {
+                self.sheet_motion.finish();
+            }
         }
         self.sheet_focus_pending = true;
         cx.notify();
@@ -1089,6 +1114,21 @@ impl PhoneApp {
                         }
                         let delta = event.delta.pixel_delta(px(20.));
                         let (along, across) = (delta.y, delta.x);
+                        let project_list = this.sheet == Some(Sheet::Project)
+                            && this.folder.read(cx).text().trim().is_empty();
+                        let (scroll_max, scroll_bounds, scroll_offset) = if project_list {
+                            (
+                                this.project_list.max_offset_for_scrollbar().y,
+                                this.project_list.viewport_bounds(),
+                                this.project_list.scroll_px_offset_for_scrollbar().y,
+                            )
+                        } else {
+                            (
+                                this.sheet_scroll.max_offset().y,
+                                this.sheet_scroll.bounds(),
+                                this.sheet_scroll.offset().y,
+                            )
+                        };
                         let motion = &mut this.sheet_motion;
                         let extent = bounds.size.height.max(px(1.));
                         if event.touch_phase == gpui::TouchPhase::Started {
@@ -1097,12 +1137,11 @@ impl PhoneApp {
                                     && this.image_box.get().contains(&event.position))
                                 || along <= px(0.)
                                 || along.abs() < across.abs()
-                                || (this.sheet_scroll.max_offset().y > px(1.)
-                                    && this.sheet_scroll.bounds().contains(&event.position)
-                                    && event.position.x
-                                        >= this.sheet_scroll.bounds().right() - px(18.))
+                                || (scroll_max > px(1.)
+                                    && scroll_bounds.contains(&event.position)
+                                    && event.position.x >= scroll_bounds.right() - px(18.))
                                 || (event.position.y > bounds.top() + px(36.)
-                                    && this.sheet_scroll.offset().y < px(-1.))
+                                    && scroll_offset < px(-1.))
                             {
                                 return;
                             }
@@ -1317,6 +1356,12 @@ impl PhoneApp {
         self.thread_pending_remeasure.clear();
         self.thread_snapshots.clear();
         self.thread_list_offsets.clear();
+        // Child projections and drafts are scoped to the old store. Parent and
+        // synthetic IDs can be reused by a different computer or Local store.
+        self.subagent_ids.clear();
+        self.subagent_sessions.clear();
+        self.subagent_projected_revisions.clear();
+        self.subagent_composers.clear();
         self._pump = None;
     }
 
@@ -2796,7 +2841,20 @@ impl PhoneApp {
         self.threads.remove(&id);
         self.subagent_composers
             .retain(|(session, _), _| *session != id);
+        let child_ids = self
+            .subagent_ids
+            .iter()
+            .filter_map(|((session, _), child)| (*session == id).then_some(*child))
+            .collect::<Vec<_>>();
         self.subagent_ids.retain(|(session, _), _| *session != id);
+        for child in child_ids {
+            self.subagent_sessions.remove(&child);
+            self.subagent_projected_revisions.remove(&child);
+            self.thread_lists.remove(&child);
+            self.thread_list_shapes.remove(&child);
+            self.thread_snapshots.remove(&child);
+            self.thread_list_offsets.remove(&child);
+        }
         self.pending_compacts.remove(&id);
         self.sample_models.remove(&id);
         self.jj_histories.remove(&id);
@@ -4442,6 +4500,38 @@ mod tests {
                 assert_eq!(second.read(cx).area.read(cx).text(), "draft for B");
                 assert_eq!(parent.read(cx).area.read(cx).text(), "parent draft");
                 assert_eq!(app.subagent_composers.len(), 2);
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn replacing_store_clears_child_projection_cache_and_drafts(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let parent = SessionId(7);
+                let child = SessionId(u32::MAX);
+                let cached = crate::store::Store::sample(crate::model::Computer::from_address(
+                    "old@computer.local",
+                ))
+                .sessions
+                .remove(0);
+                app.subagent_ids.insert((parent, "child-a".into()), child);
+                app.subagent_sessions.insert(child, cached.clone());
+                app.subagent_projected_revisions.insert(child, 1);
+                app.thread_snapshots
+                    .insert(child, std::sync::Arc::new(cached));
+                app.subagent_composer(parent, "child-a", "Steer…", window, cx);
+
+                app.replace_store(Some(crate::store::Store::sample(
+                    crate::model::Computer::from_address("new@computer.local"),
+                )));
+
+                assert!(app.subagent_ids.is_empty());
+                assert!(app.subagent_sessions.is_empty());
+                assert!(app.subagent_projected_revisions.is_empty());
+                assert!(app.subagent_composers.is_empty());
+                assert!(app.thread_snapshots.is_empty());
             })
         });
     }

@@ -12,13 +12,13 @@ use crate::{
     ui::{self, icon},
 };
 use gpui::{
-    AnyElement, Context, Div, ElementId, Focusable, FontWeight, Hsla, Stateful, Window, div,
+    AnyElement, Context, Div, ElementId, Focusable, FontWeight, Hsla, Stateful, Window, div, list,
     prelude::*, px,
 };
 use pi_core::subagent::{
     Handoff, Mode, Status, Subagent, Swarm, SwarmMessage, SwarmMessageKind, SwarmMessageStatus,
 };
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// The look of a well-known agent: its icon and hue. Others get Pi's.
 pub(crate) fn agent_look(agent: &str, colors: &Theme) -> (&'static str, Hsla) {
@@ -524,16 +524,27 @@ pub(crate) fn at_work(turns: &[Turn]) -> Option<&Handoff> {
 
 /// Every unfinished subagent in a durable background hand-off, across the session.
 pub(crate) fn background_at_work(turns: &[Turn]) -> usize {
-    turns
-        .iter()
-        .flat_map(|turn| &turn.handoffs)
-        .filter(|handoff| handoff.background)
-        .flat_map(|handoff| &handoff.subagents)
-        .filter(|subagent| !subagent.status.finished())
-        .count()
+    crate::model::background_subagents_at_work(turns)
 }
 
 impl PhoneApp {
+    fn allocate_subagent_session_id(&mut self) -> SessionId {
+        loop {
+            let candidate = SessionId(self.next_subagent_session_id);
+            self.next_subagent_session_id = self.next_subagent_session_id.wrapping_sub(1);
+            let occupied = self.subagent_ids.values().any(|id| *id == candidate)
+                || self.subagent_sessions.contains_key(&candidate)
+                || self.thread_lists.contains_key(&candidate)
+                || self
+                    .store
+                    .as_ref()
+                    .is_some_and(|store| store.session(candidate).is_some());
+            if !occupied {
+                return candidate;
+            }
+        }
+    }
+
     fn swarm_view(&self, id: SessionId) -> SwarmView {
         match self.store.as_ref() {
             Some(store) if !store.computer.connected => SwarmView::Offline,
@@ -1191,6 +1202,163 @@ impl PhoneApp {
             .cloned()
     }
 
+    /// Content before a subagent's transcript. Keeping this as the first
+    /// virtual row lets long child runs use the same retained scrolling path as
+    /// the main thread without pinning the delegation context on screen.
+    fn subagent_intro(
+        &self,
+        selection: (SessionId, Pick),
+        run: (bool, SwarmView),
+        subagent: &Subagent,
+        swarm: Option<&Swarm>,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
+        let (id, pick) = selection;
+        let (has_run, swarm_view) = run;
+        let brief = div()
+            .pl(px(16.))
+            .py(px(4.))
+            .border_l(px(3.))
+            .border_color(colors.accent)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(icon("pi", 14., colors.accent))
+                    .child(ui::label("Pi asked", colors)),
+            )
+            .child(
+                div()
+                    .mt(px(4.))
+                    .text_size(px(15.))
+                    .line_height(px(22.))
+                    .text_color(colors.secondary)
+                    .child(subagent.task.clone()),
+            );
+        div()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(24.))
+            .when(swarm.is_some() || !has_run, |column| column.child(brief))
+            .children(swarm.map(|swarm| {
+                ui::card(colors)
+                    .child(swarm_scope(swarm, swarm_view, colors))
+                    .child(
+                        ui::label(
+                            subagent.peer_id.as_deref().map_or_else(
+                                || "Peer ID unavailable".into(),
+                                |peer| peer_label(swarm, peer),
+                            ),
+                            colors,
+                        )
+                        .px(px(16.))
+                        .pb(px(8.)),
+                    )
+                    .child(
+                        ui::hint(
+                            "Original tools · read + peer messaging during delegation only. No edits or further spawning.",
+                            colors,
+                        )
+                        .px(px(16.))
+                        .pb(px(8.)),
+                    )
+                    .child(
+                        ui::hint(
+                            "Workspace · shared project for reading; no isolated editing worktree or artifact support.",
+                            colors,
+                        )
+                        .px(px(16.))
+                        .pb(px(8.)),
+                    )
+                    .child({
+                        let expected = swarm.id.clone();
+                        let namespace = self.swarm_namespace(id);
+                        ui::button(
+                            "peer-open-swarm",
+                            ui::Button::Quiet,
+                            Some("fork"),
+                            "View swarm map & exchanges",
+                            false,
+                            colors,
+                        )
+                        .w_full()
+                        .px(px(4.))
+                        .text_size(px(13.))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if this.swarm_namespace(id) != namespace {
+                                this.notify_user(
+                                    "This swarm belonged to the previous session source.",
+                                    cx,
+                                );
+                                return;
+                            }
+                            this.open_swarm(
+                                id,
+                                CrewPick {
+                                    turn: pick.turn,
+                                    handoff: pick.handoff,
+                                },
+                                &expected,
+                                window,
+                                cx,
+                            );
+                        }))
+                    })
+                    .when_some(subagent.peer_id.as_deref(), |card, peer| {
+                        let expected = swarm.id.clone();
+                        let peer = peer.to_owned();
+                        let namespace = self.swarm_namespace(id);
+                        card.child(
+                            ui::button(
+                                "peer-exchanges",
+                                ui::Button::Quiet,
+                                Some("chat"),
+                                "Inspect this peer’s exchanges",
+                                false,
+                                colors,
+                            )
+                            .debug_selector(|| "peer-exchanges".into())
+                            .w_full()
+                            .px(px(4.))
+                            .text_size(px(13.))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if this.swarm_namespace(id) != namespace {
+                                    this.notify_user(
+                                        "This peer belonged to the previous session source.",
+                                        cx,
+                                    );
+                                    return;
+                                }
+                                let pick = CrewPick {
+                                    turn: pick.turn,
+                                    handoff: pick.handoff,
+                                };
+                                this.open_swarm(id, pick, &expected, window, cx);
+                                if let Some(state) = this
+                                    .swarm_views
+                                    .get_mut(&(id, pick))
+                                    .filter(|state| state.swarm_id == expected)
+                                {
+                                    state.tab = super::swarm::SwarmTab::Exchanges;
+                                    state.filter = super::swarm::ExchangeFilter::All;
+                                    state.peer = Some(peer.clone());
+                                    state.open_message = None;
+                                }
+                                cx.notify();
+                            })),
+                        )
+                    })
+            }))
+            .children(interrupted_note(subagent).map(|text| {
+                note("alert", colors.amber, text, colors)
+                    .mx(px(0.))
+                    .mb(px(0.))
+            }))
+    }
+
     /// One subagent: what Pi asked it, its own run, and exact-target durable input.
     pub(crate) fn subagent_screen(
         &mut self,
@@ -1244,57 +1412,116 @@ impl PhoneApp {
             Some(subtitle.into()),
             &colors,
         );
-        let fetched = subagent
-            .conversation_id
-            .as_deref()
-            .and_then(|conversation| {
-                let store = self.store.as_ref()?;
-                match &store.live {
-                    Some(live) => live.subagent(id, conversation).cloned(),
-                    None => store.sample_subagents.get(conversation).cloned().map(Ok),
-                }
-            });
+        let conversation = subagent.conversation_id.clone();
+        let own = conversation.as_ref().map(|conversation| {
+            let key = (id, conversation.clone());
+            if let Some(own) = self.subagent_ids.get(&key).copied() {
+                own
+            } else {
+                let own = self.allocate_subagent_session_id();
+                self.subagent_ids.insert(key, own);
+                own
+            }
+        });
         // Drawn like a session of its own, under an ID of the phone's: the
-        // sheets that open from it find it there.
-        let own = match &fetched {
-            Some(Ok(pi)) => {
-                let key = (id, subagent.conversation_id.clone().unwrap_or_default());
-                let next = SessionId(u32::MAX - self.subagent_ids.len() as u32);
-                let own = *self.subagent_ids.entry(key).or_insert(next);
-                let shown = projection::project(
-                    pi,
-                    projection::Facts {
-                        id: own,
-                        cwd: &pi.cwd.to_string_lossy(),
-                        folder: String::new(),
-                        question: None,
-                        outbox: &[],
-                        key: "",
-                    },
-                );
-                self.subagent_sessions.insert(own, shown);
-                Some(own)
-            }
-            _ => None,
-        };
-        let run = match &fetched {
-            Some(Ok(_)) => {
-                let session = own.and_then(|own| self.subagent_sessions.get(&own));
-                match session.filter(|session| !session.turns.is_empty()) {
-                    Some(session) => div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(24.))
-                        .children(self.turns(session, true, &colors, cx))
-                        .into_any_element(),
-                    None => ui::hint("Not started yet.", &colors).into_any_element(),
+        // sheets that open from it find it there. Project each fetched revision
+        // once, and keep the immutable Arc during unrelated redraws or a fling.
+        enum ChildFetch {
+            Ready(Box<pi_core::session::Session>, u64),
+            Error(String),
+            Cached,
+            Loading,
+            Waiting,
+        }
+        let scrolling = self.scroll_in_motion()
+            || self.sheet_motion.dragging()
+            || self.sheet_motion.animating();
+        let fetched = match (conversation.as_deref(), own) {
+            (None, _) => ChildFetch::Waiting,
+            (Some(conversation), Some(own)) => {
+                let cached = self.subagent_sessions.contains_key(&own);
+                let projected = self.subagent_projected_revisions.get(&own).copied();
+                let store = self.store.as_ref();
+                match store.and_then(|store| store.live.as_ref()) {
+                    Some(live) => {
+                        let revision = live.subagent_revision(id, conversation).unwrap_or(0);
+                        if cached && (projected == Some(revision) || scrolling) {
+                            ChildFetch::Cached
+                        } else {
+                            match live.subagent(id, conversation) {
+                                Some(Ok(pi)) => ChildFetch::Ready(Box::new(pi.clone()), revision),
+                                Some(Err(error)) => ChildFetch::Error(error.clone()),
+                                None => ChildFetch::Loading,
+                            }
+                        }
+                    }
+                    None => {
+                        match store.and_then(|store| store.sample_subagents.get(conversation)) {
+                            Some(_) if cached && (projected == Some(1) || scrolling) => {
+                                ChildFetch::Cached
+                            }
+                            Some(pi) => ChildFetch::Ready(Box::new(pi.clone()), 1),
+                            None => ChildFetch::Loading,
+                        }
+                    }
                 }
             }
-            Some(Err(error)) => ui::hint(error.clone(), &colors).into_any_element(),
-            None if subagent.conversation_id.is_none() => {
+            _ => ChildFetch::Loading,
+        };
+        let mut child_changed_turns = Vec::new();
+        if let (Some(own), ChildFetch::Ready(pi, revision)) = (own, &fetched) {
+            let shown = projection::project(
+                pi,
+                projection::Facts {
+                    id: own,
+                    cwd: &pi.cwd.to_string_lossy(),
+                    folder: String::new(),
+                    question: None,
+                    outbox: &[],
+                    key: "",
+                },
+            );
+            if let Some(before) = self.subagent_sessions.get(&own)
+                && before != &shown
+            {
+                if (before.turns.len() > 1) != (shown.turns.len() > 1) {
+                    child_changed_turns.extend(0..shown.turns.len());
+                } else {
+                    child_changed_turns.extend(
+                        before
+                            .turns
+                            .iter()
+                            .zip(&shown.turns)
+                            .enumerate()
+                            .filter_map(|(index, (before, after))| {
+                                super::thread::turn_layout_changed(before, after).then_some(index)
+                            }),
+                    );
+                }
+                if before.state != shown.state || before.turns.len() != shown.turns.len() {
+                    let last = shown.turns.len().saturating_sub(1);
+                    if !shown.turns.is_empty() && !child_changed_turns.contains(&last) {
+                        child_changed_turns.push(last);
+                    }
+                }
+            }
+            let shown = Arc::new(shown);
+            self.subagent_sessions.insert(own, shown.as_ref().clone());
+            self.thread_snapshots.insert(own, shown);
+            self.subagent_projected_revisions.insert(own, *revision);
+        }
+        let run_session = own
+            .and_then(|own| self.thread_snapshots.get(&own).cloned())
+            .filter(|session| !session.turns.is_empty());
+        let run_fallback = run_session.is_none().then(|| match &fetched {
+            ChildFetch::Ready(..) | ChildFetch::Cached => {
+                ui::hint("Not started yet.", &colors).into_any_element()
+            }
+            ChildFetch::Error(error) => ui::hint(error.clone(), &colors).into_any_element(),
+            ChildFetch::Waiting => {
                 ui::hint("It starts when its turn comes.", &colors).into_any_element()
             }
-            None => div()
+            ChildFetch::Loading => div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
@@ -1303,40 +1530,18 @@ impl PhoneApp {
                 .child(ui::working_indicator(&colors))
                 .child("Loading subagent conversation…")
                 .into_any_element(),
-        };
-        // Until its own run shows, what Pi asked it.
-        let asked = subagent.task.clone();
-        let brief = div()
-            .pl(px(16.))
-            .py(px(4.))
-            .border_l(px(3.))
-            .border_color(colors.accent)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(icon("pi", 14., colors.accent))
-                    .child(ui::label("Pi asked", &colors)),
-            )
-            .child(
-                div()
-                    .mt(px(4.))
-                    .text_size(px(15.))
-                    .line_height(px(22.))
-                    .text_color(colors.secondary)
-                    .child(asked),
-            );
+        });
         let route = match self.route() {
             Route::SwarmPeer(shown, _, _) if shown == id => self.route(),
             _ => Route::Subagent(id, pick),
         };
-        let mut brief = Some(brief);
-        let scroll = self.scroll(route);
-        let child_running = fetched
-            .as_ref()
-            .is_some_and(|fetched| fetched.as_ref().is_ok_and(pi_core::session::Session::busy));
-        let conversation = subagent.conversation_id.clone();
+        let child_running = match &fetched {
+            ChildFetch::Ready(pi, _) => pi.busy(),
+            ChildFetch::Cached => run_session
+                .as_ref()
+                .is_some_and(|session| session.state.is_running()),
+            ChildFetch::Error(_) | ChildFetch::Loading | ChildFetch::Waiting => false,
+        };
         let (input_target, input_pending) =
             conversation
                 .as_deref()
@@ -1594,65 +1799,119 @@ impl PhoneApp {
             ),
             _ => None,
         };
+        let show_intro = swarm.is_some() || own.is_none() || interrupted_note(&subagent).is_some();
+        let transcript = match (own, run_session) {
+            (Some(own), Some(session)) => {
+                let leading = usize::from(show_intro);
+                let turn_count = session.turns.len();
+                let item_count = leading + turn_count;
+                let shape = (turn_count, leading, false);
+                let old_shape = self.thread_list_shapes.insert(own, shape);
+                let fresh = !self.thread_lists.contains_key(&own);
+                let list_state = self
+                    .thread_lists
+                    .entry(own)
+                    .or_insert_with(|| super::thread::new_thread_list_state(item_count))
+                    .clone();
+                if !fresh && let Some((old_turns, old_leading, _)) = old_shape {
+                    if old_leading < leading {
+                        list_state.splice(0..0, leading - old_leading);
+                    } else if old_leading > leading {
+                        list_state.splice(0..old_leading - leading, 0);
+                    }
+                    if old_turns < turn_count {
+                        let at = leading + old_turns;
+                        list_state.splice(at..at, turn_count - old_turns);
+                    } else if old_turns > turn_count {
+                        list_state.splice(leading + turn_count..leading + old_turns, 0);
+                    }
+                }
+                debug_assert_eq!(list_state.item_count(), item_count);
+                for index in child_changed_turns {
+                    let item = leading + index;
+                    if item < item_count {
+                        list_state.remeasure_items(item..item + 1);
+                    }
+                }
+                let offset = list_state.scroll_px_offset_for_scrollbar().y;
+                if let Some(previous) = self.thread_list_offsets.insert(own, offset) {
+                    crate::scroll::note_movement(offset - previous);
+                }
+
+                let list_colors = colors;
+                let list_subagent = subagent.clone();
+                let list_swarm = swarm.clone();
+                let thread = list(
+                    list_state.clone(),
+                    cx.processor(move |this, item, _, cx| {
+                        let content = if leading == 1 && item == 0 {
+                            this.subagent_intro(
+                                (id, pick),
+                                (true, swarm_view),
+                                &list_subagent,
+                                list_swarm.as_ref(),
+                                &list_colors,
+                                cx,
+                            )
+                            .into_any_element()
+                        } else {
+                            this.turn(&session, item - leading, true, &list_colors, cx)
+                                .into_any_element()
+                        };
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .px(px(20.))
+                            .when(item == 0, |row| row.pt(px(8.)))
+                            .pb(if item + 1 == item_count {
+                                px(16.)
+                            } else {
+                                px(24.)
+                            })
+                            .child(content)
+                            .into_any_element()
+                    }),
+                )
+                .size_full();
+                crate::scroll::virtual_list(("subagent-thread", own.0 as usize), &list_state)
+                    .flex_1()
+                    .min_h_0()
+                    .child(thread)
+                    .into_any_element()
+            }
+            _ => {
+                let scroll = self.scroll(route);
+                scroll_area(("subagent", pick.index), &scroll)
+                    .child(
+                        div()
+                            .px(px(20.))
+                            .pt(px(8.))
+                            .pb(px(16.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(24.))
+                            .when(show_intro, |column| {
+                                column.child(self.subagent_intro(
+                                    (id, pick),
+                                    (own.is_some(), swarm_view),
+                                    &subagent,
+                                    swarm.as_ref(),
+                                    &colors,
+                                    cx,
+                                ))
+                            })
+                            .children(run_fallback),
+                    )
+                    .into_any_element()
+            }
+        };
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
             .child(appbar)
-            .child(
-                scroll_area(("subagent", pick.index), &scroll).child(
-                    div()
-                        .px(px(20.))
-                        .pt(px(8.))
-                        .pb(px(16.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(24.))
-                        .when(swarm.is_some(), |column| column.child(brief.take().unwrap()))
-                        .children(swarm.as_ref().map(|swarm| {
-                            ui::card(&colors)
-                                .child(swarm_scope(swarm, swarm_view, &colors))
-                                .child(ui::label(
-                                    subagent.peer_id.as_deref().map_or_else(
-                                        || "Peer ID unavailable".into(),
-                                        |peer| peer_label(swarm, peer),
-                                    ),
-                                    &colors,
-                                ).px(px(16.)).pb(px(8.)))
-                                .child(ui::hint("Original tools · read + peer messaging during delegation only. No edits or further spawning.", &colors).px(px(16.)).pb(px(8.)))
-                                .child(ui::hint("Workspace · shared project for reading; no isolated editing worktree or artifact support.", &colors).px(px(16.)).pb(px(8.)))
-                                .child({
-                                    let expected = swarm.id.clone();
-                                    let namespace = self.swarm_namespace(id);
-                                    ui::button("peer-open-swarm", ui::Button::Quiet, Some("fork"), "View swarm map & exchanges", false, &colors)
-                                        .w_full().px(px(4.)).text_size(px(13.))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            if this.swarm_namespace(id) != namespace { this.notify_user("This swarm belonged to the previous session source.", cx); return; }
-                                            this.open_swarm(id, CrewPick { turn: pick.turn, handoff: pick.handoff }, &expected, window, cx);
-                                        }))
-                                })
-                                .when_some(subagent.peer_id.as_deref(), |card, peer| {
-                                    let expected = swarm.id.clone();
-                                    let peer = peer.to_owned();
-                                    let namespace = self.swarm_namespace(id);
-                                    card.child(ui::button("peer-exchanges", ui::Button::Quiet, Some("chat"), "Inspect this peer’s exchanges", false, &colors).debug_selector(|| "peer-exchanges".into()).w_full().px(px(4.)).text_size(px(13.))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            if this.swarm_namespace(id) != namespace { this.notify_user("This peer belonged to the previous session source.", cx); return; }
-                                            let pick = CrewPick { turn: pick.turn, handoff: pick.handoff };
-                                            this.open_swarm(id, pick, &expected, window, cx);
-                                            if let Some(state) = this.swarm_views.get_mut(&(id, pick)).filter(|state| state.swarm_id == expected) { state.tab = super::swarm::SwarmTab::Exchanges; state.filter = super::swarm::ExchangeFilter::All; state.peer = Some(peer.clone()); state.open_message = None; }
-                                            cx.notify();
-                                        })))
-                                })
-                        }))
-                        .when(own.is_none() && swarm.is_none(), |column| column.child(brief.take().unwrap()))
-                        .children(interrupted_note(&subagent).map(|text| {
-                            note("alert", colors.amber, text, &colors).mx(px(0.)).mb(px(0.))
-                        }))
-                        .child(run),
-                ),
-            )
+            .child(transcript)
             .child(
                 div()
                     .flex_none()
@@ -1721,6 +1980,67 @@ mod tests {
                 "no editable input without a live target"
             );
         }
+    }
+
+    #[cfg(feature = "ui-test")]
+    #[gpui::test]
+    fn subagent_transcript_uses_the_retained_virtual_list(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::testing::State::default()));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(px(384.), px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| app.preview("subagent", window, cx));
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let own = *app.subagent_ids.values().next().unwrap();
+            let turns = app.subagent_sessions[&own].turns.len();
+            assert_eq!(app.thread_lists[&own].item_count(), turns);
+            assert_eq!(app.thread_list_shapes[&own], (turns, 0, false));
+        });
+    }
+
+    #[cfg(feature = "ui-test")]
+    #[gpui::test]
+    fn subagent_turn_remeasurement_skips_the_intro_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::testing::State::default()));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(px(384.), px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| app.preview("swarm-peer", window, cx));
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let own = *app.subagent_ids.values().next().unwrap();
+            let turns = app.subagent_sessions[&own].turns.len();
+            assert_eq!(app.thread_list_shapes[&own], (turns, 1, false));
+            assert_eq!(app.thread_lists[&own].item_count(), turns + 1);
+            assert_eq!(app.thread_turn_list_index(own, 0), 1);
+        });
+    }
+
+    #[cfg(feature = "ui-test")]
+    #[gpui::test]
+    fn synthetic_subagent_ids_are_not_reused_after_deletion(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::testing::State::default()));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|_, cx| {
+            app.update(cx, |app, _| {
+                let first = app.allocate_subagent_session_id();
+                app.subagent_ids
+                    .insert((SessionId(1), "deleted".into()), first);
+                app.subagent_ids
+                    .retain(|(_, conversation), _| conversation != "deleted");
+
+                let second = app.allocate_subagent_session_id();
+                assert_ne!(second, first);
+                app.subagent_ids
+                    .insert((SessionId(2), "retained".into()), second);
+                let third = app.allocate_subagent_session_id();
+                assert_ne!(third, first);
+                assert_ne!(third, second);
+            });
+        });
     }
 
     fn example_swarm() -> Swarm {

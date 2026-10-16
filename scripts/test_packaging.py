@@ -128,7 +128,7 @@ class PackagingTests(unittest.TestCase):
             "status": "experimental",
             "engine": "bun",
             "bun": "1.4.3",
-            "sdk": "1.2.0",
+            "sdk": "1.3.0",
             "abi": "arm64-v8a",
             "librarySha256": hashlib.sha256(library).hexdigest(),
             "bundleSha256": hashlib.sha256(bundle).hexdigest(),

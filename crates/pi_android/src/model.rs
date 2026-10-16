@@ -434,6 +434,16 @@ pub struct SessionSubagent<'a> {
 
 /// Every subagent in a session: active first, then waiting, then terminal,
 /// preserving call/task order within each group.
+pub fn background_subagents_at_work(turns: &[Turn]) -> usize {
+    turns
+        .iter()
+        .flat_map(|turn| &turn.handoffs)
+        .filter(|handoff| handoff.background)
+        .flat_map(|handoff| &handoff.subagents)
+        .filter(|subagent| !subagent.status.finished())
+        .count()
+}
+
 pub fn session_subagents(turns: &[Turn]) -> Vec<SessionSubagent<'_>> {
     let mut subagents: Vec<_> = turns
         .iter()
@@ -649,6 +659,16 @@ impl Session {
         &mut self.turns[last]
     }
 
+    pub fn background_subagents_at_work(&self) -> usize {
+        background_subagents_at_work(&self.turns)
+    }
+
+    /// A finished parent remains active while its background crew is running.
+    pub fn is_working(&self) -> bool {
+        self.state == State::Working
+            || (self.state == State::Done && self.background_subagents_at_work() > 0)
+    }
+
     /// The line under the title in lists: what it is doing, or how it ended.
     pub fn status_line(&self) -> String {
         if self.local {
@@ -664,6 +684,14 @@ impl Session {
             ),
             State::Working => self.activity.clone(),
             State::Done => {
+                let background = self.background_subagents_at_work();
+                if background > 0 {
+                    return if background == 1 {
+                        "1 subagent working".into()
+                    } else {
+                        format!("{background} subagents working")
+                    };
+                }
                 let files = match self.files.len() {
                     0 => "no changes".to_owned(),
                     1 => "1 file changed".to_owned(),

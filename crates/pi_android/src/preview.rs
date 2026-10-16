@@ -2021,6 +2021,46 @@ mod tests {
         assert!(cx.debug_bounds("thinking-text").is_none());
     }
 
+    #[gpui::test]
+    fn collapsed_thoughts_share_the_tool_call_rhythm(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("working", window, cx)));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let turn = &mut app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == QWEN)
+                    .unwrap()
+                    .turns[0];
+                turn.flow = vec![
+                    Flow::Thinking("A thought".into()),
+                    Flow::Tool(StageKind::Understand, 0),
+                ];
+                app.thread_snapshots.remove(&QWEN);
+                app.remeasure_thread_turn(QWEN, 0);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.thread_lists[&QWEN].scroll_to(gpui::ListOffset::default());
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        let thought = cx.debug_bounds("thinking").unwrap();
+        let call = cx.debug_bounds("call").unwrap();
+        assert_eq!(thought.bottom(), call.top());
+    }
+
     /// A big crew shows its first few, all on request, or just its header.
     #[gpui::test]
     fn a_crew_folds(cx: &mut TestAppContext) {
@@ -3565,6 +3605,10 @@ mod tests {
         cx.update(|window, cx| app.update(cx, |app, cx| app.preview("done", window, cx)));
         cx.run_until_parked();
         assert!(cx.debug_bounds("call").is_none());
+        assert!(
+            cx.debug_bounds("thinking").is_none(),
+            "finished thoughts fold with their calls"
+        );
         let fold = cx.debug_bounds("calls-fold").unwrap();
         cx.simulate_click(fold.center(), gpui::Modifiers::none());
         cx.run_until_parked();
@@ -3572,6 +3616,7 @@ mod tests {
             assert!(app.expanded_streams.contains(&(QWEN, 0)))
         });
         assert!(cx.debug_bounds("call").is_some());
+        assert!(cx.debug_bounds("thinking").is_some());
     }
 
     #[gpui::test]

@@ -97,7 +97,7 @@ def configure_local(library: Path, target: str) -> None:
         "status": "experimental",
         "engine": "bun",
         "bun": "1.4.3",
-        "sdk": "1.2.0",
+        "sdk": "1.3.0",
         "abi": build_apk.TARGET_ABIS[target],
         "librarySha256": digest,
         "bundleSha256": hashlib.sha256(

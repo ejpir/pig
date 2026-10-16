@@ -225,7 +225,7 @@ export async function runProbe({
       phase,
       pid: process.pid,
       bun: Bun.version,
-      durableVersion: "1.2.0",
+      durableVersion: "1.3.0",
       conversationId: ids.conversationId,
       submissionId: ids.submissionId,
       databasePath: ids.databasePath,

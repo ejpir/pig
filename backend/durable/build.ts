@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-if (Bun.version !== "1.4.2") throw new Error(`Use Bun 1.4.2, not ${Bun.version}, for reproducible runner builds`);
+if (Bun.version !== "1.4.3") throw new Error(`Use Bun 1.4.3, not ${Bun.version}, for reproducible runner builds`);
 const root = resolve(import.meta.dir, "../..");
 const output = process.env.PI_DESKTOP_DURABLE_OUTPUT_DIR
   ? resolve(process.env.PI_DESKTOP_DURABLE_OUTPUT_DIR)

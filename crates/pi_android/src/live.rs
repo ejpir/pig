@@ -256,6 +256,8 @@ struct Watch {
     subagent_refresh_pending: bool,
     /// Subagents fetched from the computer: absent until asked for.
     subagents: HashMap<String, Result<pi_core::session::Session, String>>,
+    /// Monotonic child-read revisions; rendering projects each response once.
+    subagent_revisions: HashMap<String, u64>,
     /// Exact live run identity from the same child read; `None` means idle.
     subagent_runs: HashMap<String, Option<String>>,
     /// Finished child conversations the backend explicitly allows resuming.
@@ -431,6 +433,7 @@ impl Watch {
             following: None,
             subagent_refresh_pending: false,
             subagents: HashMap::new(),
+            subagent_revisions: HashMap::new(),
             subagent_runs: HashMap::new(),
             resumable_subagents: HashSet::new(),
             subagent_outbox: HashMap::new(),
@@ -816,6 +819,21 @@ impl Live {
 
     pub fn is_watched(&self, id: SessionId) -> bool {
         self.watches.contains_key(&id)
+    }
+
+    pub(crate) fn has_snapshot(&self, id: SessionId) -> bool {
+        self.watches
+            .get(&id)
+            .is_some_and(|watch| watch.cached_snapshot)
+    }
+
+    pub(crate) fn listed_session(&self, id: SessionId) -> Option<crate::model::Session> {
+        let listed = self.listed.get(&id)?;
+        Some(projection::listed(
+            id,
+            listed,
+            self.helper.short(&listed.cwd),
+        ))
     }
 
     /// No authoritative snapshot is available for display yet. This is not
@@ -1834,6 +1852,14 @@ impl Live {
             self.remove(id);
             return (vec![id], None);
         }
+        // Child transcript reads update their own retained screen cache only.
+        // Reprojecting the complete parent for every one-second child poll is
+        // both redundant and especially costly for long parent histories.
+        let parent_changed = !matches!(
+            &update,
+            Update::Record(_, record)
+                if record["type"] == "response" && record["command"] == "get_subagent"
+        );
         let Some(watch) = self.watches.get_mut(&id) else {
             return (Vec::new(), None);
         };
@@ -1849,7 +1875,7 @@ impl Live {
             session: Some(id),
             text,
         });
-        (vec![id], problem)
+        (parent_changed.then_some(id).into_iter().collect(), problem)
     }
 
     fn apply_watch(
@@ -2357,6 +2383,11 @@ impl Live {
                         .map_err(|error| error.to_string())
                 };
                 let busy = fetched.as_ref().is_ok_and(pi_core::session::Session::busy);
+                let revision = watch
+                    .subagent_revisions
+                    .entry(conversation.clone())
+                    .or_default();
+                *revision = revision.wrapping_add(1).max(1);
                 let run_id = record["data"]["runId"].as_str().map(str::to_owned);
                 if busy && run_id.is_none() {
                     watch.subagents.insert(
@@ -2540,6 +2571,14 @@ impl Live {
         conversation: &str,
     ) -> Option<&Result<pi_core::session::Session, String>> {
         self.watches.get(&id)?.subagents.get(conversation)
+    }
+
+    pub(crate) fn subagent_revision(&self, id: SessionId, conversation: &str) -> Option<u64> {
+        self.watches
+            .get(&id)?
+            .subagent_revisions
+            .get(conversation)
+            .copied()
     }
 
     fn subagent_input_target_watch(

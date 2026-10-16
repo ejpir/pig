@@ -1071,16 +1071,17 @@ impl PhoneApp {
             return div();
         };
         let wrap = self.wrap_lines(cx);
-        let displayed = tool.output_for_display().into_owned();
+        let displayed = SharedString::from(tool.output_for_display().into_owned());
         let command = match tool.name.as_str() {
             "bash" => format!("$ {}", tool.target),
             "grep" | "find" => format!("{} “{}”", tool.name, tool.target),
             _ => tool.target.clone(),
         };
         let next = super::stream::next_call(turn, kind, tool_index);
-        let header_output = tool.output.clone();
+        let header_output = SharedString::from(tool.output.clone());
         let diff_is_preview = tool.diff_is_preview;
-        let asked = format!("{command}\n\n{displayed}");
+        let asked_command = command.clone();
+        let asked_output = displayed.clone();
         let asked_name = format!("{} output", super::stream::target(tool));
         div()
             .pb(px(12.))
@@ -1161,7 +1162,7 @@ impl PhoneApp {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !header_output.is_empty() {
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                        header_output.clone(),
+                                        header_output.to_string(),
                                     ));
                                     this.notify_user("Copied output", cx);
                                 }
@@ -1191,16 +1192,15 @@ impl PhoneApp {
                                 colors,
                             ))
                         } else {
-                            box_.children(displayed.lines().map(|line| {
+                            box_.child(
                                 div()
                                     .font_family(MONO)
                                     .text_size(px(12.))
-                                    .min_h(px(18.))
                                     .line_height(px(18.))
-                                    .when(!wrap, |line| line.whitespace_nowrap())
+                                    .when(!wrap, |text| text.whitespace_nowrap())
                                     .text_color(colors.plain)
-                                    .child(super::stream::output_text(line, colors))
-                            }))
+                                    .child(super::stream::output_block(displayed.clone(), colors)),
+                            )
                         }
                     })
                     .when(!displayed.trim().is_empty(), |output| {
@@ -1284,10 +1284,11 @@ impl PhoneApp {
                                             return;
                                         }
                                         let composer = this.thread_composer(id, window, cx);
+                                        let asked = format!("{asked_command}\n\n{asked_output}");
                                         let attachment = crate::composer::Attachment::File {
                                             name: asked_name.clone(),
                                             size: crate::app::size_label(asked.len() as u64),
-                                            contents: asked.clone(),
+                                            contents: asked,
                                         };
                                         let attached = composer.update(cx, |composer, cx| {
                                             composer.try_attach(attachment, cx)

@@ -36,14 +36,10 @@ pub struct HelperUpdate {
 }
 
 impl HelperUpdate {
-    pub fn title(&self, computer: &str) -> String {
+    pub fn title(&self) -> &'static str {
         match self.state {
-            HelperUpdateState::UpdateRequired => {
-                format!("Helper update required on {computer}")
-            }
-            HelperUpdateState::UpdateRecommended => {
-                format!("Helper update recommended on {computer}")
-            }
+            HelperUpdateState::UpdateRequired => "Helper update required",
+            HelperUpdateState::UpdateRecommended => "Helper update recommended",
         }
     }
 
@@ -1031,6 +1027,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recommended.state, HelperUpdateState::UpdateRecommended);
+        assert_eq!(recommended.title(), "Helper update recommended");
 
         assert_eq!(
             evaluate_update(

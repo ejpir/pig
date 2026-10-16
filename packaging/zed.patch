@@ -360,3 +360,22 @@ index 0000000000..a37d065cc8
 +        });
 +    }
 +}
+diff --git a/crates/gpui/src/window.rs b/crates/gpui/src/window.rs
+index 52d729f75a..506a460159 100644
+--- a/crates/gpui/src/window.rs
++++ b/crates/gpui/src/window.rs
+@@ -5722,8 +5722,13 @@ impl Window {
+         let Some((touch_id, duration)) = self.touch_gestures.pending_long_press() else {
+             return;
+         };
++        // Register the deadline before enqueueing the foreground waiter. Touch
++        // dispatch runs after the foreground queue has already been serviced,
++        // so constructing the timer inside that waiter adds at least one main
++        // loop turn—and potentially busy foreground work—to every long press.
++        let timer = cx.background_executor().timer(duration);
+         self.long_press_timer = Some(self.spawn(cx, async move |cx| {
+-            cx.background_executor.timer(duration).await;
++            timer.await;
+             cx.update(move |window, cx| {
+                 window.long_press_timer.take();
+                 if let Some(gesture) = window.touch_gestures.offer_long_press(touch_id) {

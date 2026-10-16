@@ -58,7 +58,7 @@ fn failure_card(session: &Session, colors: &Theme) -> Option<gpui::Stateful<Div>
     })
 }
 
-fn new_thread_list_state(item_count: usize) -> gpui::ListState {
+pub(super) fn new_thread_list_state(item_count: usize) -> gpui::ListState {
     // Accurate off-screen heights keep the draggable thumb mapped to the whole
     // conversation. Rows remain virtualized for painting after this first
     // measurement pass, and later renders only remeasure changed rows below.
@@ -166,13 +166,15 @@ impl ThreadLayoutChanges {
     }
 }
 
-/// Compare only geometry-relevant turn state. Most duration increments repaint
-/// in place; the timing signature below catches the transitions that add rows.
-fn turn_layout_changed(before: &Turn, after: &Turn) -> bool {
+/// Compare only geometry-relevant turn state. Most duration and running-output
+/// increments repaint in place; the timing signature below catches transitions
+/// that add rows. A nonempty running bash preview has a fixed four-line box, so
+/// replacing its text must not remeasure the whole turn on every partial result.
+pub(super) fn turn_layout_changed(before: &Turn, after: &Turn) -> bool {
     before.prompt != after.prompt
         || before.at != after.at
         || before.attachments != after.attachments
-        || before.stages != after.stages
+        || stages_layout_changed(&before.stages, &after.stages)
         || before.summary != after.summary
         || before.pages != after.pages
         || before.images != after.images
@@ -180,6 +182,42 @@ fn turn_layout_changed(before: &Turn, after: &Turn) -> bool {
         || before.reported != after.reported
         || before.flow != after.flow
         || timing_layout_signature(before) != timing_layout_signature(after)
+}
+
+fn stages_layout_changed(before: &[crate::model::Stage], after: &[crate::model::Stage]) -> bool {
+    before.len() != after.len()
+        || before.iter().zip(after).any(|(before, after)| {
+            before.kind != after.kind
+                || before.status != after.status
+                || before.what != after.what
+                || before.references != after.references
+                || before.diff_path != after.diff_path
+                || before.diff.len() != after.diff.len()
+                || before.added != after.added
+                || before.removed != after.removed
+                || before.tools.len() != after.tools.len()
+                || before
+                    .tools
+                    .iter()
+                    .zip(&after.tools)
+                    .any(|(before, after)| tool_layout_changed(before, after))
+        })
+}
+
+fn tool_layout_changed(
+    before: &crate::model::ToolActivity,
+    after: &crate::model::ToolActivity,
+) -> bool {
+    before.id != after.id
+        || before.name != after.name
+        || before.target != after.target
+        || before.finished != after.finished
+        || before.failed != after.failed
+        || before.added != after.added
+        || before.removed != after.removed
+        || before.diff.len() != after.diff.len()
+        || before.diff_is_preview != after.diff_is_preview
+        || (before.name == "bash" && before.output.is_empty() != after.output.is_empty())
 }
 
 /// Time text itself paints within a fixed line. Geometry changes only when
@@ -291,11 +329,18 @@ fn thread_layout_changes(before: &Session, after: &Session) -> ThreadLayoutChang
 }
 
 impl PhoneApp {
+    fn waiting_for_thread_snapshot(&self, id: SessionId) -> bool {
+        self.store.as_ref().is_some_and(|store| {
+            !store.is_hydrated(id) && store.live.as_ref().is_some_and(|live| live.is_loading(id))
+        })
+    }
+
     pub(crate) fn begin_thread_loading(&mut self, id: SessionId) {
         let Some(store) = &self.store else {
             return;
         };
-        let waiting_for_snapshot = store.live.as_ref().is_some_and(|live| live.is_loading(id));
+        let waiting_for_snapshot =
+            !store.is_hydrated(id) && store.live.as_ref().is_some_and(|live| live.is_loading(id));
         let item_count = store.session(id).map_or(0, |session| {
             session.turns.len()
                 + usize::from(!session.queued.is_empty())
@@ -326,11 +371,7 @@ impl PhoneApp {
         let Some(generation) = self.thread_loading.get(&id).copied() else {
             return false;
         };
-        let waiting_for_snapshot = self
-            .store
-            .as_ref()
-            .and_then(|store| store.live.as_ref())
-            .is_some_and(|live| live.is_loading(id));
+        let waiting_for_snapshot = self.waiting_for_thread_snapshot(id);
         if waiting_for_snapshot {
             return true;
         }
@@ -354,11 +395,7 @@ impl PhoneApp {
             cx.on_next_frame(window, move |this, _, cx| {
                 let same_load = this.thread_loading.get(&id) == Some(&generation);
                 let still_visible = this.thread_visible(id);
-                let waiting = this
-                    .store
-                    .as_ref()
-                    .and_then(|store| store.live.as_ref())
-                    .is_some_and(|live| live.is_loading(id));
+                let waiting = this.waiting_for_thread_snapshot(id);
                 if !same_load || !still_visible || waiting {
                     if this.thread_loading_release_scheduled.get(&id) == Some(&generation) {
                         this.thread_loading_release_scheduled.remove(&id);
@@ -371,11 +408,7 @@ impl PhoneApp {
                         let same_load = this.thread_loading.get(&id) == Some(&generation);
                         let release = same_load
                             && this.thread_visible(id)
-                            && !this
-                                .store
-                                .as_ref()
-                                .and_then(|store| store.live.as_ref())
-                                .is_some_and(|live| live.is_loading(id));
+                            && !this.waiting_for_thread_snapshot(id);
                         if this.thread_loading_release_scheduled.get(&id) == Some(&generation) {
                             this.thread_loading_release_scheduled.remove(&id);
                         }
@@ -391,7 +424,19 @@ impl PhoneApp {
         true
     }
 
-    pub(crate) fn remeasure_thread_turn(&self, id: SessionId, index: usize) {
+    pub(crate) fn thread_turn_list_index(&self, id: SessionId, turn: usize) -> usize {
+        let leading = if self.subagent_sessions.contains_key(&id) {
+            self.thread_list_shapes
+                .get(&id)
+                .map_or(0, |(_, leading, _)| *leading)
+        } else {
+            0
+        };
+        leading + turn
+    }
+
+    pub(crate) fn remeasure_thread_turn(&self, id: SessionId, turn: usize) {
+        let index = self.thread_turn_list_index(id, turn);
         if let Some(list) = self.thread_lists.get(&id)
             && index < list.item_count()
         {
@@ -486,7 +531,12 @@ impl PhoneApp {
         let back = ui::tap("back", "back", &colors).on_click(cx.listener(|this, _, window, cx| {
             this.back(window, cx);
         }));
-        let scrolling = self.scroll_in_motion();
+        // Keep one immutable transcript while a modal panel moves. The panel
+        // spring invalidates the root every frame, but its background route has
+        // not changed and must not deep-compare/clone a long session each time.
+        let scrolling = self.scroll_in_motion()
+            || self.sheet_motion.dragging()
+            || self.sheet_motion.animating();
         let mut layout_changes = ThreadLayoutChanges::default();
         let cached = scrolling
             .then(|| self.thread_snapshots.get(&id).cloned())
@@ -783,24 +833,7 @@ impl PhoneApp {
             .into_any_element()
     }
 
-    /// Each turn of a session: the prompt, the run, and what Pi said and
-    /// showed. `read_only` leaves out what changes the session.
-    pub(crate) fn turns(
-        &self,
-        session: &Session,
-        read_only: bool,
-        colors: &Theme,
-        cx: &Context<Self>,
-    ) -> Vec<gpui::Stateful<Div>> {
-        session
-            .turns
-            .iter()
-            .enumerate()
-            .map(|(index, _)| self.turn(session, index, read_only, colors, cx))
-            .collect()
-    }
-
-    fn turn(
+    pub(super) fn turn(
         &self,
         session: &Session,
         index: usize,
@@ -817,8 +850,9 @@ impl PhoneApp {
         // Review and the report card belong to the session the user runs.
         let ending = (index == last && !running && !read_only && session.supports("file_review"))
             .then(|| self.ending(session, index, cx));
-        // While Pi works its calls stream in between its words; a finished
-        // run folds them under its line until Show brings them back.
+        // While Pi works its activity streams in between its words; a finished
+        // run folds its calls and thoughts under the run line until Show brings
+        // the chronological stream back.
         let streamed = turn.streams() && (live || self.expanded_streams.contains(&(id, index)));
         div()
             .id(("turn", index))
@@ -853,8 +887,12 @@ impl PhoneApp {
                 } else if turn.interleaved() {
                     column.children(self.flow(session, index, turn, colors, cx))
                 } else {
-                    let column =
-                        column.children(self.thinking_steps(id, index, turn, live, colors, cx));
+                    // A completed streamed run keeps its reasoning with the
+                    // calls under the run line. Runs without calls still show
+                    // their standalone thoughts here.
+                    let column = column.when(!turn.streams(), |column| {
+                        column.children(self.thinking_steps(id, index, turn, live, colors, cx))
+                    });
                     let text = turn.summary.as_ref().map(|s| s.text()).unwrap_or_default();
                     // Choose native rendering BEFORE constructing/highlighting the
                     // large script fence; the discarded ordinary reply was expensive.
@@ -999,12 +1037,13 @@ impl PhoneApp {
                     self.compacted(id, index, n, summary, colors, cx)
                         .into_any_element(),
                 ),
-                Flow::Thinking(text) => Some(
+                // In a completed streamed run, thoughts fold with the calls
+                // until its chronological activity is shown again.
+                Flow::Thinking(text) if !turn.streams() => Some(
                     self.thinking(id, index, n, text, false, colors, cx)
                         .into_any_element(),
                 ),
-                // Calls show in the thread only as a stream.
-                Flow::Tool(..) => None,
+                Flow::Thinking(_) | Flow::Tool(..) => None,
             })
             .collect()
     }
@@ -3447,6 +3486,34 @@ mod tests {
         let changes = thread_layout_changes(&before, &after);
         assert!(changes.turns.is_empty());
         assert!(!changes.queue);
+    }
+
+    #[test]
+    fn running_bash_output_repaints_without_remeasuring_its_fixed_tail() {
+        let mut before = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
+        let stage = &mut before.turns[0].stages[0];
+        stage.status = StageStatus::Live;
+        stage.tools.push(crate::model::ToolActivity {
+            id: "bash-1".into(),
+            name: "bash".into(),
+            target: "cargo test".into(),
+            output: "first line".into(),
+            finished: false,
+            failed: false,
+            added: 0,
+            removed: 0,
+            diff: Vec::new(),
+            diff_is_preview: false,
+        });
+        let kind = stage.kind;
+        before.turns[0].flow.push(Flow::Tool(kind, 0));
+        let mut after = before.clone();
+        after.turns[0].stages[0].tools[0].output = "first line\nsecond line".into();
+
+        assert!(thread_layout_changes(&before, &after).turns.is_empty());
+
+        before.turns[0].stages[0].tools[0].output.clear();
+        assert_eq!(thread_layout_changes(&before, &after).turns, [0]);
     }
 
     #[test]

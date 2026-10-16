@@ -7,7 +7,7 @@ import {
   createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, MemoryStorage,
 } from "@earendil-works/pi-durable";
 import {
-  definition, describe as step, gist, subagentExtension, submitSubagentInput,
+  definition, describe as step, gist, subagentExtension, submitSubagentInput, submitSubagentReport,
 } from "../src/subagents.ts";
 import { noResources, type AgentDefinition } from "../src/commands.ts";
 
@@ -163,7 +163,79 @@ test("direct child input steers only an exact run and starts follow-ups only fro
   }
 });
 
-test("background reports steer only their delegating run and wait behind a later user turn", async () => {
+test("an idle report steers a user run that wins the submit race", async () => {
+  const context = BACKGROUND_CONTEXT;
+  const laterStarted = gate(), releaseLater = gate();
+  const report = "<subagent_report call=\"race\">finished</subagent_report>";
+  const reportRequests: Message[][] = [];
+  const faux = fauxProvider();
+  const models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses(Array.from({ length: 6 }, () => ({ messages }: { messages: readonly Message[] }) => {
+    const copied = structuredClone(messages) as Message[];
+    const user = copied.findLast((message) => message.role === "user");
+    const text = user?.role === "user" ? messageText(user) : "";
+    const hasHold = copied.some((message) => message.role === "toolResult" && message.toolCallId === "race-hold");
+    if (text === "later user turn" && !hasHold) {
+      return fauxAssistantMessage(fauxToolCall("bash", { command: "hold race" }, { id: "race-hold" }), { stopReason: "toolUse" });
+    }
+    if (text === report) {
+      reportRequests.push(copied);
+      return fauxAssistantMessage("report joined the user run");
+    }
+    throw new Error(`Unexpected faux request: ${text}`);
+  }));
+
+  const registry = createRegistry();
+  registry.install(defineExtension({ name: "report-race-test", tools: [defineTool({
+    name: "bash", description: "Hold the racing user run", replay: "safe",
+    parameters: Type.Object({ command: Type.String() }),
+    execute: async ({ command }) => {
+      if (command !== "hold race") throw new Error(`Unexpected command: ${command}`);
+      laterStarted.open();
+      await releaseLater.promise;
+      return { output: [{ type: "text" as const, text: "released" }] };
+    },
+  })] }));
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, context);
+  try {
+    const model = faux.getModel();
+    const root = await harness.root(context, { agent: { model: { provider: model.provider, modelId: model.id } } });
+    let later: Awaited<ReturnType<typeof root.submit>> | undefined;
+    const racing = new Proxy(root, {
+      get(target, property, receiver) {
+        if (property !== "submit") return Reflect.get(target, property, receiver);
+        return async (...args: Parameters<typeof root.submit>) => {
+          later = await root.submit({ type: "input", content: "later user turn" }, context);
+          await laterStarted.promise;
+          return root.submit(...args);
+        };
+      },
+    });
+
+    const submitted = await submitSubagentReport(racing, report, "racing-report", context);
+    expect(later).toBeDefined();
+    const queued = await root.commit(async (tx) => {
+      const inbox = JSON.parse(JSON.stringify(await tx.doc(InboxDoc, root.id))) as { items: { mode: string; content?: unknown }[] };
+      const live = JSON.parse(JSON.stringify(await tx.doc(LiveDoc, root.id))) as { run?: { inputs: number[] } };
+      return { report: inbox.items.find((item) => item.content === report), live };
+    }, context);
+    expect(queued.report?.mode).toBe("steer");
+    expect(queued.live.run?.inputs.map(Number)).toEqual([Number(later!.id)]);
+
+    releaseLater.open();
+    await submitted.wait(context);
+    await root.waitForIdle(context);
+    expect(reportRequests).toHaveLength(1);
+    expect(reportRequests[0].filter((message) => message.role === "user").map(messageText))
+      .toEqual(["later user turn", report]);
+  } finally {
+    releaseLater.open();
+    await harness.close(context);
+  }
+});
+
+test("background reports steer whichever parent run is active", async () => {
   const context = BACKGROUND_CONTEXT;
   const sameRunStarted = gate(), releaseSameRun = gate();
   const subagentStarted = gate(), releaseSubagent = gate();
@@ -271,22 +343,146 @@ test("background reports steer only their delegating run and wait behind a later
       const report = inbox.items.find((item) => typeof item.content === "string" && item.content.startsWith("<subagent_report"));
       return report === undefined ? undefined : { report, live };
     }, context));
-    expect(queued.report.mode).toBe("followUp");
+    expect(queued.report.mode).toBe("steer");
     expect(queued.live.run?.inputs.map(Number)).toEqual([Number(later.id)]);
 
     releaseLater.open();
     await later.wait(context);
     await root.waitForIdle(context);
-    expect(laterContinuations).toHaveLength(1);
-    expect(laterContinuations[0].filter((message) => message.role === "user").map(messageText).at(-1)).toBe("later user turn");
+    expect(laterContinuations).toHaveLength(0);
     expect(laterReports).toHaveLength(1);
     const reportUsers = laterReports[0].filter((message) => message.role === "user").map(messageText);
+    expect(reportUsers).toContain("later user turn");
     expect(reportUsers.at(-1)).toStartWith("<subagent_report");
-    expect(laterReports[0].some((message) => message.role === "assistant" && messageText(message) === "later turn complete")).toBe(true);
+    expect(laterReports[0].some((message) => message.role === "toolResult" && message.toolCallId === "later-hold")).toBe(true);
   } finally {
     releaseSameRun.open();
     releaseSubagent.open();
     releaseLater.open();
+    await harness.close(context);
+  }
+});
+
+test("multiple background reports steer across consecutive parent tool boundaries", async () => {
+  const context = BACKGROUND_CONTEXT;
+  const childOneStarted = gate(), releaseChildOne = gate();
+  const childTwoStarted = gate(), releaseChildTwo = gate();
+  const toolOneStarted = gate(), releaseToolOne = gate();
+  const toolTwoStarted = gate(), releaseToolTwo = gate();
+  const laterRequests: Message[][] = [];
+  const faux = fauxProvider();
+  const models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses(Array.from({ length: 24 }, () => ({ messages: source }: { messages: readonly Message[] }) => {
+    const messages = structuredClone(source) as Message[];
+    const users = messages.filter((message) => message.role === "user").map(messageText);
+    const hasResult = (id: string) => messages.some((message) => message.role === "toolResult" && message.toolCallId === id);
+    if (users.includes("later consecutive run")) {
+      laterRequests.push(messages);
+      if (!hasResult("parent-tool-one")) {
+        return fauxAssistantMessage(fauxToolCall("bash", { command: "hold parent one" }, { id: "parent-tool-one" }), { stopReason: "toolUse" });
+      }
+      if (!hasResult("parent-tool-two")) {
+        return fauxAssistantMessage(fauxToolCall("bash", { command: "hold parent two" }, { id: "parent-tool-two" }), { stopReason: "toolUse" });
+      }
+      return fauxAssistantMessage("later run complete");
+    }
+    const text = users.at(-1) ?? "";
+    if (text === "delegate two crews") {
+      return hasResult("crew-one") && hasResult("crew-two")
+        ? fauxAssistantMessage("Both delegations started.")
+        : fauxAssistantMessage([
+          fauxToolCall("subagent", { agent: "scout", task: "slow one" }, { id: "crew-one" }),
+          fauxToolCall("subagent", { agent: "scout", task: "slow two" }, { id: "crew-two" }),
+        ], { stopReason: "toolUse" });
+    }
+    if (text === "slow one") {
+      return hasResult("child-one")
+        ? fauxAssistantMessage("first child complete")
+        : fauxAssistantMessage(fauxToolCall("bash", { command: "hold child one" }, { id: "child-one" }), { stopReason: "toolUse" });
+    }
+    if (text === "slow two") {
+      return hasResult("child-two")
+        ? fauxAssistantMessage("second child complete")
+        : fauxAssistantMessage(fauxToolCall("bash", { command: "hold child two" }, { id: "child-two" }), { stopReason: "toolUse" });
+    }
+    throw new Error(`Unexpected faux request: ${text}`);
+  }));
+
+  const registry = createRegistry();
+  registry.install(defineExtension({ name: "multi-report-steering-test", tools: [defineTool({
+    name: "bash", description: "A deterministic gated command", replay: "safe",
+    parameters: Type.Object({ command: Type.String() }),
+    execute: async ({ command }) => {
+      if (command === "hold child one") {
+        childOneStarted.open();
+        await releaseChildOne.promise;
+      } else if (command === "hold child two") {
+        childTwoStarted.open();
+        await releaseChildTwo.promise;
+      } else if (command === "hold parent one") {
+        toolOneStarted.open();
+        await releaseToolOne.promise;
+      } else if (command === "hold parent two") {
+        toolTwoStarted.open();
+        await releaseToolTwo.promise;
+      } else {
+        throw new Error(`Unexpected command: ${command}`);
+      }
+      return { output: [{ type: "text" as const, text: `${command} complete` }] };
+    },
+  })] }));
+  let harness!: Harness;
+  registry.install(subagentExtension(models, () => harness, () => ({ ...noResources, agents: [scout] })));
+  harness = await Harness.open(new MemoryStorage(), { models, registry }, context);
+  try {
+    const model = faux.getModel();
+    const root = await harness.root(context, { agent: { model: { provider: model.provider, modelId: model.id } } });
+    const delegated = await root.submit({ type: "input", content: "delegate two crews" }, context);
+    await Promise.all([childOneStarted.promise, childTwoStarted.promise]);
+    await delegated.wait(context);
+    await root.waitForIdle(context);
+
+    const later = await root.submit({ type: "input", content: "later consecutive run" }, context);
+    await toolOneStarted.promise;
+    releaseChildOne.open();
+    releaseChildTwo.open();
+
+    const queued = await eventually(async () => root.commit(async (tx) => {
+      const inbox = JSON.parse(JSON.stringify(await tx.doc(InboxDoc, root.id))) as { items: { mode: string; content?: unknown }[] };
+      const reports = inbox.items.filter((item) => typeof item.content === "string" && item.content.startsWith("<subagent_report"));
+      const live = JSON.parse(JSON.stringify(await tx.doc(LiveDoc, root.id))) as { run?: { inputs: number[] } };
+      return reports.length === 2 ? { reports, live } : undefined;
+    }, context));
+    expect(queued.reports.map((report) => report.mode)).toEqual(["steer", "steer"]);
+    expect(queued.live.run?.inputs.map(Number)).toEqual([Number(later.id)]);
+
+    releaseToolOne.open();
+    await toolTwoStarted.promise;
+    const afterFirstBoundary = laterRequests.find((messages) =>
+      messages.some((message) => message.role === "toolResult" && message.toolCallId === "parent-tool-one") &&
+      !messages.some((message) => message.role === "toolResult" && message.toolCallId === "parent-tool-two")
+    );
+    expect(afterFirstBoundary).toBeDefined();
+    const firstBoundaryUsers = afterFirstBoundary!
+      .filter((message) => message.role === "user").map(messageText);
+    expect(firstBoundaryUsers.slice(firstBoundaryUsers.indexOf("later consecutive run")))
+      .toEqual(["later consecutive run", expect.stringContaining("<subagent_report")]);
+
+    releaseToolTwo.open();
+    await later.wait(context);
+    await root.waitForIdle(context);
+    expect(laterRequests).toHaveLength(3);
+    const finalUsers = laterRequests.at(-1)!.filter((message) => message.role === "user").map(messageText);
+    const laterUsers = finalUsers.slice(finalUsers.indexOf("later consecutive run"));
+    expect(laterUsers).toHaveLength(3);
+    expect(laterUsers[0]).toBe("later consecutive run");
+    expect(laterUsers.slice(1).every((text) => text.startsWith("<subagent_report"))).toBe(true);
+  } finally {
+    releaseChildOne.open();
+    releaseChildTwo.open();
+    releaseToolOne.open();
+    releaseToolTwo.open();
     await harness.close(context);
   }
 });

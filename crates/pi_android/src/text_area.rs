@@ -416,6 +416,10 @@ impl TextArea {
                 };
                 self.anchor = Some(word.clone());
                 self.select(word, cx);
+                // Show Copy/Paste at recognition time, not only after the
+                // finger lifts. The long-press stream is captured by this
+                // field, so selection can still extend while the bar is open.
+                self.menu = true;
                 activity::long_press_feedback();
             }
             TouchPhase::Moved => {
@@ -1979,6 +1983,26 @@ mod tests {
                 None,
                 "another contact cannot inherit the old touch"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn a_long_press_shows_the_edit_menu_before_release(cx: &mut TestAppContext) {
+        crate::theme::install_for_tests(cx);
+        let (area, cx) = cx.add_window_view(|_, cx| TextArea::multiline("", 4, cx));
+        cx.simulate_resize(size(px(320.), px(500.)));
+        area.update(cx, |area, cx| area.set_text("select this word", cx));
+        cx.run_until_parked();
+        let position = area.read_with(cx, |area, _| area.bounds.unwrap().center());
+        cx.simulate_event(LongPressEvent {
+            phase: TouchPhase::Started,
+            start_position: position,
+            position,
+        });
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| {
+            assert!(area.menu, "the toolbar appears at recognition time");
+            assert!(!area.selection.is_empty());
         });
     }
 

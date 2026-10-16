@@ -113,7 +113,7 @@ const commands = [
 const defaultInfo = {
   backend: "pi-durable",
   version: "1",
-  piVersion: "1.2.0",
+  piVersion: "1.3.0",
   protocolVersion: 2,
   bunVersion: Bun.version,
   workerPid: process.pid,

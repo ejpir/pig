@@ -21,6 +21,7 @@ import android.util.Log;
 import android.view.Display;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowInsetsAnimation;
@@ -275,6 +276,11 @@ public class GpuiActivity extends NativeActivity {
                     barIcons = mode;
                     followNightMode(getResources().getConfiguration());
                 });
+    }
+
+    /** The user's configured touch-and-hold delay, in milliseconds. */
+    public int longPressTimeout() {
+        return ViewConfiguration.getLongPressTimeout();
     }
 
     /** The short buzz of a long press, such as one that selects text. */

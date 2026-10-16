@@ -1,19 +1,19 @@
 # Experimental durable SSH backend
 
-This is the first vertical slice, **not yet the default or a stock Pi replacement**. It pins pi-durable/pi-ai/chord and the stock Pi model/auth SDK at 1.2.0 and compiles the JavaScript and Bun 1.4.2 runtime into a standalone worker. Rust keeps ownership/SSH/files; SQLite owns recoverable execution state. No provider is called by the tests.
+This is the first vertical slice, **not yet the default or a stock Pi replacement**. It pins pi-durable/pi-ai/chord and the stock Pi model/auth SDK at 1.3.0 and compiles the JavaScript and Bun 1.4.3 runtime into a standalone worker. Rust keeps ownership/SSH/files; SQLite owns recoverable execution state. No provider is called by the tests.
 
 ## Build-machine Bun setup
 
-Use Bun **1.4.2** on the build machine, not the execution host. If Bun isn't already installed, use a separate tools directory and explicitly run its installer; this also works when npm lifecycle scripts are disabled. Project dependencies still use `npm ci --ignore-scripts`.
+Use Bun **1.4.3** on the build machine, not the execution host. If Bun isn't already installed, use a separate tools directory and explicitly run its installer; this also works when npm lifecycle scripts are disabled. Project dependencies still use `npm ci --ignore-scripts`.
 
 ```sh
 tools="$HOME/.local/share/pi-desktop-build"
-npm install --prefix "$tools" --ignore-scripts bun@1.4.2
+npm install --prefix "$tools" --ignore-scripts bun@1.4.3
 (cd "$tools/node_modules/bun" && node install.js)
 export PATH="$tools/node_modules/.bin:$PATH"
 ```
 
-If `npm exec --package=bun@1.4.2` reports "Bun's postinstall script was not run", use this setup instead of the cached npm-exec wrapper.
+If `npm exec --package=bun@1.4.3` reports "Bun's postinstall script was not run", use this setup instead of the cached npm-exec wrapper.
 
 ## JavaScript files (experimental)
 
@@ -163,7 +163,7 @@ A project's own folders are read only when stock Pi trusts it: its remembered an
 
 The runner gives Pi a `subagent` tool, with the same parameters as stock Pi's subagent extension: one `agent` and `task`, `tasks` side by side (at most 200 in a call, 8 at a time), or a `chain` whose tasks take the previous answer as `{previous}`. Pi needs no agent files: it can name an agent in the call (`"architecture"`, `"code-quality"`) and define it with `instructions` and `tools`. Agent files are presets, the same Markdown files stock Pi uses: `~/.pi/agent/agents/*.md`, and the project's `.pi/agents/*.md` once stock Pi trusts the project, each with `name`, `description`, and optional `model` and `tools`. The system prompt lists them; a call's `instructions` and `tools` add to a preset's.
 
-Subagents work in the background, so Pi is never blocked on them. The call returns at once and starts a crew: a background task of the session that runs them, each in a conversation it owns. Pi answers, and you can keep talking to it, while they work. When the last one finishes, the crew posts their answers to Pi as one message (`<subagent_report>`), which comes after Pi's current answer or starts a turn when Pi is idle. Pi's own turns and Esc don't reach the crew; stopping the session (`abort`) stops its subagents too.
+Subagents work in the background, so Pi is never blocked on them. The call returns at once and starts a crew: a background task of the session that runs them, each in a conversation it owns. Pi answers, and you can keep talking to it, while they work. When the last one finishes, the crew posts their answers to Pi as one message (`<subagent_report>`), steering whichever parent run is active at its next model boundary or starting a turn when Pi is idle. Pi's own turns and Esc don't reach the crew; stopping the session (`abort`) stops its subagents too.
 
 Each subagent starts as a copy of the session's agent, with its instructions, the model a preset names when this computer has it (else the session's, with a note), its tools among `read`, `write`, `edit`, `bash` and `javascript` (stock Pi's `grep`, `find` and `ls` become `bash`; without any, the session's), and no subagents of its own. After a restart the crew finds the same conversations and submissions instead of starting them again, reports only once, and a command a restart cut off is reported, never repeated by itself.
 

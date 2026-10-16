@@ -11,9 +11,10 @@ use crate::{
     ui::{self, Button, icon},
 };
 use gpui::{
-    Context, Div, ElementId, Focusable, FontWeight, HighlightStyle, SharedString, StyledText,
-    Window, div, prelude::*, px,
+    AnyElement, Context, Div, ElementId, Focusable, FontWeight, HighlightStyle, SharedString,
+    StyledText, Window, div, list, prelude::*, px,
 };
+use std::sync::Arc;
 
 /// How far each level of the tree steps in.
 const STEP: f32 = 20.;
@@ -95,7 +96,19 @@ impl PhoneApp {
 
     /// 01 Projects, from New session's project chip: the title stays, the
     /// tree scrolls, and the one action stays at the bottom.
-    pub(crate) fn project_sheet(&self, colors: &Theme, cx: &Context<Self>) -> Div {
+    pub(crate) fn project_sheet(&mut self, colors: &Theme, cx: &Context<Self>) -> Div {
+        let query = self.folder.read(cx).text().trim().to_owned();
+        let browser: AnyElement = if query.is_empty() {
+            self.project_browser_list(colors, cx).into_any_element()
+        } else {
+            crate::scroll::vertical("project-tree", &self.sheet_scroll)
+                .flex_1()
+                .min_h_0()
+                .px(px(20.))
+                .pb(px(8.))
+                .child(self.found(&query, colors, cx))
+                .into_any_element()
+        };
         div()
             .flex_1()
             .min_h_0()
@@ -142,14 +155,7 @@ impl PhoneApp {
                     .mt(px(16.))
                     .child(self.folder_search(colors, cx)),
             )
-            .child(
-                crate::scroll::vertical("project-tree", &self.sheet_scroll)
-                    .flex_1()
-                    .min_h_0()
-                    .px(px(20.))
-                    .pb(px(8.))
-                    .child(self.project_browser_body(false, colors, cx)),
-            )
+            .child(browser)
             .child(
                 div()
                     .flex_none()
@@ -159,6 +165,206 @@ impl PhoneApp {
                     .border_color(colors.line)
                     .child(self.use_folder_button(colors, cx)),
             )
+    }
+
+    fn project_browser_list(&mut self, colors: &Theme, cx: &Context<Self>) -> AnyElement {
+        let rows = self.project_browser.rows();
+        self.sync_project_list(&rows);
+        let state = self.project_list.clone();
+        let offset = state.scroll_px_offset_for_scrollbar().y;
+        crate::scroll::note_movement(offset - self.project_list_offset);
+        self.project_list_offset = offset;
+
+        let rows: Arc<Vec<Row>> = Arc::new(rows);
+        let list_rows = rows.clone();
+        let list_colors = *colors;
+        let item_count = 1 + rows.len();
+        let body = list(
+            state.clone(),
+            cx.processor(move |this, index: usize, _, cx| {
+                let content = if index == 0 {
+                    this.project_sheet_overview(&list_colors, cx)
+                        .into_any_element()
+                } else {
+                    this.project_tree_row(list_rows[index - 1].clone(), &list_colors, cx)
+                        .into_any_element()
+                };
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .px(px(20.))
+                    .when(index + 1 == item_count, |row| row.pb(px(8.)))
+                    .child(content)
+                    .into_any_element()
+            }),
+        )
+        .size_full();
+        crate::scroll::virtual_list("project-tree", &state)
+            .flex_1()
+            .min_h_0()
+            .child(body)
+            .into_any_element()
+    }
+
+    fn sync_project_list(&mut self, rows: &[Row]) {
+        let project_count = self.store.as_ref().map_or(0, |store| store.projects.len());
+        let overview_shape = (project_count, self.project_browser.root.is_some());
+        let state = self.project_list.clone();
+        if self.project_overview_shape.is_none() {
+            state.reset_with_uniform_height(1 + rows.len(), px(48.));
+        } else {
+            let old = &self.project_tree_rows;
+            let mut prefix = 0;
+            while prefix < old.len()
+                && prefix < rows.len()
+                && old[prefix].key() == rows[prefix].key()
+            {
+                if old[prefix] != rows[prefix] {
+                    state.remeasure_items(prefix + 1..prefix + 2);
+                }
+                prefix += 1;
+            }
+            let mut suffix = 0;
+            while suffix < old.len().saturating_sub(prefix)
+                && suffix < rows.len().saturating_sub(prefix)
+                && old[old.len() - 1 - suffix].key() == rows[rows.len() - 1 - suffix].key()
+            {
+                let old_index = old.len() - 1 - suffix;
+                let new_index = rows.len() - 1 - suffix;
+                if old[old_index] != rows[new_index] {
+                    state.remeasure_items(new_index + 1..new_index + 2);
+                }
+                suffix += 1;
+            }
+            let old_end = old.len() - suffix;
+            let new_end = rows.len() - suffix;
+            if prefix != old_end || prefix != new_end {
+                state.splice(prefix + 1..old_end + 1, new_end - prefix);
+            }
+            if self.project_overview_shape != Some(overview_shape) {
+                state.remeasure_items(0..1);
+            }
+        }
+        self.project_tree_rows = rows.to_vec();
+        self.project_overview_shape = Some(overview_shape);
+        debug_assert_eq!(state.item_count(), 1 + rows.len());
+    }
+
+    fn project_sheet_overview(&self, colors: &Theme, cx: &Context<Self>) -> Div {
+        let browser = &self.project_browser;
+        let computer = self.computer_name();
+        let projects = self
+            .store
+            .as_ref()
+            .map(|store| store.projects.clone())
+            .unwrap_or_default();
+        let sessions = |folder: &str| {
+            self.store.as_ref().map_or(0, |store| {
+                store
+                    .sessions
+                    .iter()
+                    .filter(|session| session.folder == folder)
+                    .count()
+            })
+        };
+        let recent = projects.into_iter().enumerate().map(|(index, project)| {
+            let current = self.project == index;
+            let detail = match sessions(&project.folder) {
+                0 => project.folder.clone(),
+                1 => format!("{} · 1 session", project.folder),
+                count => format!("{} · {count} sessions", project.folder),
+            };
+            div()
+                .id(("project", index))
+                .relative()
+                .child(crate::testing::probe(format!(
+                    "{:?}",
+                    ElementId::from(("project", index))
+                )))
+                .debug_selector(move || format!("project-choice-{index}"))
+                .min_h(px(64.))
+                .py(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .when(index > 0, |row| row.border_t_1().border_color(colors.line))
+                .active(|style| style.bg(colors.selected))
+                .child(icon(
+                    "folder",
+                    20.,
+                    if current { colors.accent } else { colors.muted },
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .truncate()
+                                .child(project.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .mt(px(2.))
+                                .text_size(px(12.5))
+                                .line_height(px(16.))
+                                .text_color(colors.muted)
+                                .truncate()
+                                .child(detail),
+                        ),
+                )
+                .when(current, |row| row.child(icon("check", 20., colors.accent)))
+                .on_click(cx.listener(move |this, _, _, cx| this.select_project(index, cx)))
+        });
+        let has_recent = self
+            .store
+            .as_ref()
+            .is_some_and(|store| !store.projects.is_empty());
+        div()
+            .flex()
+            .flex_col()
+            .when(has_recent, |body| {
+                body.child(
+                    ui::label("Recent", colors)
+                        .text_color(colors.muted)
+                        .mt(px(20.)),
+                )
+                .child(div().mt(px(4.)).flex().flex_col().children(recent))
+            })
+            .child(
+                div()
+                    .mt(px(20.))
+                    .flex()
+                    .items_center()
+                    .child(
+                        ui::label(format!("On {computer}"), colors)
+                            .text_color(colors.muted)
+                            .flex_1(),
+                    )
+                    .child(
+                        ui::chip("hidden-toggle", Some("eye"), "Hidden", colors)
+                            .h(px(28.))
+                            .px(px(10.))
+                            .text_size(px(12.5))
+                            .when(browser.show_hidden, |chip| {
+                                chip.bg(colors.tint(colors.accent))
+                                    .border_color(gpui::transparent_black())
+                                    .text_color(colors.accent)
+                            })
+                            .aria_label(if browser.show_hidden {
+                                "Hide hidden files"
+                            } else {
+                                "Show hidden files"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.project_browser.show_hidden =
+                                    !this.project_browser.show_hidden;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(self.crumbs(colors, cx))
     }
 
     /// "New session in pi": the picked folder, or where the tree starts.
@@ -445,6 +651,20 @@ impl PhoneApp {
     }
 
     fn tree(&self, colors: &Theme, cx: &Context<Self>) -> Div {
+        div().flex().flex_col().children(
+            self.project_browser
+                .rows()
+                .into_iter()
+                .map(|row| self.project_tree_row(row, colors, cx)),
+        )
+    }
+
+    fn project_tree_row(
+        &self,
+        row: Row,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<Div> {
         let picked = self.project_browser.picked.clone();
         let guides = |depth: usize| {
             (0..depth).map(|level| {
@@ -470,7 +690,7 @@ impl PhoneApp {
                 .rounded(px(12.))
                 .children(guides(depth))
         };
-        let rows = self.project_browser.rows().into_iter().map(|row| match row {
+        match row {
             Row::Node { node, depth, open } => {
                 let key = self.short_path(&node.path);
                 let picked = picked.as_deref() == Some(node.path.as_str());
@@ -512,7 +732,11 @@ impl PhoneApp {
                     .when(node.folder, |roll| {
                         let node = node.clone();
                         roll.active(|style| style.bg(colors.selected))
-                            .child(icon(if open { "chev_d" } else { "chev_r" }, 16., colors.muted))
+                            .child(icon(
+                                if open { "chev_d" } else { "chev_r" },
+                                16.,
+                                colors.muted,
+                            ))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.toggle_folder(&node, cx)
@@ -544,47 +768,55 @@ impl PhoneApp {
                         }
                     }))
             }
-            Row::Loading { depth } => line(ElementId::Name("tree-loading".into()), depth)
-                .pl(px(depth as f32 * STEP + 12.))
-                .child(ui::working_indicator(colors))
-                .child(ui::hint("Loading…", colors)),
-            Row::Failed { depth, path, error } => line(
-                ElementId::Name(format!("tree-failed:{path}").into()),
+            Row::Loading { depth, path } => line(
+                ElementId::Name(format!("tree-loading:{path}").into()),
                 depth,
             )
             .pl(px(depth as f32 * STEP + 12.))
-            .py(px(8.))
-            .child(ui::hint(error, colors).flex_1().text_color(colors.coral))
-            .child(
-                ui::button(
-                    ElementId::Name(format!("retry:{path}").into()),
-                    Button::Plain,
-                    None,
-                    "Retry",
-                    true,
-                    colors,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.retry_folder(path.clone(), cx))),
-            ),
-            Row::More { depth, path, count } => line(
-                ElementId::Name(format!("more:{path}").into()),
+            .child(ui::working_indicator(colors))
+            .child(ui::hint("Loading…", colors)),
+            Row::Failed { depth, path, error } => {
+                line(ElementId::Name(format!("tree-failed:{path}").into()), depth)
+                    .pl(px(depth as f32 * STEP + 12.))
+                    .py(px(8.))
+                    .child(ui::hint(error, colors).flex_1().text_color(colors.coral))
+                    .child(
+                        ui::button(
+                            ElementId::Name(format!("retry:{path}").into()),
+                            Button::Plain,
+                            None,
+                            "Retry",
+                            true,
+                            colors,
+                        )
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.retry_folder(path.clone(), cx)),
+                        ),
+                    )
+            }
+            Row::More { depth, path, count } => {
+                line(ElementId::Name(format!("more:{path}").into()), depth)
+                    .pl(px(depth as f32 * STEP + 40.))
+                    .text_color(colors.accent)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(14.))
+                    .active(|style| style.bg(colors.selected))
+                    .child(format!("Show {count} more"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.project_browser.all.insert(path.clone());
+                        cx.notify();
+                    }))
+            }
+            Row::Partial { depth, path } => line(
+                ElementId::Name(format!("tree-partial:{path}").into()),
                 depth,
             )
             .pl(px(depth as f32 * STEP + 40.))
-            .text_color(colors.accent)
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_size(px(14.))
-            .active(|style| style.bg(colors.selected))
-            .child(format!("Show {count} more"))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.project_browser.all.insert(path.clone());
-                cx.notify();
-            })),
-            Row::Partial { depth } => line(ElementId::Name("tree-partial".into()), depth)
-                .pl(px(depth as f32 * STEP + 40.))
-                .child(ui::hint("The computer listed only part of this folder. Search or type a path to go deeper.", colors)),
-        });
-        div().flex().flex_col().children(rows)
+            .child(ui::hint(
+                "The computer listed only part of this folder. Search or type a path to go deeper.",
+                colors,
+            )),
+        }
     }
 
     /// 05 What the search found among what is listed, or the path to go to.
@@ -780,4 +1012,51 @@ fn marked(name: &str, query: &str, colors: &Theme) -> StyledText {
         })
         .unwrap_or_default();
     StyledText::new(name.to_owned()).with_highlights(highlights)
+}
+
+#[cfg(all(test, feature = "ui-test"))]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn project_sheet_only_mounts_visible_tree_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::testing::State::default()));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(px(384.), px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| app.preview("project-tree", window, cx));
+        });
+        cx.run_until_parked();
+
+        let (last, last_probe) = app.read_with(cx, |app, _| {
+            let rows = app.project_browser.rows();
+            let row = rows
+                .iter()
+                .rposition(|row| matches!(row, Row::Node { .. }))
+                .expect("sample tree has nodes");
+            let Row::Node { node, .. } = &rows[row] else {
+                unreachable!()
+            };
+            (
+                row + 1,
+                format!("node:{}", app.short_path(&node.path)).leak(),
+            )
+        });
+        assert!(last > 8);
+        assert!(cx.debug_bounds(last_probe).is_none());
+
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.project_list.scroll_to(gpui::ListOffset {
+                    item_ix: last,
+                    offset_in_item: px(0.),
+                });
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let top = app.read_with(cx, |app, _| app.project_list.logical_scroll_top());
+        assert!(top.item_ix > 0, "list did not move: {top:?}");
+        assert!(cx.debug_bounds(last_probe).is_some());
+    }
 }

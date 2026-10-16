@@ -249,6 +249,30 @@ pub(crate) fn output_text(line: &str, colors: &Theme) -> gpui::StyledText {
     )
 }
 
+/// A complete command output as one text element. Keeping line-local colour
+/// ranges while avoiding one GPUI layout node per line makes large call sheets
+/// cheap enough to open and scroll.
+pub(crate) fn output_block(text: SharedString, colors: &Theme) -> gpui::StyledText {
+    let mut highlights = Vec::new();
+    let mut offset = 0;
+    for chunk in text.split_inclusive('\n') {
+        let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        highlights.extend(
+            output_spans(line, colors)
+                .into_iter()
+                .map(|(range, color)| {
+                    (
+                        range.start + offset..range.end + offset,
+                        gpui::HighlightStyle::color(color),
+                    )
+                }),
+        );
+        offset += chunk.len();
+    }
+    gpui::StyledText::new(text).with_highlights(highlights)
+}
+
 fn output_spans(line: &str, colors: &Theme) -> Vec<(std::ops::Range<usize>, Hsla)> {
     let mut spans: Vec<(std::ops::Range<usize>, Hsla)> = Vec::new();
     let trimmed = line.trim_start();
@@ -402,18 +426,24 @@ impl PhoneApp {
         let id = session.id;
         let turn = &session.turns[index];
         let mut column = div().min_w_0().flex().flex_col().gap(px(16.));
-        let mut calls: Vec<AnyElement> = Vec::new();
-        let flush = |column: Div, calls: &mut Vec<AnyElement>| {
-            if calls.is_empty() {
+        let mut activity: Vec<AnyElement> = Vec::new();
+        let flush_activity = |column: Div, activity: &mut Vec<AnyElement>| {
+            if activity.is_empty() {
                 column
             } else {
-                column.child(div().min_w_0().flex().flex_col().children(calls.drain(..)))
+                column.child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .children(activity.drain(..)),
+                )
             }
         };
         for piece in pieces(turn) {
             match piece {
                 Piece::Folded(first, folded) => {
-                    calls.push(
+                    activity.push(
                         self.folded_calls(id, index, turn, first, &folded, colors, cx)
                             .into_any_element(),
                     );
@@ -423,7 +453,7 @@ impl PhoneApp {
                     // Keep them in the compact run of calls; flushing here adds
                     // a full content gap on both sides of every thought.
                     Flow::Thinking(text) if !self.expanded_thinking.contains(&(id, index, n)) => {
-                        calls.push(
+                        activity.push(
                             self.thinking(
                                 id,
                                 index,
@@ -441,7 +471,7 @@ impl PhoneApp {
                             continue;
                         };
                         if live && !tool.finished {
-                            column = flush(column, &mut calls);
+                            column = flush_activity(column, &mut activity);
                             column = column.child(self.open_call(
                                 id,
                                 index,
@@ -453,7 +483,7 @@ impl PhoneApp {
                                 cx,
                             ));
                         } else {
-                            calls.push(
+                            activity.push(
                                 self.call_row(
                                     id,
                                     index,
@@ -469,7 +499,7 @@ impl PhoneApp {
                         }
                     }
                     step => {
-                        column = flush(column, &mut calls);
+                        column = flush_activity(column, &mut activity);
                         let element = match step {
                             Flow::Text(text) => Some(
                                 self.visual_reply(session, index, n, text, colors, cx)
@@ -507,7 +537,7 @@ impl PhoneApp {
                 },
             }
         }
-        flush(column, &mut calls)
+        flush_activity(column, &mut activity)
     }
 
     /// One call on one line: its icon, a verb, what it touched and its change
@@ -742,7 +772,7 @@ impl PhoneApp {
     }
 
     /// Under a finished run's line: how many calls it made, and Show to bring
-    /// them back into the thread between Pi's words.
+    /// its calls and thoughts back into the thread between Pi's words.
     pub(crate) fn calls_fold(
         &self,
         id: SessionId,

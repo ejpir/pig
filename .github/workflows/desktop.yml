@@ -53,7 +53,7 @@ jobs:
           key: checks
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.4.2'
+          bun-version: '1.4.3'
       - name: Build and validate experimental Local adapters (offline)
         run: |
           (cd crates/pi_local && npm ci --ignore-scripts && bun run build)
@@ -190,7 +190,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         if: runner.os != 'Windows'
         with:
-          bun-version: '1.4.2'
+          bun-version: '1.4.3'
       - name: Durable standalone prototype and crash recovery (no model calls)
         if: runner.os != 'Windows'
         shell: bash
@@ -258,7 +258,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         if: steps.runtime-cache.outputs.cache-hit != 'true'
         with:
-          bun-version: '1.4.2'
+          bun-version: '1.4.3'
       - uses: dtolnay/rust-toolchain@master
         if: steps.runtime-cache.outputs.cache-hit != 'true'
         with:
@@ -324,7 +324,7 @@ jobs:
           key: android
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.4.2'
+          bun-version: '1.4.3'
       - uses: actions/download-artifact@v4
         with:
           name: pi-desktop-bun-android-arm64

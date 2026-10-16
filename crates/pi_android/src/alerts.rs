@@ -126,7 +126,7 @@ pub fn helper_update(update: &HelperUpdate, computer: &str, accent: u32) -> Noti
     Notification {
         id: HELPER_UPDATE_ID,
         channel: HELPER_UPDATES,
-        title: update.title(computer),
+        title: update.title().into(),
         text: update.details(computer),
         subtext: Some(computer.to_owned()),
         url: "pi://helper-update".into(),
@@ -242,7 +242,7 @@ mod tests {
             reasons: vec!["missing session discovery".into()],
         };
         let notification = helper_update(&update, "build-box", 0);
-        assert_eq!(notification.title, "Helper update required on build-box");
+        assert_eq!(notification.title, "Helper update required");
         assert!(notification.text.contains("pi-desktop-remote 0.0.4"));
         assert!(notification.text.contains("Pi Android 0.0.5"));
         assert!(notification.text.contains("pi-desktop-remote-linux-arm64"));

@@ -1,6 +1,6 @@
    set -e
    tools="$HOME/.local/share/pi-desktop-build"
-   npm install --prefix "$tools" --ignore-scripts bun@1.4.2
+   npm install --prefix "$tools" --ignore-scripts bun@1.4.3
    (cd "$tools/node_modules/bun" && node install.js)
 
    export PATH="$tools/node_modules/.bin:$HOME/.cargo/bin:$PATH"
