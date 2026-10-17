@@ -245,12 +245,6 @@ pub(crate) fn vertical(id: impl Into<ElementId>, handle: &ScrollHandle) -> Scrol
     scroll_area(id, handle, false)
 }
 
-/// A two-dimensional viewport for unwrapped code and diffs. It retains the
-/// same vertical scrollbar while native touch scrolling can also pan sideways.
-pub(crate) fn both(id: impl Into<ElementId>, handle: &ScrollHandle) -> ScrollArea {
-    scroll_area(id, handle, true)
-}
-
 fn scroll_area(id: impl Into<ElementId>, handle: &ScrollHandle, horizontal: bool) -> ScrollArea {
     let id = id.into();
     ScrollArea {

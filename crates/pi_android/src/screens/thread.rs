@@ -75,17 +75,16 @@ fn composer_status(session: &Session, compacting: bool) -> &'static str {
     } else if session.state == State::NeedsYou {
         "Needs you"
     } else if session.details.background_compacting {
-        "Compacting"
+        "Working · compacting"
     } else {
         "Working"
     }
 }
 
-/// Control phases are not tool progress. Local and SSH use the same policy;
-/// a stale stage must not mask a retry, admission, stop, or configuration change.
+/// Blocking control phases are not tool progress. Background compaction runs
+/// alongside the active turn, so keep its real stage visible in the same rail.
 fn composer_shows_stage(session: &Session, compacting: bool) -> bool {
     !compacting
-        && !session.details.background_compacting
         && session.state == State::Working
         && !matches!(
             session.activity.as_str(),
@@ -2586,7 +2585,7 @@ mod tests {
                             view.update(cx, |view, cx| {
                                 view.session.local = local;
                                 view.session.state = state;
-                                view.session.activity = if compacting || background {
+                                view.session.activity = if compacting {
                                     "Compacting"
                                 } else if state == State::NeedsYou {
                                     "Needs you"
@@ -2618,10 +2617,12 @@ mod tests {
                         let content = cx.debug_bounds("composer-working-content").unwrap();
                         let label = cx.debug_bounds("composer-working-status").unwrap();
                         let text = cx
-                            .debug_bounds(if compacting || background {
+                            .debug_bounds(if compacting {
                                 "composer-label-Compacting"
                             } else if state == State::NeedsYou {
                                 "composer-label-Needs you"
+                            } else if background {
+                                "composer-label-Working · compacting"
                             } else {
                                 "composer-label-Working"
                             })
@@ -2646,19 +2647,17 @@ mod tests {
                             assert!(elapsed.top() < label.bottom(), "{context}");
                             assert!(label.right() + px(8.) <= elapsed.left(), "{context}");
                             assert!(elapsed.right() <= stop.left(), "{context}");
-                            if !background {
-                                let timer = cx.debug_bounds("composer-timer-reference").unwrap();
-                                assert!(
-                                    elapsed.size.width >= timer.size.width,
-                                    "timer clipped: {context}"
-                                );
-                            }
+                            let timer = cx.debug_bounds("composer-timer-reference").unwrap();
+                            assert!(
+                                elapsed.size.width >= timer.size.width,
+                                "timer clipped: {context}"
+                            );
                         }
                         assert!(stop.left() >= strip.left(), "{context}");
                         assert!(stop.right() <= strip.right() - px(8.), "{context}");
                         assert!(stop.top() >= strip.top(), "{context}");
                         assert!(stop.bottom() <= strip.bottom(), "{context}");
-                        let has_rail = state == State::Working && !compacting && !background;
+                        let has_rail = state == State::Working && !compacting;
                         let rail = cx.debug_bounds("composer-working-segments");
                         assert_eq!(rail.is_some(), has_rail, "{context}");
                         if let Some(rail) = rail {
@@ -2914,7 +2913,7 @@ mod tests {
                 );
                 assert!(stop.top() >= strip.top());
                 assert!(stop.bottom() <= strip.bottom());
-                if active_subagents == 0 || background_compacting {
+                if active_subagents == 0 {
                     let status = cx.debug_bounds("composer-working-status").unwrap();
                     assert!(status.size.width > px(0.));
                     assert!(status.right() <= stop.left());
@@ -3513,18 +3512,17 @@ mod tests {
     }
 
     #[test]
-    fn background_compaction_overrides_the_stage_without_blocking_idle_chat() {
+    fn background_compaction_keeps_active_progress_and_does_not_block_idle_chat() {
         let mut session = crate::demo::new_session(SessionId(1), 0, "Test".into(), Vec::new());
         assert!(session.turns.last().unwrap().live_stage().is_some());
         assert!(composer_shows_stage(&session, false));
 
         session.details.background_compacting = true;
-        assert_eq!(composer_status(&session, false), "Compacting");
-        assert!(!composer_shows_stage(&session, false));
+        assert_eq!(composer_status(&session, false), "Working · compacting");
+        assert!(composer_shows_stage(&session, false));
 
         session.state = State::Done;
         assert!(!thread_running(&session, false));
-        assert_eq!(composer_status(&session, false), "Compacting");
         session.state = State::NeedsYou;
         assert_eq!(composer_status(&session, false), "Needs you");
         assert_eq!(composer_status(&session, true), "Compacting");

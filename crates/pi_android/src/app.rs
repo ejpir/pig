@@ -51,6 +51,8 @@ pub enum Route {
     /// A file from the project browser, read-only.
     File,
     Thread(SessionId),
+    /// A live shell call, bound by an opaque screen token to its stable tool ID.
+    Command(SessionId, u64),
     Review(SessionId),
     History(SessionId),
     Diagnostics(SessionId),
@@ -78,6 +80,18 @@ pub struct Pick {
 pub struct CrewPick {
     pub turn: usize,
     pub handoff: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewListShape {
+    pub(crate) session: SessionId,
+    pub(crate) call: Option<(usize, StageKind, usize)>,
+    pub(crate) file: usize,
+    pub(crate) rows: usize,
+    pub(crate) wrap: bool,
+    pub(crate) added: u32,
+    pub(crate) removed: u32,
+    pub(crate) content_key: u64,
 }
 
 /// Getting back to the saved computer when the app opens, in place of setup.
@@ -350,6 +364,8 @@ pub struct PhoneApp {
     pub(crate) next_swarm_peer: u64,
     pub(crate) swarm_peer_bindings: HashMap<u64, crate::screens::swarm::SwarmPeerBinding>,
     pub(crate) swarm_views: HashMap<(SessionId, CrewPick), crate::screens::swarm::SwarmScreenState>,
+    pub(crate) next_command_view: u64,
+    pub(crate) command_views: HashMap<u64, crate::screens::command::CommandScreenState>,
     /// A sheet transition gives focus back to the app once, before its fields can focus.
     sheet_focus_pending: bool,
     /// Open disclosures in the details sheet.
@@ -441,6 +457,12 @@ pub struct PhoneApp {
     pub(crate) review_call: Option<(usize, StageKind, usize)>,
     /// Tapped review lines, as (hunk, line) of the shown file.
     pub(crate) review_lines: BTreeSet<(usize, usize)>,
+    /// Retained vertical virtualization for the current session/call diff.
+    pub(crate) review_list: gpui::ListState,
+    /// Identity and dimensions of the diff represented by `review_list`.
+    pub(crate) review_list_shape: Option<ReviewListShape>,
+    /// Last virtual-list offset, for settled-fling touch filtering.
+    pub(crate) review_list_offset: Pixels,
     scrolls: HashMap<Route, ScrollHandle>,
     pub(crate) thread_lists: HashMap<SessionId, gpui::ListState>,
     pub(crate) thread_list_shapes: HashMap<SessionId, (usize, usize, bool)>,
@@ -474,6 +496,10 @@ pub struct PhoneApp {
     pub(crate) playing: bool,
     subscriptions: Vec<Subscription>,
     _ticker: Task<()>,
+}
+
+pub(crate) fn is_scrolled_to_bottom(scroll: &ScrollHandle) -> bool {
+    scroll.bounds().size.height <= px(0.) || scroll.max_offset().y + scroll.offset().y <= px(2.)
 }
 
 impl PhoneApp {
@@ -661,6 +687,8 @@ impl PhoneApp {
             next_swarm_peer: 1,
             swarm_peer_bindings: HashMap::new(),
             swarm_views: HashMap::new(),
+            next_command_view: 1,
+            command_views: HashMap::new(),
             sheet_focus_pending: false,
             expanded: HashSet::new(),
             notice: None,
@@ -729,6 +757,10 @@ impl PhoneApp {
             review_file: 0,
             review_call: None,
             review_lines: BTreeSet::new(),
+            review_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(128.))
+                .with_uniform_item_height(px(24.)),
+            review_list_shape: None,
+            review_list_offset: px(0.),
             scrolls: HashMap::new(),
             thread_lists: HashMap::new(),
             thread_list_shapes: HashMap::new(),
@@ -794,20 +826,30 @@ impl PhoneApp {
         self.swarm_views.clear();
         self.swarm_peer_bindings.clear();
         self.swarm_input_targets.clear();
+        self.command_views.clear();
         self.scrolls
             .retain(|route, _| !matches!(route, Route::Swarm(_, _) | Route::SwarmPeer(_, _, _)));
     }
 
     /// Follow content updates only while the reader is at the bottom. Doing
-    /// this in render would also undo upward swipes and activity expansion.
+    /// this unconditionally in render would undo upward swipes and activity expansion.
     fn keep_latest_in_view(&mut self) {
-        if let Route::Thread(_) = self.route() {
-            let scroll = self.scroll(self.route());
-            if scroll.bounds().size.height > px(0.)
-                && scroll.max_offset().y + scroll.offset().y <= px(2.)
-            {
-                scroll.scroll_to_bottom();
+        match self.route() {
+            Route::Thread(_) => {
+                let scroll = self.scroll(self.route());
+                if is_scrolled_to_bottom(&scroll) {
+                    scroll.scroll_to_bottom();
+                }
             }
+            Route::Command(_, token) => {
+                if let Some(view) = self.command_views.get(&token)
+                    && view.tab == crate::screens::command::CommandTab::Output
+                    && view.output_list.is_following_tail()
+                {
+                    view.output_list.scroll_to_end();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -969,6 +1011,7 @@ impl PhoneApp {
     fn show_live(&mut self) {
         let shown = match self.route() {
             Route::Thread(id)
+            | Route::Command(id, _)
             | Route::Review(id)
             | Route::History(id)
             | Route::Diagnostics(id)
@@ -994,6 +1037,7 @@ impl PhoneApp {
         window.dismiss_virtual_keyboard();
         window.focus(&self.focus, cx);
         if let Route::Thread(id)
+        | Route::Command(id, _)
         | Route::Review(id)
         | Route::History(id)
         | Route::Diagnostics(id)
@@ -1283,6 +1327,9 @@ impl PhoneApp {
             if let Some(route @ Route::SwarmPeer(_, _, token)) = left {
                 self.swarm_peer_bindings.remove(&token);
                 self.scrolls.remove(&route);
+            }
+            if let Some(Route::Command(_, token)) = left {
+                self.command_views.remove(&token);
             }
             self.show_live();
             if let Route::Thread(id) = self.route() {
@@ -2099,6 +2146,7 @@ impl PhoneApp {
     pub(crate) fn model_session(&self) -> Option<SessionId> {
         match self.route() {
             Route::Thread(id)
+            | Route::Command(id, _)
             | Route::Review(id)
             | Route::History(id)
             | Route::Diagnostics(id)
@@ -2372,7 +2420,7 @@ impl PhoneApp {
 
     fn viewing(&self, id: SessionId) -> bool {
         self.visible
-            && matches!(self.route(), Route::Thread(shown) | Route::Review(shown) | Route::History(shown) | Route::Diagnostics(shown) | Route::Subagents(shown) | Route::Swarm(shown, _) | Route::SwarmPeer(shown, _, _) | Route::Subagent(shown, _) if shown == id)
+            && matches!(self.route(), Route::Thread(shown) | Route::Command(shown, _) | Route::Review(shown) | Route::History(shown) | Route::Diagnostics(shown) | Route::Subagents(shown) | Route::Swarm(shown, _) | Route::SwarmPeer(shown, _, _) | Route::Subagent(shown, _) if shown == id)
     }
 
     fn alert(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -2510,6 +2558,7 @@ impl PhoneApp {
         }
         if self.visible
             && let Route::Thread(id)
+            | Route::Command(id, _)
             | Route::Review(id)
             | Route::History(id)
             | Route::Diagnostics(id)
@@ -2739,6 +2788,7 @@ impl PhoneApp {
             // never prompt contents, clipboard data, addresses or credentials.
             let session = match self.route() {
                 Route::Thread(id)
+                | Route::Command(id, _)
                 | Route::Review(id)
                 | Route::History(id)
                 | Route::Diagnostics(id)
@@ -3002,10 +3052,20 @@ impl PhoneApp {
             .retain(|_, binding| binding.id != id);
         self.swarm_input_targets
             .retain(|(session, _), _| *session != id);
+        let command_tokens: HashSet<u64> = self
+            .routes
+            .iter()
+            .filter_map(|route| match route {
+                Route::Command(session, token) if *session == id => Some(*token),
+                _ => None,
+            })
+            .collect();
+        self.command_views
+            .retain(|token, _| !command_tokens.contains(token));
         self.scrolls
             .retain(|route, _| !matches!(route, Route::SwarmPeer(session, _, _) if *session == id));
         self.preview_transport_diagnostics.remove(&id);
-        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Review(session) | Route::History(session) | Route::Diagnostics(session) | Route::Subagents(session) | Route::Swarm(session, _) | Route::SwarmPeer(session, _, _) | Route::Subagent(session, _) if *session == id));
+        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Command(session, _) | Route::Review(session) | Route::History(session) | Route::Diagnostics(session) | Route::Subagents(session) | Route::Swarm(session, _) | Route::SwarmPeer(session, _, _) | Route::Subagent(session, _) if *session == id));
         if self.sheet == Some(Sheet::Delete(id)) {
             self.close_sheet(cx);
         }
@@ -3060,14 +3120,26 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let diff = self
+        let detail = self
             .session(id)
             .and_then(|session| session.turns.get(turn))
             .and_then(|turn| turn.tool(kind, tool))
-            .is_some_and(|tool| {
-                matches!(tool.name.as_str(), "edit" | "write") && !tool.diff.is_empty()
+            .map(|tool| {
+                (
+                    tool.id.clone(),
+                    tool.name.clone(),
+                    tool.finished,
+                    !tool.diff.is_empty(),
+                )
             });
-        if !diff {
+        let Some((tool_id, name, finished, has_diff)) = detail else {
+            return;
+        };
+        if name == "bash" && !finished {
+            self.open_command_detail(id, tool_id, window, cx);
+            return;
+        }
+        if !matches!(name.as_str(), "edit" | "write") || !has_diff {
             self.open_sheet(Sheet::Call(id, turn, kind, tool), cx);
             return;
         }
@@ -4045,6 +4117,7 @@ impl Render for PhoneApp {
                 Route::Start => self.start_screen(window, cx).into_any_element(),
                 Route::File => self.file_screen(window, cx).into_any_element(),
                 Route::Thread(id) => self.thread_screen(id, window, cx),
+                Route::Command(id, token) => self.command_screen(id, token, window, cx),
                 Route::Review(id) => self.review_screen(id, window, cx),
                 Route::History(id) => self.history_screen(id, window, cx),
                 Route::Diagnostics(id) => self.diagnostics_screen(id, window, cx),

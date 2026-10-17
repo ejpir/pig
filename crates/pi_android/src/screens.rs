@@ -1,6 +1,7 @@
 //! The screens of design/android, as `PhoneApp` methods: one file each, and
 //! the bottom sheets together.
 
+pub(crate) mod command;
 mod connect;
 mod diagnostics;
 mod files;
@@ -28,11 +29,6 @@ use gpui::{Div, ElementId, ScrollHandle, div, prelude::*, px};
 /// A screen's scrolling middle.
 fn scroll_area(id: impl Into<ElementId>, handle: &ScrollHandle) -> crate::scroll::ScrollArea {
     crate::scroll::vertical(id, handle).flex_1()
-}
-
-/// A screen's scrolling middle when unwrapped content can also pan sideways.
-fn pan_area(id: impl Into<ElementId>, handle: &ScrollHandle) -> crate::scroll::ScrollArea {
-    crate::scroll::both(id, handle).flex_1()
 }
 
 /// A section's heading above a card.

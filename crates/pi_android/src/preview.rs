@@ -3742,6 +3742,91 @@ mod tests {
     }
 
     #[gpui::test]
+    fn review_virtualizes_large_unwrapped_diffs(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("review", window, cx);
+                let file = &mut app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == QWEN)
+                    .unwrap()
+                    .files[0];
+                file.added = 2_000;
+                file.removed = 0;
+                file.hunks = vec![crate::model::Hunk {
+                    header: "@@ 1,2000 · largeReview".into(),
+                    lines: (0..2_000)
+                        .map(|index| {
+                            crate::model::DiffLine::new(
+                                LineKind::Added,
+                                index + 1,
+                                &format!(
+                                    "let review_line_{index} = {};",
+                                    "a_very_long_value + ".repeat(12)
+                                ),
+                            )
+                        })
+                        .collect(),
+                }];
+                app.review_lines.clear();
+                app.review_list_shape = None;
+                app.update_prefs(cx, |prefs| prefs.wrap_lines = false);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("review-line-0-0").is_some());
+        assert!(
+            cx.debug_bounds("review-line-0-1500").is_none(),
+            "off-screen diff rows must not be laid out"
+        );
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.review_list.item_count(), 2_003);
+        });
+        let max_x = cx.update(|_, cx| {
+            app.update(cx, |app, _| app.scroll(Route::Review(QWEN)).max_offset().x)
+        });
+        assert!(
+            max_x > gpui::px(0.),
+            "unwrapped rows must still pan sideways"
+        );
+        let first = cx.debug_bounds("review-line-0-0").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-500.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(
+                app.review_list.scroll_px_offset_for_scrollbar().y < gpui::px(0.),
+                "the horizontal viewport must not swallow vertical movement"
+            );
+        });
+
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.review_list.scroll_to(gpui::ListOffset {
+                    item_ix: 1_502,
+                    offset_in_item: gpui::px(0.),
+                });
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("review-line-0-1500").is_some());
+        assert!(cx.debug_bounds("review-line-0-0").is_none());
+    }
+
+    #[gpui::test]
     fn readonly_subagent_call_sheet_has_no_attach_action(cx: &mut TestAppContext) {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.simulate_resize(gpui::size(gpui::px(412.), gpui::px(915.)));

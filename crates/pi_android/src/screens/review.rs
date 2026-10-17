@@ -2,16 +2,75 @@
 //! diff, and tapped lines attached to the follow-up, which goes back to the
 //! session.
 
-use super::{pan_area, scroll_area};
 use crate::{
-    app::{PhoneApp, Route},
+    app::{PhoneApp, ReviewListShape, Route},
     composer::Attachment,
     model::{DiffLine, FileChange, LineKind, SessionId, StageKind},
     theme::{MONO, theme},
     ui::{self, Button, icon},
 };
-use gpui::{AnyElement, Context, Window, div, prelude::*, px};
-use std::collections::BTreeSet;
+use gpui::{AnyElement, Context, Window, div, list, prelude::*, px};
+use std::{
+    collections::{BTreeSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
+
+#[derive(Clone, Copy, Debug)]
+enum ReviewRow {
+    Gap(u32),
+    Header(usize),
+    Spacer,
+    Line(usize, usize),
+}
+
+fn file_content_key(file: &FileChange) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    file.path.hash(&mut hasher);
+    for hunk in &file.hunks {
+        hunk.header.hash(&mut hasher);
+        for line in &hunk.lines {
+            std::mem::discriminant(&line.kind).hash(&mut hasher);
+            line.number.hash(&mut hasher);
+            line.text.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn call_content_key(path: &str, lines: &[DiffLine]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    for line in lines {
+        std::mem::discriminant(&line.kind).hash(&mut hasher);
+        line.number.hash(&mut hasher);
+        line.text.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn review_rows(file: &FileChange) -> Vec<ReviewRow> {
+    let mut rows = Vec::with_capacity(file.hunks.iter().map(|hunk| hunk.lines.len() + 3).sum());
+    for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+        let gap = hunk_index
+            .checked_sub(1)
+            .and_then(|before| file.hunks[before].lines.last())
+            .zip(hunk.lines.first())
+            .map(|(last, first)| first.number.saturating_sub(last.number + 1))
+            .filter(|gap| *gap > 0);
+        rows.extend(gap.map(ReviewRow::Gap));
+        rows.push(ReviewRow::Header(hunk_index));
+        rows.push(ReviewRow::Spacer);
+        rows.extend(
+            hunk.lines
+                .iter()
+                .enumerate()
+                .map(|(line, _)| ReviewRow::Line(hunk_index, line)),
+        );
+        rows.push(ReviewRow::Spacer);
+    }
+    rows
+}
 
 impl PhoneApp {
     pub(crate) fn review_screen(
@@ -63,12 +122,16 @@ impl PhoneApp {
                 (file.name().to_owned(), folder)
             },
         );
-        let step = |id: &'static str, glyph: &'static str, to: Option<usize>| {
-            let tap = ui::tap(id, glyph, &colors);
+        let step = |selector: &'static str, glyph: &'static str, to: Option<usize>| {
+            let tap = ui::tap(selector, glyph, &colors);
             match to {
                 Some(to) => tap.on_click(cx.listener(move |this, _, _, cx| {
                     this.review_file = to;
                     this.review_lines.clear();
+                    this.review_list_shape = None;
+                    this.review_list_offset = px(0.);
+                    this.scroll(Route::Review(id))
+                        .set_offset(gpui::point(px(0.), px(0.)));
                     this.review
                         .update(cx, |review, cx| review.set_lines(None, cx));
                     cx.notify();
@@ -77,15 +140,22 @@ impl PhoneApp {
             }
         };
         let wrap = self.wrap_lines(cx);
-        let diff_width = file
-            .map(|file| {
-                file.hunks
-                    .iter()
-                    .flat_map(|hunk| &hunk.lines)
-                    .map(|line| ui::unwrapped_code_line_width(line, 48.))
-                    .fold(0., f32::max)
-            })
-            .unwrap_or(0.);
+        let (rows, diff_width, added, removed, content_key) = file.map_or_else(
+            || (Vec::new(), 0., 0, 0, 0),
+            |file| {
+                (
+                    review_rows(file),
+                    file.hunks
+                        .iter()
+                        .flat_map(|hunk| &hunk.lines)
+                        .map(|line| ui::unwrapped_code_line_width(line, 48.))
+                        .fold(0., f32::max),
+                    file.added,
+                    file.removed,
+                    file_content_key(file),
+                )
+            },
+        );
         let appbar = ui::appbar(back, name, Some(folder.into()), &colors)
             .child(self.wrap_toggle("wrap-review", cx))
             .child(step("previous-file", "chev_l", shown.checked_sub(1)))
@@ -140,61 +210,116 @@ impl PhoneApp {
                         }),
                 )
         });
-        let diff = file.map(|file| {
-            let hunks = &file.hunks;
-            div().children(hunks.iter().enumerate().map(|(hunk_index, hunk)| {
-                // The lines between this hunk and the one before stay folded.
-                let gap = hunk_index
-                    .checked_sub(1)
-                    .and_then(|before| hunks[before].lines.last())
-                    .zip(hunk.lines.first())
-                    .map(|(last, first)| first.number.saturating_sub(last.number + 1))
-                    .filter(|gap| *gap > 0);
-                div()
-                    .children(gap.map(|gap| {
+        let row_count = rows.len();
+        let shape = ReviewListShape {
+            session: id,
+            call: None,
+            file: shown,
+            rows: row_count,
+            wrap,
+            added,
+            removed,
+            content_key,
+        };
+        if self.review_list_shape != Some(shape) {
+            self.review_list
+                .reset_with_uniform_height(row_count, px(24.));
+            self.review_list_shape = Some(shape);
+            self.review_list_offset = px(0.);
+        }
+        let list_state = self.review_list.clone();
+        let offset = list_state.scroll_px_offset_for_scrollbar().y;
+        crate::scroll::note_movement(offset - self.review_list_offset);
+        self.review_list_offset = offset;
+        let rows = Arc::new(rows);
+        let list_rows = rows.clone();
+        let row_colors = colors;
+        let row_scroll = scroll.clone();
+        let diff_list = list(
+            list_state.clone(),
+            cx.processor(move |this, row_index, _, cx| {
+                let Some(file) = this
+                    .session(id)
+                    .and_then(|session| session.files.get(shown))
+                else {
+                    return div().into_any_element();
+                };
+                let row = match list_rows[row_index] {
+                    ReviewRow::Gap(gap) => div()
+                        .h(px(32.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .border_t_1()
+                        .border_b_1()
+                        .border_dashed()
+                        .border_color(row_colors.line_strong)
+                        .text_size(px(12.5))
+                        .text_color(row_colors.muted)
+                        .child(match gap {
+                            1 => "1 unchanged line".to_owned(),
+                            gap => format!("{gap} unchanged lines"),
+                        })
+                        .into_any_element(),
+                    ReviewRow::Header(hunk) => div()
+                        .h(px(32.))
+                        .px(px(20.))
+                        .flex()
+                        .items_center()
+                        .bg(row_colors.panel)
+                        .font_family(MONO)
+                        .text_size(px(12.))
+                        .text_color(row_colors.faint)
+                        .child(hunk_title(&file.hunks[hunk].header))
+                        .into_any_element(),
+                    ReviewRow::Spacer => div().h(px(4.)).into_any_element(),
+                    ReviewRow::Line(hunk, line_index) => {
+                        let line = &file.hunks[hunk].lines[line_index];
+                        let selected = this.review_lines.contains(&(hunk, line_index));
                         div()
-                            .h(px(32.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .border_t_1()
-                            .border_b_1()
-                            .border_dashed()
-                            .border_color(colors.line_strong)
-                            .text_size(px(12.5))
-                            .text_color(colors.muted)
-                            .child(match gap {
-                                1 => "1 unchanged line".to_owned(),
-                                gap => format!("{gap} unchanged lines"),
-                            })
-                    }))
-                    .child(
-                        div()
-                            .h(px(32.))
-                            .px(px(20.))
-                            .flex()
-                            .items_center()
-                            .bg(colors.panel)
-                            .font_family(MONO)
-                            .text_size(px(12.))
-                            .text_color(colors.faint)
-                            .child(hunk_title(&hunk.header)),
-                    )
-                    .child(div().id(("hunk", hunk_index)).py(px(4.)).children(
-                        hunk.lines.iter().enumerate().map(|(index, line)| {
-                            let selected = self.review_lines.contains(&(hunk_index, index));
-                            div()
-                                .id(("line", hunk_index * 10_000 + index))
-                                .relative()
-                                .child(ui::code_line(line, selected, 48., wrap, &colors))
-                                .child(self.copyable(line.text.clone(), cx))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_line(id, hunk_index, index, cx)
-                                }))
-                        }),
-                    ))
-            }))
-        });
+                            .id(("line", hunk * 10_000 + line_index))
+                            .debug_selector(move || format!("review-line-{hunk}-{line_index}"))
+                            .relative()
+                            .child(ui::code_line(line, selected, 48., wrap, &row_colors))
+                            .child(this.copyable(line.text.clone(), cx))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_line(id, hunk, line_index, cx)
+                            }))
+                            .into_any_element()
+                    }
+                };
+                if wrap {
+                    row
+                } else {
+                    div()
+                        .id(("review-row-pan", row_index))
+                        .w_full()
+                        .overflow_x_scroll()
+                        .restrict_scroll_to_axis()
+                        .track_scroll(&row_scroll)
+                        .child(div().min_w(px(diff_width)).child(row))
+                        .into_any_element()
+                }
+            }),
+        )
+        .size_full();
+        let diff_body = if count == 0 {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .px(px(20.))
+                .child(icon("info", 16., colors.muted))
+                .child(ui::hint("Pi changed no files in this session.", &colors))
+                .into_any_element()
+        } else {
+            crate::scroll::virtual_list(("review", id.0 as usize), &list_state)
+                .flex_1()
+                .min_h_0()
+                .child(diff_list)
+                .into_any_element()
+        };
         div()
             .flex_1()
             .min_h_0()
@@ -204,33 +329,7 @@ impl PhoneApp {
             .when(count > 1, |screen| screen.child(progress))
             .when(count <= 1, |screen| screen.child(div().h(px(12.))))
             .children(summary)
-            .child(
-                if wrap {
-                    scroll_area(("review", id.0 as usize), &scroll)
-                } else {
-                    pan_area(("review", id.0 as usize), &scroll)
-                }
-                .child(
-                    div()
-                        .pb(px(12.))
-                        .when(!wrap, |list| list.min_w(px(diff_width)))
-                        .children(diff)
-                        .when(count == 0, |list| {
-                            list.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(12.))
-                                    .px(px(20.))
-                                    .child(icon("info", 16., colors.muted))
-                                    .child(ui::hint(
-                                        "Pi changed no files in this session.",
-                                        &colors,
-                                    )),
-                            )
-                        }),
-                ),
-            )
+            .child(diff_body)
             .child(
                 div()
                     .flex_none()
@@ -252,28 +351,92 @@ impl PhoneApp {
         colors: &crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (path, lines) = self
+        let tool = self
             .session(id)?
             .turns
             .get(turn_index)?
-            .tool(kind, tool_index)
-            .map(|tool| (tool.target.clone(), tool.diff.clone()))?;
-        if lines.is_empty() {
+            .tool(kind, tool_index)?;
+        if tool.diff.is_empty() {
             return None;
         }
+        let path = tool.target.clone();
+        let line_count = tool.diff.len();
+        let diff_width = tool
+            .diff
+            .iter()
+            .map(|line| ui::unwrapped_code_line_width(line, 48.))
+            .fold(0., f32::max);
         let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
         let folder = path
             .rsplit_once('/')
             .map_or_else(String::new, |(folder, _)| folder.to_owned());
         let subtitle: Option<gpui::SharedString> = (!folder.is_empty()).then(|| folder.into());
         let wrap = self.wrap_lines(cx);
-        let diff_width = lines
-            .iter()
-            .map(|line| ui::unwrapped_code_line_width(line, 48.))
-            .fold(0., f32::max);
         let language = super::language(&path);
-        let attachment_name = format!("{name} diff");
-        let attachment_text = call_diff_text(&path, &lines);
+        let line_count_u32 = u32::try_from(line_count).unwrap_or(u32::MAX);
+        let shape = ReviewListShape {
+            session: id,
+            call: Some((turn_index, kind, tool_index)),
+            file: 0,
+            rows: line_count,
+            wrap,
+            added: line_count_u32,
+            removed: 0,
+            content_key: call_content_key(&path, &tool.diff),
+        };
+        if self.review_list_shape != Some(shape) {
+            self.review_list
+                .reset_with_uniform_height(line_count, px(22.));
+            self.review_list_shape = Some(shape);
+            self.review_list_offset = px(0.);
+        }
+        let list_state = self.review_list.clone();
+        let offset = list_state.scroll_px_offset_for_scrollbar().y;
+        crate::scroll::note_movement(offset - self.review_list_offset);
+        self.review_list_offset = offset;
+        let scroll = self.scroll(Route::Review(id));
+        let row_colors = *colors;
+        let row_scroll = scroll.clone();
+        let diff_list = list(
+            list_state.clone(),
+            cx.processor(move |this, index, _, _| {
+                let Some(line) = this
+                    .session(id)
+                    .and_then(|session| session.turns.get(turn_index))
+                    .and_then(|turn| turn.tool(kind, tool_index))
+                    .and_then(|tool| tool.diff.get(index))
+                else {
+                    return div().into_any_element();
+                };
+                let row = div()
+                    .id(("call-diff-review-row", index))
+                    .when(index == 0, |row| row.pt(px(8.)))
+                    .when(index + 1 == line_count, |row| row.pb(px(8.)))
+                    .child(
+                        ui::code_line_in(line, false, 48., wrap, language, &row_colors)
+                            .debug_selector(move || format!("call-diff-review-line-{index}")),
+                    );
+                if wrap {
+                    row.into_any_element()
+                } else {
+                    div()
+                        .id(("call-diff-review-pan", index))
+                        .w_full()
+                        .overflow_x_scroll()
+                        .restrict_scroll_to_axis()
+                        .track_scroll(&row_scroll)
+                        .child(div().min_w(px(diff_width)).child(row))
+                        .into_any_element()
+                }
+            }),
+        )
+        .size_full();
+        let diff_body =
+            crate::scroll::virtual_list(("call-diff-review", id.0 as usize), &list_state)
+                .flex_1()
+                .min_h_0()
+                .child(diff_list)
+                .into_any_element();
         let can_ask = self
             .store
             .as_ref()
@@ -284,7 +447,6 @@ impl PhoneApp {
         let appbar = ui::appbar(back, name, subtitle, colors)
             .debug_selector(|| "call-diff-review-file".into())
             .child(self.wrap_toggle("wrap-call-diff-review", cx));
-        let scroll = self.scroll(Route::Review(id));
         Some(
             div()
                 .debug_selector(|| "call-diff-review".into())
@@ -293,25 +455,7 @@ impl PhoneApp {
                 .flex()
                 .flex_col()
                 .child(appbar)
-                .child(
-                    if wrap {
-                        scroll_area(("call-diff-review", id.0 as usize), &scroll)
-                    } else {
-                        pan_area(("call-diff-review", id.0 as usize), &scroll)
-                    }
-                    .child(
-                        div()
-                            .id("call-diff-review-lines")
-                            .py(px(8.))
-                            .when(!wrap, |diff| diff.min_w(px(diff_width)))
-                            .children(lines.iter().enumerate().map(|(index, line)| {
-                                ui::code_line_in(line, false, 48., wrap, language, colors)
-                                    .debug_selector(move || {
-                                        format!("call-diff-review-line-{index}")
-                                    })
-                            })),
-                    ),
-                )
+                .child(diff_body)
                 .when(can_ask, |screen| {
                     screen.child(
                         div().flex_none().px(px(20.)).pt(px(8.)).pb(px(12.)).child(
@@ -330,18 +474,30 @@ impl PhoneApp {
                             .debug_selector(|| "ask-about-diff".into())
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
-                                    if !this
-                                        .store
-                                        .as_ref()
-                                        .is_some_and(|store| store.session(id).is_some())
-                                    {
+                                    let Some((attachment_name, attachment_text)) = this
+                                        .session(id)
+                                        .and_then(|session| session.turns.get(turn_index))
+                                        .and_then(|turn| turn.tool(kind, tool_index))
+                                        .map(|tool| {
+                                            (
+                                                format!(
+                                                    "{} diff",
+                                                    tool.target
+                                                        .rsplit('/')
+                                                        .next()
+                                                        .unwrap_or(&tool.target)
+                                                ),
+                                                call_diff_text(&tool.target, &tool.diff),
+                                            )
+                                        })
+                                    else {
                                         return;
-                                    }
+                                    };
                                     let composer = this.thread_composer(id, window, cx);
                                     let attachment = Attachment::File {
-                                        name: attachment_name.clone(),
+                                        name: attachment_name,
                                         size: crate::app::size_label(attachment_text.len() as u64),
-                                        contents: attachment_text.clone(),
+                                        contents: attachment_text,
                                     };
                                     match composer.update(cx, |composer, cx| {
                                         composer.try_attach(attachment, cx)
