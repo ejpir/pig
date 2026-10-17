@@ -419,9 +419,7 @@ impl PhoneApp {
                                 .p(px(16.))
                                 .rounded(px(12.))
                                 .bg(colors.panel)
-                                .when(!wrap, |command| {
-                                    command.overflow_x_scroll().restrict_scroll_to_axis()
-                                })
+                                .when(!wrap, |command| command.overflow_x_scroll())
                                 .child(
                                     ui::mono(format!("$ {}", tool.target), 13.)
                                         .line_height(px(20.))
@@ -460,17 +458,22 @@ impl PhoneApp {
                         if wrap {
                             line.into_any_element()
                         } else {
-                            div()
-                                .id(("command-output-pan", index))
-                                .debug_selector(move || format!("command-output-pan-{index}"))
-                                .w_full()
-                                .min_w_0()
-                                .max_w_full()
-                                .overflow_x_scroll()
-                                .restrict_scroll_to_axis()
-                                .track_scroll(&row_scroll)
-                                .child(div().flex_none().min_w(px(output_width)).child(line))
-                                .into_any_element()
+                            super::shared_horizontal_pan(
+                                ("command-output-pan", index),
+                                row_scroll.clone(),
+                                px(output_width),
+                                div()
+                                    .flex_none()
+                                    .min_w(px(output_width))
+                                    .child(line)
+                                    .into_any_element(),
+                                cx,
+                            )
+                            .debug_selector(move || format!("command-output-pan-{index}"))
+                            .w_full()
+                            .min_w_0()
+                            .max_w_full()
+                            .into_any_element()
                         }
                     }),
                 )
@@ -632,6 +635,7 @@ mod tests {
         let (token, tool_id) = cx.update(|window, cx| {
             app.update(cx, |app, cx| {
                 app.preview("verifying", window, cx);
+                app.update_prefs(cx, |prefs| prefs.wrap_lines = false);
                 let (turn, kind, tool, tool_id) = running_bash(app);
                 let activity = &mut app
                     .store
@@ -645,7 +649,7 @@ mod tests {
                     .stages[kind.index()]
                 .tools[tool];
                 activity.output = (0..120)
-                    .map(|line| format!("streamed output line {line}"))
+                    .map(|line| format!("streamed output line {line} {}", "wide-".repeat(40)))
                     .collect::<Vec<_>>()
                     .join("\n");
                 app.open_call_detail(SessionId(1), turn, kind, tool, window, cx);
@@ -663,11 +667,25 @@ mod tests {
             assert!(view.output_list.is_following_tail());
         });
 
-        let output = app.read_with(cx, |app, _| {
-            app.command_views[&token].output_list.viewport_bounds()
+        let pan = cx.debug_bounds("command-output-pan-119").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: pan.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-120.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
         });
         cx.simulate_event(gpui::ScrollWheelEvent {
-            position: output.center(),
+            position: pan.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Ended,
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(app.command_views[&token].output_horizontal.offset().x < px(0.));
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: pan.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(500.))),
             modifiers: gpui::Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
@@ -756,7 +774,7 @@ mod tests {
 
         let first = cx.debug_bounds("command-output-pan-0").unwrap();
         app.read_with(cx, |app, _| {
-            assert!(app.command_views[&token].output_horizontal.max_offset().x > px(0.));
+            assert!(app.command_views[&token].output_width > 384.);
         });
         cx.simulate_event(gpui::ScrollWheelEvent {
             position: first.center(),
@@ -764,10 +782,47 @@ mod tests {
             modifiers: gpui::Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
         });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Ended,
+        });
+        cx.run_until_parked();
+        let first_pan = app.read_with(cx, |app, _| {
+            let offset = app.command_views[&token].output_horizontal.offset().x;
+            assert!(offset < px(0.));
+            offset
+        });
+        let second = cx.debug_bounds("command-output-pan-1").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: second.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-200.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: second.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Ended,
+        });
         cx.run_until_parked();
         let panned = app.read_with(cx, |app, _| {
             let offset = app.command_views[&token].output_horizontal.offset().x;
-            assert!(offset < px(0.));
+            assert!(offset < first_pan, "a second gesture must continue panning");
+            offset
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(100.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        let reversed = app.read_with(cx, |app, _| {
+            let offset = app.command_views[&token].output_horizontal.offset().x;
+            assert!(offset > panned);
             offset
         });
 
@@ -792,7 +847,7 @@ mod tests {
         app.read_with(cx, |app, _| {
             assert_eq!(
                 app.command_views[&token].output_horizontal.offset().x,
-                panned
+                reversed
             );
         });
 
@@ -816,6 +871,16 @@ mod tests {
         cx.run_until_parked();
         app.read_with(cx, |app, _| {
             assert!(app.command_views[&token].output_rows[0].starts_with('X'));
+        });
+
+        cx.simulate_resize(gpui::size(px(4096.), px(640.)));
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(
+                app.command_views[&token].output_horizontal.offset().x,
+                px(0.),
+                "a wider viewport must clamp a retained pan without another gesture"
+            );
         });
     }
 

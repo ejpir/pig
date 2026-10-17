@@ -3774,18 +3774,14 @@ mod tests {
         assert!(cx.debug_bounds("call-diff-review-file").is_some());
         let long_line = cx.debug_bounds("call-diff-review-line-1").unwrap();
         assert!(cx.debug_bounds("call-output").is_none());
-        let (max_x, before_x, wrap) = cx.update(|_, cx| {
+        let (before_x, wrap) = cx.update(|_, cx| {
             app.update(cx, |app, cx| {
                 let wrap = app.wrap_lines(cx);
-                let scroll = app.scroll(Route::Review(QWEN));
-                (scroll.max_offset().x, scroll.offset().x, wrap)
+                (app.scroll(Route::Review(QWEN)).offset().x, wrap)
             })
         });
-        assert!(
-            max_x > gpui::px(0.),
-            "unwrapped diff must overflow sideways: wrap={wrap}, line={:?}, max={max_x:?}, offset={before_x:?}",
-            long_line.size.width
-        );
+        assert!(!wrap);
+        assert!(long_line.size.width > gpui::px(384.));
         cx.simulate_event(gpui::ScrollWheelEvent {
             position: gpui::point(gpui::px(180.), long_line.center().y),
             delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(-120.), gpui::px(0.))),
@@ -3862,16 +3858,34 @@ mod tests {
         app.read_with(cx, |app, _| {
             assert_eq!(app.review_list.item_count(), 2_003);
         });
-        let max_x = cx.update(|_, cx| {
-            app.update(cx, |app, _| app.scroll(Route::Review(QWEN)).max_offset().x)
+        let first = cx.debug_bounds("review-line-0-0").unwrap();
+        let before_x =
+            cx.update(|_, cx| app.update(cx, |app, _| app.scroll(Route::Review(QWEN)).offset().x));
+        let visible = gpui::point(gpui::px(180.), first.center().y);
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: visible,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(-120.), gpui::px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
         });
-        assert!(
-            max_x > gpui::px(0.),
-            "unwrapped rows must still pan sideways"
-        );
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: visible,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Ended,
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            app.update(cx, |app, _| {
+                assert!(
+                    app.scroll(Route::Review(QWEN)).offset().x < before_x,
+                    "unwrapped rows must still pan sideways"
+                );
+            })
+        });
         let first = cx.debug_bounds("review-line-0-0").unwrap();
         cx.simulate_event(gpui::ScrollWheelEvent {
-            position: first.center(),
+            position: gpui::point(gpui::px(180.), first.center().y),
             delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-500.))),
             modifiers: gpui::Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,

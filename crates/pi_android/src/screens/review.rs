@@ -456,14 +456,15 @@ impl PhoneApp {
                 if wrap || flow_card {
                     row
                 } else {
-                    div()
-                        .id(("review-row-pan", row_index))
-                        .w_full()
-                        .overflow_x_scroll()
-                        .restrict_scroll_to_axis()
-                        .track_scroll(&row_scroll)
-                        .child(div().min_w(px(diff_width)).child(row))
-                        .into_any_element()
+                    super::shared_horizontal_pan(
+                        ("review-row-pan", row_index),
+                        row_scroll.clone(),
+                        px(diff_width),
+                        div().min_w(px(diff_width)).child(row).into_any_element(),
+                        cx,
+                    )
+                    .w_full()
+                    .into_any_element()
                 }
             }),
         )
@@ -601,7 +602,7 @@ impl PhoneApp {
         let row_scroll = scroll.clone();
         let diff_list = list(
             list_state.clone(),
-            cx.processor(move |this, index, _, _| {
+            cx.processor(move |this, index, _, cx| {
                 let Some(line) = this
                     .session(id)
                     .and_then(|session| session.turns.get(turn_index))
@@ -621,14 +622,15 @@ impl PhoneApp {
                 if wrap {
                     row.into_any_element()
                 } else {
-                    div()
-                        .id(("call-diff-review-pan", index))
-                        .w_full()
-                        .overflow_x_scroll()
-                        .restrict_scroll_to_axis()
-                        .track_scroll(&row_scroll)
-                        .child(div().min_w(px(diff_width)).child(row))
-                        .into_any_element()
+                    super::shared_horizontal_pan(
+                        ("call-diff-review-pan", index),
+                        row_scroll.clone(),
+                        px(diff_width),
+                        div().min_w(px(diff_width)).child(row).into_any_element(),
+                        cx,
+                    )
+                    .w_full()
+                    .into_any_element()
                 }
             }),
         )

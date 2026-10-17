@@ -1784,16 +1784,17 @@ impl PhoneApp {
                             line.into_any_element()
                         } else {
                             let scroll = activity_horizontal_handle(&horizontal, "diff".into());
-                            div()
-                                .id(("activity-diff-pan", index))
-                                .w_full()
-                                .min_w_0()
-                                .max_w_full()
-                                .overflow_x_scroll()
-                                .restrict_scroll_to_axis()
-                                .track_scroll(&scroll)
-                                .child(div().min_w(px(width)).child(line))
-                                .into_any_element()
+                            super::shared_horizontal_pan(
+                                ("activity-diff-pan", index),
+                                scroll,
+                                px(width),
+                                div().min_w(px(width)).child(line).into_any_element(),
+                                cx,
+                            )
+                            .w_full()
+                            .min_w_0()
+                            .max_w_full()
+                            .into_any_element()
                         }
                     }
                     ActivityRow::Reference { index, reference } => {
@@ -1910,19 +1911,22 @@ impl PhoneApp {
                                 &horizontal,
                                 format!("{tool_id}:target"),
                             );
-                            div()
-                                .id(("activity-target-pan", index * 1_000_000 + line_index))
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_x_scroll()
-                                .restrict_scroll_to_axis()
-                                .track_scroll(&scroll)
-                                .child(
-                                    div()
-                                        .min_w(px(width))
-                                        .child(ui::mono(line.clone(), 12.5).whitespace_nowrap()),
-                                )
-                                .into_any_element()
+                            super::shared_horizontal_pan(
+                                ("activity-target-pan", index * 1_000_000 + line_index),
+                                scroll,
+                                px(width),
+                                div()
+                                    .min_w(px(width))
+                                    .child(ui::mono(line.clone(), 12.5).whitespace_nowrap())
+                                    .into_any_element(),
+                                cx,
+                            )
+                            .debug_selector(move || {
+                                format!("activity-tool-{index}-target-pan-{line_index}")
+                            })
+                            .flex_1()
+                            .min_w_0()
+                            .into_any_element()
                         };
                         let copied_tool = tool_id.clone();
                         div()
@@ -1957,6 +1961,11 @@ impl PhoneApp {
                                             this.notify_user("Copied", cx);
                                         })),
                                 )
+                            })
+                            .when(!first, |row| {
+                                // Reserve the first row's copy-button width so every line
+                                // sharing this pan offset has the same viewport and clamp.
+                                row.child(div().w(px(48.)).h(px(0.)).flex_none())
                             })
                             .into_any_element()
                     }
@@ -2044,19 +2053,20 @@ impl PhoneApp {
                         } else {
                             let output_scroll = format!("{id}:output");
                             let scroll = activity_horizontal_handle(&horizontal, output_scroll);
-                            div()
-                                .id(("activity-output-pan", index * 1_000_000 + line_index))
-                                .debug_selector(move || {
-                                    format!("activity-tool-{index}-output-pan-{line_index}")
-                                })
-                                .w_full()
-                                .min_w_0()
-                                .max_w_full()
-                                .overflow_x_scroll()
-                                .restrict_scroll_to_axis()
-                                .track_scroll(&scroll)
-                                .child(div().min_w(px(width)).child(output_line))
-                                .into_any_element()
+                            super::shared_horizontal_pan(
+                                ("activity-output-pan", index * 1_000_000 + line_index),
+                                scroll,
+                                px(width),
+                                div().min_w(px(width)).child(output_line).into_any_element(),
+                                cx,
+                            )
+                            .debug_selector(move || {
+                                format!("activity-tool-{index}-output-pan-{line_index}")
+                            })
+                            .w_full()
+                            .min_w_0()
+                            .max_w_full()
+                            .into_any_element()
                         }
                     }
                     ActivityRow::ToolEmpty { index, id } => {
@@ -3922,12 +3932,54 @@ mod tests {
                 .filter_map(activity_pan_key)
                 .collect();
             assert_eq!(diff_pan_keys.len(), 1);
-            assert!(view.horizontal.borrow()["diff"].max_offset().x > px(0.));
         });
         let first = cx.debug_bounds("activity-diff-line-0").unwrap();
         cx.simulate_event(gpui::ScrollWheelEvent {
             position: first.center(),
-            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-120.), px(0.))),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-20.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Ended,
+        });
+        cx.run_until_parked();
+        let first_pan = app.read_with(cx, |app, _| {
+            let offset = app.activity_view.as_ref().unwrap().horizontal.borrow()["diff"]
+                .offset()
+                .x;
+            assert!(offset < px(0.));
+            offset
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-20.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Ended,
+        });
+        cx.run_until_parked();
+        let second_pan = app.read_with(cx, |app, _| {
+            let offset = app.activity_view.as_ref().unwrap().horizontal.borrow()["diff"]
+                .offset()
+                .x;
+            assert!(
+                offset < first_pan,
+                "a second gesture must continue panning: first={first_pan:?}, second={offset:?}"
+            );
+            offset
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(10.), px(0.))),
             modifiers: gpui::Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
         });
@@ -3937,7 +3989,7 @@ mod tests {
                 app.activity_view.as_ref().unwrap().horizontal.borrow()["diff"]
                     .offset()
                     .x
-                    < px(0.)
+                    > second_pan
             );
         });
     }
@@ -4016,6 +4068,11 @@ mod tests {
                     .find(|tool| tool.id == "test-command")
                     .unwrap()
                     .clone();
+                tool.target = [
+                    format!("first {}", "wide-target-".repeat(20)),
+                    format!("second {}", "wide-target-".repeat(20)),
+                ]
+                .join("\n");
                 tool.output = (0..2_000)
                     .map(|line| format!("output line {line}: {}", "x".repeat(120)))
                     .collect::<Vec<_>>()
@@ -4043,6 +4100,15 @@ mod tests {
         cx.simulate_click(wrap.center(), gpui::Modifiers::none());
         cx.run_until_parked();
 
+        let target_pans = [
+            "activity-tool-0-target-pan-0",
+            "activity-tool-0-target-pan-1",
+        ]
+        .map(|selector| cx.debug_bounds(selector).unwrap());
+        assert_eq!(
+            target_pans[0].size.width, target_pans[1].size.width,
+            "rows sharing a target pan must reserve the same viewport width"
+        );
         assert!(cx.debug_bounds("activity-tool-0").is_some());
         assert!(cx.debug_bounds("activity-tool-0-output-0").is_some());
         assert!(
@@ -4054,12 +4120,6 @@ mod tests {
             assert!(view.list.item_count() > 2_000);
             assert!(view.list.viewport_bounds().size.height > px(0.));
             assert!(view.list.max_offset_for_scrollbar().y > px(0.));
-            assert!(
-                view.horizontal.borrow()["test-command:output"]
-                    .max_offset()
-                    .x
-                    > px(0.)
-            );
             let output_pan_keys: std::collections::HashSet<_> = view
                 .rows
                 .iter()
@@ -4226,13 +4286,37 @@ mod tests {
             modifiers: gpui::Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
         });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Ended,
+        });
         cx.run_until_parked();
-        app.read_with(cx, |app, _| {
-            assert!(
+        let first_pan = app.read_with(cx, |app, _| {
+            let offset =
                 app.activity_view.as_ref().unwrap().horizontal.borrow()["test-command:output"]
                     .offset()
-                    .x
-                    < px(0.)
+                    .x;
+            assert!(offset < px(0.));
+            offset
+        });
+        let second = cx.debug_bounds("activity-tool-0-output-pan-1").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: second.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-200.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let horizontal = app.activity_view.as_ref().unwrap().horizontal.borrow();
+            let handle = &horizontal["test-command:output"];
+            assert!(
+                handle.offset().x < first_pan,
+                "a second gesture must continue panning virtualized output: first={:?}, second={:?}",
+                first_pan,
+                handle.offset().x
             );
         });
 
