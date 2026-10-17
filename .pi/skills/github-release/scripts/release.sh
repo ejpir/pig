@@ -105,6 +105,7 @@ find_run() {
     --jq "[.[] | select(.headSha == \"$SHA\" and .headBranch == \"$head\")] | .[0].databaseId // empty"
 }
 
+LAST_RUN_ID=
 wait_for_run() {
   local head=$1 run_id=
   echo "Waiting for Desktop workflow for $head at $SHA"
@@ -116,10 +117,11 @@ wait_for_run() {
   [[ -n "$run_id" ]] || { echo "No Desktop workflow appeared for $head" >&2; return 1; }
   echo "Workflow: https://github.com/$REPO/actions/runs/$run_id"
   gh run watch "$run_id" --repo "$REPO" --compact --exit-status
-  printf '%s\n' "$run_id"
+  LAST_RUN_ID=$run_id
 }
 
-BRANCH_RUN=$(wait_for_run "$BRANCH" | tee /dev/stderr | tail -n1)
+wait_for_run "$BRANCH"
+BRANCH_RUN=$LAST_RUN_ID
 if [[ $(remote_branch_sha) != "$SHA" ]]; then
   echo "Remote $BRANCH moved after CI; refusing to tag an unconfirmed branch head." >&2
   exit 1
@@ -131,7 +133,8 @@ fi
 
 git tag -a "$TAG" "$SHA" -m "$TAG"
 git push "$REMOTE" "refs/tags/$TAG"
-TAG_RUN=$(wait_for_run "$TAG" | tee /dev/stderr | tail -n1)
+wait_for_run "$TAG"
+TAG_RUN=$LAST_RUN_ID
 
 for _ in $(seq 1 60); do
   if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
