@@ -645,6 +645,14 @@ pub fn code_text_language(text: &str, language: Option<&str>, colors: &Theme) ->
 /// Compact diff rows share a gutter sized for the largest line number. Keep
 /// 12 dp inside the card's edge even when numbers grow past three digits.
 pub fn diff_lines<'a>(lines: &'a [DiffLine], colors: &'a Theme) -> impl Iterator<Item = Div> + 'a {
+    let gutter = diff_gutter(lines);
+    lines
+        .iter()
+        .map(move |line| diff_line(line, false, gutter, colors))
+}
+
+/// Gutter shared by every row in one diff, including ten-digit line numbers.
+pub fn diff_gutter(lines: &[DiffLine]) -> f32 {
     let digits = lines
         .iter()
         .map(|line| line.number)
@@ -652,11 +660,8 @@ pub fn diff_lines<'a>(lines: &'a [DiffLine], colors: &'a Theme) -> impl Iterator
         .unwrap_or(0)
         .to_string()
         .len();
-    // Commit Mono at 12 dp has a 7.2 dp character advance.
-    let gutter = (12. + (digits as f32 * 7.2).ceil() + 10.).max(38.);
-    lines
-        .iter()
-        .map(move |line| diff_line(line, false, gutter, colors))
+    // Review's 12.5 dp Commit Mono has a 7.75 dp character advance.
+    (12. + (digits as f32 * 7.75).ceil() + 10.).max(38.)
 }
 
 /// A diff line: number, then code; added and removed lines are tinted.
@@ -1028,6 +1033,7 @@ pub fn code_line_in(
     language: Option<&str>,
     colors: &Theme,
 ) -> Div {
+    let number = line.number;
     let background = match line.kind {
         LineKind::Added => Some(colors.added),
         LineKind::Removed => Some(colors.removed),
@@ -1063,19 +1069,29 @@ pub fn code_line_in(
             div()
                 .w(px(gutter))
                 .flex_none()
-                .pr(px(12.))
+                .flex()
+                .items_start()
+                .justify_end()
+                .pl(px(12.))
+                .pr(px(10.))
                 .whitespace_nowrap()
-                .text_right()
                 .text_color(colors.faint)
-                .child(if line.number == 0 {
-                    String::new()
-                } else {
-                    line.number.to_string()
-                }),
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(20.))
+                        .debug_selector(move || format!("diff-number-{number}"))
+                        .child(if number == 0 {
+                            String::new()
+                        } else {
+                            number.to_string()
+                        }),
+                ),
         )
         .child(
             div()
                 .pr(px(8.))
+                .debug_selector(move || format!("diff-code-{number}"))
                 .map(|text| {
                     if wrap {
                         text.flex_1().min_w_0()

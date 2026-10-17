@@ -1,8 +1,16 @@
 # Design studies
 
+## Historical scripted mini-app prototype
+
+**[Browse the archived GPUI calculator prototype](scripted-calculator/README.md)**: JSON/Rhai sources, a standalone native runner and its [Moonstone](scripted-calculator/screens/02-moonstone.png) and [Evening](scripted-calculator/screens/01-evening.png) captures are retained as design history. The current native [`@Visualize`](../crates/pi_android/README.md#native-mini-apps-with-visualize) runtime uses JavaScript bundles instead.
+
 ## Latest: Android screens
 
 **[Browse the twelve phone screens](android/index.html)**: Pi keeps running on your computer or server, and the phone follows sessions, answers questions, reviews changes and starts work. Connect, Sessions, Starting, Working, Waiting, Done, Review, Typing, Details, Notifications, Evening and Settings, in the Moonstone and Evening themes. See the [notes and phone contract](android/README.md) and the [overview](android/overview.png).
+
+## Android: inline pages
+
+**[Open the interactive inline-page study](android/inline-pages/index.html)**: HTML pages become usable parts of the reply. Try a real calculator, expand it without losing state, inspect its source, choose when to load a revision, and explore offline/unavailable states. See the [design contract](android/inline-pages/README.md) and [overview](android/inline-pages/overview.png). The browser study is separate from the native inline host documented in the design notes.
 
 ## Android: swarm communication
 

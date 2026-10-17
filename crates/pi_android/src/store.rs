@@ -715,6 +715,26 @@ impl Store {
         prompt: crate::prompt::Prompt,
         attachments: Vec<String>,
     ) -> Result<(), String> {
+        self.send_with_mode(id, prompt, attachments, false)
+    }
+
+    /// A review response waits behind active work instead of steering it.
+    pub fn follow_up(
+        &mut self,
+        id: SessionId,
+        prompt: crate::prompt::Prompt,
+        attachments: Vec<String>,
+    ) -> Result<(), String> {
+        self.send_with_mode(id, prompt, attachments, true)
+    }
+
+    fn send_with_mode(
+        &mut self,
+        id: SessionId,
+        prompt: crate::prompt::Prompt,
+        attachments: Vec<String>,
+        follow_up: bool,
+    ) -> Result<(), String> {
         #[cfg(feature = "local-backend")]
         if let Some(local) = &mut self.local {
             let session = self
@@ -722,10 +742,14 @@ impl Store {
                 .iter_mut()
                 .find(|s| s.id == id)
                 .ok_or("Chat no longer available")?;
-            return local.send(session, prompt, attachments);
+            return local.send(session, prompt, attachments, follow_up);
         }
         if let Some(live) = &mut self.live {
-            live.prompt(id, prompt)?;
+            if follow_up {
+                live.follow_up(id, prompt)?;
+            } else {
+                live.prompt(id, prompt)?;
+            }
             self.reproject(id);
             return Ok(());
         }
@@ -825,7 +849,7 @@ impl Store {
         if let Some(local) = &mut self.local {
             let mut session = local.create()?;
             let id = session.id;
-            if let Err(error) = local.send(&mut session, prompt, attachments) {
+            if let Err(error) = local.send(&mut session, prompt, attachments, false) {
                 self.sessions.push(local.project(id));
                 return Err(error);
             }

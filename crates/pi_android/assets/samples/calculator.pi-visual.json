@@ -1,0 +1,191 @@
+{
+  "version": 1,
+  "title": "Calculator",
+  "initial_state": {
+    "entry": "0",
+    "display": "0",
+    "value": 0.0,
+    "lhs": 0.0,
+    "op": "",
+    "mode": "entry",
+    "caption": "",
+    "history1": "No calculations yet",
+    "history2": "",
+    "history3": ""
+  },
+  "view": {
+    "type": "column",
+    "gap": 8,
+    "width": null,
+    "children": [
+      {
+        "type": "text",
+        "style": "expression",
+        "bind": "caption"
+      },
+      {
+        "type": "text",
+        "style": "display",
+        "bind": "display"
+      },
+      {
+        "type": "column",
+        "gap": 6,
+        "width": null,
+        "children": [
+          {
+            "type": "row",
+            "gap": 6,
+            "children": [
+              {
+                "type": "button",
+                "label": "AC",
+                "action": "AC",
+                "tone": "utility"
+              },
+              {
+                "type": "button",
+                "label": "±",
+                "action": "sign",
+                "tone": "utility"
+              },
+              {
+                "type": "button",
+                "label": "%",
+                "action": "%",
+                "tone": "utility"
+              },
+              {
+                "type": "button",
+                "label": "÷",
+                "action": "/",
+                "tone": "operator"
+              }
+            ]
+          },
+          {
+            "type": "row",
+            "gap": 6,
+            "children": [
+              {
+                "type": "button",
+                "label": "7",
+                "action": "7",
+                "tone": "normal"
+              },
+              {
+                "type": "button",
+                "label": "8",
+                "action": "8",
+                "tone": "normal"
+              },
+              {
+                "type": "button",
+                "label": "9",
+                "action": "9",
+                "tone": "normal"
+              },
+              {
+                "type": "button",
+                "label": "×",
+                "action": "*",
+                "tone": "operator"
+              }
+            ]
+          },
+          {
+            "type": "row",
+            "gap": 6,
+            "children": [
+              {
+                "type": "button",
+                "label": "4",
+                "action": "4",
+                "tone": "normal"
+              },
+              {
+                "type": "button",
+                "label": "5",
+                "action": "5",
+                "tone": "normal"
+              },
+              {
+                "type": "button",
+                "label": "6",
+                "action": "6",
+                "tone": "normal"
+              },
+              {
+                "type": "button",
+                "label": "−",
+                "action": "-",
+                "tone": "operator"
+              }
+            ]
+          },
+          {
+            "type": "row",
+            "gap": 6,
+            "children": [
+              {
+                "type": "button",
+                "label": "1",
+                "action": "1",
+                "tone": "normal"
+              },
+              {
+                "type": "button",
+                "label": "2",
+                "action": "2",
+                "tone": "normal"
+              },
+              {
+                "type": "button",
+                "label": "3",
+                "action": "3",
+                "tone": "normal"
+              },
+              {
+                "type": "button",
+                "label": "+",
+                "action": "+",
+                "tone": "operator"
+              }
+            ]
+          },
+          {
+            "type": "row",
+            "gap": 6,
+            "children": [
+              {
+                "type": "button",
+                "label": "⌫",
+                "action": "backspace",
+                "tone": "utility"
+              },
+              {
+                "type": "button",
+                "label": "0",
+                "action": "0",
+                "tone": "normal"
+              },
+              {
+                "type": "button",
+                "label": ".",
+                "action": ".",
+                "tone": "normal"
+              },
+              {
+                "type": "button",
+                "label": "=",
+                "action": "=",
+                "tone": "accent"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "script": "// Loaded at runtime, never compiled to Rust. Only dispatch is called.\n// Immediate-execution calculator: 2 + 3 × 4 = 20. Percent divides by 100.\n// Numeric results retain full precision; only their presentation is formatted.\n\nfn reset(s) {\n    s.entry = \"0\";\n    s.display = \"0\";\n    s.value = 0.0;\n    s.lhs = 0.0;\n    s.op = \"\";\n    s.mode = \"entry\";\n    s.caption = \"\";\n    s\n}\n\nfn symbol(op) {\n    if op == \"*\" { \"×\" }\n    else if op == \"/\" { \"÷\" }\n    else if op == \"-\" { \"−\" }\n    else { op }\n}\n\nfn arithmetic(a, b, op) {\n    if op == \"/\" && b == 0.0 { throw \"Cannot divide by zero\"; }\n    let result = if op == \"+\" { a + b }\n        else if op == \"-\" { a - b }\n        else if op == \"*\" { a * b }\n        else { a / b };\n    if !finite(result) { throw \"Result out of range\"; }\n    result\n}\n\nfn refresh(s) {\n    s.display = if s.mode == \"entry\" { s.entry } else { fmt(s.value) };\n    s\n}\n\nfn dispatch(s, key) {\n    let digits = [\"0\", \"1\", \"2\", \"3\", \"4\", \"5\", \"6\", \"7\", \"8\", \"9\"];\n    let operators = [\"+\", \"-\", \"*\", \"/\"];\n    if !(key in digits) && !(key in operators)\n        && !(key in [\".\", \"=\", \"AC\", \"sign\", \"%\", \"backspace\"]) { return s; }\n    if key == \"AC\" { return reset(s); }\n    if s.mode == \"error\" { s = reset(s); }\n\n    try {\n        if key in digits || key == \".\" {\n            if s.mode != \"entry\" {\n                s.entry = \"0\";\n                s.value = 0.0;\n                s.mode = \"entry\";\n                if s.op == \"\" { s.caption = \"\"; }\n            }\n            if key == \".\" {\n                if !s.entry.contains(\".\") { s.entry += \".\"; }\n            } else if s.entry.len() < 15 {\n                if s.entry == \"0\" { s.entry = key; }\n                else if s.entry == \"-0\" { s.entry = \"-\" + key; }\n                else { s.entry += key; }\n            }\n            s.value = parse_float(s.entry);\n        } else if key == \"backspace\" {\n            if s.mode == \"entry\" {\n                s.entry = s.entry.sub_string(0, s.entry.len() - 1);\n                if s.entry == \"\" || s.entry == \"-\" { s.entry = \"0\"; }\n                s.value = parse_float(s.entry);\n            }\n        } else if key == \"sign\" {\n            if s.mode == \"pending\" {\n                s.entry = \"-0\";\n                s.value = -0.0;\n                s.mode = \"entry\";\n            } else if s.mode == \"entry\" {\n                if s.entry.starts_with(\"-\") { s.entry = s.entry.sub_string(1); }\n                else { s.entry = \"-\" + s.entry; }\n                s.value = parse_float(s.entry);\n            } else { s.value = -s.value; }\n        } else if key == \"%\" {\n            if s.mode == \"pending\" { s.value = 0.0; }\n            s.value /= 100.0;\n            s.mode = \"result\";\n        } else if key in operators {\n            if s.op != \"\" && s.mode != \"pending\" {\n                s.value = arithmetic(s.lhs, s.value, s.op);\n            }\n            s.lhs = s.value;\n            s.op = key;\n            s.mode = \"pending\";\n            s.caption = fmt(s.value) + \" \" + symbol(key);\n        } else if key == \"=\" {\n            if s.op == \"\" || s.mode == \"pending\" { return s; }\n            let rhs = s.value;\n            s.value = arithmetic(s.lhs, rhs, s.op);\n            s.caption = fmt(s.lhs) + \" \" + symbol(s.op) + \" \" + fmt(rhs) + \" =\";\n            s.history3 = s.history2;\n            s.history2 = if s.history1 == \"No calculations yet\" { \"\" } else { s.history1 };\n            s.history1 = fmt(s.lhs) + \" \" + symbol(s.op) + \" \" + fmt(rhs) + \" = \" + fmt(s.value);\n            s.op = \"\";\n            s.mode = \"result\";\n        }\n        return refresh(s);\n    } catch (message) {\n        s = reset(s);\n        s.mode = \"error\";\n        s.display = \"Error\";\n        s.caption = message.to_string();\n        return s;\n    }\n}\n"
+}

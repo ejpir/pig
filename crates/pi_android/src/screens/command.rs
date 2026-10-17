@@ -20,6 +20,15 @@ pub(crate) enum CommandTab {
     Output,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CommandOutputSource {
+    len: usize,
+    hash: u64,
+    sample_hash: u64,
+    pointer: usize,
+    ends_with_newline: bool,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CommandScreenState {
     pub(crate) tool_id: String,
@@ -27,7 +36,8 @@ pub(crate) struct CommandScreenState {
     pub(crate) command_scroll: ScrollHandle,
     pub(crate) output_list: ListState,
     pub(crate) output_horizontal: ScrollHandle,
-    output_bytes: usize,
+    output_source: Option<CommandOutputSource>,
+    output_width: f32,
     output_wrap: bool,
     output_rows: Arc<Vec<SharedString>>,
 }
@@ -43,11 +53,171 @@ impl CommandScreenState {
             command_scroll: ScrollHandle::new(),
             output_list,
             output_horizontal: ScrollHandle::new(),
-            output_bytes: usize::MAX,
+            output_source: None,
+            output_width: 0.,
             output_wrap: false,
             output_rows: Arc::new(Vec::new()),
         }
     }
+}
+
+fn output_line_width(text: &str) -> f32 {
+    let units = text
+        .chars()
+        .map(|character| match character {
+            '\t' => 4.,
+            character if character.is_control() => 0.,
+            character if character.is_ascii() => 1.,
+            _ => 2.,
+        })
+        .sum::<f32>();
+    40. + units * 12. * 0.6
+}
+
+const OUTPUT_HASH_OFFSET: u64 = 0xcbf29ce484222325;
+const OUTPUT_HASH_PRIME: u64 = 0x100000001b3;
+
+fn extend_output_hash(mut hash: u64, text: &str) -> u64 {
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(OUTPUT_HASH_PRIME);
+    }
+    hash
+}
+
+fn output_fingerprint(text: &str) -> u64 {
+    let bytes = text.as_bytes();
+    if bytes.len() <= 512 {
+        return extend_output_hash(OUTPUT_HASH_OFFSET, text);
+    }
+    let mut hash = OUTPUT_HASH_OFFSET;
+    for sample in 0..16 {
+        let start = sample * (bytes.len() - 16) / 15;
+        for byte in &bytes[start..start + 16] {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(OUTPUT_HASH_PRIME);
+        }
+    }
+    hash
+}
+
+fn command_output_source(
+    output: &str,
+    previous: Option<&CommandOutputSource>,
+) -> CommandOutputSource {
+    let pointer = output.as_ptr() as usize;
+    let sample_hash = output_fingerprint(output);
+    let hash = previous
+        .and_then(|old| {
+            if old.len == output.len() && old.pointer == pointer && old.sample_hash == sample_hash {
+                Some(old.hash)
+            } else if old.len < output.len()
+                && output
+                    .get(..old.len)
+                    .is_some_and(|prefix| output_fingerprint(prefix) == old.sample_hash)
+            {
+                output
+                    .get(old.len..)
+                    .map(|suffix| extend_output_hash(old.hash, suffix))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| extend_output_hash(OUTPUT_HASH_OFFSET, output));
+    CommandOutputSource {
+        len: output.len(),
+        hash,
+        sample_hash,
+        pointer,
+        ends_with_newline: output.ends_with('\n'),
+    }
+}
+
+fn command_suffix_for_display(raw: &str) -> std::borrow::Cow<'_, str> {
+    if raw.contains('\n') || !raw.contains('\r') {
+        return pi_core::command_output::for_display(raw);
+    }
+    let before_pending = raw.strip_suffix('\r').unwrap_or(raw);
+    let start = before_pending.rfind('\r').map_or(0, |index| index + 1);
+    std::borrow::Cow::Borrowed(&before_pending[start..])
+}
+
+fn replace_command_output_rows(
+    view: &mut CommandScreenState,
+    tool: &ToolActivity,
+    old: &CommandOutputSource,
+    new: &CommandOutputSource,
+) -> bool {
+    if new.len <= old.len
+        || tool
+            .output
+            .get(old.len..)
+            .is_none_or(|suffix| extend_output_hash(old.hash, suffix) != new.hash)
+    {
+        return false;
+    }
+    let old_count = view.output_rows.len();
+    if old_count == 0 {
+        return false;
+    }
+    let (replace_start, suffix_start) = if old.ends_with_newline {
+        (old_count, old.len)
+    } else {
+        (
+            old_count - 1,
+            tool.output[..old.len]
+                .rfind('\n')
+                .map_or(0, |position| position + 1),
+        )
+    };
+    let raw_suffix = &tool.output[suffix_start..];
+    let displayed = if tool.name == "bash" {
+        command_suffix_for_display(raw_suffix)
+    } else {
+        std::borrow::Cow::Borrowed(raw_suffix)
+    };
+    let replacement: Vec<SharedString> = displayed.lines().map(SharedString::from).collect();
+    if replacement.is_empty() {
+        return false;
+    }
+
+    let removed_width = view.output_rows[replace_start..]
+        .iter()
+        .map(|line| output_line_width(line))
+        .fold(0., f32::max);
+    let replacement_width = replacement
+        .iter()
+        .map(|line| output_line_width(line))
+        .fold(0., f32::max);
+    let rows = Arc::make_mut(&mut view.output_rows);
+    rows.splice(replace_start.., replacement);
+    if replacement_width >= view.output_width {
+        view.output_width = replacement_width;
+    } else if removed_width >= view.output_width {
+        view.output_width = rows
+            .iter()
+            .map(|line| output_line_width(line))
+            .fold(0., f32::max);
+    }
+    view.output_list
+        .splice(replace_start..old_count, rows.len() - replace_start);
+    true
+}
+
+fn reset_command_output(view: &mut CommandScreenState, tool: &ToolActivity) {
+    let displayed = tool.output_for_display();
+    let rows: Vec<SharedString> = if displayed.trim().is_empty() {
+        Vec::new()
+    } else {
+        displayed.lines().map(SharedString::from).collect()
+    };
+    view.output_width = rows
+        .iter()
+        .map(|line| output_line_width(line))
+        .fold(0., f32::max);
+    view.output_list
+        .reset_with_uniform_height(rows.len(), px(20.));
+    view.output_rows = Arc::new(rows);
 }
 
 impl PhoneApp {
@@ -196,31 +366,19 @@ impl PhoneApp {
                 .into_any_element();
         };
         let wrap = self.wrap_lines(cx);
-        let output_bytes = tool.output.len();
         let Some(view) = self.command_views.get_mut(&token) else {
             return div().into_any_element();
         };
-        if view.output_bytes != output_bytes {
-            let displayed_output = tool.output_for_display();
-            let rows: Vec<SharedString> = if displayed_output.trim().is_empty() {
-                Vec::new()
-            } else {
-                displayed_output.lines().map(SharedString::from).collect()
-            };
-            let old_count = view.output_list.item_count();
-            let new_count = rows.len();
-            if new_count >= old_count {
-                if old_count > 0 {
-                    view.output_list.remeasure_items(old_count - 1..old_count);
-                }
-                view.output_list
-                    .splice(old_count..old_count, new_count - old_count);
-            } else {
-                view.output_list
-                    .reset_with_uniform_height(new_count, px(20.));
+        let output_source = command_output_source(&tool.output, view.output_source.as_ref());
+        if view.output_source.as_ref() != Some(&output_source) {
+            let incremented = view
+                .output_source
+                .clone()
+                .is_some_and(|old| replace_command_output_rows(view, &tool, &old, &output_source));
+            if !incremented {
+                reset_command_output(view, &tool);
             }
-            view.output_rows = Arc::new(rows);
-            view.output_bytes = output_bytes;
+            view.output_source = Some(output_source);
         }
         if view.output_wrap != wrap {
             view.output_list.remeasure();
@@ -231,6 +389,7 @@ impl PhoneApp {
         let output_list = view.output_list.clone();
         let output_horizontal = view.output_horizontal.clone();
         let output_rows = view.output_rows.clone();
+        let output_width = view.output_width;
         let output_follow = output_list.is_following_tail();
         if tab == CommandTab::Output && output_follow {
             output_list.scroll_to_end();
@@ -292,7 +451,9 @@ impl PhoneApp {
                             .font_family(MONO)
                             .text_size(px(12.))
                             .line_height(px(18.))
-                            .when(!wrap, |line| line.whitespace_nowrap())
+                            .when(!wrap, |line| {
+                                line.min_w(px(output_width)).whitespace_nowrap()
+                            })
                             .text_color(row_colors.plain)
                             .child(super::stream::output_block(text.clone(), &row_colors))
                             .child(this.copyable(text, cx));
@@ -301,11 +462,14 @@ impl PhoneApp {
                         } else {
                             div()
                                 .id(("command-output-pan", index))
+                                .debug_selector(move || format!("command-output-pan-{index}"))
                                 .w_full()
+                                .min_w_0()
+                                .max_w_full()
                                 .overflow_x_scroll()
                                 .restrict_scroll_to_axis()
                                 .track_scroll(&row_scroll)
-                                .child(div().flex_none().child(line))
+                                .child(div().flex_none().min_w(px(output_width)).child(line))
                                 .into_any_element()
                         }
                     }),
@@ -554,6 +718,104 @@ mod tests {
             let view = &app.command_views[&token];
             assert!(view.output_list.logical_scroll_top().item_ix > 0);
             assert!(view.output_list.is_following_tail());
+        });
+    }
+
+    #[gpui::test]
+    fn unwrapped_live_output_pans_horizontally_and_keeps_its_position(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(px(384.), px(640.)));
+        let (token, tool_id) = cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("verifying", window, cx);
+                app.update_prefs(cx, |prefs| prefs.wrap_lines = false);
+                let (turn, kind, tool, tool_id) = running_bash(app);
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == SessionId(1))
+                    .unwrap()
+                    .turns[turn]
+                    .stages[kind.index()]
+                .tools[tool]
+                    .output = [
+                    format!("first {}", "wide-output-".repeat(30)),
+                    "short second line".into(),
+                ]
+                .join("\n");
+                app.open_call_detail(SessionId(1), turn, kind, tool, window, cx);
+                let Route::Command(_, token) = app.route() else {
+                    panic!("command route");
+                };
+                (token, tool_id)
+            })
+        });
+        cx.run_until_parked();
+
+        let first = cx.debug_bounds("command-output-pan-0").unwrap();
+        app.read_with(cx, |app, _| {
+            assert!(app.command_views[&token].output_horizontal.max_offset().x > px(0.));
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-200.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        let panned = app.read_with(cx, |app, _| {
+            let offset = app.command_views[&token].output_horizontal.offset().x;
+            assert!(offset < px(0.));
+            offset
+        });
+
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .flat_map(|session| &mut session.turns)
+                    .flat_map(|turn| &mut turn.stages)
+                    .flat_map(|stage| &mut stage.tools)
+                    .find(|tool| tool.id == tool_id)
+                    .unwrap()
+                    .output
+                    .push_str("\nshort streamed line");
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(
+                app.command_views[&token].output_horizontal.offset().x,
+                panned
+            );
+        });
+
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .flat_map(|session| &mut session.turns)
+                    .flat_map(|turn| &mut turn.stages)
+                    .flat_map(|stage| &mut stage.tools)
+                    .find(|tool| tool.id == tool_id)
+                    .unwrap()
+                    .output
+                    .replace_range(..1, "X");
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(app.command_views[&token].output_rows[0].starts_with('X'));
         });
     }
 

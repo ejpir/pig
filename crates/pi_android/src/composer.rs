@@ -45,6 +45,13 @@ pub enum ComposerEvent {
         text: String,
         attachments: Vec<Attachment>,
     },
+    /// Stage one line-anchored section for a later batched review follow-up.
+    StageReview {
+        text: String,
+        attachments: Vec<Attachment>,
+    },
+    /// Close the line-anchored review editor without discarding its draft.
+    CancelReview,
     /// The paperclip: the app offers files and the clipboard.
     Attach,
     /// Independent controls, shared by new sessions, later prompts and reviews.
@@ -122,6 +129,8 @@ pub struct Composer {
     /// A session's composer is one line while you aren't typing in it; the
     /// model and effort show once it has focus or a draft.
     compact_when_idle: bool,
+    /// Draw the review composer as a comment card inside the diff.
+    inline_review: bool,
     send_blocked: bool,
     /// The exact child payload remains visible but cannot be sent twice in flight.
     sending: bool,
@@ -160,6 +169,7 @@ impl Composer {
             session_commands: false,
             message_only: false,
             compact_when_idle: false,
+            inline_review: false,
             send_blocked: false,
             sending: false,
             draft_height: 24.,
@@ -246,6 +256,10 @@ impl Composer {
     /// One line until you type: see `compact_when_idle`.
     pub fn set_compact_when_idle(&mut self) {
         self.compact_when_idle = true;
+    }
+
+    pub fn set_inline_review(&mut self, inline: bool) {
+        self.inline_review = inline;
     }
 
     pub fn set_send_blocked(&mut self, blocked: bool) {
@@ -368,10 +382,11 @@ impl Composer {
     }
 
     pub fn can_send(&self, cx: &App) -> bool {
-        !self.sending
-            && !self.send_blocked
-            && self.imports == 0
-            && (!self.area.read(cx).is_empty() || !self.attachments.is_empty())
+        let has_payload = !self.area.read(cx).is_empty()
+            || self.attachments.iter().any(|attachment| {
+                !self.inline_review || !matches!(attachment, Attachment::Lines(_))
+            });
+        !self.sending && !self.send_blocked && self.imports == 0 && has_payload
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -386,10 +401,17 @@ impl Composer {
         // or connection errors must leave text AND images ready to retry.
         let text = self.area.read(cx).text().to_owned();
         let attachments = self.attachments.clone();
-        cx.emit(ComposerEvent::Send {
-            text: text.trim().to_owned(),
-            attachments,
-        });
+        if self.inline_review {
+            cx.emit(ComposerEvent::StageReview {
+                text: text.trim().to_owned(),
+                attachments,
+            });
+        } else {
+            cx.emit(ComposerEvent::Send {
+                text: text.trim().to_owned(),
+                attachments,
+            });
+        }
         cx.notify();
     }
 
@@ -557,7 +579,11 @@ impl Render for Composer {
                 );
             } else {
                 area.set_touch_target(
-                    px(self.draft_height),
+                    px(if self.inline_review {
+                        88.
+                    } else {
+                        self.draft_height
+                    }),
                     Edges {
                         top: px(12.),
                         right: px(16.),
@@ -783,6 +809,103 @@ impl Render for Composer {
                         }),
                 )
         });
+        if self.inline_review {
+            let context = self
+                .attachments
+                .iter()
+                .find_map(|attachment| match attachment {
+                    Attachment::Lines(lines) => Some(lines.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "selected lines".into());
+            let attach = ui::button(
+                "inline-review-attach",
+                ui::Button::Quiet,
+                Some("clip"),
+                "Add files",
+                true,
+                &colors,
+            )
+            .debug_selector(|| "inline-review-attach".into())
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::Attach)));
+            let cancel = ui::button(
+                "inline-review-cancel",
+                ui::Button::Plain,
+                None,
+                "Cancel",
+                true,
+                &colors,
+            )
+            .debug_selector(|| "inline-review-cancel".into())
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::CancelReview)));
+            let comment = ui::button(
+                "inline-review-submit",
+                ui::Button::Primary,
+                None,
+                "Add comment",
+                true,
+                &colors,
+            )
+            .debug_selector(|| "inline-review-submit".into())
+            .when(can_send, |button| {
+                button.on_click(cx.listener(|this, _, _, cx| this.send(cx)))
+            })
+            .when(!can_send, |button| button.opacity(0.45));
+            return div()
+                .id("inline-review-card")
+                .debug_selector(|| "inline-review-card".into())
+                .relative()
+                .child(crate::testing::probe("inline-review-card"))
+                .mx(px(12.))
+                .p(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .rounded(px(16.))
+                .bg(colors.composer)
+                .border_1()
+                .border_color(colors.line_strong)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(14.))
+                        .child(icon("file", 16., colors.accent))
+                        .child(format!("Add a comment on {context}")),
+                )
+                .children(attachments)
+                .child(
+                    div()
+                        .id("inline-review-draft")
+                        .debug_selector(|| "inline-review-draft".into())
+                        .relative()
+                        .child(crate::testing::probe("inline-review-draft"))
+                        .min_h(px(112.))
+                        .p(px(12.))
+                        .rounded(px(10.))
+                        .bg(colors.canvas)
+                        .border_1()
+                        .border_color(if focused {
+                            colors.accent
+                        } else {
+                            colors.line_strong
+                        })
+                        .child(area),
+                )
+                .child(attach)
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(cancel)
+                        .child(comment),
+                )
+                .into_any_element();
+        }
+
         let strip = suggestions.map(|(title, items)| {
             div()
                 .mx(px(12.))
@@ -919,6 +1042,7 @@ impl Render for Composer {
                     })
                     .child(body),
             )
+            .into_any_element()
     }
 }
 
@@ -1000,6 +1124,28 @@ mod tests {
             assert!(composer.can_send(cx));
             composer.clear_if_text("/review", cx);
             assert!(!composer.can_send(cx));
+        });
+    }
+
+    #[gpui::test]
+    fn inline_review_requires_a_comment_not_only_its_line_anchor(cx: &mut TestAppContext) {
+        let composer = cx.new(|cx| Composer::new("Add a comment…", cx));
+        composer.update(cx, |composer, cx| {
+            composer.set_inline_review(true);
+            composer.set_lines(Some("lines 10–12".into()), cx);
+            assert!(!composer.can_send(cx));
+            composer.set_text("Handle the empty case", cx);
+            assert!(composer.can_send(cx));
+            composer.set_text("", cx);
+            composer.attach(
+                Attachment::File {
+                    name: "note.txt".into(),
+                    size: "4 B".into(),
+                    contents: "note".into(),
+                },
+                cx,
+            );
+            assert!(composer.can_send(cx));
         });
     }
 

@@ -4,6 +4,12 @@
 
 **[Open the gallery](index.html)** · [Overview PNG](overview.png)
 
+## Inline pages study
+
+**[Open the interactive, self-contained HTML](inline-pages/index.html)** · [Design contract](inline-pages/README.md) · [Overview PNG](inline-pages/overview.png)
+
+A working calculator inside the conversation, with optional expansion, selectable source, explicit revisions and offline behavior. The calculator is real local HTML; session and connection states are samples. This browser study is separate from the app's native inline WebView host; the design contract records the relationship and native verification.
+
 ## Swarm communication proposal
 
 **[Open the interactive swarm HTML](swarm/index.html)** · [Architecture and interaction contract](swarm/README.md) · [Overview PNG](swarm/overview.png)
@@ -14,7 +20,7 @@ Peers communicate through a durable broker on the computer, not by sharing every
 
 **[Open the before/after gallery](next5/index.html)** · [Why, and what it would take](next5/README.md) · [Overview PNG](next5/overview.png)
 
-Twelve screens on top of next4. Home becomes an inbox of questions, unreviewed results and stopped runs. The run line shows what happened in order, with each check's result where it happened. Answers are buttons. Review ends in **Looks good** or **Undo this turn**. A Live Update and a share target let the phone reach you while the app is closed. First run, Home, Working, the question, the Live Update, Details and the run line are [built](next5/README.md#built); review's decisions and the share target are not yet.
+Twelve screens on top of next4. Home becomes an inbox of questions, unreviewed results and stopped runs. The run line shows what happened in order, with each check's result where it happened. Answers are buttons. Edited and Wrote open a focused full-screen file diff with an optional **Ask about this** action. A Live Update and a share target let the phone reach you while the app is closed. First run, Home, Working, the question, focused edit review, the Live Update, Details and the run line are [built](next5/README.md#built); the share target is not yet.
 
 ## Scheduling proposal
 
@@ -46,7 +52,7 @@ Editing code, terminals and long configuration stay on the desktop.
 | [06 · Done](screens/06-done.png) | Pi's closing words first, the stage tiles collapsed into one line, then the changed files and check, and one primary action: Review. |
 | [07 · Review](screens/07-review.png) | One file at a time, chosen from chips; a unified diff that fits a phone's width; tap lines to attach them to a revision request typed right below. These are observed edits already on the computer: there is no Accept. |
 | [08 · Typing](screens/08-typing.png) | The composer above the keyboard: a pasted screenshot and an attached log as removable chips, `@` suggestions in a strip attached to the composer, the model and thinking level one tap away. |
-| [09 · Details](screens/09-details.png) | The desktop inspector as a bottom sheet, closed until asked for: context use, cost, observed edits, then disclosures. |
+| [09 · Details](screens/09-details.png) | The desktop inspector as a bottom sheet, closed until asked for: the run line stays visible, while rail details and context metadata start folded. |
 | [10 · Notifications](screens/10-alerts.png) | How the phone is usually reached: a question with its answer buttons, a finished session with Review, and one quiet ongoing notification while sessions work. |
 | [11 · Evening](screens/11-evening.png) | Screen 04 in the Evening theme. The phone follows the system's dark mode unless a theme is chosen. |
 | [12 · Settings and tools](screens/12-settings.png) | Computers, appearance, notifications and typing on the phone; models and resources belong to the computer and open its settings. |

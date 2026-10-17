@@ -1,0 +1,148 @@
+{
+  "version": 2,
+  "title": "Spirograph · growing trace",
+  "initial_state": {
+    "ring": 96.0,
+    "wheel": 36.0,
+    "pen": 54.0,
+    "speed": 1.0,
+    "angle": 0.0,
+    "turns": 3.0,
+    "playing": false,
+    "ring_label": "Fixed ring · 96",
+    "wheel_label": "Rolling circle · 36",
+    "pen_label": "Pen distance · 54",
+    "speed_label": "Speed · 1×",
+    "closure": "Closes after 3 turns · ratio 96:36",
+    "status": "Paused · tap Play to explore",
+    "progress": 0.0
+  },
+  "view": {
+    "type": "column",
+    "gap": 8,
+    "width": null,
+    "children": [
+      {
+        "type": "text",
+        "text": "SPIROGRAPH / MOTION LAB",
+        "style": "muted"
+      },
+      {
+        "type": "text",
+        "text": "A circle. An endless pattern.",
+        "style": "heading"
+      },
+      {
+        "type": "text",
+        "bind": "status",
+        "style": "muted"
+      },
+      {
+        "type": "row",
+        "gap": 8,
+        "children": [
+          {
+            "type": "button",
+            "label": "Play / Pause",
+            "action": "play",
+            "tone": "accent"
+          },
+          {
+            "type": "button",
+            "label": "Restart",
+            "action": "restart",
+            "tone": "utility"
+          },
+          {
+            "type": "button",
+            "label": "Reset",
+            "action": "reset",
+            "tone": "utility"
+          }
+        ]
+      },
+      {
+        "type": "canvas",
+        "label": "Spirograph curve with moving rolling circle and pen",
+        "height": 300,
+        "view_box": [
+          -160,
+          -160,
+          320,
+          320
+        ],
+        "draw": "scene"
+      },
+      {
+        "type": "text",
+        "bind": "closure",
+        "style": "history"
+      },
+      {
+        "type": "text",
+        "bind": "ring_label",
+        "style": "heading"
+      },
+      {
+        "type": "slider",
+        "label": "Fixed ring radius",
+        "bind": "ring",
+        "min": 60.0,
+        "max": 140.0,
+        "step": 1.0,
+        "action": "adjust"
+      },
+      {
+        "type": "text",
+        "bind": "wheel_label",
+        "style": "heading"
+      },
+      {
+        "type": "slider",
+        "label": "Rolling circle radius",
+        "bind": "wheel",
+        "min": 8.0,
+        "max": 58.0,
+        "step": 1.0,
+        "action": "adjust"
+      },
+      {
+        "type": "text",
+        "bind": "pen_label",
+        "style": "heading"
+      },
+      {
+        "type": "slider",
+        "label": "Pen distance",
+        "bind": "pen",
+        "min": 0.0,
+        "max": 120.0,
+        "step": 1.0,
+        "action": "adjust"
+      },
+      {
+        "type": "text",
+        "bind": "speed_label",
+        "style": "heading"
+      },
+      {
+        "type": "slider",
+        "label": "Animation speed",
+        "bind": "speed",
+        "min": 0.2,
+        "max": 3.0,
+        "step": 0.1,
+        "action": "speed"
+      },
+      {
+        "type": "text",
+        "text": "Blue: full pen path. Gold: rolling circle and pen. The wheel rolls inside the fixed ring; the pen follows the gold arm.",
+        "style": "muted"
+      }
+    ]
+  },
+  "animation": {
+    "running": "playing"
+  },
+  "script": "fn refresh(s) {\n    s.ring_label = \"Fixed ring · \" + fmt(s.ring);\n    s.wheel_label = \"Rolling circle · \" + fmt(s.wheel);\n    s.pen_label = \"Pen distance · \" + fmt(s.pen);\n    s.speed_label = \"Speed · \" + fmt(s.speed) + \"×\";\n    let a = s.ring.to_int(); let b = s.wheel.to_int();\n    while b != 0 { let c = a % b; a = b; b = c; }\n    s.turns = s.wheel / a.to_float();\n    s.closure = \"Closes after \" + fmt(s.turns) + \" turns · ratio \" + fmt(s.ring) + \":\" + fmt(s.wheel);\n    s.status = \"Paused · tap Play to explore\";\n    if s.playing { s.status = \"Playing · drag the controls\"; }\n    return s;\n}\nfn dispatch(s, action) {\n    if action == \"play\" { s.playing = !s.playing; }\n    if action == \"restart\" || action == \"adjust\" { s.angle = 0.0; s.progress = 0.0; }\n    if action == \"reset\" { s.ring = 96.0; s.wheel = 36.0; s.pen = 54.0; s.speed = 1.0; s.angle = 0.0; s.progress = 0.0; s.playing = false; }\n    return refresh(s);\n}\nfn tick(s, dt) {\n    s.angle += dt * s.speed * 2.0;\n    s.progress += dt * s.speed / 3.0;\n    if s.progress >= 1.0 { s.progress = 1.0; s.playing = false; }\n    s.status = \"Rolling · \" + fmt((s.progress*100.0).floor()) + \"% traced\";\n    if !s.playing { s.status = \"Complete · 100% traced\"; }\n    return s;\n}\nfn pen_point(s, t, scale) {\n    let k = s.ring - s.wheel;\n    let q = k / s.wheel * t;\n    return [(k*cos(t) + s.pen*cos(q))*scale, (k*sin(t) - s.pen*sin(q))*scale];\n}\nfn scene(s) {\n    let extent = s.ring - s.wheel + s.pen;\n    if s.ring > extent { extent = s.ring; }\n    let scale = 140.0 / (extent + 1.0);\n    let k = s.ring - s.wheel;\n    let center = [k*cos(s.angle)*scale, k*sin(s.angle)*scale];\n    let pen = pen_point(s, s.angle, scale);\n    let shapes = [#{type:\"circle\",center:[0.0,0.0],radius:s.ring*scale,color:\"#596574\",width:1.0}];\n    let ratio = k / s.wheel; let amplitude = s.pen; let interval = 6.28318530718 * s.turns / 128.0;\n    let chunk = 0;\n    while chunk < 4 {\n        let points = []; let i = 0;\n        while i < 33 {\n            let t = (chunk*32+i).to_float() * interval; let q = ratio * t;\n            points.push([(k*cos(t)+amplitude*cos(q))*scale, (k*sin(t)-amplitude*sin(q))*scale]); i += 1;\n        }\n        shapes.push(#{type:\"polyline\",points:points,color:\"#77BFFF\",width:1.5}); chunk += 1;\n    }\n    let target = (s.progress * 256.0).to_int();\n    let start = 0;\n    while start < target {\n        let stop = start + 32;\n        if stop > target { stop = target; }\n        let points = []; let i = start;\n        while i <= stop {\n            let t = i.to_float() / 256.0 * 6.28318530718 * s.turns;\n            points.push(pen_point(s, t, scale)); i += 1;\n        }\n        shapes.push(#{type:\"polyline\",points:points,color:\"#EAB879\",width:2.0});\n        start = stop;\n    }\n    shapes.push(#{type:\"circle\",center:center,radius:s.wheel*scale,color:\"#EAB879\",width:1.5});\n    shapes.push(#{type:\"line\",from:center,to:pen,color:\"#EAB879\",width:2.0});\n    shapes.push(#{type:\"circle\",center:pen,radius:3.5,color:\"#EAB879\",width:1.0,fill:\"#EAB879\"});\n    return shapes;\n}"
+}

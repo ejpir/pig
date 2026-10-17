@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Inline pages · Pi for Android</title>
+<!-- Self-contained output. Edit index.template, inline-pages.css or inline-pages.js, then run build.cjs. -->
+<!-- INLINE_CSS -->
+</head>
+<body>
+<div class="shell">
+  <header class="masthead" id="masthead">
+    <a class="brand" href="../index.html"><span class="pi-mark">π</span> Pi in your pocket</a>
+    <div class="masthead-end"><span class="study-label">Android / Interaction study</span><button class="theme-switch" id="theme-toggle" aria-pressed="false">Evening theme</button></div>
+  </header>
+  <main class="experience">
+    <section class="lead" id="study-controls" aria-label="Design study controls">
+      <div class="eyebrow"><span class="tiny-rule"></span> Pages, made present</div>
+      <h1>Don’t open it.<br>Just use it.</h1>
+      <p class="lede">A little tool, right where you asked for it. Pages Pi makes become working parts of the conversation.</p>
+      <div class="try-note"><span class="try-arrow" aria-hidden="true">↗</span><div><b>This calculator really works.</b><span>Tap its keys. Expand it. Come back.<br>Your calculation stays with you.</span></div></div>
+      <nav class="scenes" aria-label="Explore a sample state">
+        <button class="scene-choice selected" data-scene="inline" aria-pressed="true"><span class="scene-number">01</span><span><b>In the conversation</b><small>Ready to use, not another destination</small></span><span class="scene-indicator" aria-hidden="true">↗</span></button>
+        <button class="scene-choice" data-scene="update" aria-pressed="false"><span class="scene-number">02</span><span><b>A revision is ready</b><small>Keep your work until you choose to update</small></span><span class="scene-indicator" aria-hidden="true">↗</span></button>
+        <button class="scene-choice" data-scene="offline" aria-pressed="false"><span class="scene-number">03</span><span><b>The computer is away</b><small>The local page keeps working</small></span><span class="scene-indicator" aria-hidden="true">↗</span></button>
+        <button class="scene-choice" data-scene="unavailable" aria-pressed="false"><span class="scene-number">04</span><span><b>An edit we can’t follow</b><small>Never pass an old page off as the new one</small></span><span class="scene-indicator" aria-hidden="true">↗</span></button>
+      </nav>
+      <div class="study-tools"><button class="quiet-button" id="reset-sample">Reset sample <span aria-hidden="true">↺</span></button><a href="?single=1">Phone-only view ↗</a></div>
+      <p class="sample-note">Interactive design, not native app UI.<br>No Pi process, SSH connection or network requests.</p>
+    </section>
+
+    <section class="phone" id="phone" aria-label="Interactive Android design sample">
+      <div class="phone-main" id="phone-main">
+        <div class="status-bar"><span>9:41</span><span class="status-icons" aria-hidden="true"><svg viewBox="0 0 24 16"><path d="M2 14h3V10H2zm5 0h3V7H7zm5 0h3V4h-3zm5 0h3V1h-3z" fill="currentColor"/></svg><svg viewBox="0 0 24 16"><rect x="1" y="3" width="19" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M4 6h12v4H4zm17 0h2v4h-2z" fill="currentColor"/></svg></span></div>
+        <header class="app-header">
+          <button class="icon-button" data-action="back" aria-label="Session navigation"><svg viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></svg></button>
+          <div class="app-title"><b id="session-title">Build a calculator</b><span><i class="connection-dot" id="connection-dot"></i><span id="host-label">studio-mac · tools</span></span></div>
+          <button class="icon-button" data-action="session-info" aria-label="About this sample session"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
+        </header>
+        <div class="connection-banner" id="connection-banner" hidden><span><b>Computer disconnected</b><small>Your saved page is still available.</small></span><button data-action="reconnect">Reconnect</button></div>
+        <div class="expanded-context" id="expanded-context" hidden><span>Same page. A little more room.</span><span class="small-badge">On this phone</span></div>
+        <div class="thread" id="thread">
+          <section class="user-message chat-copy"><div class="message-meta"><span class="turn-number">01</span><b>You</b><time>9:40</time></div><p id="user-prompt">Build me a simple calculator I can use here.</p></section>
+          <section class="assistant-message">
+            <div class="assistant-copy chat-copy"><div class="message-meta"><span class="assistant-mark">π</span><b>Pi</b><span class="finished-label">Done <span aria-hidden="true">·</span> 8s</span></div><p id="assistant-intro">Here you go. A small calculator, right in the conversation.</p></div>
+            <div class="revision-notice" id="revision-notice" hidden><span><b>v2 is ready</b><small>Memory buttons added. v1 is still running.</small></span><button data-action="review-update">Update</button></div>
+            <article class="artifact" id="artifact" aria-label="Calculator, an interactive HTML page">
+              <header class="artifact-header"><div class="artifact-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="3"/><path d="M8 7h8M8 11h1m3 0h1m3 0h0M8 15h1m3 0h1m3 0h0M8 18h1m3 0h1m3 0h0"/></svg></div><div class="artifact-title"><b>Calculator</b><span id="artifact-file">calculator.html <span>·</span> v1</span></div><button class="icon-button" data-action="expand" id="expand-button" aria-label="Expand calculator" title="Expand calculator"><svg viewBox="0 0 24 24"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4M4 4l5 5m11-5-5 5M4 20l5-5m11 5-5-5"/></svg></button></header>
+              <div class="saved-notice" id="saved-notice" hidden>Saved v1 snapshot <span>· not the current revision</span></div>
+              <div class="widget-surface" id="widget-surface"><iframe id="calculator-frame" title="Interactive calculator" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe></div>
+              <div class="unavailable-page" id="unavailable-page" hidden><span class="unavailable-symbol" aria-hidden="true">&lt;/&gt;</span><h2>This revision isn’t available.</h2><p>The last edit couldn’t be reconstructed. We won’t show an older page as if it were current.</p><button class="button primary" data-action="request-rewrite">Ask Pi to rewrite it</button><button class="quiet-button" data-action="saved-page">View saved v1 instead</button></div>
+              <footer class="artifact-footer"><button class="local-status" data-action="sandbox-info" aria-label="Page permissions: local scripts, no network"><svg viewBox="0 0 24 24"><path d="m12 3 7 3v5c0 5-4 8-7 10-3-2-7-5-7-10V6z"/><path d="m9 12 2 2 4-4"/></svg><span id="page-status">On this phone <span>·</span> no network</span></button><button class="source-button" data-action="source">Source <svg viewBox="0 0 24 24"><path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-14-2 18"/></svg></button></footer>
+            </article>
+            <p class="after-page chat-copy" id="after-page">Want memory buttons or a different layout? Just ask.</p>
+            <div class="sample-followup chat-copy" id="sample-followup" hidden><span class="message-meta">Sample follow-up · not sent to Pi</span><p id="sample-followup-text"></p></div>
+          </section>
+        </div>
+        <footer class="composer-dock" id="composer-dock"><div class="composer-box"><button class="icon-button" data-action="attachments" aria-label="Attachment options"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button><textarea id="draft" rows="1" aria-label="Ask Pi for a change" placeholder="Ask for a change…"></textarea><button class="send-button" data-action="send" id="send-button" aria-label="Send sample follow-up" disabled><svg viewBox="0 0 24 24"><path d="M12 18V6m-5 5 5-5 5 5"/></svg></button></div><div class="composer-meta"><span id="composer-hint">Claude Sonnet <span>·</span> Medium <span aria-hidden="true">⌄</span></span><span>Design sample</span></div></footer>
+        <div class="gesture-bar" aria-hidden="true"></div>
+      </div>
+      <div class="overlay" id="overlay" hidden><button class="sheet-scrim" data-action="close-sheet" aria-label="Dismiss dialog" tabindex="-1"></button><section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" tabindex="-1"><div class="sheet-grip" aria-hidden="true"></div><header class="sheet-header"><h2 id="sheet-title"></h2><button class="icon-button" data-action="close-sheet" aria-label="Close dialog"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header><div class="sheet-content" id="sheet-content"></div></section></div>
+      <div class="phone-toast" id="toast" role="status" aria-live="polite"></div>
+    </section>
+
+    <aside class="margin-notes" id="margin-notes" aria-label="Interaction notes">
+      <div class="state-label"><span class="live-dot"></span><span id="state-label">01 / In the conversation</span></div>
+      <div class="annotation"><span class="annotation-number">A</span><h2>Part of the reply.</h2><p>Pi’s words lead into the working page, then carry on below it. No “Open preview” gate.</p></div>
+      <div class="annotation"><span class="annotation-number">B</span><h2>Room when you need it.</h2><p>Expand is optional. It’s the same running page, not a fresh load.</p><button class="note-action" data-action="expand">Try expanding <span aria-hidden="true">↗</span></button></div>
+      <div class="annotation"><span class="annotation-number">C</span><h2>A visible boundary.</h2><p>The frame belongs to Pi. What’s inside belongs to the page. Local scripts, no app access.</p><button class="note-action" data-action="sandbox-info">Inspect permissions <span aria-hidden="true">↗</span></button></div>
+      <div class="state-detail" id="state-detail"><b>Try 12 × 8.</b><p>Use AC to start over. The page also accepts keyboard input when focused.</p></div>
+    </aside>
+  </main>
+  <section class="contracts" id="contracts" aria-label="Design principles"><div><span class="eyebrow">The interaction contract</span><h2>A page, not a portal.</h2></div><article><span>01</span><b>Keep the conversation native.</b><p>Only the artifact is a browser surface. Chat, composer and controls remain Pi’s.</p></article><article><span>02</span><b>Don’t erase someone’s work.</b><p>A revision waits for an explicit update. Expanding and scrolling don’t reload it.</p></article><article><span>03</span><b>Local means local.</b><p>A self-contained page works offline. It cannot read app data or act as an agent.</p></article></section>
+  <footer class="study-footer" id="study-footer"><span>Proposed Android UI · all session content is sample content.</span><a href="README.md">Design notes & implementation boundary ↗</a></footer>
+</div>
+<!-- INLINE_JS -->
+</body>
+</html>

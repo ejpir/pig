@@ -1,0 +1,23 @@
+[package]
+name = "pi-scripted-calculator-mock"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A standalone visual prototype; no changes to the desktop/Android release builds.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+gpui = { path = "../../../../zed/crates/gpui", default-features = false, features = ["x11", "wayland"] }
+gpui_platform = { path = "../../../../zed/crates/gpui_platform", features = ["font-kit", "x11", "wayland"] }
+pi_visual = { path = "../../../crates/pi_visual" }
+
+[patch.crates-io]
+async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

@@ -22,6 +22,10 @@ enum ReviewRow {
     Header(usize),
     Spacer,
     Line(usize, usize),
+    /// A locally staged section remains at the line where it was written.
+    Comment(u64),
+    /// The follow-up editor is part of the diff flow, directly below its anchor.
+    Composer,
 }
 
 fn file_content_key(file: &FileChange) -> u64 {
@@ -49,8 +53,19 @@ fn call_content_key(path: &str, lines: &[DiffLine]) -> u64 {
     hasher.finish()
 }
 
-fn review_rows(file: &FileChange) -> Vec<ReviewRow> {
-    let mut rows = Vec::with_capacity(file.hunks.iter().map(|hunk| hunk.lines.len() + 3).sum());
+fn review_rows(
+    file: &FileChange,
+    comments: &[(u64, (usize, usize))],
+    comment_after: Option<(usize, usize)>,
+) -> Vec<ReviewRow> {
+    let mut rows = Vec::with_capacity(
+        file.hunks
+            .iter()
+            .map(|hunk| hunk.lines.len() + 3)
+            .sum::<usize>()
+            + comments.len()
+            + usize::from(comment_after.is_some()),
+    );
     for (hunk_index, hunk) in file.hunks.iter().enumerate() {
         let gap = hunk_index
             .checked_sub(1)
@@ -61,12 +76,18 @@ fn review_rows(file: &FileChange) -> Vec<ReviewRow> {
         rows.extend(gap.map(ReviewRow::Gap));
         rows.push(ReviewRow::Header(hunk_index));
         rows.push(ReviewRow::Spacer);
-        rows.extend(
-            hunk.lines
-                .iter()
-                .enumerate()
-                .map(|(line, _)| ReviewRow::Line(hunk_index, line)),
-        );
+        for (line, _) in hunk.lines.iter().enumerate() {
+            rows.push(ReviewRow::Line(hunk_index, line));
+            rows.extend(
+                comments
+                    .iter()
+                    .filter(|(_, anchor)| *anchor == (hunk_index, line))
+                    .map(|(id, _)| ReviewRow::Comment(*id)),
+            );
+            if comment_after == Some((hunk_index, line)) {
+                rows.push(ReviewRow::Composer);
+            }
+        }
         rows.push(ReviewRow::Spacer);
     }
     rows
@@ -122,6 +143,36 @@ impl PhoneApp {
                 (file.name().to_owned(), folder)
             },
         );
+        let wrap = self.wrap_lines(cx);
+        let comment_after = self.review_lines.iter().next_back().copied();
+        let staged = self
+            .review_comments
+            .iter()
+            .enumerate()
+            .filter(|(_, comment)| file.is_some_and(|file| comment.path == file.path))
+            .map(|(_, comment)| (comment.id, comment.anchor))
+            .collect::<Vec<_>>();
+        let mut comments_hasher = DefaultHasher::new();
+        for (id, _) in &staged {
+            let Some(comment) = self
+                .review_comments
+                .iter()
+                .find(|comment| comment.id == *id)
+            else {
+                continue;
+            };
+            id.hash(&mut comments_hasher);
+            comment.anchor.hash(&mut comments_hasher);
+            comment.lines.hash(&mut comments_hasher);
+            comment.text.hash(&mut comments_hasher);
+            for attachment in &comment.attachments {
+                attachment.label().hash(&mut comments_hasher);
+            }
+        }
+        let comments_key = comments_hasher.finish();
+        self.review.update(cx, |review, _| {
+            review.set_inline_review(comment_after.is_some())
+        });
         let step = |selector: &'static str, glyph: &'static str, to: Option<usize>| {
             let tap = ui::tap(selector, glyph, &colors);
             match to {
@@ -139,12 +190,11 @@ impl PhoneApp {
                 None => tap.opacity(0.45),
             }
         };
-        let wrap = self.wrap_lines(cx);
         let (rows, diff_width, added, removed, content_key) = file.map_or_else(
             || (Vec::new(), 0., 0, 0, 0),
             |file| {
                 (
-                    review_rows(file),
+                    review_rows(file, &staged, comment_after),
                     file.hunks
                         .iter()
                         .flat_map(|hunk| &hunk.lines)
@@ -191,7 +241,7 @@ impl PhoneApp {
                 .text_size(px(12.5))
                 .line_height(px(16.))
                 .text_color(colors.muted)
-                .child(div().flex_1().child("Tap a line to ask Pi about it"))
+                .child(div().flex_1().child("Tap lines to add review comments"))
                 .when(file.added > 0, |row| {
                     row.child(
                         div()
@@ -216,6 +266,8 @@ impl PhoneApp {
             call: None,
             file: shown,
             rows: row_count,
+            comment_after,
+            comments_key,
             wrap,
             added,
             removed,
@@ -226,6 +278,13 @@ impl PhoneApp {
                 .reset_with_uniform_height(row_count, px(24.));
             self.review_list_shape = Some(shape);
             self.review_list_offset = px(0.);
+            if comment_after.is_some()
+                && let Some(row) = rows
+                    .iter()
+                    .position(|row| matches!(row, ReviewRow::Composer))
+            {
+                self.review_list.scroll_to_reveal_item(row);
+            }
         }
         let list_state = self.review_list.clone();
         let offset = list_state.scroll_px_offset_for_scrollbar().y;
@@ -244,6 +303,10 @@ impl PhoneApp {
                 else {
                     return div().into_any_element();
                 };
+                let flow_card = matches!(
+                    list_rows[row_index],
+                    ReviewRow::Comment(_) | ReviewRow::Composer
+                );
                 let row = match list_rows[row_index] {
                     ReviewRow::Gap(gap) => div()
                         .h(px(32.))
@@ -280,15 +343,117 @@ impl PhoneApp {
                             .id(("line", hunk * 10_000 + line_index))
                             .debug_selector(move || format!("review-line-{hunk}-{line_index}"))
                             .relative()
+                            .child(crate::testing::probe(format!(
+                                "review-line-{hunk}-{line_index}"
+                            )))
                             .child(ui::code_line(line, selected, 48., wrap, &row_colors))
                             .child(this.copyable(line.text.clone(), cx))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.toggle_line(id, hunk, line_index, cx)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.toggle_line_for_follow_up(id, hunk, line_index, window, cx)
                             }))
                             .into_any_element()
                     }
+                    ReviewRow::Comment(comment_id) => {
+                        let Some(comment) = this
+                            .review_comments
+                            .iter()
+                            .find(|comment| comment.id == comment_id)
+                        else {
+                            return div().into_any_element();
+                        };
+                        let lines = comment.lines.clone();
+                        let text = comment.text.clone();
+                        let attachment_labels = comment
+                            .attachments
+                            .iter()
+                            .map(Attachment::label)
+                            .collect::<Vec<_>>();
+                        let card = div()
+                            .debug_selector(move || format!("staged-review-comment-{comment_id}"))
+                            .relative()
+                            .child(crate::testing::probe(format!(
+                                "staged-review-comment-{comment_id}"
+                            )))
+                            .w_full()
+                            .p(px(12.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .rounded(px(14.))
+                            .bg(row_colors.composer)
+                            .border_1()
+                            .border_color(row_colors.line_strong)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(icon("file", 15., row_colors.accent))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(12.5))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(lines),
+                                    )
+                                    .child(
+                                        ui::tap(
+                                            ("remove-review-comment", comment_id as usize),
+                                            "x",
+                                            &row_colors,
+                                        )
+                                        .debug_selector(move || {
+                                            format!("remove-review-comment-{comment_id}")
+                                        })
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.remove_review_comment(comment_id, cx)
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .when(!text.is_empty(), |card| {
+                                card.child(
+                                    div()
+                                        .text_size(px(13.5))
+                                        .line_height(px(19.))
+                                        .text_color(row_colors.text)
+                                        .child(text),
+                                )
+                            })
+                            .when(!attachment_labels.is_empty(), |card| {
+                                card.child(div().flex().flex_wrap().gap(px(6.)).children(
+                                    attachment_labels.into_iter().enumerate().map(
+                                        |(attachment_index, label)| {
+                                            ui::chip(
+                                                (
+                                                    "staged-review-attachment",
+                                                    comment_id as usize * 100 + attachment_index,
+                                                ),
+                                                Some("clip"),
+                                                label,
+                                                &row_colors,
+                                            )
+                                            .h(px(28.))
+                                            .text_size(px(12.))
+                                        },
+                                    ),
+                                ))
+                            });
+                        div()
+                            .w_full()
+                            .px(px(12.))
+                            .py(px(8.))
+                            .child(card)
+                            .into_any_element()
+                    }
+                    ReviewRow::Composer => div()
+                        .debug_selector(|| "inline-review-composer".into())
+                        .py(px(12.))
+                        .child(this.review.clone())
+                        .into_any_element(),
                 };
-                if wrap {
+                if wrap || flow_card {
                     row
                 } else {
                     div()
@@ -320,6 +485,47 @@ impl PhoneApp {
                 .child(diff_list)
                 .into_any_element()
         };
+        let staged_count = self.review_comments.len();
+        let send_staged = (staged_count > 0 && comment_after.is_none()).then(|| {
+            div()
+                .debug_selector(|| "review-batch-footer".into())
+                .relative()
+                .child(crate::testing::probe("review-batch-footer"))
+                .flex_none()
+                .px(px(16.))
+                .py(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .bg(colors.composer)
+                .border_t_1()
+                .border_color(colors.line)
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(12.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(colors.secondary)
+                        .child(format!(
+                            "{staged_count} comment{} ready",
+                            if staged_count == 1 { "" } else { "s" }
+                        )),
+                )
+                .child(
+                    ui::button(
+                        "send-review-comments",
+                        Button::Primary,
+                        None,
+                        format!("Send follow-up ({staged_count})"),
+                        true,
+                        &colors,
+                    )
+                    .debug_selector(|| "send-review-comments".into())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.submit_review_comments(id, window, cx)
+                    })),
+                )
+        });
         div()
             .flex_1()
             .min_h_0()
@@ -330,13 +536,7 @@ impl PhoneApp {
             .when(count <= 1, |screen| screen.child(div().h(px(12.))))
             .children(summary)
             .child(diff_body)
-            .child(
-                div()
-                    .flex_none()
-                    .pt(px(8.))
-                    .pb(px(12.))
-                    .child(self.review.clone()),
-            )
+            .children(send_staged)
             .into_any_element()
     }
 
@@ -379,6 +579,8 @@ impl PhoneApp {
             call: Some((turn_index, kind, tool_index)),
             file: 0,
             rows: line_count,
+            comment_after: None,
+            comments_key: 0,
             wrap,
             added: line_count_u32,
             removed: 0,
@@ -520,6 +722,24 @@ impl PhoneApp {
         )
     }
 
+    fn toggle_line_for_follow_up(
+        &mut self,
+        id: SessionId,
+        hunk: usize,
+        line: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let opening = self.review_lines.is_empty();
+        self.toggle_line(id, hunk, line, cx);
+        if opening && self.review_lines.contains(&(hunk, line)) {
+            // The first anchored line opens the review composer directly;
+            // further taps can extend the same context.
+            self.review
+                .update(cx, |review, cx| review.focus(window, cx));
+        }
+    }
+
     pub(crate) fn toggle_line(
         &mut self,
         id: SessionId,
@@ -629,6 +849,28 @@ mod tests {
         lines.insert((0, 2));
         assert_eq!(lines_label(&file, &lines).as_deref(), Some("lines 211–212"));
         assert_eq!(lines_label(&file, &BTreeSet::new()), None);
+    }
+
+    #[test]
+    fn staged_sections_stay_at_their_anchors_and_keep_their_order() {
+        let file = FileChange {
+            path: "a.ts".into(),
+            added: 1,
+            removed: 0,
+            hunks: vec![Hunk {
+                header: "@@ 1".into(),
+                lines: vec![
+                    DiffLine::new(LineKind::Context, 1, "one"),
+                    DiffLine::new(LineKind::Added, 2, "two"),
+                ],
+            }],
+        };
+        let rows = review_rows(&file, &[(7, (0, 0)), (9, (0, 0))], Some((0, 1)));
+        assert!(matches!(rows[2], ReviewRow::Line(0, 0)));
+        assert!(matches!(rows[3], ReviewRow::Comment(7)));
+        assert!(matches!(rows[4], ReviewRow::Comment(9)));
+        assert!(matches!(rows[5], ReviewRow::Line(0, 1)));
+        assert!(matches!(rows[6], ReviewRow::Composer));
     }
 
     #[test]

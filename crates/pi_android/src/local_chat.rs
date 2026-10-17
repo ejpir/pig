@@ -190,11 +190,12 @@ fn observe_submission(meta: &mut Meta, record: &Value) -> bool {
     changed
 }
 
-fn prompt_record(prompt: &Prompt) -> Value {
-    // "steer" means start if idle, queue if busy. Always freezing this policy
-    // also covers the admission-ack -> run_start presentation gap.
+fn prompt_record(prompt: &Prompt, follow_up: bool) -> Value {
+    // Freeze the user's choice before admission so a reconnect or a run
+    // settling cannot turn a review follow-up into steering (or vice versa).
     json!({"type":"prompt","id":format!("admit-{}",prompt.request_id),"requestId":prompt.request_id,
-        "message":prompt.message,"images":prompt.images,"streamingBehavior":"steer"})
+        "message":prompt.message,"images":prompt.images,
+        "streamingBehavior":if follow_up { "followUp" } else { "steer" }})
 }
 
 fn settle_admission(
@@ -682,6 +683,7 @@ impl Local {
         session: &mut Session,
         prompt: Prompt,
         attachments: Vec<String>,
+        follow_up: bool,
     ) -> Result<(), String> {
         if prompt.message.trim().is_empty() && prompt.images.is_empty() {
             return Err("Write a message first".into());
@@ -717,7 +719,7 @@ impl Local {
         {
             return Err("Choose an image-capable model first".into());
         }
-        let record = prompt_record(&prompt);
+        let record = prompt_record(&prompt, follow_up);
         c.engine
             .validate(&record)
             .map_err(|_| "Prompt exceeds the native bridge limit; your draft was kept")?;
@@ -1370,8 +1372,12 @@ mod tests {
             message: "steer".into(),
             images: Vec::new(),
         };
-        let record = prompt_record(&prompt);
+        let record = prompt_record(&prompt, false);
         assert_eq!(record["streamingBehavior"], "steer");
+        assert_eq!(
+            prompt_record(&prompt, true)["streamingBehavior"],
+            "followUp"
+        );
         let mut meta = metadata();
         meta.pending = Some(record.clone());
         meta.pending_starts_turn = false;
@@ -1481,11 +1487,14 @@ mod tests {
     #[test]
     fn only_matching_receipts_settle_admission_and_rejection_keeps_the_payload() {
         let mut meta = metadata();
-        let original = prompt_record(&Prompt {
-            request_id: "current".into(),
-            message: "steer".into(),
-            images: Vec::new(),
-        });
+        let original = prompt_record(
+            &Prompt {
+                request_id: "current".into(),
+                message: "steer".into(),
+                images: Vec::new(),
+            },
+            false,
+        );
         meta.pending = Some(original.clone());
         let mut admitting = true;
         let mut error = None;

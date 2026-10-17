@@ -1,0 +1,227 @@
+{
+  "title": "Calculator",
+  "initial_state": {
+    "entry": "0",
+    "display": "0",
+    "value": 0.0,
+    "lhs": 0.0,
+    "op": "",
+    "mode": "entry",
+    "caption": "",
+    "history1": "No calculations yet",
+    "history2": "",
+    "history3": ""
+  },
+  "view": {
+    "type": "row",
+    "gap": 24,
+    "children": [
+      {
+        "type": "column",
+        "gap": 8,
+        "width": 330,
+        "children": [
+          {
+            "type": "text",
+            "style": "expression",
+            "bind": "caption"
+          },
+          {
+            "type": "text",
+            "style": "display",
+            "bind": "display"
+          },
+          {
+            "type": "column",
+            "gap": 6,
+            "width": null,
+            "children": [
+              {
+                "type": "row",
+                "gap": 6,
+                "children": [
+                  {
+                    "type": "button",
+                    "label": "AC",
+                    "action": "AC",
+                    "tone": "utility"
+                  },
+                  {
+                    "type": "button",
+                    "label": "±",
+                    "action": "sign",
+                    "tone": "utility"
+                  },
+                  {
+                    "type": "button",
+                    "label": "%",
+                    "action": "%",
+                    "tone": "utility"
+                  },
+                  {
+                    "type": "button",
+                    "label": "÷",
+                    "action": "/",
+                    "tone": "operator"
+                  }
+                ]
+              },
+              {
+                "type": "row",
+                "gap": 6,
+                "children": [
+                  {
+                    "type": "button",
+                    "label": "7",
+                    "action": "7",
+                    "tone": "normal"
+                  },
+                  {
+                    "type": "button",
+                    "label": "8",
+                    "action": "8",
+                    "tone": "normal"
+                  },
+                  {
+                    "type": "button",
+                    "label": "9",
+                    "action": "9",
+                    "tone": "normal"
+                  },
+                  {
+                    "type": "button",
+                    "label": "×",
+                    "action": "*",
+                    "tone": "operator"
+                  }
+                ]
+              },
+              {
+                "type": "row",
+                "gap": 6,
+                "children": [
+                  {
+                    "type": "button",
+                    "label": "4",
+                    "action": "4",
+                    "tone": "normal"
+                  },
+                  {
+                    "type": "button",
+                    "label": "5",
+                    "action": "5",
+                    "tone": "normal"
+                  },
+                  {
+                    "type": "button",
+                    "label": "6",
+                    "action": "6",
+                    "tone": "normal"
+                  },
+                  {
+                    "type": "button",
+                    "label": "−",
+                    "action": "-",
+                    "tone": "operator"
+                  }
+                ]
+              },
+              {
+                "type": "row",
+                "gap": 6,
+                "children": [
+                  {
+                    "type": "button",
+                    "label": "1",
+                    "action": "1",
+                    "tone": "normal"
+                  },
+                  {
+                    "type": "button",
+                    "label": "2",
+                    "action": "2",
+                    "tone": "normal"
+                  },
+                  {
+                    "type": "button",
+                    "label": "3",
+                    "action": "3",
+                    "tone": "normal"
+                  },
+                  {
+                    "type": "button",
+                    "label": "+",
+                    "action": "+",
+                    "tone": "operator"
+                  }
+                ]
+              },
+              {
+                "type": "row",
+                "gap": 6,
+                "children": [
+                  {
+                    "type": "button",
+                    "label": "⌫",
+                    "action": "backspace",
+                    "tone": "utility"
+                  },
+                  {
+                    "type": "button",
+                    "label": "0",
+                    "action": "0",
+                    "tone": "normal"
+                  },
+                  {
+                    "type": "button",
+                    "label": ".",
+                    "action": ".",
+                    "tone": "normal"
+                  },
+                  {
+                    "type": "button",
+                    "label": "=",
+                    "action": "=",
+                    "tone": "accent"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "column",
+        "gap": 10,
+        "width": null,
+        "children": [
+          {
+            "type": "text",
+            "style": "heading",
+            "text": "Recent calculations"
+          },
+          {
+            "type": "text",
+            "style": "muted",
+            "text": "This session"
+          },
+          {
+            "type": "text",
+            "style": "history",
+            "bind": "history1"
+          },
+          {
+            "type": "text",
+            "style": "history",
+            "bind": "history2"
+          },
+          {
+            "type": "text",
+            "style": "history",
+            "bind": "history3"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -13,7 +13,7 @@ const RUN = (steps, { width, total, small = false, live = false, track = false }
   steps.forEach(([kind, secs, end], n) => {
     const w = Math.max(small ? 3 : 4, Math.round(secs * px) - gap);
     bars += `<b class="${kind}${live && n === steps.length - 1 ? " live" : ""}" style="left:${x}px;width:${w}px"></b>`;
-    if (end) marks += `<span class="mk ${end}" style="left:${Math.round(x + w - size / 2)}px"><i data-i="${glyph[end]}"></i></span>`;
+    if (end) marks += `<span class="mk ${end}" style="left:${Math.round(x + w - size)}px"><i data-i="${glyph[end]}"></i></span>`;
     x += w + gap;
   });
   const rest = track ? `<b class="rest" style="left:0;width:${width}px"></b>` : "";
@@ -132,12 +132,7 @@ const V5 = {
   // The same Home once everything has been answered and reviewed.
   caught: `${HOME_BAR}
     <div class="scroll col" style="padding-top:4px">
-      <div class="row g12" style="padding:16px 0 12px;align-items:flex-start">
-        <span class="tile" style="--hue:var(--accent);width:40px;height:40px;border-radius:12px"><i data-i="inbox"></i></span>
-        <div class="grow"><p class="headline">Nothing needs you.</p>
-          <p class="meta" style="margin-top:4px;font-size:13px;line-height:18px">You'll hear when a run asks something, finishes or stops.</p></div>
-      </div>
-      <div class="label" style="margin:16px 0 0">Working<span class="n">2</span></div>
+      <div class="label" style="margin:4px 0 0">Working<span class="n">2</span></div>
       <div class="col">${WORKING("Streaming retry", "3:10", RETRY_ANSWERED, "pi · changing · you answered “Only for OpenCode”")}${WORKING("Kimi K3 default", "4:05", KIMI_LATE, "pi · writing its hand-off · checks passed")}
       </div>
       <div class="label" style="margin:16px 0 0">Today</div>
@@ -208,8 +203,8 @@ const V5 = {
     </div>
     <div class="dock">
       <div class="strip">
-        <span class="on-panel">${RUN(QWEN_NOW, { width: 92, total: 171, small: true, live: true })}</span>
-        <span class="stage">Checking</span><span class="meta grow">2:51</span>
+        <span class="on-panel">${RUN(QWEN_NOW, { width: 56, total: 171, small: true, live: true })}</span>
+        <span class="stage">Working</span><span class="meta grow">2:51</span>
         <span class="open"><i data-i="chev-u"></i></span>
         <span class="btn sm quiet" style="color:var(--fail);padding:0 12px"><i data-i="stop" class="sm"></i>Stop</span>
       </div>${SLIM("Queue a follow-up…")}

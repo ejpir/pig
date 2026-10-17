@@ -15,7 +15,7 @@ mod review;
 mod schedules;
 mod sessions;
 mod settings;
-mod sheets;
+pub(crate) mod sheets;
 mod start;
 mod stream;
 mod subagents;

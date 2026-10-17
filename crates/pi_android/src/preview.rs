@@ -177,8 +177,11 @@ impl PhoneApp {
         self.expanded_turns.clear();
         self.expanded_streams.clear();
         self.expanded_calls.clear();
+        self.review_session = None;
         self.review_call = None;
         self.review_lines.clear();
+        self.review_comments.clear();
+        self.review_list_shape = None;
         self.reset_swarm_views();
         self.visual_apps.borrow_mut().clear_running();
         self.searching = false;
@@ -192,6 +195,7 @@ impl PhoneApp {
         });
         self.apply_return_sends(cx);
         self.start.update(cx, |composer, cx| composer.clear(cx));
+        self.review.update(cx, |composer, cx| composer.clear(cx));
         self.search.update(cx, |area, cx| area.set_text("", cx));
         self.apply_theme(window, cx);
         window.dismiss_virtual_keyboard();
@@ -1105,6 +1109,8 @@ impl PhoneApp {
             "text_menu_open": composer.is_some_and(|c| c.read(cx).area.read(cx).menu_open()),
             "draft_attachments": composer.map(|c| c.read(cx).attachments().len()),
             "draft_images": composer.map(|c| c.read(cx).attachments().iter().filter(|a| matches!(a, Attachment::Image { .. })).count()),
+            "review_comments": self.review_comments.len(),
+            "review_selected_lines": self.review_lines.len(),
             "model_search_chars": self.model_search.read(cx).text().chars().count(),
             "model": model, "thinking": thinking,
             "state": session.map(|s| format!("{:?}", s.state)),
@@ -2922,11 +2928,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn follow_up_and_review_have_the_shared_model_picker(cx: &mut TestAppContext) {
+    fn follow_up_has_the_shared_model_picker_and_review_is_line_anchored(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
-        for name in ["done", "review", "follow-up-input"] {
+        for name in ["done", "follow-up-input"] {
             cx.update(|window, cx| app.update(cx, |app, cx| app.preview(name, window, cx)));
             cx.run_until_parked();
             // An idle session composer is one line: typing in it shows the model.
@@ -2954,6 +2960,72 @@ mod tests {
                 );
             });
         }
+
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("review", window, cx)));
+        cx.run_until_parked();
+        let anchor = cx.debug_bounds("review-line-0-2").unwrap();
+        let card = cx.debug_bounds("inline-review-card").unwrap();
+        assert!(card.top() >= anchor.bottom());
+        assert!(cx.debug_bounds("inline-review-draft").is_some());
+        assert!(cx.debug_bounds("inline-review-attach").is_some());
+        assert!(cx.debug_bounds("inline-review-cancel").is_some());
+        assert!(cx.debug_bounds("inline-review-submit").is_some());
+        assert!(cx.debug_bounds("composer-model").is_none());
+
+        let add = cx.debug_bounds("inline-review-submit").unwrap();
+        cx.simulate_click(add.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| assert_eq!(app.review_comments.len(), 1));
+        assert!(cx.debug_bounds("staged-review-comment-1").is_some());
+        assert!(cx.debug_bounds("review-batch-footer").is_some());
+        assert!(cx.debug_bounds("send-review-comments").is_some());
+        assert!(cx.debug_bounds("inline-review-card").is_none());
+
+        // A second selection opens a fresh editor without losing the first card.
+        let second_anchor = cx.debug_bounds("review-line-0-2").unwrap();
+        cx.simulate_click(second_anchor.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.review.update(cx, |review, cx| {
+                    review.set_text("Explain the fallback too", cx)
+                });
+            })
+        });
+        cx.run_until_parked();
+        let add = cx.debug_bounds("inline-review-submit").unwrap();
+        cx.simulate_click(add.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| assert_eq!(app.review_comments.len(), 2));
+        assert!(cx.debug_bounds("staged-review-comment-1").is_some());
+        assert!(cx.debug_bounds("staged-review-comment-2").is_some());
+        let turns_before = app.read_with(cx, |app, _| {
+            app.store
+                .as_ref()
+                .unwrap()
+                .session(QWEN)
+                .unwrap()
+                .turns
+                .len()
+        });
+        let send = cx.debug_bounds("send-review-comments").unwrap();
+        cx.simulate_click(send.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.route(), Route::Thread(QWEN));
+            assert!(app.review_comments.is_empty());
+            assert_eq!(
+                app.store
+                    .as_ref()
+                    .unwrap()
+                    .session(QWEN)
+                    .unwrap()
+                    .turns
+                    .len(),
+                turns_before + 1,
+                "the whole review is one follow-up turn"
+            );
+        });
     }
 
     #[gpui::test]

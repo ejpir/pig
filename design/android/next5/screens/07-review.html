@@ -6,9 +6,6 @@
   .fold { height: 32px; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: var(--t1); color: var(--accent);
     border-top: 1px dashed var(--line-strong); border-bottom: 1px dashed var(--line-strong); }
   .code .n { width: 48px; }
-  .files { display: flex; gap: 4px; padding: 12px var(--g); }
-  .files span { flex: 1; height: 3px; border-radius: 2px; background: var(--raised); }
-  .files span.on { background: var(--accent); }
 </style></head>
 <body>
 <div class="phone">
@@ -16,11 +13,8 @@
     <div class="bar">
       <span class="tap"><i data-i="back"></i></span>
       <div class="title"><b>openai-completions.ts</b><span>packages/ai/src/providers</span></div>
-      <span class="tap" style="color:var(--faint)"><i data-i="chev-l"></i></span>
-      <span class="tap"><i data-i="chev-r"></i></span>
+      <span class="tap"><i data-i="wrap"></i></span>
     </div>
-    <div class="files"><span class="on"></span><span></span></div>
-    <div class="row meta" style="padding:0 var(--g) 12px"><span class="grow">1 of 2 files · tap a line to ask about it</span><span class="add">+3</span><span class="del" style="width:28px;text-align:right">−1</span></div>
     <div class="col" style="flex:1;min-height:0;overflow:hidden">
       <div class="hunk">@@ 204 readThinking</div>
       <div class="code" style="padding:4px 0">
@@ -36,10 +30,6 @@
         <div class="l"><span class="n">212</span><span>    signatures.push(sig ?? <span class="s">""</span>);</span></div>
       </div>
       <div class="fold"><i data-i="chev-d" class="sm"></i>Show 28 unchanged lines</div>
-      <div class="note" style="margin-top:12px">
-        <div class="h"><i data-i="flag"></i>Worth a look · 1 of 2</div>
-        <p><code>isAnthropic()</code> trusts <code>model.provider</code>, so an Anthropic model behind a proxy would skip the check.</p>
-      </div>
       <div class="hunk">@@ 241 isAnthropic</div>
       <div class="code" style="padding:4px 0">
         <div class="l"><span class="n">241</span><span><span class="k">function</span> isAnthropic(model) {</span></div>
@@ -48,14 +38,8 @@
         <div class="l"><span class="n">244</span><span>}</span></div>
       </div>
     </div>
-    <div class="dock g8">
-      <div class="row g8">
-        <span class="btn" style="color:var(--fail)"><i data-i="undo" class="sm"></i>Undo this turn</span>
-        <span class="btn primary grow"><i data-i="check" class="sm"></i>Looks good</span>
-      </div>
-      <div class="composer slim">
-        <span class="tap"><i data-i="clip"></i></span><span class="draft ph">Ask for changes…</span><span class="send off"><i data-i="send"></i></span>
-      </div>
+    <div class="dock">
+      <span class="btn wide"><i data-i="clip" class="sm"></i>Ask about this</span>
     </div>
   </main>
 </div>

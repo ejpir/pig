@@ -108,6 +108,9 @@ struct PendingPrompt {
     /// The sole owned payload while delivery is pending. Once `admission` is
     /// present, neither text nor images are rebuilt or replaced.
     prompt: Prompt,
+    /// An explicit mode chosen before transport admission. Unlike `admission`,
+    /// this does not bypass the capability checks for a pending image.
+    requested_behavior: Option<&'static str>,
     admission: Option<Admission>,
     /// User turns visible when an idle/new-turn admission first left the phone.
     /// This distinguishes its later snapshot from an older identical prompt.
@@ -156,8 +159,19 @@ impl PendingSubagentInput {
 
 impl PendingPrompt {
     fn new(prompt: Prompt) -> Self {
+        Self::with_behavior(prompt, None)
+    }
+
+    fn follow_up(prompt: Prompt) -> Self {
+        Self::with_behavior(prompt, Some("followUp"))
+    }
+
+    fn with_behavior(prompt: Prompt, streaming_behavior: Option<&'static str>) -> Self {
         Self {
             prompt,
+            // An explicit follow-up must stay a follow-up even if the run
+            // settles before the transport accepts it.
+            requested_behavior: streaming_behavior,
             admission: None,
             user_turns_before: None,
             cancelled: false,
@@ -1108,7 +1122,9 @@ impl Live {
                 }
             }
             let admission = watch.outbox[index].admission.unwrap_or_else(|| Admission {
-                streaming_behavior: watch.effective_busy().then_some("steer"),
+                streaming_behavior: watch.outbox[index]
+                    .requested_behavior
+                    .or_else(|| watch.effective_busy().then_some("steer")),
             });
             let request_id = watch.outbox[index].prompt.request_id.clone();
             let record = watch.outbox[index].record(admission);
@@ -1190,6 +1206,10 @@ impl Live {
     }
 
     fn enqueue(watch: &mut Watch, prompt: Prompt) -> Result<(), String> {
+        Self::enqueue_with_mode(watch, prompt, false)
+    }
+
+    fn enqueue_with_mode(watch: &mut Watch, prompt: Prompt, follow_up: bool) -> Result<(), String> {
         if !prompt.images.is_empty()
             && let ImageReadiness::Rejected(error) = watch.image_readiness()
         {
@@ -1207,7 +1227,11 @@ impl Live {
             watch.image_backend_requested = false;
             watch.image_catalog_requested = false;
         }
-        watch.outbox.push(prompt.into());
+        watch.outbox.push(if follow_up {
+            PendingPrompt::follow_up(prompt)
+        } else {
+            prompt.into()
+        });
         Self::flush(watch);
         Ok(())
     }
@@ -1269,6 +1293,20 @@ impl Live {
 
     /// A prompt for a session: it runs now, or steers the current run.
     pub fn prompt(&mut self, id: SessionId, prompt: Prompt) -> Result<(), String> {
+        self.prompt_with_mode(id, prompt, false)
+    }
+
+    /// A review response remains a follow-up instead of changing an active run.
+    pub fn follow_up(&mut self, id: SessionId, prompt: Prompt) -> Result<(), String> {
+        self.prompt_with_mode(id, prompt, true)
+    }
+
+    fn prompt_with_mode(
+        &mut self,
+        id: SessionId,
+        prompt: Prompt,
+        follow_up: bool,
+    ) -> Result<(), String> {
         self.helper
             .require_attach("sending a prompt")
             .map_err(|error| error.to_string())?;
@@ -1285,7 +1323,11 @@ impl Live {
             .watches
             .get_mut(&id)
             .ok_or("This session is no longer available.")?;
-        Self::enqueue(watch, prompt)
+        if follow_up {
+            Self::enqueue_with_mode(watch, prompt, true)
+        } else {
+            Self::enqueue(watch, prompt)
+        }
     }
 
     pub fn model_settings(&self, id: SessionId) -> Option<(String, String)> {
@@ -3384,6 +3426,23 @@ mod tests {
             now,
         );
         assert!(watch.cached_snapshot && !watch.current && !watch.ready);
+    }
+
+    #[test]
+    fn review_follow_up_is_frozen_before_transport_admission() {
+        let (mut watch, commands) = watch();
+        watch.current = true;
+        watch.ready = true;
+        watch.pi.run = pi_core::session::RunState::Running;
+        watch.pi.state.model = Some(model("host", "chosen", "Chosen"));
+
+        Live::enqueue_with_mode(&mut watch, "review this next".into(), true).unwrap();
+        let sent = commands.try_recv().unwrap();
+        assert_eq!(sent["streamingBehavior"], "followUp");
+        assert_eq!(
+            watch.outbox[0].admission.unwrap().streaming_behavior,
+            Some("followUp")
+        );
     }
 
     #[test]

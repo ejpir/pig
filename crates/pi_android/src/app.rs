@@ -88,10 +88,26 @@ pub(crate) struct ReviewListShape {
     pub(crate) call: Option<(usize, StageKind, usize)>,
     pub(crate) file: usize,
     pub(crate) rows: usize,
+    /// The selected diff row after which the inline follow-up editor appears.
+    pub(crate) comment_after: Option<(usize, usize)>,
+    /// Changes whenever staged cards on this file change.
+    pub(crate) comments_key: u64,
     pub(crate) wrap: bool,
     pub(crate) added: u32,
     pub(crate) removed: u32,
     pub(crate) content_key: u64,
+}
+
+/// One locally staged inline section. Sections remain separate in the review UI
+/// and are encoded together only when the reviewer sends the final follow-up.
+#[derive(Clone, Debug)]
+pub(crate) struct ReviewComment {
+    pub(crate) id: u64,
+    pub(crate) path: String,
+    pub(crate) anchor: (usize, usize),
+    pub(crate) lines: String,
+    pub(crate) text: String,
+    pub(crate) attachments: Vec<Attachment>,
 }
 
 /// Getting back to the saved computer when the app opens, in place of setup.
@@ -109,13 +125,15 @@ pub(crate) struct Resume {
 pub enum Target {
     Start,
     Thread(SessionId),
-    Review,
+    Review(SessionId),
 }
 
 fn composer_target_active(target: Target, route: Route) -> bool {
     match (target, route) {
-        (Target::Start, Route::Start) | (Target::Review, Route::Review(_)) => true,
-        (Target::Thread(id), Route::Thread(shown)) => id == shown,
+        (Target::Start, Route::Start) => true,
+        (Target::Review(id), Route::Review(shown)) | (Target::Thread(id), Route::Thread(shown)) => {
+            id == shown
+        }
         _ => false,
     }
 }
@@ -328,6 +346,8 @@ pub struct PhoneApp {
     pub(crate) image_pan: gpui::Point<Pixels>,
     pub(crate) image_box: Rc<Cell<gpui::Bounds<Pixels>>>,
     pub(crate) sheet_scroll: ScrollHandle,
+    /// Retained rows for the one activity bottom sheet that can be open.
+    pub(crate) activity_view: Option<crate::screens::sheets::ActivitySheetState>,
     pub(crate) expanded_turns: HashMap<(SessionId, usize), bool>,
     /// Finished prompts shown in full instead of on one line.
     pub(crate) expanded_prompts: HashSet<(SessionId, usize)>,
@@ -451,12 +471,17 @@ pub struct PhoneApp {
     /// Sample sessions have their own model selection, just like live sessions.
     sample_models: HashMap<SessionId, (String, String)>,
     pub(crate) review: Entity<Composer>,
+    /// Session that owns the retained review draft and staged sections.
+    pub(crate) review_session: Option<SessionId>,
     pub(crate) review_file: usize,
     /// One edit/write call shown as a focused full-screen diff instead of the
     /// session-wide file review: turn, stage and tool index.
     pub(crate) review_call: Option<(usize, StageKind, usize)>,
     /// Tapped review lines, as (hunk, line) of the shown file.
     pub(crate) review_lines: BTreeSet<(usize, usize)>,
+    /// Inline sections accumulated for one final follow-up.
+    pub(crate) review_comments: Vec<ReviewComment>,
+    pub(crate) review_next_comment_id: u64,
     /// Retained vertical virtualization for the current session/call diff.
     pub(crate) review_list: gpui::ListState,
     /// Identity and dimensions of the diff represented by `review_list`.
@@ -561,7 +586,7 @@ impl PhoneApp {
             composer.set_new_task();
             composer
         });
-        let review = cx.new(|cx| Composer::new("Ask for a revision…", cx));
+        let review = cx.new(|cx| Composer::new("Add a follow-up…", cx));
         let selectable = cx.new(|cx| TextArea::read_only(12, cx));
         let subscriptions = vec![
             cx.subscribe(&selectable, |this, _, event: &TextAreaEvent, cx| {
@@ -597,7 +622,9 @@ impl PhoneApp {
                 this.composer_event(Target::Start, event, window, cx)
             }),
             cx.subscribe_in(&review, window, |this, _, event, window, cx| {
-                this.composer_event(Target::Review, event, window, cx)
+                if let Route::Review(id) = this.route() {
+                    this.composer_event(Target::Review(id), event, window, cx)
+                }
             }),
             cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)),
             cx.observe_window_visibility(window, |this, visibility, _, cx| {
@@ -667,6 +694,7 @@ impl PhoneApp {
             image_pan: gpui::Point::default(),
             image_box: Rc::default(),
             sheet_scroll: ScrollHandle::new(),
+            activity_view: None,
             expanded_turns: HashMap::new(),
             expanded_prompts: HashSet::new(),
             expanded_compactions: HashSet::new(),
@@ -754,9 +782,12 @@ impl PhoneApp {
             pending_compacts: HashMap::new(),
             sample_models: HashMap::new(),
             review,
+            review_session: None,
             review_file: 0,
             review_call: None,
             review_lines: BTreeSet::new(),
+            review_comments: Vec::new(),
+            review_next_comment_id: 1,
             review_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(128.))
                 .with_uniform_item_height(px(24.)),
             review_list_shape: None,
@@ -827,6 +858,7 @@ impl PhoneApp {
         self.swarm_peer_bindings.clear();
         self.swarm_input_targets.clear();
         self.command_views.clear();
+        self.activity_view = None;
         self.scrolls
             .retain(|route, _| !matches!(route, Route::Swarm(_, _) | Route::SwarmPeer(_, _, _)));
     }
@@ -1107,6 +1139,9 @@ impl PhoneApp {
         self.sheet_height.set(px(0.));
         self.sheet_motion.settle(0.);
         self.sheet_scroll = ScrollHandle::new();
+        if !matches!(sheet, Sheet::Activity(..)) {
+            self.activity_view = None;
+        }
         if matches!(sheet, Sheet::Details(_)) {
             self.expanded.remove("details-rail");
             self.expanded.remove("details-context");
@@ -1148,6 +1183,9 @@ impl PhoneApp {
         self.sheet_motion.tick(now, reduced);
         self.start_motion.tick(now, reduced);
         if self.sheet.is_none() && !self.sheet_motion.animating() {
+            if matches!(self.closing_sheet, Some(Sheet::Activity(..))) {
+                self.activity_view = None;
+            }
             self.closing_sheet = None;
         }
         if let Some((_, motion)) = &mut self.swiping_session {
@@ -1205,13 +1243,23 @@ impl PhoneApp {
                         }
                         let delta = event.delta.pixel_delta(px(20.));
                         let (along, across) = (delta.y, delta.x);
-                        let project_list = this.sheet == Some(Sheet::Project)
+                        let shown_sheet = this.sheet.or(this.closing_sheet);
+                        let project_list = shown_sheet == Some(Sheet::Project)
                             && this.folder.read(cx).text().trim().is_empty();
+                        let activity_list = matches!(shown_sheet, Some(Sheet::Activity(..)))
+                            .then(|| this.activity_view.as_ref())
+                            .flatten();
                         let (scroll_max, scroll_bounds, scroll_offset) = if project_list {
                             (
                                 this.project_list.max_offset_for_scrollbar().y,
                                 this.project_list.viewport_bounds(),
                                 this.project_list.scroll_px_offset_for_scrollbar().y,
+                            )
+                        } else if let Some(activity) = activity_list {
+                            (
+                                activity.list.max_offset_for_scrollbar().y,
+                                activity.list.viewport_bounds(),
+                                activity.list.scroll_px_offset_for_scrollbar().y,
                             )
                         } else {
                             (
@@ -1343,6 +1391,11 @@ impl PhoneApp {
             if !matches!(self.route(), Route::Review(_)) {
                 self.review_call = None;
                 self.review_lines.clear();
+                if matches!(left, Some(Route::Review(_))) {
+                    self.review
+                        .update(cx, |review, cx| review.set_lines(None, cx));
+                    self.review_list_shape = None;
+                }
             }
             window.dismiss_virtual_keyboard();
             window.focus(&self.focus, cx);
@@ -1441,6 +1494,10 @@ impl PhoneApp {
             Route::Connect
         }];
         self.store = store;
+        self.review_session = None;
+        self.review_lines.clear();
+        self.review_comments.clear();
+        self.review_list_shape = None;
         self.threads.clear();
         self.pending_compacts.clear();
         self.sample_models.clear();
@@ -3018,6 +3075,13 @@ impl PhoneApp {
             self.thread_list_offsets.remove(&child);
         }
         self.pending_compacts.remove(&id);
+        if self.review_session == Some(id) {
+            self.review_session = None;
+            self.review_lines.clear();
+            self.review_comments.clear();
+            self.review_list_shape = None;
+            self.review.update(cx, |review, cx| review.clear(cx));
+        }
         self.sample_models.remove(&id);
         self.jj_histories.remove(&id);
         if self
@@ -3066,8 +3130,10 @@ impl PhoneApp {
             .retain(|route, _| !matches!(route, Route::SwarmPeer(session, _, _) if *session == id));
         self.preview_transport_diagnostics.remove(&id);
         self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Command(session, _) | Route::Review(session) | Route::History(session) | Route::Diagnostics(session) | Route::Subagents(session) | Route::Swarm(session, _) | Route::SwarmPeer(session, _, _) | Route::Subagent(session, _) if *session == id));
-        if self.sheet == Some(Sheet::Delete(id)) {
+        if matches!(self.sheet, Some(Sheet::Delete(session) | Sheet::Activity(session, _, _)) if session == id)
+        {
             self.close_sheet(cx);
+            self.activity_view = None;
         }
         activity::cancel_notification(alerts::question_id(id));
         activity::cancel_notification(alerts::finished_id(id));
@@ -3099,11 +3165,17 @@ impl PhoneApp {
         if !self.backend_supports("file_review") {
             return;
         }
+        if self.review_session != Some(id) {
+            self.review_comments.clear();
+            self.review.update(cx, |review, cx| review.clear(cx));
+        } else {
+            self.review
+                .update(cx, |review, cx| review.set_lines(None, cx));
+        }
+        self.review_session = Some(id);
         self.review_file = file;
         self.review_call = None;
         self.review_lines.clear();
-        self.review
-            .update(cx, |review, cx| review.set_lines(None, cx));
         self.scroll(Route::Review(id))
             .set_offset(gpui::point(px(0.), px(0.)));
         self.push(Route::Review(id), window, cx);
@@ -3143,10 +3215,11 @@ impl PhoneApp {
             self.open_sheet(Sheet::Call(id, turn, kind, tool), cx);
             return;
         }
+        self.review_session = None;
         self.review_call = Some((turn, kind, tool));
         self.review_lines.clear();
-        self.review
-            .update(cx, |review, cx| review.set_lines(None, cx));
+        self.review_comments.clear();
+        self.review.update(cx, |review, cx| review.clear(cx));
         self.scroll(Route::Review(id))
             .set_offset(gpui::point(px(0.), px(0.)));
         self.push(Route::Review(id), window, cx);
@@ -3483,7 +3556,9 @@ impl PhoneApp {
             ComposerEvent::Attach
             | ComposerEvent::ChooseModel
             | ComposerEvent::ChooseThinking
-            | ComposerEvent::PreviewImage(_) => self.notify_user(
+            | ComposerEvent::PreviewImage(_)
+            | ComposerEvent::StageReview { .. }
+            | ComposerEvent::CancelReview => self.notify_user(
                 "This composer sends text only to the selected subagent.",
                 cx,
             ),
@@ -3618,7 +3693,8 @@ impl PhoneApp {
     pub(crate) fn composer(&self, target: Target) -> Option<Entity<Composer>> {
         match target {
             Target::Start => Some(self.start.clone()),
-            Target::Review => Some(self.review.clone()),
+            Target::Review(id) => matches!(self.route(), Route::Review(shown) if shown == id)
+                .then(|| self.review.clone()),
             Target::Thread(id) => self.threads.get(&id).cloned(),
         }
     }
@@ -3660,14 +3736,96 @@ impl PhoneApp {
             ComposerEvent::ChooseModel => self.open_sheet(Sheet::Model, cx),
             ComposerEvent::ChooseThinking => self.open_sheet(Sheet::Thinking, cx),
             ComposerEvent::PreviewImage(index) => self.open_sheet(Sheet::Image(target, *index), cx),
+            ComposerEvent::StageReview { text, attachments } => {
+                let Route::Review(id) = self.route() else {
+                    return;
+                };
+                if target != Target::Review(id) {
+                    return;
+                }
+                let Some(anchor) = self.review_lines.iter().next_back().copied() else {
+                    self.notify_user("Select the lines for this comment again.", cx);
+                    return;
+                };
+                let Some(lines) = attachments.iter().find_map(|attachment| match attachment {
+                    Attachment::Lines(lines) => Some(lines.clone()),
+                    _ => None,
+                }) else {
+                    self.notify_user("Select the lines for this comment again.", cx);
+                    return;
+                };
+                let Some(path) = self
+                    .store
+                    .as_ref()
+                    .and_then(|store| store.session(id))
+                    .and_then(|session| session.files.get(self.review_file))
+                    .map(|file| file.path.clone())
+                else {
+                    self.notify_user("The reviewed file is no longer available.", cx);
+                    return;
+                };
+                let body_attachments = attachments
+                    .iter()
+                    .filter(|attachment| !matches!(attachment, Attachment::Lines(_)))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let staged_attachments: usize = self
+                    .review_comments
+                    .iter()
+                    .map(|comment| comment.attachments.len())
+                    .sum();
+                if staged_attachments + body_attachments.len() > 8 {
+                    self.notify_user("Attach up to eight files across all review comments.", cx);
+                    return;
+                }
+                let staged_images: usize = self
+                    .review_comments
+                    .iter()
+                    .flat_map(|comment| &comment.attachments)
+                    .filter(|attachment| matches!(attachment, Attachment::Image { .. }))
+                    .count();
+                let new_images = body_attachments
+                    .iter()
+                    .filter(|attachment| matches!(attachment, Attachment::Image { .. }))
+                    .count();
+                if staged_images + new_images > crate::attachments::MAX_IMAGES {
+                    self.notify_user("Attach up to four images across all review comments.", cx);
+                    return;
+                }
+                let comment_id = self.review_next_comment_id;
+                self.review_next_comment_id = self.review_next_comment_id.wrapping_add(1).max(1);
+                self.review_comments.push(ReviewComment {
+                    id: comment_id,
+                    path,
+                    anchor,
+                    lines,
+                    text: text.clone(),
+                    attachments: body_attachments,
+                });
+                self.review.update(cx, |composer, cx| composer.clear(cx));
+                self.review_lines.clear();
+                self.review_list_shape = None;
+                window.dismiss_virtual_keyboard();
+                cx.notify();
+            }
+            ComposerEvent::CancelReview => {
+                if matches!(target, Target::Review(_)) {
+                    self.review
+                        .update(cx, |composer, cx| composer.set_lines(None, cx));
+                    self.review_lines.clear();
+                    self.review_list_shape = None;
+                    window.dismiss_virtual_keyboard();
+                    cx.notify();
+                }
+            }
             ComposerEvent::Send { text, attachments } => {
                 let route = self.route();
                 let compact = match target {
                     Target::Thread(id) => self
                         .compact_for_session(id, text)
                         .map(|instructions| (id, instructions)),
-                    Target::Review => match route {
-                        Route::Review(id) => self
+                    Target::Review(target_id) => match route {
+                        Route::Review(id) if id == target_id => self
                             .compact_for_session(id, text)
                             .map(|instructions| (id, instructions)),
                         _ => None,
@@ -3751,24 +3909,100 @@ impl PhoneApp {
                             self.notify_user("Queued to steer this run", cx);
                         }
                     }
-                    Target::Review => {
+                    Target::Review(target_id) => {
                         let Route::Review(id) = route else {
                             return;
                         };
-                        if let Err(error) = store.send(id, prompt, labels) {
+                        if id != target_id {
+                            return;
+                        };
+                        let running = store.session(id).is_some_and(|s| s.state.is_running());
+                        if let Err(error) = store.follow_up(id, prompt, labels) {
                             self.notify_user(error, cx);
                             return;
                         }
                         self.review.update(cx, |composer, cx| composer.clear(cx));
                         self.review_lines.clear();
+                        self.review_comments.clear();
+                        self.review_session = None;
                         self.routes.pop();
                         self.entered(window, cx);
-                        self.notify_user("Sent to this session", cx);
+                        self.notify_user(
+                            if running {
+                                "Queued as a follow-up"
+                            } else {
+                                "Sent as a follow-up"
+                            },
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
             }
         }
+    }
+
+    pub(crate) fn remove_review_comment(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .review_comments
+            .iter()
+            .position(|comment| comment.id == id)
+        {
+            self.review_comments.remove(index);
+            self.review_list_shape = None;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn submit_review_comments(
+        &mut self,
+        id: SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.route() != Route::Review(id)
+            || self.review_session != Some(id)
+            || self.review_comments.is_empty()
+        {
+            return;
+        }
+        let visualize = self
+            .store
+            .as_ref()
+            .is_some_and(|store| store.supports("visualize"));
+        let (prompt, labels) = match batched_review_prompt(&self.review_comments, visualize) {
+            Ok(batch) => batch,
+            Err(error) => {
+                self.notify_user(error, cx);
+                return;
+            }
+        };
+        let Some(store) = &mut self.store else {
+            return;
+        };
+        let running = store
+            .session(id)
+            .is_some_and(|session| session.state.is_running());
+        if let Err(error) = store.follow_up(id, prompt, labels) {
+            self.notify_user(error, cx);
+            return;
+        }
+        self.review.update(cx, |composer, cx| composer.clear(cx));
+        self.review_lines.clear();
+        self.review_comments.clear();
+        self.review_session = None;
+        self.review_list_shape = None;
+        self.routes.pop();
+        self.entered(window, cx);
+        self.notify_user(
+            if running {
+                "Queued review comments as a follow-up"
+            } else {
+                "Sent review comments as a follow-up"
+            },
+            cx,
+        );
+        cx.notify();
     }
 
     pub(crate) fn recover_prompt(
@@ -4019,6 +4253,48 @@ fn prompt_with_capabilities(
     Ok(crate::prompt::Prompt::new(message, images))
 }
 
+fn batched_review_prompt(
+    comments: &[ReviewComment],
+    visualize: bool,
+) -> Result<(crate::prompt::Prompt, Vec<String>), String> {
+    if comments.is_empty() {
+        return Err("Add at least one review comment before sending.".into());
+    }
+    let mut sections = Vec::with_capacity(comments.len());
+    let attachment_count: usize = comments
+        .iter()
+        .map(|comment| comment.attachments.len())
+        .sum();
+    if attachment_count > 8 {
+        return Err("Attach up to eight files across all review comments.".into());
+    }
+    let mut images = Vec::new();
+    let mut labels = Vec::new();
+    for (index, comment) in comments.iter().enumerate() {
+        let encoded =
+            prompt_with_capabilities(&comment.text, &comment.attachments, None, visualize)?;
+        images.extend(encoded.images);
+        labels.push(format!("{} · {}", comment.path, comment.lines));
+        labels.extend(comment.attachments.iter().map(Attachment::label));
+        sections.push(format!(
+            "## Comment {}\nFile: {}\nLocation: {}\n\n{}",
+            index + 1,
+            comment.path,
+            comment.lines,
+            encoded.message
+        ));
+    }
+    if images.len() > crate::attachments::MAX_IMAGES {
+        return Err("Attach up to four images across all review comments.".into());
+    }
+    let message = format!(
+        "Please address these {} review comments:\n\n{}",
+        comments.len(),
+        sections.join("\n\n")
+    );
+    Ok((crate::prompt::Prompt::new(message, images), labels))
+}
+
 pub(crate) fn size_label(bytes: u64) -> String {
     match bytes {
         0..1_000 => format!("{bytes} B"),
@@ -4131,6 +4407,13 @@ impl Render for PhoneApp {
         };
         let sheet = self.sheet.or(self.closing_sheet).map(|sheet| {
             let content = self.sheet_content(sheet, window, cx);
+            let max_sheet_height = window.viewport_size().height - insets.top - px(24.);
+            let activity_height = matches!(sheet, Sheet::Activity(..)).then(|| {
+                self.activity_view
+                    .as_ref()
+                    .map_or(px(240.), |view| view.panel_height())
+                    .min(max_sheet_height)
+            });
             let progress = self.sheet_motion.position();
             let height = self.sheet_height.get();
             let sheet_drag = if height > px(0.) {
@@ -4165,11 +4448,11 @@ impl Render for PhoneApp {
                         .top(sheet_drag)
                         .when(self.sheet.is_none(), |sheet| sheet.min_h(height))
                         .occlude()
-                        .max_h(window.viewport_size().height - insets.top - px(24.))
-                        // The tree rolls out without the sheet growing under it.
-                        .when(sheet == Sheet::Project, |panel| {
-                            panel.h(window.viewport_size().height - insets.top - px(24.))
-                        })
+                        .max_h(max_sheet_height)
+                        // Virtual lists need a definite viewport; long sheets keep their
+                        // header fixed while only their retained rows scroll.
+                        .when(sheet == Sheet::Project, |panel| panel.h(max_sheet_height))
+                        .when_some(activity_height, |panel, height| panel.h(height))
                         .flex()
                         .flex_col()
                         .bg(colors.canvas)
@@ -4450,7 +4733,7 @@ mod tests {
         use crate::model::SessionId;
         assert!(composer_target_active(Target::Start, Route::Start));
         assert!(composer_target_active(
-            Target::Review,
+            Target::Review(SessionId(1)),
             Route::Review(SessionId(1))
         ));
         assert!(composer_target_active(
@@ -4462,8 +4745,12 @@ mod tests {
             Route::Thread(SessionId(2))
         ));
         assert!(!composer_target_active(
-            Target::Review,
+            Target::Review(SessionId(1)),
             Route::Thread(SessionId(1))
+        ));
+        assert!(!composer_target_active(
+            Target::Review(SessionId(1)),
+            Route::Review(SessionId(2))
         ));
         assert!(!composer_target_active(Target::Start, Route::Sessions));
     }
@@ -4471,6 +4758,53 @@ mod tests {
     use crate::{live::Update, model::SessionId};
     use gpui::{AppContext, TestAppContext};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn staged_review_sections_encode_as_one_structured_prompt() {
+        use super::{ReviewComment, batched_review_prompt};
+        use crate::composer::Attachment;
+        let comments = vec![
+            ReviewComment {
+                id: 1,
+                path: "src/a.rs".into(),
+                anchor: (0, 1),
+                lines: "lines 10–12".into(),
+                text: "Handle the empty case.".into(),
+                attachments: Vec::new(),
+            },
+            ReviewComment {
+                id: 2,
+                path: "src/b.rs".into(),
+                anchor: (0, 0),
+                lines: "line 44".into(),
+                text: "Keep this documented.".into(),
+                attachments: vec![Attachment::File {
+                    name: "note.txt".into(),
+                    size: "4 B".into(),
+                    contents: "note".into(),
+                }],
+            },
+        ];
+        let (prompt, labels) = batched_review_prompt(&comments, false).unwrap();
+        assert!(
+            prompt
+                .message
+                .starts_with("Please address these 2 review comments:")
+        );
+        assert!(
+            prompt
+                .message
+                .contains("File: src/a.rs\nLocation: lines 10–12")
+        );
+        assert!(prompt.message.contains("Handle the empty case."));
+        assert!(prompt.message.contains("File: src/b.rs\nLocation: line 44"));
+        assert!(prompt.message.contains("Attached text file: \"note.txt\""));
+        assert_eq!(
+            labels,
+            ["src/a.rs · lines 10–12", "src/b.rs · line 44", "note.txt"]
+        );
+        assert!(prompt.images.is_empty());
+    }
 
     #[test]
     fn visualize_expands_only_draft_text_before_attachment_and_review_encoding() {
