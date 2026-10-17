@@ -262,7 +262,10 @@ impl TextArea {
     }
 
     fn shows_caret(&self) -> bool {
-        !self.read_only && !self.content.is_empty() && self.selection.is_empty()
+        // Paint decides whether the field is focused. Keeping an empty editable
+        // field eligible gives a newly focused composer an insertion point at
+        // the start of its placeholder, before the first character is typed.
+        !self.read_only && self.selection.is_empty()
     }
 
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
@@ -1916,10 +1919,10 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_placeholder_has_no_caret_but_editable_text_still_does(cx: &mut TestAppContext) {
+    fn focused_editable_fields_have_a_caret_before_the_first_character(cx: &mut TestAppContext) {
         let area = cx.new(|cx| TextArea::multiline("Steer this run…", 4, cx));
         area.update(cx, |area, cx| {
-            assert!(!area.shows_caret());
+            assert!(area.shows_caret());
             area.set_text("draft", cx);
             assert!(area.shows_caret());
             area.selection = 0..5;

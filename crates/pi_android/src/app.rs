@@ -125,6 +125,8 @@ pub enum Sheet {
     RestoreHistory(SessionId, usize),
     EnableJj(SessionId),
     Image(Target, usize),
+    /// An image submitted with a prompt: session, turn, which image.
+    PromptImage(SessionId, usize, usize),
     /// An image a tool returned: session, turn, which.
     ToolImage(SessionId, usize, usize),
     /// What the app logged lately, from Settings.
@@ -434,6 +436,9 @@ pub struct PhoneApp {
     sample_models: HashMap<SessionId, (String, String)>,
     pub(crate) review: Entity<Composer>,
     pub(crate) review_file: usize,
+    /// One edit/write call shown as a focused full-screen diff instead of the
+    /// session-wide file review: turn, stage and tool index.
+    pub(crate) review_call: Option<(usize, StageKind, usize)>,
     /// Tapped review lines, as (hunk, line) of the shown file.
     pub(crate) review_lines: BTreeSet<(usize, usize)>,
     scrolls: HashMap<Route, ScrollHandle>,
@@ -722,6 +727,7 @@ impl PhoneApp {
             sample_models: HashMap::new(),
             review,
             review_file: 0,
+            review_call: None,
             review_lines: BTreeSet::new(),
             scrolls: HashMap::new(),
             thread_lists: HashMap::new(),
@@ -1057,6 +1063,10 @@ impl PhoneApp {
         self.sheet_height.set(px(0.));
         self.sheet_motion.settle(0.);
         self.sheet_scroll = ScrollHandle::new();
+        if matches!(sheet, Sheet::Details(_)) {
+            self.expanded.remove("details-rail");
+            self.expanded.remove("details-context");
+        }
         if sheet == Sheet::Model {
             self.model_search
                 .update(cx, |area, cx| area.set_text("", cx));
@@ -1284,6 +1294,7 @@ impl PhoneApp {
                 self.open_sheet(Sheet::Project, cx);
             }
             if !matches!(self.route(), Route::Review(_)) {
+                self.review_call = None;
                 self.review_lines.clear();
             }
             window.dismiss_virtual_keyboard();
@@ -3029,9 +3040,43 @@ impl PhoneApp {
             return;
         }
         self.review_file = file;
+        self.review_call = None;
         self.review_lines.clear();
         self.review
             .update(cx, |review, cx| review.set_lines(None, cx));
+        self.scroll(Route::Review(id))
+            .set_offset(gpui::point(px(0.), px(0.)));
+        self.push(Route::Review(id), window, cx);
+    }
+
+    /// Opens edit and write calls as a focused full-screen diff. Calls without
+    /// an applied/requested diff keep their complete command/output sheet.
+    pub(crate) fn open_call_detail(
+        &mut self,
+        id: SessionId,
+        turn: usize,
+        kind: StageKind,
+        tool: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let diff = self
+            .session(id)
+            .and_then(|session| session.turns.get(turn))
+            .and_then(|turn| turn.tool(kind, tool))
+            .is_some_and(|tool| {
+                matches!(tool.name.as_str(), "edit" | "write") && !tool.diff.is_empty()
+            });
+        if !diff {
+            self.open_sheet(Sheet::Call(id, turn, kind, tool), cx);
+            return;
+        }
+        self.review_call = Some((turn, kind, tool));
+        self.review_lines.clear();
+        self.review
+            .update(cx, |review, cx| review.set_lines(None, cx));
+        self.scroll(Route::Review(id))
+            .set_offset(gpui::point(px(0.), px(0.)));
         self.push(Route::Review(id), window, cx);
     }
 

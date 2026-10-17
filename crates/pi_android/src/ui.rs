@@ -55,6 +55,93 @@ pub fn composer_status_strip(joined: bool, colors: &Theme) -> Div {
         })
 }
 
+/// The shared one-row rail inside a working composer strip: run marker, status,
+/// then elapsed/details. Only the status may shrink; the marker and trailing
+/// metadata retain their measured widths.
+pub fn composer_working_rail(
+    selector_prefix: &'static str,
+    marker: AnyElement,
+    label: impl Into<SharedString>,
+    detail: Option<SharedString>,
+    hue: Hsla,
+    colors: &Theme,
+) -> Div {
+    let label = label.into();
+    let content_selector = format!("{selector_prefix}-working-content");
+    let status_selector = format!("{selector_prefix}-working-status");
+    let detail_selector = format!("{selector_prefix}-working-elapsed");
+    let label_selector = format!("{selector_prefix}-label-{label}");
+    div()
+        .flex_1()
+        .min_w_0()
+        .py(px(4.))
+        // Folded run segments paint a 2 dp halo outside their solid bounds.
+        .pl(px(2.))
+        .debug_selector(move || content_selector.clone())
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(marker)
+        .child(
+            div()
+                .debug_selector(move || status_selector.clone())
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_size(px(14.))
+                .line_height(px(20.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(hue)
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .debug_selector(move || label_selector.clone())
+                        .child(label),
+                ),
+        )
+        .when_some(detail, |rail, detail| {
+            rail.child(
+                div()
+                    .debug_selector(move || detail_selector.clone())
+                    .flex_none()
+                    .text_size(px(12.5))
+                    .line_height(px(16.))
+                    .text_color(colors.muted)
+                    .child(detail),
+            )
+        })
+}
+
+/// The shared Stop action at the end of parent and subagent working rails.
+pub fn composer_stop_button(
+    id: impl Into<ElementId>,
+    selector: &'static str,
+    colors: &Theme,
+) -> Stateful<Div> {
+    let id = id.into();
+    let probe = crate::testing::probe(format!("{id:?}"));
+    div()
+        .id(id)
+        .relative()
+        .child(probe)
+        .debug_selector(move || selector.into())
+        .h(px(40.))
+        .px(px(12.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(8.))
+        .rounded(px(20.))
+        .text_size(px(14.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(colors.coral)
+        .active(|style| style.bg(colors.selected))
+        .child(icon("stop", 16., colors.coral))
+        .aria_label("Stop")
+        .child("Stop")
+}
+
 /// A 48 dp round touch target around a 20 dp icon.
 pub fn tap(id: impl Into<ElementId>, glyph: &str, colors: &Theme) -> Stateful<Div> {
     let id = id.into();
@@ -700,7 +787,8 @@ fn shown_mark(stretch: &Stretch, live: bool, size: f32) -> Option<Mark> {
 }
 
 /// A stretch on a line, 4 dp tall: its bar, and how it ended at its right
-/// end. A question still waiting shows its hand there already.
+/// end. The mark stays inside the stretch so a following bar cannot paint
+/// through its glyph. A question still waiting shows its hand there already.
 fn stretch_piece(stretch: &Stretch, live: bool, mark: f32, colors: &Theme) -> Div {
     let end = shown_mark(stretch, live, mark);
     div()
@@ -711,7 +799,7 @@ fn stretch_piece(stretch: &Stretch, live: bool, mark: f32, colors: &Theme) -> Di
             div()
                 .absolute()
                 .top(px(2. - mark / 2.))
-                .right(px(-1. - mark / 2.))
+                .right_0()
                 .child(end_mark(end, mark, colors))
         }))
 }
@@ -914,6 +1002,23 @@ pub fn code_line(line: &DiffLine, selected: bool, gutter: f32, wrap: bool, color
     code_line_in(line, selected, gutter, wrap, None, colors)
 }
 
+/// The minimum width of one unwrapped diff row at the review font size.
+pub fn unwrapped_code_line_width(line: &DiffLine, gutter: f32) -> f32 {
+    gutter
+        + 8.
+        + line
+            .text
+            .chars()
+            .map(|character| match character {
+                '\t' => 4.,
+                character if character.is_control() => 0.,
+                character if character.is_ascii() => 1.,
+                _ => 2.,
+            })
+            .sum::<f32>()
+            * 7.75
+}
+
 /// A diff line highlighted in its file's language: "typescript", "rust".
 pub fn code_line_in(
     line: &DiffLine,
@@ -928,10 +1033,15 @@ pub fn code_line_in(
         LineKind::Removed => Some(colors.removed),
         LineKind::Context => None,
     };
+    // `w_full` supplies the viewport-wide background. Without wrapping, a
+    // content-derived minimum also gives the scrolling parent real horizontal
+    // overflow instead of merely clipping text outside a viewport-wide row.
+    let unwrapped_width = unwrapped_code_line_width(line, gutter);
     div()
         .relative()
         .flex()
         .w_full()
+        .when(!wrap, |line| line.min_w(px(unwrapped_width)))
         .min_h(px(22.))
         .font_family(MONO)
         .text_size(px(12.5))

@@ -272,36 +272,6 @@ impl PhoneApp {
                 )
                 .child(icon("chev_r", 16., colors.accent))
         });
-        // Nothing needs you: say so, so an empty inbox reads as done, not as
-        // something missing.
-        let caught_up = (needs.is_empty() && found && !self.searching).then(|| {
-            div()
-                .debug_selector(|| "caught-up".into())
-                .pt(px(4.))
-                .pb(px(8.))
-                .flex()
-                .items_start()
-                .gap(px(12.))
-                .child(ui::tile_box(40., 12., colors.accent, &colors).child(icon(
-                    "inbox",
-                    18.,
-                    colors.accent,
-                )))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(ui::serif("Nothing needs you.", 22.).line_height(px(28.)))
-                        .child(
-                            div()
-                                .mt(px(4.))
-                                .text_size(px(13.))
-                                .line_height(px(18.))
-                                .text_color(colors.muted)
-                                .child("When a run asks something, finishes or stops, it shows up here."),
-                        ),
-                )
-        });
         // What you've seen folds away while something needs you.
         let fold_seen = !needs.is_empty() && !self.searching && !finished.is_empty();
         let seen_open = !fold_seen || self.seen_open;
@@ -350,7 +320,6 @@ impl PhoneApp {
                     cx.notify();
                 }))
         });
-        let calm = caught_up.is_some();
         let list = div()
             .px(px(20.))
             .pt(px(12.))
@@ -358,7 +327,6 @@ impl PhoneApp {
             .flex()
             .flex_col()
             .children(helper_update)
-            .children(caught_up)
             .when(!needs.is_empty(), |list| {
                 list.child(section("Needs you", needs.len()).mb(px(8.)))
                     .children(needs.iter().enumerate().map(|(index, session)| {
@@ -376,7 +344,7 @@ impl PhoneApp {
             })
             .when(!working.is_empty(), |list| {
                 list.child(
-                    section("Working", working.len()).mt(px(if needs.is_empty() && !calm {
+                    section("Working", working.len()).mt(px(if needs.is_empty() {
                         4.
                     } else {
                         24.
@@ -392,7 +360,7 @@ impl PhoneApp {
                 |list| {
                     list.when(!fold_seen, |list| {
                         list.child(label("Today").mt(px(
-                            if needs.is_empty() && working.is_empty() && !calm {
+                            if needs.is_empty() && working.is_empty() {
                                 4.
                             } else {
                                 16.

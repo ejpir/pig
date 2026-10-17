@@ -1397,7 +1397,6 @@ impl PhoneApp {
         // after navigation. Keep the displayed transcript and follow target
         // aligned; following the same child does not start another read.
         self.follow_subagent(id, subagent.conversation_id.clone());
-        let (_, hue) = agent_look(&subagent.agent, &colors);
         let subtitle = match &subagent.model {
             Some(model) => format!(
                 "{} for {parent} · {}",
@@ -1621,113 +1620,106 @@ impl PhoneApp {
                 input_target.as_ref(),
                 Some(Ok(crate::live::SubagentInputTarget::Steer { .. }))
             );
+        let rail_turn = run_session
+            .as_ref()
+            .and_then(|session| session.turns.last());
+        let rail_live = (child_running || subagent.status == Status::Running)
+            && (swarm.is_none() || swarm_view == SwarmView::Observed);
+        let rail_hue = if rail_turn.is_some() {
+            colors.text
+        } else {
+            match subagent.status {
+                Status::Waiting => colors.wait,
+                Status::Running => colors.read,
+                Status::Failed => colors.coral,
+                Status::Done | Status::Stopped => colors.muted,
+            }
+        };
+        let marker = match rail_turn {
+            Some(turn) => super::stream::segments_named(
+                turn,
+                rail_live,
+                "subagent-working-segments",
+                "subagent-stretch",
+                &colors,
+            )
+            .into_any_element(),
+            None if running && swarm.is_some() && swarm_view != SwarmView::Observed => div()
+                .size(px(7.))
+                .rounded_full()
+                .bg(rail_hue)
+                .into_any_element(),
+            None if running => ui::ring_dot(rail_hue).into_any_element(),
+            None => icon(
+                if subagent.status == Status::Done {
+                    "check"
+                } else {
+                    "stop"
+                },
+                16.,
+                colors.muted,
+            )
+            .into_any_element(),
+        };
+        let details = ui::composer_working_rail(
+            "subagent",
+            marker,
+            label,
+            (!spent.is_empty()).then(|| spent.into()),
+            rail_hue,
+            &colors,
+        );
         let strip = ui::composer_status_strip(joined_input, &colors)
             .debug_selector(|| "subagent-working-strip".into())
             .relative()
             .child(crate::testing::probe("subagent-working-strip"))
             .pl(px(16.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .py(px(4.))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(14.))
-                            .line_height(px(20.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(hue)
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(if running {
-                                if swarm.is_some() && swarm_view != SwarmView::Observed {
-                                    div().size(px(7.)).rounded_full().bg(hue).into_any_element()
-                                } else {
-                                    ui::ring_dot(hue).into_any_element()
-                                }
-                            } else {
-                                icon(
-                                    if subagent.status == Status::Done { "check" } else { "stop" },
-                                    16.,
-                                    colors.muted,
-                                )
-                                .into_any_element()
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(12.5))
-                                    .text_color(colors.muted)
-                                    .child(spent),
-                            ),
-                    ),
-            )
+            .child(details)
             .when_some(
                 conversation.clone().filter(|_| {
                     (child_running || subagent.status == Status::Running)
                         && (swarm.is_none()
                             || (swarm_view == SwarmView::Observed
-                                && (child_running || swarm.as_ref().is_some_and(|swarm| !swarm.closed))))
+                                && (child_running
+                                    || swarm.as_ref().is_some_and(|swarm| !swarm.closed))))
                 }),
                 |strip, conversation| {
                     strip.child(
-                        div()
-                            .id("stop-subagent")
-                            .debug_selector(|| "stop-subagent".into())
-                            .relative()
-                            .child(crate::testing::probe("stop-subagent"))
-                            .h(px(if swarm.is_some() { 48. } else { 40. }))
-                            .flex_none()
-                            .px(px(12.))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .rounded(px(20.))
-                            .text_size(px(14.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors.coral)
-                            .active(|style| style.bg(colors.selected))
-                            .child(icon("stop", 14., colors.coral))
-                            .aria_label(format!("Stop {}", subagent.agent))
-                            .child("Stop")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if let Some((expected, peer)) = &swarm_stop {
-                                    if this.swarm_namespace(id) != stop_namespace { this.notify_user("This peer belonged to the previous session source. Nothing was sent.", cx); return; }
-                                    this.request_swarm_peer_stop(
-                                        id,
-                                        CrewPick {
-                                            turn: pick.turn,
-                                            handoff: pick.handoff,
-                                        },
-                                        expected,
-                                        peer,
-                                        window,
-                                        cx,
-                                    );
+                        ui::composer_stop_button(
+                            "stop-subagent",
+                            "stop-subagent",
+                            &colors,
+                        )
+                        .aria_label(format!("Stop {}", subagent.agent))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if let Some((expected, peer)) = &swarm_stop {
+                                if this.swarm_namespace(id) != stop_namespace {
+                                    this.notify_user("This peer belonged to the previous session source. Nothing was sent.", cx);
                                     return;
                                 }
-                                let stopped = this
-                                    .store
-                                    .as_mut()
-                                    .and_then(|store| store.live.as_mut())
-                                    .map(|live| live.stop_subagent(id, &conversation));
-                                if let Some(Err(error)) = stopped {
-                                    this.notify_user(error, cx);
-                                }
-                                cx.notify();
-                            })),
+                                this.request_swarm_peer_stop(
+                                    id,
+                                    CrewPick {
+                                        turn: pick.turn,
+                                        handoff: pick.handoff,
+                                    },
+                                    expected,
+                                    peer,
+                                    window,
+                                    cx,
+                                );
+                                return;
+                            }
+                            let stopped = this
+                                .store
+                                .as_mut()
+                                .and_then(|store| store.live.as_mut())
+                                .map(|live| live.stop_subagent(id, &conversation));
+                            if let Some(Err(error)) = stopped {
+                                this.notify_user(error, cx);
+                            }
+                            cx.notify();
+                        })),
                     )
                 },
             );
@@ -1955,6 +1947,10 @@ mod tests {
             });
             cx.run_until_parked();
             let strip = cx.debug_bounds("subagent-working-strip").unwrap();
+            let rail = cx.debug_bounds("subagent-working-content").unwrap();
+            let segments = cx.debug_bounds("subagent-working-segments").unwrap();
+            let status = cx.debug_bounds("subagent-working-status").unwrap();
+            let elapsed = cx.debug_bounds("subagent-working-elapsed").unwrap();
             let composer = cx.debug_bounds("composer").unwrap();
             let draft = cx.debug_bounds("composer-draft").unwrap();
             let stop = cx.debug_bounds("stop-subagent").unwrap();
@@ -1964,6 +1960,13 @@ mod tests {
             assert_eq!(strip.bottom(), composer.top() + px(1.));
             assert!(strip.top() <= stop.top() && stop.bottom() <= strip.bottom());
             assert!(strip.left() <= stop.left() && stop.right() <= strip.right());
+            assert_eq!(segments.left() - px(2.), rail.left());
+            assert_eq!(status.left(), segments.right() + px(8.));
+            assert_eq!(elapsed.left(), status.right() + px(8.));
+            assert_eq!(segments.center().y, status.center().y);
+            assert_eq!(status.center().y, elapsed.center().y);
+            assert!(elapsed.right() <= stop.left());
+            assert!(status.size.width > px(0.));
             assert!(draft.bottom() <= send.top());
             assert!(composer.bottom() <= px(height));
             assert!(cx.debug_bounds("composer-model").is_none());

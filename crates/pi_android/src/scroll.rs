@@ -237,16 +237,28 @@ pub(crate) struct ScrollArea {
     name: String,
     outer: Stateful<Div>,
     handle: ScrollHandle,
+    horizontal: bool,
     children: Vec<AnyElement>,
 }
 
 pub(crate) fn vertical(id: impl Into<ElementId>, handle: &ScrollHandle) -> ScrollArea {
+    scroll_area(id, handle, false)
+}
+
+/// A two-dimensional viewport for unwrapped code and diffs. It retains the
+/// same vertical scrollbar while native touch scrolling can also pan sideways.
+pub(crate) fn both(id: impl Into<ElementId>, handle: &ScrollHandle) -> ScrollArea {
+    scroll_area(id, handle, true)
+}
+
+fn scroll_area(id: impl Into<ElementId>, handle: &ScrollHandle, horizontal: bool) -> ScrollArea {
     let id = id.into();
     ScrollArea {
         #[cfg(feature = "ui-test")]
         name: format!("{id:?}"),
         outer: div().id(id).relative().min_h_0().flex().flex_col(),
         handle: handle.clone(),
+        horizontal,
         children: Vec::new(),
     }
 }
@@ -268,13 +280,20 @@ impl RenderOnce for ScrollArea {
         let measure = self.handle.clone();
         let handle = self.handle.clone();
         let source = Viewport::Scroll(self.handle.clone());
+        let horizontal = self.horizontal;
         self.outer
             .child(
                 div()
                     .id("viewport")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .map(|viewport| {
+                        if horizontal {
+                            viewport.overflow_scroll()
+                        } else {
+                            viewport.overflow_y_scroll()
+                        }
+                    })
                     .track_scroll(&self.handle)
                     .on_scroll_wheel(move |event, _, _| {
                         note_viewport_input(event.touch_phase, source.clone())

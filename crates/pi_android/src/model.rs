@@ -412,6 +412,9 @@ pub struct Turn {
     pub at: String,
     /// What came with the prompt: "screenshot.png", "lines 211–212".
     pub attachments: Vec<String>,
+    /// Images submitted with this prompt. They remain separate from pictures Pi
+    /// later inspected so attachment chips can open the original image.
+    pub prompt_images: Vec<ToolImage>,
     pub stages: Vec<Stage>,
     pub summary: Option<Summary>,
     /// HTML pages Pi wrote or changed, shown as cards that open them.
@@ -440,6 +443,7 @@ impl Turn {
             prompt: prompt.into(),
             at: at.into(),
             attachments: Vec::new(),
+            prompt_images: Vec::new(),
             stages: StageKind::ALL.into_iter().map(Stage::planned).collect(),
             summary: None,
             pages: Vec::new(),

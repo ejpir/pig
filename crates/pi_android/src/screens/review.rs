@@ -2,13 +2,13 @@
 //! diff, and tapped lines attached to the follow-up, which goes back to the
 //! session.
 
-use super::scroll_area;
+use super::{pan_area, scroll_area};
 use crate::{
     app::{PhoneApp, Route},
     composer::Attachment,
-    model::{FileChange, SessionId},
+    model::{DiffLine, FileChange, LineKind, SessionId, StageKind},
     theme::{MONO, theme},
-    ui::{self, icon},
+    ui::{self, Button, icon},
 };
 use gpui::{AnyElement, Context, Window, div, prelude::*, px};
 use std::collections::BTreeSet;
@@ -21,6 +21,12 @@ impl PhoneApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = theme(cx);
+        if let Some((turn, kind, tool)) = self.review_call {
+            if let Some(screen) = self.call_diff_review_screen(id, turn, kind, tool, &colors, cx) {
+                return screen;
+            }
+            self.review_call = None;
+        }
         let scroll = self.scroll(Route::Review(id));
         let commands = self.command_catalog_for_session(id, cx);
         self.review
@@ -71,6 +77,15 @@ impl PhoneApp {
             }
         };
         let wrap = self.wrap_lines(cx);
+        let diff_width = file
+            .map(|file| {
+                file.hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .map(|line| ui::unwrapped_code_line_width(line, 48.))
+                    .fold(0., f32::max)
+            })
+            .unwrap_or(0.);
         let appbar = ui::appbar(back, name, Some(folder.into()), &colors)
             .child(self.wrap_toggle("wrap-review", cx))
             .child(step("previous-file", "chev_l", shown.checked_sub(1)))
@@ -165,23 +180,19 @@ impl PhoneApp {
                             .text_color(colors.faint)
                             .child(hunk_title(&hunk.header)),
                     )
-                    .child(
-                        div()
-                            .id(("hunk", hunk_index))
-                            .py(px(4.))
-                            .when(!wrap, |lines| lines.overflow_x_scroll())
-                            .children(hunk.lines.iter().enumerate().map(|(index, line)| {
-                                let selected = self.review_lines.contains(&(hunk_index, index));
-                                div()
-                                    .id(("line", hunk_index * 10_000 + index))
-                                    .relative()
-                                    .child(ui::code_line(line, selected, 48., wrap, &colors))
-                                    .child(self.copyable(line.text.clone(), cx))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_line(id, hunk_index, index, cx)
-                                    }))
-                            })),
-                    )
+                    .child(div().id(("hunk", hunk_index)).py(px(4.)).children(
+                        hunk.lines.iter().enumerate().map(|(index, line)| {
+                            let selected = self.review_lines.contains(&(hunk_index, index));
+                            div()
+                                .id(("line", hunk_index * 10_000 + index))
+                                .relative()
+                                .child(ui::code_line(line, selected, 48., wrap, &colors))
+                                .child(self.copyable(line.text.clone(), cx))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_line(id, hunk_index, index, cx)
+                                }))
+                        }),
+                    ))
             }))
         });
         div()
@@ -193,19 +204,33 @@ impl PhoneApp {
             .when(count > 1, |screen| screen.child(progress))
             .when(count <= 1, |screen| screen.child(div().h(px(12.))))
             .children(summary)
-            .child(scroll_area(("review", id.0 as usize), &scroll).child(
-                div().pb(px(12.)).children(diff).when(count == 0, |list| {
-                    list.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(12.))
-                            .px(px(20.))
-                            .child(icon("info", 16., colors.muted))
-                            .child(ui::hint("Pi changed no files in this session.", &colors)),
-                    )
-                }),
-            ))
+            .child(
+                if wrap {
+                    scroll_area(("review", id.0 as usize), &scroll)
+                } else {
+                    pan_area(("review", id.0 as usize), &scroll)
+                }
+                .child(
+                    div()
+                        .pb(px(12.))
+                        .when(!wrap, |list| list.min_w(px(diff_width)))
+                        .children(diff)
+                        .when(count == 0, |list| {
+                            list.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .px(px(20.))
+                                    .child(icon("info", 16., colors.muted))
+                                    .child(ui::hint(
+                                        "Pi changed no files in this session.",
+                                        &colors,
+                                    )),
+                            )
+                        }),
+                ),
+            )
             .child(
                 div()
                     .flex_none()
@@ -214,6 +239,129 @@ impl PhoneApp {
                     .child(self.review.clone()),
             )
             .into_any_element()
+    }
+
+    /// A single edit/write call as a full-screen file diff. This deliberately
+    /// leaves command output and neighboring calls behind in the thread.
+    fn call_diff_review_screen(
+        &mut self,
+        id: SessionId,
+        turn_index: usize,
+        kind: StageKind,
+        tool_index: usize,
+        colors: &crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (path, lines) = self
+            .session(id)?
+            .turns
+            .get(turn_index)?
+            .tool(kind, tool_index)
+            .map(|tool| (tool.target.clone(), tool.diff.clone()))?;
+        if lines.is_empty() {
+            return None;
+        }
+        let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
+        let folder = path
+            .rsplit_once('/')
+            .map_or_else(String::new, |(folder, _)| folder.to_owned());
+        let subtitle: Option<gpui::SharedString> = (!folder.is_empty()).then(|| folder.into());
+        let wrap = self.wrap_lines(cx);
+        let diff_width = lines
+            .iter()
+            .map(|line| ui::unwrapped_code_line_width(line, 48.))
+            .fold(0., f32::max);
+        let language = super::language(&path);
+        let attachment_name = format!("{name} diff");
+        let attachment_text = call_diff_text(&path, &lines);
+        let can_ask = self
+            .store
+            .as_ref()
+            .is_some_and(|store| store.session(id).is_some());
+        let back = ui::tap("back", "back", colors).on_click(cx.listener(|this, _, window, cx| {
+            this.back(window, cx);
+        }));
+        let appbar = ui::appbar(back, name, subtitle, colors)
+            .debug_selector(|| "call-diff-review-file".into())
+            .child(self.wrap_toggle("wrap-call-diff-review", cx));
+        let scroll = self.scroll(Route::Review(id));
+        Some(
+            div()
+                .debug_selector(|| "call-diff-review".into())
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(appbar)
+                .child(
+                    if wrap {
+                        scroll_area(("call-diff-review", id.0 as usize), &scroll)
+                    } else {
+                        pan_area(("call-diff-review", id.0 as usize), &scroll)
+                    }
+                    .child(
+                        div()
+                            .id("call-diff-review-lines")
+                            .py(px(8.))
+                            .when(!wrap, |diff| diff.min_w(px(diff_width)))
+                            .children(lines.iter().enumerate().map(|(index, line)| {
+                                ui::code_line_in(line, false, 48., wrap, language, colors)
+                                    .debug_selector(move || {
+                                        format!("call-diff-review-line-{index}")
+                                    })
+                            })),
+                    ),
+                )
+                .when(can_ask, |screen| {
+                    screen.child(
+                        div().flex_none().px(px(20.)).pt(px(8.)).pb(px(12.)).child(
+                            ui::button(
+                                "ask-about-diff",
+                                Button::Plain,
+                                Some("clip"),
+                                "Ask about this",
+                                false,
+                                colors,
+                            )
+                            .w_full()
+                            .bg(colors.tint(colors.accent))
+                            .border_color(gpui::transparent_black())
+                            .text_color(colors.accent)
+                            .debug_selector(|| "ask-about-diff".into())
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    if !this
+                                        .store
+                                        .as_ref()
+                                        .is_some_and(|store| store.session(id).is_some())
+                                    {
+                                        return;
+                                    }
+                                    let composer = this.thread_composer(id, window, cx);
+                                    let attachment = Attachment::File {
+                                        name: attachment_name.clone(),
+                                        size: crate::app::size_label(attachment_text.len() as u64),
+                                        contents: attachment_text.clone(),
+                                    };
+                                    match composer.update(cx, |composer, cx| {
+                                        composer.try_attach(attachment, cx)
+                                    }) {
+                                        Ok(()) => {
+                                            this.review_call = None;
+                                            this.back(window, cx);
+                                            composer.update(cx, |composer, cx| {
+                                                composer.focus(window, cx)
+                                            });
+                                        }
+                                        Err(error) => this.notify_user(error, cx),
+                                    }
+                                },
+                            )),
+                        ),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     pub(crate) fn toggle_line(
@@ -236,6 +384,21 @@ impl PhoneApp {
             .update(cx, |review, cx| review.set_lines(label, cx));
         cx.notify();
     }
+}
+
+fn call_diff_text(path: &str, lines: &[DiffLine]) -> String {
+    let mut text = format!("File: {path}\n\n```diff\n");
+    for line in lines {
+        text.push(match line.kind {
+            LineKind::Context => ' ',
+            LineKind::Added => '+',
+            LineKind::Removed => '-',
+        });
+        text.push_str(&line.text);
+        text.push('\n');
+    }
+    text.push_str("```\n");
+    text
 }
 
 /// "@@ 204 readThinking", from "@@ 204,13 · readThinking".

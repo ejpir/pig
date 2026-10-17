@@ -5,7 +5,7 @@
 //! in full once the run is done.
 
 use crate::{
-    app::{PhoneApp, Sheet},
+    app::PhoneApp,
     model::{Flow, Session, SessionId, StageKind, ToolActivity, Turn},
     theme::{MONO, Theme},
     ui::{self, icon},
@@ -377,17 +377,39 @@ fn tail_line(line: String, newest: bool, colors: &Theme) -> Div {
         .child(output_text(&line, colors))
 }
 
-/// The run line folded into the working strip: what happened so far, in
-/// order, with each check's result and the stretch under way ringed.
+/// The run line folded into the main working strip.
 pub(crate) fn segments(turn: &Turn, colors: &Theme) -> Div {
+    segments_named(
+        turn,
+        true,
+        "composer-working-segments",
+        "composer-stretch",
+        colors,
+    )
+}
+
+/// The shared folded run marker used by parent and subagent composer rails:
+/// what happened so far, in order, with the stretch under way ringed when live.
+pub(crate) fn segments_named(
+    turn: &Turn,
+    live: bool,
+    selector: &'static str,
+    stretch_selector: &'static str,
+    colors: &Theme,
+) -> Div {
     div()
-        .debug_selector(|| "composer-working-segments".into())
+        .debug_selector(move || selector.into())
+        // A long run may need more minimum-width pieces than this compact
+        // strip can show. Clip it at a fixed width so it never crosses the
+        // elapsed time beside it.
         .w(px(56.))
+        .h(px(10.))
         .flex_none()
+        .overflow_hidden()
         .child(if turn.run.is_empty() {
             div().h(px(4.)).rounded(px(2.)).bg(colors.raised)
         } else {
-            ui::run_line_named(&turn.run, true, 6., Some("composer-stretch"), colors)
+            ui::run_line_named(&turn.run, live, 6., Some(stretch_selector), colors)
         })
 }
 
@@ -577,8 +599,8 @@ impl PhoneApp {
                 row.child(change(tool.added, tool.removed, colors))
             })
             .when(!live, |row| row.child(icon("chev_r", 16., colors.faint)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_sheet(Sheet::Call(id, turn_index, kind, tool_index), cx)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_call_detail(id, turn_index, kind, tool_index, window, cx)
             }))
     }
 

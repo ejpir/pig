@@ -30,6 +30,11 @@ fn scroll_area(id: impl Into<ElementId>, handle: &ScrollHandle) -> crate::scroll
     crate::scroll::vertical(id, handle).flex_1()
 }
 
+/// A screen's scrolling middle when unwrapped content can also pan sideways.
+fn pan_area(id: impl Into<ElementId>, handle: &ScrollHandle) -> crate::scroll::ScrollArea {
+    crate::scroll::both(id, handle).flex_1()
+}
+
 /// A section's heading above a card.
 fn section(text: &'static str, colors: &Theme) -> Div {
     ui::label(text, colors).mt(px(20.)).mb(px(8.)).mx(px(4.))

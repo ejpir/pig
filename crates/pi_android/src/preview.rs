@@ -177,6 +177,8 @@ impl PhoneApp {
         self.expanded_turns.clear();
         self.expanded_streams.clear();
         self.expanded_calls.clear();
+        self.review_call = None;
+        self.review_lines.clear();
         self.reset_swarm_views();
         self.visual_apps.borrow_mut().clear_running();
         self.searching = false;
@@ -2290,10 +2292,25 @@ mod tests {
             })
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("run-stretch-0").is_none());
+        let rail = cx.debug_bounds("details-rail").unwrap();
+        cx.simulate_click(rail.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("run-stretch-0").is_some());
+        assert!(cx.debug_bounds("details-context-cost").is_none());
+        assert!(cx.debug_bounds("details-context-turns").is_none());
+        let context = cx.debug_bounds("details-context").unwrap();
+        cx.simulate_click(context.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("details-context-body").is_some());
+        let usage = cx.debug_bounds("details-context-usage").unwrap();
+        assert!(usage.left() >= context.left() + gpui::px(32.));
+        assert!(cx.debug_bounds("details-context-cost").is_some());
+        assert!(cx.debug_bounds("details-context-turns").is_some());
         for selector in ["details-compaction-policy", "details-background-compaction"] {
             let bounds = cx
                 .debug_bounds(selector)
-                .expect("compaction information is rendered");
+                .expect("expanded context information is rendered");
             assert!(bounds.left() >= gpui::px(0.));
             assert!(bounds.right() <= gpui::px(320.));
         }
@@ -3026,7 +3043,7 @@ mod tests {
         assert!(cx.debug_bounds("new-6").is_some());
         // With the restore seen too, and the runs that are still going
         // (which would ask or finish as the test's clock runs) set aside,
-        // nothing needs you, and Home says so.
+        // Home has no needs-you or replacement empty-state section.
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
                 app.show_session(SessionId(6), window, cx);
@@ -3037,7 +3054,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("new-6").is_none());
-        assert!(cx.debug_bounds("caught-up").is_some());
+        assert!(cx.debug_bounds("caught-up").is_none());
     }
 
     #[gpui::test]
@@ -3638,6 +3655,89 @@ mod tests {
         cx.run_until_parked();
         app.read_with(cx, |app, _| {
             assert_eq!(app.sheet, Some(Sheet::Run(QWEN, 0)))
+        });
+        let rail = cx.debug_bounds("stage-rail").unwrap();
+        let first = cx.debug_bounds("stage-details").unwrap();
+        assert!(first.left() >= rail.left() + gpui::px(4.));
+    }
+
+    #[gpui::test]
+    fn clicking_an_edit_opens_a_focused_diff_and_can_attach_it(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("working", window, cx);
+                let tool = &mut app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == QWEN)
+                    .unwrap()
+                    .turns[0]
+                    .stage_mut(StageKind::Change)
+                    .tools[0];
+                tool.target = "crates/pi_android/src/preview.rs".into();
+                let long_line = format!("new({});", "a_very_long_argument, ".repeat(24));
+                tool.diff = vec![
+                    crate::model::DiffLine::new(LineKind::Removed, 42, "old();"),
+                    crate::model::DiffLine::new(LineKind::Added, 42, &long_line),
+                ];
+                app.update_prefs(cx, |prefs| prefs.wrap_lines = false);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let edit = cx.debug_bounds("call").expect("the active edit is visible");
+        cx.simulate_click(edit.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.route(), Route::Review(QWEN));
+            assert_eq!(app.review_call, Some((0, StageKind::Change, 0)));
+            assert!(app.sheet.is_none());
+        });
+        assert!(cx.debug_bounds("call-diff-review").is_some());
+        assert!(cx.debug_bounds("call-diff-review-file").is_some());
+        let long_line = cx.debug_bounds("call-diff-review-line-1").unwrap();
+        assert!(cx.debug_bounds("call-output").is_none());
+        let (max_x, before_x, wrap) = cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let wrap = app.wrap_lines(cx);
+                let scroll = app.scroll(Route::Review(QWEN));
+                (scroll.max_offset().x, scroll.offset().x, wrap)
+            })
+        });
+        assert!(
+            max_x > gpui::px(0.),
+            "unwrapped diff must overflow sideways: wrap={wrap}, line={:?}, max={max_x:?}, offset={before_x:?}",
+            long_line.size.width
+        );
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(gpui::px(180.), long_line.center().y),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(-120.), gpui::px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        let after_x =
+            cx.update(|_, cx| app.update(cx, |app, _| app.scroll(Route::Review(QWEN)).offset().x));
+        assert!(after_x < before_x, "horizontal scroll must pan the drawer");
+
+        let ask = cx.debug_bounds("ask-about-diff").unwrap();
+        cx.simulate_click(ask.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.route(), Route::Thread(QWEN));
+            let composer = app.threads[&QWEN].read(cx);
+            let [crate::composer::Attachment::File { name, contents, .. }] = composer.attachments()
+            else {
+                panic!("expected one diff attachment");
+            };
+            assert_eq!(name, "preview.rs diff");
+            assert!(contents.contains("File: crates/pi_android/src/preview.rs"));
+            assert!(contents.contains("-old();\n+new("));
         });
     }
 

@@ -124,6 +124,28 @@ impl PhoneApp {
                         })),
                     )
             }
+            Sheet::PromptImage(id, turn, n) => {
+                let image = self
+                    .session(id)
+                    .and_then(|session| session.turns.get(turn))
+                    .and_then(|turn| turn.prompt_images.get(n))
+                    .cloned();
+                if let Some(image) = &image {
+                    self.demand_tool_image(id, image);
+                }
+                let shown = image.as_ref().map(|image| self.tool_image(id, image));
+                div().pb(px(8.)).child(match shown {
+                    Some(Ok(Some(shown))) => self
+                        .zoomable_image(shown.image, shown.ratio, cx)
+                        .rounded(px(12.))
+                        .bg(colors.panel)
+                        .into_any_element(),
+                    Some(Err(error)) => ui::hint(error, &colors).into_any_element(),
+                    _ => {
+                        ui::hint("Getting the image from the computer…", &colors).into_any_element()
+                    }
+                })
+            }
             Sheet::ToolImage(id, turn, n) => {
                 let image = self
                     .session(id)
@@ -259,6 +281,14 @@ impl PhoneApp {
                     Sheet::RestoreHistory(_, _) => "Restore project files?".into(),
                     Sheet::EnableJj(_) => "Turn on jj file history?".into(),
                     Sheet::Image(_, _) => "Attached image".into(),
+                    Sheet::PromptImage(id, turn, n) => self
+                        .session(id)
+                        .and_then(|session| session.turns.get(turn))
+                        .and_then(|turn| turn.prompt_images.get(n))
+                        .map_or_else(
+                            || "Attached image".into(),
+                            |image| image.name.clone().into(),
+                        ),
                     Sheet::Logs => "Debug log".into(),
                     Sheet::ToolImage(id, turn, n) => self
                         .session(id)
@@ -925,6 +955,7 @@ impl PhoneApp {
                                 .into_any_element()
                         };
                         ui::row(("activity-reference", index), index == 0, colors)
+                            .debug_selector(move || format!("activity-reference-{index}"))
                             .child(icon(glyph, 18., colors.muted))
                             .child(
                                 div()
@@ -935,15 +966,18 @@ impl PhoneApp {
                             .child(action)
                     }),
             )
-            .children(
-                stage
-                    .tools
-                    .iter()
-                    .enumerate()
-                    .map(|(index, tool)| self.tool_card(index, tool, wrap, colors, cx).mt(px(12.))),
-            )
+            // Changed is already represented by its diff and per-file Review
+            // rows. Repeating edit/write arguments and transport output below
+            // them adds no review information.
+            .when(kind != StageKind::Change, |body| {
+                body.children(
+                    stage.tools.iter().enumerate().map(|(index, tool)| {
+                        self.tool_card(index, tool, wrap, colors, cx).mt(px(12.))
+                    }),
+                )
+            })
             .when(
-                stage.tools.is_empty() && stage.references.is_empty(),
+                kind != StageKind::Change && stage.tools.is_empty() && stage.references.is_empty(),
                 |body| body.child(ui::hint("No tool calls recorded for this stage.", colors)),
             )
     }
@@ -969,6 +1003,7 @@ impl PhoneApp {
             "Running…"
         };
         ui::card(colors)
+            .debug_selector(move || format!("activity-tool-{index}"))
             .mt(px(12.))
             .p(px(14.))
             .child(
@@ -1247,8 +1282,8 @@ impl PhoneApp {
                             }),
                     )
                     .child(icon("chev_r", 16., colors.faint))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_sheet(Sheet::Call(id, turn_index, next_kind, next_index), cx)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_call_detail(id, turn_index, next_kind, next_index, window, cx)
                     }))
             }))
             .child(
@@ -1675,6 +1710,8 @@ impl PhoneApp {
         let session_file = details.session_file.clone();
         let files = session.files.len();
         let snapshots = details.snapshots;
+        let rail_open = self.expanded.contains("details-rail");
+        let context_open = self.expanded.contains("details-context");
         let runs_open = self.expanded.contains("details-run");
         let tools_open = self.expanded.contains("details-tools");
         let transport = super::diagnostics::transport_diagnostics(self, id);
@@ -1710,36 +1747,46 @@ impl PhoneApp {
                         )))
                     }),
             );
-        // The run line, then each stretch of it in the order it happened.
+        // The run line stays visible; its vertical rail is a disclosure so a
+        // long session does not take over Details before the options.
         let running = session.state.is_running();
         let run = session
             .turn()
             .filter(|turn| !turn.run.is_empty())
             .map(|turn| {
                 let turn_index = session.turns.len() - 1;
+                let stretches = turn.run.len();
                 div()
                     .mt(px(20.))
                     .child(ui::run_line(&turn.run, running, 14., colors))
                     .child(
-                        self.run_stretches(id, turn_index, turn, running, colors, cx)
-                            .mt(px(20.)),
+                        row(
+                            "details-rail",
+                            "layers",
+                            "Run details",
+                            format!("{stretches} steps"),
+                            Some(rail_open),
+                        )
+                        .mt(px(16.))
+                        .on_click(disclosure("details-rail")),
                     )
+                    .when(rail_open, |run| {
+                        run.child(
+                            self.run_stretches(id, turn_index, turn, running, colors, cx)
+                                .mt(px(16.)),
+                        )
+                    })
             });
-        let stat = |label: &'static str, value: String| {
+        let context_detail = |label: &'static str, value: String| {
             div()
-                .flex_1()
-                .min_w_0()
-                .py(px(16.))
-                .child(ui::label(label, colors).text_color(colors.muted))
-                .child(
-                    div()
-                        .mt(px(4.))
-                        .text_size(px(22.))
-                        .line_height(px(28.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .truncate()
-                        .child(value),
-                )
+                .min_h(px(40.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .border_t_1()
+                .border_color(colors.line)
+                .child(meta(label.into()).flex_1())
+                .child(meta(value))
         };
         let used = details.context_percent.unwrap_or(0).min(100) as f32 / 100.;
         let live = self.store.as_ref().and_then(|store| store.live.as_ref());
@@ -1779,40 +1826,24 @@ impl PhoneApp {
         div()
             .pb(px(8.))
             .children(run)
-            .child(
-                div()
-                    .mt(px(20.))
-                    .flex()
-                    .border_t_1()
-                    .border_b_1()
-                    .border_color(colors.line)
-                    .child(stat(
-                        "Cost",
-                        if details.cost.is_empty() {
-                            "—".into()
-                        } else {
-                            details.cost.clone()
+            .child(div().h(px(20.)))
+            .when(files > 0, |body| {
+                body.child(
+                    row(
+                        "details-changes",
+                        "diff",
+                        "Changes",
+                        match files {
+                            1 => "1 file".into(),
+                            count => format!("{count} files"),
                         },
-                    ))
-                    .child(
-                        stat("Turns", details.turns.to_string())
-                            .pl(px(16.))
-                            .border_l_1()
-                            .border_color(colors.line),
+                        None,
                     )
-                    .child(
-                        stat(
-                            "Changed",
-                            match files {
-                                1 => "1 file".into(),
-                                count => format!("{count} files"),
-                            },
-                        )
-                        .pl(px(16.))
-                        .border_l_1()
-                        .border_color(colors.line),
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.open_review(id, 0, window, cx)),
                     ),
-            )
+                )
+            })
             .children(subagents.map(|summary| {
                 row("details-subagents", "fork", "Subagents", summary, None).on_click(cx.listener(
                     move |this, _, window, cx| {
@@ -1822,87 +1853,110 @@ impl PhoneApp {
                 ))
             }))
             .child(
-                div()
-                    .pt(px(20.))
-                    .pb(px(24.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Context"),
-                            )
-                            .child(meta(details.context_tokens.clone())),
-                    )
-                    .children(slider)
-                    .when(!adjustable, |section| {
-                        section
-                            .child(
-                                div()
-                                    .relative()
-                                    .mt(px(12.))
-                                    .h(px(8.))
-                                    .rounded(px(4.))
-                                    .bg(colors.raised)
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left_0()
-                                            .top_0()
-                                            .bottom_0()
-                                            .w(relative(used))
-                                            .rounded(px(4.))
-                                            .bg(colors.accent),
-                                    )
-                                    .children(
-                                        details
-                                            .compaction_percent
-                                            .filter(|_| details.auto_compaction_enabled)
-                                            .map(|percent| {
-                                                div()
-                                                    .absolute()
-                                                    .left(relative(
-                                                        (percent / 100.).clamp(0., 1.) as f32
-                                                    ))
-                                                    .top(px(-4.))
-                                                    .bottom(px(-4.))
-                                                    .w(px(2.))
-                                                    .rounded(px(1.))
-                                                    .bg(colors.line_strong)
-                                            }),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(8.))
-                                    .flex()
-                                    .child(
-                                        meta(details.context_percent.map_or_else(
-                                            || "Usage not reported".into(),
-                                            |percent| format!("{percent}% used"),
-                                        ))
-                                        .flex_1(),
-                                    )
-                                    .child(
-                                        meta(compaction_label(
-                                            details.auto_compaction_enabled,
-                                            details.compaction_percent,
-                                        ))
-                                        .debug_selector(|| "details-compaction-policy".into()),
-                                    ),
-                            )
-                    })
-                    .when(details.background_compacting, |section| {
-                        section.child(
-                            meta("Compacting in background…".into())
-                                .debug_selector(|| "details-background-compaction".into())
-                                .mt(px(8.)),
-                        )
-                    }),
+                row(
+                    "details-context",
+                    "layers",
+                    "Context",
+                    details.context_tokens.clone(),
+                    Some(context_open),
+                )
+                .on_click(disclosure("details-context")),
             )
+            .when(context_open, |body| {
+                body.child(
+                    div()
+                        .debug_selector(|| "details-context-body".into())
+                        .pl(px(32.))
+                        .pt(px(4.))
+                        .pb(px(16.))
+                        .children(slider)
+                        .when(!adjustable, |section| {
+                            section
+                                .child(
+                                    div()
+                                        .debug_selector(|| "details-context-usage".into())
+                                        .relative()
+                                        .mt(px(8.))
+                                        .h(px(8.))
+                                        .rounded(px(4.))
+                                        .bg(colors.raised)
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .left_0()
+                                                .top_0()
+                                                .bottom_0()
+                                                .w(relative(used))
+                                                .rounded(px(4.))
+                                                .bg(colors.accent),
+                                        )
+                                        .children(
+                                            details
+                                                .compaction_percent
+                                                .filter(|_| details.auto_compaction_enabled)
+                                                .map(|percent| {
+                                                    div()
+                                                        .absolute()
+                                                        .left(relative(
+                                                            (percent / 100.).clamp(0., 1.) as f32,
+                                                        ))
+                                                        .top(px(-4.))
+                                                        .bottom(px(-4.))
+                                                        .w(px(2.))
+                                                        .rounded(px(1.))
+                                                        .bg(colors.line_strong)
+                                                }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .mt(px(8.))
+                                        .flex()
+                                        .gap(px(12.))
+                                        .child(
+                                            meta(details.context_percent.map_or_else(
+                                                || "Usage not reported".into(),
+                                                |percent| format!("{percent}% used"),
+                                            ))
+                                            .flex_1(),
+                                        )
+                                        .child(
+                                            meta(compaction_label(
+                                                details.auto_compaction_enabled,
+                                                details.compaction_percent,
+                                            ))
+                                            .debug_selector(|| "details-compaction-policy".into()),
+                                        ),
+                                )
+                        })
+                        .when(details.background_compacting, |section| {
+                            section.child(
+                                meta("Compacting in background…".into())
+                                    .debug_selector(|| "details-background-compaction".into())
+                                    .mt(px(8.)),
+                            )
+                        })
+                        .child(
+                            div()
+                                .mt(px(12.))
+                                .child(
+                                    context_detail(
+                                        "Cost",
+                                        if details.cost.is_empty() {
+                                            "—".into()
+                                        } else {
+                                            details.cost.clone()
+                                        },
+                                    )
+                                    .debug_selector(|| "details-context-cost".into()),
+                                )
+                                .child(
+                                    context_detail("Turns", details.turns.to_string())
+                                        .debug_selector(|| "details-context-turns".into()),
+                                ),
+                        ),
+                )
+            })
             .child(
                 row(
                     "details-model",
@@ -2555,8 +2609,8 @@ impl PhoneApp {
                 match first_call {
                     Some((kind, tool)) => row
                         .active(|style| style.bg(colors.selected))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_sheet(Sheet::Call(id, turn_index, kind, tool), cx)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_call_detail(id, turn_index, kind, tool, window, cx)
                         }))
                         .into_any_element(),
                     None => row.into_any_element(),
@@ -2735,6 +2789,24 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[gpui::test]
+    fn changed_sheet_omits_redundant_edit_actions_and_output(cx: &mut gpui::TestAppContext) {
+        use crate::app::PhoneApp;
+        use gpui::{px, size};
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(size(px(384.), px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("diff-spacing", window, cx);
+                app.sheet_motion.finish();
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("activity-live-diff").is_some());
+        assert!(cx.debug_bounds("activity-reference-0").is_some());
+        assert!(cx.debug_bounds("activity-tool-0").is_none());
     }
 
     #[gpui::test]

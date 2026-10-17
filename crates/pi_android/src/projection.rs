@@ -415,11 +415,16 @@ fn turns(pi: &Pi, cwd: &str) -> (Vec<Turn>, Option<Duration>) {
                     // safely distinguished across compaction; keep apps inert.
                 }
                 turn.stages.clear();
-                let images = message["content"].as_array().map_or(0, |blocks| {
-                    blocks.iter().filter(|b| b["type"] == "image").count()
-                });
-                if images > 0 {
-                    turn.attachments.push(match images {
+                let images: Vec<Value> = message["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| block["type"] == "image")
+                    .cloned()
+                    .collect();
+                turn.prompt_images = pi_markdown::tool_images(&images, None);
+                if !images.is_empty() {
+                    turn.attachments.push(match images.len() {
                         1 => "1 image".into(),
                         count => format!("{count} images"),
                     });
@@ -2007,6 +2012,29 @@ mod tests {
         assert_eq!(super::question(&select).unwrap().choices[1].label, "Allow");
         assert_eq!(answer(&select, Answer::AllowSession)["value"], "Allow");
         assert_eq!(answer(&select, Answer::Deny)["cancelled"], true);
+    }
+
+    #[test]
+    fn images_submitted_with_a_prompt_remain_available_to_open() {
+        let id = "b".repeat(64);
+        let pi = session(&[
+            json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
+                {"role":"user","content":[
+                    {"type":"text","text":"Inspect this screenshot"},
+                    {"type":"image","data":"","imageId":id,"mimeType":"image/png","bytes":10}
+                ]},
+                {"role":"assistant","content":[{"type":"text","text":"I can see it."}],"stopReason":"stop"}
+            ]}}),
+        ]);
+        let shown = project(&pi, facts(&[]));
+        let turn = &shown.turns[0];
+        assert_eq!(turn.prompt, "Inspect this screenshot");
+        assert_eq!(turn.attachments, ["1 image"]);
+        assert_eq!(turn.prompt_images.len(), 1);
+        assert_eq!(turn.prompt_images[0].key, id);
+        assert_eq!(turn.prompt_images[0].mime, "image/png");
+        assert_eq!(turn.prompt_images[0].inline, None);
+        assert!(turn.images.is_empty());
     }
 
     #[test]

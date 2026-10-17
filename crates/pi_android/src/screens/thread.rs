@@ -69,17 +69,15 @@ fn thread_running(session: &Session, compacting: bool) -> bool {
     session.state.is_running() || compacting
 }
 
-fn composer_status(session: &Session, compacting: bool) -> &str {
+fn composer_status(session: &Session, compacting: bool) -> &'static str {
     if compacting {
         "Compacting"
     } else if session.state == State::NeedsYou {
         "Needs you"
     } else if session.details.background_compacting {
         "Compacting"
-    } else if session.activity.is_empty() {
-        "Working"
     } else {
-        &session.activity
+        "Working"
     }
 }
 
@@ -174,6 +172,7 @@ pub(super) fn turn_layout_changed(before: &Turn, after: &Turn) -> bool {
     before.prompt != after.prompt
         || before.at != after.at
         || before.attachments != after.attachments
+        || before.prompt_images != after.prompt_images
         || stages_layout_changed(&before.stages, &after.stages)
         || before.summary != after.summary
         || before.pages != after.pages
@@ -1311,21 +1310,34 @@ impl PhoneApp {
                         .into_any_element(),
                 })
                 .when(!turn.attachments.is_empty(), |prompt| {
-                    prompt.child(
-                        div().mt(px(8.)).flex().flex_wrap().gap(px(8.)).children(
-                            turn.attachments
-                                .iter()
-                                .enumerate()
-                                .map(|(index, attachment)| {
-                                    small_chip(
-                                        ("sent", index),
-                                        Some("clip"),
-                                        attachment.clone(),
-                                        colors,
+                    prompt.child(div().mt(px(8.)).flex().flex_wrap().gap(px(8.)).children(
+                        turn.attachments.iter().enumerate().map(
+                            |(attachment_index, attachment)| {
+                                let image = prompt_image_for_attachment(turn, attachment_index);
+                                small_chip(
+                                    format!("sent-{index}-{attachment_index}"),
+                                    Some("clip"),
+                                    attachment.clone(),
+                                    colors,
+                                )
+                                .debug_selector(move || {
+                                    format!("turn-{index}-attachment-{attachment_index}")
+                                })
+                                .when_some(image, |chip, image| {
+                                    chip.active(|style| style.bg(colors.selected)).on_click(
+                                        cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            window.prevent_default();
+                                            this.open_sheet(
+                                                Sheet::PromptImage(id, index, image),
+                                                cx,
+                                            );
+                                        }),
                                     )
-                                }),
+                                })
+                            },
                         ),
-                    )
+                    ))
                 })
                 .child(self.copyable(turn.prompt.clone(), cx))
                 .when(!live || turn.reported, |prompt| {
@@ -1445,6 +1457,10 @@ impl PhoneApp {
         };
         let stages = &turn.stages[..shown];
         div()
+            // A live station's 4 dp halo must stay inside a sheet's clipped
+            // scroll viewport rather than losing its left edge.
+            .pl(px(4.))
+            .debug_selector(|| "stage-rail".into())
             .flex()
             .flex_col()
             .gap(px(24.))
@@ -1861,6 +1877,41 @@ pub(crate) fn shown_run(turn: &Turn) -> std::borrow::Cow<'_, [Stretch]> {
             })
             .collect(),
     )
+}
+
+/// Which submitted image an attachment chip represents. Durable snapshots may
+/// only say "1 image" while Local can retain the original filename. Mixed text
+/// files stay inert unless their label clearly belongs to an image.
+fn prompt_image_for_attachment(turn: &Turn, attachment: usize) -> Option<usize> {
+    if turn.prompt_images.is_empty() || attachment >= turn.attachments.len() {
+        return None;
+    }
+    if turn.attachments.len() == turn.prompt_images.len() {
+        return Some(attachment);
+    }
+    if turn.attachments.len() == 1 && image_attachment_label(&turn.attachments[0]) {
+        return Some(0);
+    }
+    let image_labels: Vec<usize> = turn
+        .attachments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, label)| image_attachment_label(label).then_some(index))
+        .collect();
+    (image_labels.len() == turn.prompt_images.len())
+        .then(|| image_labels.iter().position(|index| *index == attachment))
+        .flatten()
+}
+
+fn image_attachment_label(label: &str) -> bool {
+    let label = label.trim().to_ascii_lowercase();
+    label == "1 image"
+        || label
+            .strip_suffix(" images")
+            .is_some_and(|count| count.parse::<usize>().is_ok())
+        || [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]
+            .iter()
+            .any(|extension| label.ends_with(extension))
 }
 
 /// A 28 dp chip for a file or a search.
@@ -2304,24 +2355,7 @@ fn working_strip(
         .turns
         .last()
         .and_then(|turn| turn.live_stage().map(|kind| (turn, kind)));
-    let stop = div()
-        .id("stop")
-        .relative()
-        .child(crate::testing::probe("stop"))
-        .debug_selector(|| "composer-stop".into())
-        .h(px(40.))
-        .px(px(12.))
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(8.))
-        .rounded(px(20.))
-        .text_size(px(14.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(colors.coral)
-        .active(|style| style.bg(colors.selected))
-        .child(icon("stop", 16., colors.coral))
-        .child("Stop")
+    let stop = ui::composer_stop_button("stop", "composer-stop", colors)
         .when(stopping, |button| button.opacity(0.5))
         .when(!stopping, |button| {
             button.on_click(cx.listener(move |this, _, _, cx| this.stop(id, cx)))
@@ -2339,84 +2373,32 @@ fn working_strip(
             )
             .child(stop);
     }
-    // Keep the status and timing in one shrinkable column. A one-row layout
-    // made the stage, segments and hour-long timer compete with the fixed-size
-    // actions, pushing Stop past the composer's border on phone-sized screens.
-    // The folded run line beside the timer carries the stage's colour; the
-    // label stays in the text colour, so a grey check still reads.
-    let (label, hue) = match (!show_stage, &stage) {
-        (false, Some((_, kind))) => (
-            if session.activity.is_empty() {
-                kind.name(StageStatus::Live)
-            } else {
-                status
-            },
-            colors.text,
-        ),
-        _ => (status, if waiting { colors.wait } else { colors.read }),
+    // The run marker, status and elapsed time are one compact rail. The marker
+    // has a hard width, the timer keeps its intrinsic width and only the label
+    // may truncate, so neither can paint over the other on a narrow phone.
+    let label = status;
+    let hue = if show_stage && stage.is_some() {
+        colors.text
+    } else if waiting {
+        colors.wait
+    } else {
+        colors.read
     };
-    let details = div()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .map(|details| match (!show_stage, &stage) {
-            (false, Some((turn, _))) => details.child(super::stream::segments(turn, colors)),
-            _ => details.child(ui::ring_dot(hue)),
-        })
-        .child(
-            meta(
-                if session.details.background_compacting && !compacting {
-                    if waiting {
-                        "Compacting in background…".into()
-                    } else {
-                        format!("In background · {}", duration_label(session.elapsed))
-                    }
-                } else {
-                    duration_label(session.elapsed)
-                },
-                colors,
-            )
-            .debug_selector(|| "composer-working-elapsed".into())
-            .min_w_0()
-            .flex_1()
-            .truncate(),
-        );
+    let marker = match (!show_stage, &stage) {
+        (false, Some((turn, _))) => super::stream::segments(turn, colors).into_any_element(),
+        _ => ui::ring_dot(hue).into_any_element(),
+    };
+    let details = ui::composer_working_rail(
+        "composer",
+        marker,
+        label,
+        (!waiting).then(|| duration_label(session.elapsed).into()),
+        hue,
+        colors,
+    );
     strip
         .pl(px(16.))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .py(px(4.))
-                // GPUI paints the live segment's 2 dp shadow outside its
-                // layout bounds. Reserve that gutter once for BOTH rows: the
-                // label starts at the first solid block, not the halo's edge.
-                // Keep it even when another stage is live or the rail becomes
-                // a status dot, so those transitions cannot move the label.
-                .pl(px(2.))
-                .debug_selector(|| "composer-working-content".into())
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .debug_selector(|| "composer-working-status".into())
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(14.))
-                        .line_height(px(20.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(hue)
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .debug_selector(move || format!("composer-label-{label}"))
-                                .child(label.to_owned()),
-                        ),
-                )
-                .child(details),
-        )
+        .child(details)
         .when(show_stage && stage.is_some() && !waiting, |strip| {
             strip.child(
                 ui::tap("run-line", "chev_u", colors)
@@ -2467,6 +2449,20 @@ mod tests {
         active_subagents: usize,
     }
 
+    struct PromptFrame {
+        app: gpui::Entity<PhoneApp>,
+        session: Session,
+    }
+
+    impl Render for PromptFrame {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let turn = &self.session.turns[0];
+            self.app.update(cx, |app, cx| {
+                app.prompt(self.session.id, 0, turn, false, false, &theme(cx), cx)
+            })
+        }
+    }
+
     impl Render for WorkingFrame {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.app.update(cx, |_, cx| {
@@ -2507,6 +2503,58 @@ mod tests {
     }
 
     #[gpui::test]
+    fn submitted_image_chip_opens_its_detail_sheet(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = cx.new(|cx| PhoneApp::new(None, window, cx));
+            let mut session = crate::demo::new_session(id, 0, "Test".into(), Vec::new());
+            let turn = &mut session.turns[0];
+            turn.attachments = vec!["1 image".into()];
+            turn.prompt_images = vec![crate::model::ToolImage {
+                key: "submitted-image".into(),
+                name: "Image".into(),
+                mime: "image/png".into(),
+                inline: Some("iVBORw0KGgo=".into()),
+            }];
+            PromptFrame { app, session }
+        });
+        cx.simulate_resize(gpui::size(px(320.), px(240.)));
+        cx.run_until_parked();
+        let chip = cx.debug_bounds("turn-0-attachment-0").unwrap();
+        cx.simulate_click(chip.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.app.read(cx).sheet, Some(Sheet::PromptImage(id, 0, 0)));
+        });
+    }
+
+    #[test]
+    fn submitted_image_labels_map_without_opening_text_files() {
+        let mut turn = Turn::new("Look", "10:00");
+        turn.attachments = vec!["notes.txt".into(), "shot.png".into(), "second.webp".into()];
+        turn.prompt_images = vec![
+            crate::model::ToolImage {
+                key: "one".into(),
+                name: "shot.png".into(),
+                mime: "image/png".into(),
+                inline: None,
+            },
+            crate::model::ToolImage {
+                key: "two".into(),
+                name: "second.webp".into(),
+                mime: "image/webp".into(),
+                inline: None,
+            },
+        ];
+        assert_eq!(prompt_image_for_attachment(&turn, 0), None);
+        assert_eq!(prompt_image_for_attachment(&turn, 1), Some(0));
+        assert_eq!(prompt_image_for_attachment(&turn, 2), Some(1));
+
+        turn.attachments = vec!["2 images".into()];
+        assert_eq!(prompt_image_for_attachment(&turn, 0), Some(0));
+    }
+
+    #[gpui::test]
     fn composer_rail_label_geometry_survives_stage_and_status_transitions(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| {
             let app = cx.new(|cx| PhoneApp::new(None, window, cx));
@@ -2522,7 +2570,6 @@ mod tests {
         for width in [320., 360., 393.] {
             cx.simulate_resize(gpui::size(px(width), px(200.)));
             for local in [false, true] {
-                let mut label_left = None;
                 let mut stop_left = None;
                 for live in StageKind::ALL {
                     // Reuse the same rendered view: a fresh frame for every
@@ -2562,6 +2609,7 @@ mod tests {
                             })
                         });
                         cx.run_until_parked();
+                        let waiting = state == State::NeedsYou && !compacting;
                         let context = format!(
                             "width={width}, local={local}, live={live:?}, state={state:?}, \
                              compacting={compacting}, background={background}"
@@ -2583,35 +2631,33 @@ mod tests {
                             label.left(),
                             "actual label text shifted: {context}"
                         );
-                        let elapsed = cx.debug_bounds("composer-working-elapsed").unwrap();
+                        let elapsed = cx.debug_bounds("composer-working-elapsed");
                         let stop = cx.debug_bounds("composer-stop").unwrap();
-                        assert_eq!(label.left(), content.left() + px(2.), "{context}");
-                        assert_eq!(
-                            *label_left.get_or_insert(label.left()),
-                            label.left(),
-                            "{context}"
-                        );
                         assert_eq!(
                             *stop_left.get_or_insert(stop.left()),
                             stop.left(),
                             "{context}"
                         );
                         assert!(label.size.width > px(0.), "{context}");
-                        assert!(elapsed.size.width > px(0.), "{context}");
-                        assert!(label.bottom() <= elapsed.top(), "{context}");
-                        assert!(label.right() <= stop.left(), "{context}");
-                        assert!(elapsed.right() <= stop.left(), "{context}");
+                        assert_eq!(elapsed.is_none(), waiting, "{context}");
+                        if let Some(elapsed) = elapsed {
+                            assert!(elapsed.size.width > px(0.), "{context}");
+                            assert!(label.top() < elapsed.bottom(), "{context}");
+                            assert!(elapsed.top() < label.bottom(), "{context}");
+                            assert!(label.right() + px(8.) <= elapsed.left(), "{context}");
+                            assert!(elapsed.right() <= stop.left(), "{context}");
+                            if !background {
+                                let timer = cx.debug_bounds("composer-timer-reference").unwrap();
+                                assert!(
+                                    elapsed.size.width >= timer.size.width,
+                                    "timer clipped: {context}"
+                                );
+                            }
+                        }
                         assert!(stop.left() >= strip.left(), "{context}");
                         assert!(stop.right() <= strip.right() - px(8.), "{context}");
                         assert!(stop.top() >= strip.top(), "{context}");
                         assert!(stop.bottom() <= strip.bottom(), "{context}");
-                        if !background {
-                            let timer = cx.debug_bounds("composer-timer-reference").unwrap();
-                            assert!(
-                                elapsed.size.width >= timer.size.width,
-                                "timer clipped: {context}"
-                            );
-                        }
                         let has_rail = state == State::Working && !compacting && !background;
                         let rail = cx.debug_bounds("composer-working-segments");
                         assert_eq!(rail.is_some(), has_rail, "{context}");
@@ -2630,14 +2676,14 @@ mod tests {
                             for block in [first, last] {
                                 assert_eq!(block.size.height, px(4.), "{context}");
                                 assert!(block.size.width > px(0.), "{context}");
-                                assert!(block.top() >= label.bottom(), "{context}");
+                                assert!(block.top() < label.bottom(), "{context}");
+                                assert!(label.top() < block.bottom(), "{context}");
                             }
                             // Bounds are the solid block, NOT the 2 dp painted
-                            // halo. This catches aligning text to a decoration.
-                            assert_eq!(label.left(), first.left(), "{context}");
+                            // halo. The status follows the rail on the same row.
                             assert_eq!(first.left() - px(2.), content.left(), "{context}");
                             assert!(last.right() <= rail.right(), "{context}");
-                            assert_eq!(elapsed.left(), rail.right() + px(8.), "{context}");
+                            assert_eq!(label.left(), rail.right() + px(8.), "{context}");
                         }
                     }
                 }
@@ -2680,7 +2726,7 @@ mod tests {
                 ),
                 (
                     json!({"type":"tool_execution_start","toolCallId":"read","toolName":"read","args":{"path":"a.rs"}}),
-                    "composer-label-Reading a.rs",
+                    "composer-label-Working",
                     Some(0),
                 ),
                 (
@@ -2690,7 +2736,7 @@ mod tests {
                 ),
                 (
                     json!({"type":"tool_execution_start","toolCallId":"edit","toolName":"edit","args":{"path":"a.rs"}}),
-                    "composer-label-Editing a.rs",
+                    "composer-label-Working",
                     Some(1),
                 ),
                 (
@@ -2700,7 +2746,7 @@ mod tests {
                 ),
                 (
                     json!({"type":"tool_execution_start","toolCallId":"bash","toolName":"bash","args":{"command":"check"}}),
-                    "composer-label-Running check",
+                    "composer-label-Working",
                     Some(2),
                 ),
                 (
@@ -2710,12 +2756,12 @@ mod tests {
                 ),
                 (
                     json!({"type":"message_start","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Think"}]}}),
-                    "composer-label-Thinking",
+                    "composer-label-Working",
                     Some(0),
                 ),
                 (
                     json!({"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":1}}),
-                    "composer-label-Writing",
+                    "composer-label-Working",
                     Some(0),
                 ),
                 (
@@ -2725,7 +2771,7 @@ mod tests {
                 ),
                 (
                     json!({"type":"tool_execution_start","toolCallId":"js","toolName":"javascript","args":{"file":"inspect.cjs"}}),
-                    "composer-label-Running inspect.cjs",
+                    "composer-label-Working",
                     Some(0),
                 ),
                 (
@@ -2735,7 +2781,7 @@ mod tests {
                 ),
                 (
                     json!({"type":"auto_retry_start","attempt":1}),
-                    "composer-label-Retrying",
+                    "composer-label-Working",
                     None,
                 ),
                 (
@@ -2872,9 +2918,14 @@ mod tests {
                     let status = cx.debug_bounds("composer-working-status").unwrap();
                     assert!(status.size.width > px(0.));
                     assert!(status.right() <= stop.left());
-                    let elapsed = cx.debug_bounds("composer-working-elapsed").unwrap();
-                    assert!(elapsed.size.width > px(0.));
-                    assert!(elapsed.right() <= stop.left());
+                    let elapsed = cx.debug_bounds("composer-working-elapsed");
+                    if state == State::NeedsYou && !compacting {
+                        assert!(elapsed.is_none());
+                    } else {
+                        let elapsed = elapsed.unwrap();
+                        assert!(elapsed.size.width > px(0.));
+                        assert!(elapsed.right() <= stop.left());
+                    }
                 }
             }
         }
@@ -3480,7 +3531,7 @@ mod tests {
         session.details.background_compacting = false;
         session.state = State::Working;
         assert!(composer_shows_stage(&session, false));
-        session.activity.clear();
+        session.activity = "Running ./install.sh".into();
         assert_eq!(composer_status(&session, false), "Working");
     }
 
