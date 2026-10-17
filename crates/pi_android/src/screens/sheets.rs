@@ -116,6 +116,7 @@ struct ActivityToolRows {
     output_header: Option<usize>,
     output_start: usize,
     output_end: usize,
+    output_width: f32,
     empty: Option<usize>,
 }
 
@@ -186,7 +187,7 @@ fn activity_row_height(row: &ActivityRow) -> f32 {
         ActivityRow::DiffPath(_) => 26.,
         ActivityRow::DiffLine { .. } => 20.,
         ActivityRow::Reference { .. } => 48.,
-        ActivityRow::ToolHeader { .. } => 48.,
+        ActivityRow::ToolHeader { .. } => 56.,
         ActivityRow::ToolTargetLine { .. } => 18.,
         ActivityRow::ToolOutputHeader { .. } => 42.,
         ActivityRow::ToolOutputLine { first, last, .. } => {
@@ -210,13 +211,9 @@ fn activity_horizontal_handle(
 
 fn activity_pan_key(row: &ActivityRow) -> Option<String> {
     match row {
-        ActivityRow::DiffLine { index, .. } => Some(format!("diff:{index}")),
-        ActivityRow::ToolTargetLine { id, line_index, .. } => {
-            Some(format!("{id}:target:{line_index}"))
-        }
-        ActivityRow::ToolOutputLine { id, line_index, .. } => {
-            Some(format!("{id}:output:{line_index}"))
-        }
+        ActivityRow::DiffLine { .. } => Some("diff".into()),
+        ActivityRow::ToolTargetLine { id, .. } => Some(format!("{id}:target")),
+        ActivityRow::ToolOutputLine { id, .. } => Some(format!("{id}:output")),
         _ => None,
     }
 }
@@ -241,6 +238,13 @@ fn activity_tool_rows(rows: &[ActivityRow]) -> Vec<ActivityToolRows> {
                 .iter()
                 .position(|row| !matches!(row, ActivityRow::ToolOutputLine { .. }))
                 .map_or(block_end, |offset| output_start + offset);
+            let output_width = rows[output_start..output_end]
+                .iter()
+                .filter_map(|row| match row {
+                    ActivityRow::ToolOutputLine { width, .. } => Some(*width),
+                    _ => None,
+                })
+                .fold(0., f32::max);
             let empty = rows[block_start..block_end]
                 .iter()
                 .position(|row| matches!(row, ActivityRow::ToolEmpty { .. }))
@@ -251,6 +255,7 @@ fn activity_tool_rows(rows: &[ActivityRow]) -> Vec<ActivityToolRows> {
                 output_header,
                 output_start,
                 output_end,
+                output_width,
                 empty,
             }
         })
@@ -506,6 +511,10 @@ fn incremental_activity_rows(
                 index,
                 id: tool.id.clone().into(),
             }];
+            let output_width = lines
+                .iter()
+                .map(|line| activity_mono_width(line, 12., 28.))
+                .fold(0., f32::max);
             if lines.is_empty() {
                 replacement.push(ActivityRow::ToolEmpty {
                     index,
@@ -518,7 +527,7 @@ fn incremental_activity_rows(
                         index,
                         id: tool.id.clone().into(),
                         line_index,
-                        width: activity_mono_width(&line, 12., 28.),
+                        width: output_width,
                         line,
                         first: line_index == 0,
                         last: line_index + 1 == count,
@@ -538,6 +547,7 @@ fn incremental_activity_rows(
                 output_header: Some(empty),
                 output_start: empty + 1,
                 output_end: empty + replacement_len,
+                output_width,
                 empty: (replacement_len == 2
                     && matches!(rows.get(empty + 1), Some(ActivityRow::ToolEmpty { .. })))
                 .then_some(empty + 1),
@@ -582,6 +592,10 @@ fn incremental_activity_rows(
             *last = false;
         }
         let count = lines.len();
+        let output_width = lines
+            .iter()
+            .map(|line| activity_mono_width(line, 12., 28.))
+            .fold(positions.output_width, f32::max);
         let replacement: Vec<_> = lines
             .into_iter()
             .enumerate()
@@ -589,7 +603,7 @@ fn incremental_activity_rows(
                 index,
                 id: tool.id.clone().into(),
                 line_index: line_index + offset,
-                width: activity_mono_width(&line, 12., 28.),
+                width: output_width,
                 line,
                 first: line_index + offset == 0,
                 last: offset + 1 == count,
@@ -608,6 +622,7 @@ fn incremental_activity_rows(
         let delta = replacement_len as isize - replaced_len as isize;
         tool_rows[index].block_end = block_end.saturating_add_signed(delta);
         tool_rows[index].output_end = replace_start + replacement_len;
+        tool_rows[index].output_width = output_width;
         tool_rows[index].empty = None;
         for later in &mut tool_rows[index + 1..] {
             shift_activity_tool_rows(later, delta);
@@ -1674,6 +1689,11 @@ impl PhoneApp {
         }
         let list_state = view.list.clone();
         let rows = view.rows.clone();
+        let output_widths: Vec<_> = view
+            .tool_rows
+            .iter()
+            .map(|tool| tool.output_width)
+            .collect();
         let horizontal = view.horizontal.clone();
         let offset = list_state.scroll_px_offset_for_scrollbar().y;
         crate::scroll::note_movement(offset - view.offset);
@@ -1763,8 +1783,7 @@ impl PhoneApp {
                         if wrap {
                             line.into_any_element()
                         } else {
-                            let scroll =
-                                activity_horizontal_handle(&horizontal, format!("diff:{index}"));
+                            let scroll = activity_horizontal_handle(&horizontal, "diff".into());
                             div()
                                 .id(("activity-diff-pan", index))
                                 .w_full()
@@ -1842,23 +1861,29 @@ impl PhoneApp {
                             "Running…"
                         };
                         div()
-                            .debug_selector(move || format!("activity-tool-{index}"))
                             .w_full()
-                            .mt(px(12.))
-                            .pt(px(14.))
-                            .px(px(14.))
-                            .pb(px(4.))
-                            .rounded_t(px(12.))
-                            .bg(row_colors.panel)
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(ui::label(tool.name.clone(), &row_colors).flex_1())
-                            .child(ui::hint(status, &row_colors).text_color(if tool.failed {
-                                row_colors.coral
-                            } else {
-                                row_colors.muted
-                            }))
+                            .pt(px(20.))
+                            .child(
+                                div()
+                                    .debug_selector(move || format!("activity-tool-{index}"))
+                                    .w_full()
+                                    .pt(px(14.))
+                                    .px(px(14.))
+                                    .pb(px(4.))
+                                    .rounded_t(px(12.))
+                                    .bg(row_colors.panel)
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(ui::label(tool.name.clone(), &row_colors).flex_1())
+                                    .child(ui::hint(status, &row_colors).text_color(
+                                        if tool.failed {
+                                            row_colors.coral
+                                        } else {
+                                            row_colors.muted
+                                        },
+                                    )),
+                            )
                             .into_any_element()
                     }
                     ActivityRow::ToolTargetLine {
@@ -1883,7 +1908,7 @@ impl PhoneApp {
                         } else {
                             let scroll = activity_horizontal_handle(
                                 &horizontal,
-                                format!("{tool_id}:target:{line_index}"),
+                                format!("{tool_id}:target"),
                             );
                             div()
                                 .id(("activity-target-pan", index * 1_000_000 + line_index))
@@ -1994,6 +2019,7 @@ impl PhoneApp {
                         else {
                             return div().into_any_element();
                         };
+                        let width = output_widths.get(index).copied().unwrap_or(width);
                         let output_line = div()
                             .id(("activity-output-line", index * 1_000_000 + line_index))
                             .debug_selector(move || {
@@ -2016,7 +2042,7 @@ impl PhoneApp {
                         if wrap {
                             output_line.into_any_element()
                         } else {
-                            let output_scroll = format!("{id}:output:{line_index}");
+                            let output_scroll = format!("{id}:output");
                             let scroll = activity_horizontal_handle(&horizontal, output_scroll);
                             div()
                                 .id(("activity-output-pan", index * 1_000_000 + line_index))
@@ -3743,7 +3769,10 @@ fn stretch_words(
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivityRow, activity_content_key, activity_stage, compaction_label, shorten};
+    use super::{
+        ActivityRow, activity_content_key, activity_pan_key, activity_stage, compaction_label,
+        shorten,
+    };
     use crate::model::{Stage, StageKind, StageStatus, ToolActivity, Turn};
 
     #[test]
@@ -3871,6 +3900,98 @@ mod tests {
     }
 
     #[gpui::test]
+    fn changed_sheet_pans_the_whole_diff(cx: &mut gpui::TestAppContext) {
+        use crate::app::PhoneApp;
+        use gpui::{px, size};
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(size(px(384.), px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("diff-spacing", window, cx);
+                app.update_prefs(cx, |prefs| prefs.wrap_lines = false);
+                app.sheet_motion.finish();
+            })
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let view = app.activity_view.as_ref().unwrap();
+            let diff_pan_keys: std::collections::HashSet<_> = view
+                .rows
+                .iter()
+                .filter(|row| matches!(row, ActivityRow::DiffLine { .. }))
+                .filter_map(activity_pan_key)
+                .collect();
+            assert_eq!(diff_pan_keys.len(), 1);
+            assert!(view.horizontal.borrow()["diff"].max_offset().x > px(0.));
+        });
+        let first = cx.debug_bounds("activity-diff-line-0").unwrap();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-120.), px(0.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(
+                app.activity_view.as_ref().unwrap().horizontal.borrow()["diff"]
+                    .offset()
+                    .x
+                    < px(0.)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn activity_tool_cards_have_breathing_room(cx: &mut gpui::TestAppContext) {
+        use crate::{app::PhoneApp, model::SessionId};
+        use gpui::{px, size};
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(size(px(384.), px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("tool-output", window, cx);
+                let stage = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == SessionId(1))
+                    .unwrap()
+                    .turns[0]
+                    .stage_mut(StageKind::Verify);
+                let mut first = stage
+                    .tools
+                    .iter()
+                    .find(|tool| tool.id == "test-command")
+                    .unwrap()
+                    .clone();
+                first.output = "first output".into();
+                let mut second = first.clone();
+                second.id = "second-command".into();
+                second.name = "read".into();
+                second.target = "README.md".into();
+                second.output = "second output".into();
+                stage.tools = vec![first, second];
+                app.sheet_motion.finish();
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let first_bottom = cx
+            .debug_bounds("activity-tool-0-output-0")
+            .unwrap()
+            .bottom();
+        let second_top = cx.debug_bounds("activity-tool-1").unwrap().top();
+        assert!(
+            second_top - first_bottom >= px(16.),
+            "tool card gap was {}px",
+            f32::from(second_top - first_bottom)
+        );
+    }
+
+    #[gpui::test]
     fn looked_sheet_virtualizes_large_tool_output(cx: &mut gpui::TestAppContext) {
         use crate::{app::PhoneApp, model::SessionId};
         use gpui::{px, size};
@@ -3934,11 +4055,20 @@ mod tests {
             assert!(view.list.viewport_bounds().size.height > px(0.));
             assert!(view.list.max_offset_for_scrollbar().y > px(0.));
             assert!(
-                view.horizontal.borrow()["test-command:output:0"]
+                view.horizontal.borrow()["test-command:output"]
                     .max_offset()
                     .x
                     > px(0.)
             );
+            let output_pan_keys: std::collections::HashSet<_> = view
+                .rows
+                .iter()
+                .filter(|row| {
+                    matches!(row, ActivityRow::ToolOutputLine { id, .. } if id.as_ref() == "test-command")
+                })
+                .filter_map(activity_pan_key)
+                .collect();
+            assert_eq!(output_pan_keys.len(), 1);
             (view.list.clone(), view.rows.clone())
         });
         cx.update(|_, cx| app.update(cx, |_, cx| cx.notify()));
@@ -4099,7 +4229,7 @@ mod tests {
         cx.run_until_parked();
         app.read_with(cx, |app, _| {
             assert!(
-                app.activity_view.as_ref().unwrap().horizontal.borrow()["test-command:output:0"]
+                app.activity_view.as_ref().unwrap().horizontal.borrow()["test-command:output"]
                     .offset()
                     .x
                     < px(0.)
