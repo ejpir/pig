@@ -1,3 +1,5 @@
+#![cfg(any(target_os = "linux", target_os = "macos"))]
+
 use pi_core::{remote_files::Client, ssh::SshTarget, transport::Launch};
 use std::{path::Path, time::Duration};
 fn client(root: &Path) -> Client {

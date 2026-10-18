@@ -1,6 +1,8 @@
+use std::process::Command;
+#[cfg(target_os = "linux")]
 use std::{
     io::{Read as _, Write as _},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 const MARKER: &str = "pi-phone:test-device";
@@ -33,11 +35,11 @@ fn legacy_and_current_gateways_dispatch_an_ordinary_capability() {
             capabilities["fileEditing"],
             cfg!(any(target_os = "linux", target_os = "macos"))
         );
-        assert_eq!(capabilities["terminal"], cfg!(unix));
+        assert_eq!(capabilities["terminal"], cfg!(target_os = "linux"));
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn legacy_and_current_gateways_open_a_terminal() {
     // Open protocol v1 at 80x24 in the account's home directory, then close.
