@@ -133,7 +133,7 @@ impl Options {
 }
 
 pub fn pair(arguments: &[String]) -> Result<()> {
-    if !cfg!(unix) {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
         bail!("QR pairing currently requires OpenSSH on macOS or Linux");
     }
     let mut options = Options::parse(arguments)?;
@@ -1796,7 +1796,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(unix))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     fn qr_pairing_rejects_unsupported_platforms_before_touching_host_state() {
         assert!(
             pair(&[])
@@ -1845,7 +1845,7 @@ mod tests {
     }
 
     #[test]
-    fn staged_phone_gateways_require_their_durable_commit_marker() {
+    fn gateway_authorization_requires_its_durable_commit_marker() {
         let directory = isolated();
         let marker = directory.path().join("authorization");
         assert!(require_gateway_authorization_at(&marker).is_err());
@@ -1853,7 +1853,11 @@ mod tests {
         assert!(require_gateway_authorization_at(&marker).is_err());
         fs::write(&marker, b"authorized\n").unwrap();
         require_gateway_authorization_at(&marker).unwrap();
+    }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn staged_phone_gateways_include_their_durable_commit_marker() {
         let private = PrivateKey::from(Ed25519Keypair::from_seed(&[19; 32]));
         let authorization_id = "44444444444444444444444444444444";
         let (line, phone_marker) = staged_permanent_line(
@@ -2091,6 +2095,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn qr_pairing_replaces_every_entry_with_the_same_phone_key() {
         let directory = isolated();
@@ -2126,6 +2131,7 @@ mod tests {
         assert_eq!(text.matches(encoded).count(), 1);
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn unpublished_phone_authorization_rolls_back_without_losing_other_edits() {
         let directory = isolated();
@@ -2169,6 +2175,7 @@ mod tests {
         assert_eq!(fs::read(&keys).unwrap(), b"keep\nexternal revocation\n");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn rollback_bypasses_a_full_recovery_quota() {
         let directory = isolated();

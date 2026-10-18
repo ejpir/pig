@@ -37,7 +37,7 @@ cargo fmt -p pi_visual -p pi_visual_ui -p pi_markdown -p pi_core -p pi_remote \
   -p pi_settings -p terminal -p pi_terminal -p pi_terminal_mobile -p pi-desktop -- --check
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
-cargo install cargo-about --version 0.9.2 --locked
+cargo install cargo-about --version 0.9.2 --locked --features cli
 python scripts/rust_notices.py --check
 
 # Zed test-support features must run separately from workspace tests.

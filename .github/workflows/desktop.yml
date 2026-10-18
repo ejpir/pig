@@ -70,7 +70,7 @@ jobs:
           python -m unittest discover -s experiments/bun-embedding -p 'test_*_tooling.py' -v
       - name: Verify generated inputs and lockfiles are current
         run: |
-          cargo install cargo-about --version 0.9.2 --locked
+          cargo install cargo-about --version 0.9.2 --locked --features cli
           python scripts/rust_notices.py --check
           git diff --exit-code
       # Do not traverse/format the sibling Zed checkout.

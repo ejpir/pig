@@ -1232,6 +1232,9 @@ fn acl(file: &File) -> Result<Option<Vec<u8>>> {
 #[cfg(target_os = "macos")]
 fn set_acl(file: &File, acl_text: Option<&[u8]>) -> Result<()> {
     const ACL_TYPE_EXTENDED: i32 = 0x0000_0100;
+    if acl(file)?.as_deref() == acl_text {
+        return Ok(());
+    }
     unsafe {
         match acl_text {
             Some(text) => {
