@@ -267,7 +267,14 @@ fn diff(old: &ImeState, new: &ImeState, start: usize) -> Vec<Edit> {
     let changed = prefix..b.len() - suffix;
     match &new.composing {
         // Typing within a composition: replace the old composing text whole.
-        Some(region) if region.start <= changed.start && changed.end <= region.end => {
+        Some(region)
+            if old
+                .composing
+                .as_ref()
+                .is_none_or(|old_region| old_region.start == region.start)
+                && region.start <= changed.start
+                && changed.end <= region.end =>
+        {
             let grown = b.len() as isize - a.len() as isize;
             let old_region = region.start..(region.end as isize - grown) as usize;
             edits.push(compose_over(&old_region, region));
@@ -287,21 +294,37 @@ fn diff(old: &ImeState, new: &ImeState, start: usize) -> Vec<Edit> {
             if old.composing.is_some() {
                 edits.push(Edit::Commit);
             }
-            edits.push(Edit::Replace {
-                range: shift(&(prefix..a.len() - suffix)),
-                text: String::from_utf16_lossy(&b[changed.clone()]),
-            });
             match composing {
                 Some(region) => {
-                    edits.push(compose(region));
+                    // A keyboard can commit/correct one word and begin the next
+                    // composition in the same report. Apply the plain committed
+                    // document first, then insert the new marked region; no UTF-16
+                    // unit may be delivered by both Replace and Compose.
+                    let mut plain = b.clone();
+                    plain.drain(region.clone());
+                    if a != plain {
+                        let (plain_prefix, plain_suffix) = common_affixes(&a, &plain);
+                        edits.push(Edit::Replace {
+                            range: shift(&(plain_prefix..a.len() - plain_suffix)),
+                            text: String::from_utf16_lossy(
+                                &plain[plain_prefix..plain.len() - plain_suffix],
+                            ),
+                        });
+                    }
+                    edits.push(compose_over(&(region.start..region.start), region));
                     if !selection_in(region) {
                         edits.push(Edit::Select(shift(&new.selection)));
                     }
                 }
-                None if new.selection != (changed.end..changed.end) => {
-                    edits.push(Edit::Select(shift(&new.selection)));
+                None => {
+                    edits.push(Edit::Replace {
+                        range: shift(&(prefix..a.len() - suffix)),
+                        text: String::from_utf16_lossy(&b[changed.clone()]),
+                    });
+                    if new.selection != (changed.end..changed.end) {
+                        edits.push(Edit::Select(shift(&new.selection)));
+                    }
                 }
-                None => {}
             }
         }
     }
@@ -456,6 +479,63 @@ mod tests {
                     text: "lo ".into()
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn committed_correction_and_new_composition_do_not_duplicate_the_preedit() {
+        let sentinel = "\u{200b}";
+        let mut corrected = mirror(&format!("{sentinel}helo"), 5);
+        corrected.state.composing = Some(1..5);
+        assert_eq!(
+            corrected.reported(2, 0, state(&format!("{sentinel}hello n"), 8..8, Some(7..8))),
+            [
+                Edit::Commit,
+                Edit::Replace {
+                    range: 4..5,
+                    text: "lo ".into(),
+                },
+                Edit::Compose {
+                    range: 7..7,
+                    text: "n".into(),
+                    selection: 1..1,
+                },
+            ]
+        );
+
+        let mut emoji = mirror(&format!("{sentinel}helo"), 5);
+        emoji.state.composing = Some(1..5);
+        assert_eq!(
+            emoji.reported(
+                2,
+                0,
+                state(&format!("{sentinel}hello 🐈"), 9..9, Some(7..9))
+            ),
+            [
+                Edit::Commit,
+                Edit::Replace {
+                    range: 4..5,
+                    text: "lo ".into(),
+                },
+                Edit::Compose {
+                    range: 7..7,
+                    text: "🐈".into(),
+                    selection: 2..2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn deleting_the_only_sentinel_remains_an_exact_replacement() {
+        let sentinel = "\u{200b}";
+        let mut mirror = mirror(sentinel, 1);
+        assert_eq!(
+            mirror.reported(2, 0, state("", 0..0, None)),
+            [Edit::Replace {
+                range: 0..1,
+                text: String::new(),
+            }]
         );
     }
 

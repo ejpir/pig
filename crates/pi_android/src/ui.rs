@@ -144,6 +144,16 @@ pub fn composer_stop_button(
 
 /// A 48 dp round touch target around a 20 dp icon.
 pub fn tap(id: impl Into<ElementId>, glyph: &str, colors: &Theme) -> Stateful<Div> {
+    tap_colored(id, glyph, colors.secondary, colors)
+}
+
+/// A 48 dp icon target whose state is communicated by both shape and colour.
+pub fn tap_colored(
+    id: impl Into<ElementId>,
+    glyph: &str,
+    foreground: Hsla,
+    colors: &Theme,
+) -> Stateful<Div> {
     let id = id.into();
     let probe = crate::testing::probe(format!("{id:?}"));
     div()
@@ -157,7 +167,7 @@ pub fn tap(id: impl Into<ElementId>, glyph: &str, colors: &Theme) -> Stateful<Di
         .justify_center()
         .rounded_full()
         .active(|style| style.bg(colors.selected))
-        .child(icon(glyph, 20., colors.secondary))
+        .child(icon(glyph, 20., foreground))
 }
 
 /// The top app bar: 56 dp, with a title and an optional subtitle.

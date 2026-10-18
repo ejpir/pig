@@ -5,12 +5,15 @@ mod deletion;
 mod directories;
 mod durable;
 mod executable;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod files;
 mod history;
 mod pairing;
 mod schedules;
 mod server;
 mod sessions;
+#[cfg(target_os = "linux")]
+mod terminal;
 use anyhow::{Context, Result, bail};
 use pi_core::ssh::{PROTOCOL_VERSION, VERSION};
 
@@ -26,7 +29,17 @@ pub(crate) fn platform() -> &'static str {
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("gateway") {
-        anyhow::ensure!(args.len() == 2, "Invalid SSH gateway command");
+        anyhow::ensure!(
+            matches!(args.as_slice(), [_, _marker])
+                || matches!(args.as_slice(), [_, version, _marker] if version == "2")
+                || matches!(args.as_slice(), [_, version, _marker, _authorization] if version == "3"),
+            "Invalid SSH gateway command"
+        );
+        if let [_, version, _marker, authorization] = args.as_slice()
+            && version == "3"
+        {
+            pairing::require_gateway_authorization(authorization)?;
+        }
         args = pairing::gateway_command()?;
         return dispatch(args, true);
     }
@@ -49,7 +62,7 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
         ),
         Some("--capabilities") => println!(
             "{}",
-            serde_json::json!({"pi":true,"durable":cfg!(unix),"schedules":cfg!(any(target_os = "linux", target_os = "macos")),"durableExperimental":true,"watchers":true,"sessions":true,"directories":true,"commands":true,"jjHistory":true,"deleteSessions":cfg!(unix),"imagePrompts":cfg!(feature = "bundled-durable")})
+            serde_json::json!({"pi":true,"durable":cfg!(unix),"schedules":cfg!(any(target_os = "linux", target_os = "macos")),"durableExperimental":true,"watchers":true,"sessions":true,"directories":true,"fileEditing":cfg!(any(target_os = "linux", target_os = "macos")),"commands":true,"jjHistory":true,"deleteSessions":cfg!(unix),"imagePrompts":cfg!(feature = "bundled-durable"),"terminal":cfg!(target_os = "linux")})
         ),
         Some("activate") => {
             anyhow::ensure!(
@@ -77,11 +90,12 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
         }
         Some("--licenses") => {
             println!(
-                "{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{}",
                 include_str!("../../../LICENSE"),
                 include_str!("../../../THIRD_PARTY.md"),
                 include_str!("../../../licenses/PI-MIT.txt"),
-                include_str!("../../../licenses/BUN-LICENSE.md")
+                include_str!("../../../licenses/BUN-LICENSE.md"),
+                include_str!("../../../licenses/PORTABLE-PTY-MIT.txt")
             );
             #[cfg(feature = "bundled-backend")]
             println!("{}", include_str!(env!("PI_DESKTOP_BACKEND_NOTICES")));
@@ -129,7 +143,20 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
             anyhow::ensure!(args.next().is_none(), "Unexpected directories argument");
             directories::print(&path, show_hidden)?;
         }
-        Some("files") if args.next().as_deref() == Some("--stdio") => files::serve()?,
+        Some("files") if args.next().as_deref() == Some("--stdio") => {
+            anyhow::ensure!(args.next().is_none(), "Unexpected files argument");
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            files::serve()?;
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            bail!("Secure file editing is unavailable on this platform");
+        }
+        Some("terminal") if args.next().as_deref() == Some("--stdio") => {
+            anyhow::ensure!(args.next().is_none(), "Unexpected terminal argument");
+            #[cfg(target_os = "linux")]
+            terminal::stdio()?;
+            #[cfg(not(target_os = "linux"))]
+            bail!("Terminal sessions are unavailable on this platform");
+        }
         Some("schedules") => {
             anyhow::ensure!(
                 args.next().as_deref() == Some("--stdio") && args.next().is_none(),
@@ -169,7 +196,7 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
             server::daemon(target)?;
         }
         _ => bail!(
-            "Usage: pi-desktop-remote activate | pair [OPTIONS] | connect --stdio | files --stdio | schedules --stdio | scheduler start/stop/status/install --confirm | sessions | models | commands | directories --path PATH [--show-hidden] | jj-history --path PATH | jj-enable --path PATH | jj-restore --path PATH --operation ID | pi [ARGS] | --version | --licenses"
+            "Usage: pi-desktop-remote activate | pair [OPTIONS] | connect --stdio | files --stdio | terminal --stdio | schedules --stdio | scheduler start/stop/status/install --confirm | sessions | models | commands | directories --path PATH [--show-hidden] | jj-history --path PATH | jj-enable --path PATH | jj-restore --path PATH --operation ID | pi [ARGS] | --version | --licenses"
         ),
     }
     Ok(())

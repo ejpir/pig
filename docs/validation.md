@@ -7,7 +7,7 @@ Recorded validation includes Linux aarch64, Linux x86_64 and an Android x86_64 e
 | Area | Evidence | Scope |
 | --- | --- | --- |
 | Rust | Workspace regression tests; separate fake-LSP tests; warnings-denied Clippy | Session lifecycle, transport, rendering isolation, input, editor and jj behavior |
-| Desktop extension | Channel unit tests; pi_core's transport test and a native Xvfb capture against Pi's 1.0.0 release binary | Routing, `hello` and reconnection, metadata commands, active tools, settings, sessions, trust, tree navigation, reload and fork into a folder |
+| Desktop extension | Channel unit tests; pi_core's transport test and a native Xvfb capture against Pi's 1.3.0 release binary | Routing, `hello` and reconnection, metadata commands, active tools, settings, sessions, trust, tree navigation, reload and fork into a folder |
 | Embedded pi | Desktop unpack tests; `fetch_pi.py` digest, layout and version checks | Cache extraction of the embedded archive |
 | Packaging | Offline archive and release-policy tests | Binary architecture, staging, notices, exact target matrix, checksums and tag validation |
 | Native UI | Capture scripts driving real GPUI windows and the X11 clipboard | Layout, selection/copy, scrolling, dialogs, navigation and file operations |
@@ -16,7 +16,7 @@ These checks were recorded in separate runs, not one combined release qualificat
 
 ## Reproduce the checks
 
-Install the [native prerequisites](../README.md#native-prerequisites-and-packaging) and use the sibling Zed checkout pinned in [the workflow](../.github/workflows/desktop.yml). CI pins Rust 1.98.1, Python 3.12 and Node 22.19.0 (npm collects Pi's license notices when packaging).
+Install the [build prerequisites](../README.md#build-and-run) and use the sibling Zed checkout pinned in [the workflow](../.github/workflows/desktop.yml). CI pins Rust 1.98.1, Python 3.12, Node 22.19.0 and Bun 1.4.3 (npm collects bundled dependency notices when packaging).
 
 From the repository root:
 
@@ -25,11 +25,20 @@ From the repository root:
 export CARGO_TARGET_DIR=target/linux
 export CARGO_INCREMENTAL=0
 
+# Rebuild ignored Local bundles; their manifests make Cargo reject stale inputs.
+(cd crates/pi_local && npm ci --ignore-scripts && bun run build)
+(cd backend/durable && npm ci --ignore-scripts)
+python3 experiments/bun-embedding/build_local.py
+git diff --exit-code  # generated work must not drift tracked inputs or lockfiles
+
 # Format only this repository, not the sibling Zed checkout.
-cargo fmt -p pi_core -p pi_editor -p pi_jj -p pi_lsp_bridge \
-  -p pi_settings -p pi_terminal -p pi-desktop -p pi_remote -p pi_android -- --check
+cargo fmt -p pi_visual -p pi_visual_ui -p pi_markdown -p pi_core -p pi_remote \
+  -p pi_android -p gpui_android -p pi_editor -p pi_jj -p pi_lsp_bridge \
+  -p pi_settings -p terminal -p pi_terminal -p pi_terminal_mobile -p pi-desktop -- --check
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
+cargo install cargo-about --version 0.9.2 --locked
+python scripts/rust_notices.py --check
 
 # Zed test-support features must run separately from workspace tests.
 cargo test --locked -p pi_lsp_bridge --features fake-lsp
@@ -120,15 +129,7 @@ PI_DESKTOP_TEST_DURABLE_RUNNER="$PWD/artifacts/durable/pi-desktop-durable-fixtur
   cargo test --locked -p pi_remote --test durable --test schedules -- --ignored
 ```
 
-The default workspace run encountered an unchanged terminal test assumption:
-`/bin/sh` is Bash 5.3 here and enables bracketed paste, while
-`multi_line_text_is_not_typed_without_bracketed_paste` assumes it is disabled.
-All **712** workspace tests passed (24 gated tests ignored) with an isolated
-temporary `INPUTRC` containing `set enable-bracketed-paste off`; neither shell
-configuration nor terminal source was changed. Both run logs are retained.
-Actual systemd/launchd installation, macOS scheduling and live-provider runs
-remain unverified; synthetic manager tests and faux runtime tests are not
-substitutes for those checks.
+Current terminal coverage includes binary frame fragmentation and limits, bounded queue overflow, external PTY cleanup, retained Android views, one-shot pinch geometry, IME replacement and process-tree termination with a SIGHUP-ignoring descendant. Actual systemd/launchd installation, macOS scheduling and live-provider runs remain unverified; synthetic manager tests and faux runtime tests are not substitutes for those checks.
 
 ## CI and publication
 
@@ -141,7 +142,7 @@ The workflow runs checks on Linux amd64 and builds native packages for:
 | macOS arm64 | `aarch64-apple-darwin` | `pi-desktop-macos-arm64.zip` |
 | Windows amd64 | `x86_64-pc-windows-msvc` | `pi-desktop-windows-amd64.zip` |
 
-Pushes, pull requests and manual runs upload package artifacts. Version tags publish all four archives plus `SHA256SUMS` only after checks and native builds succeed. Missing or unexpected files fail validation; published assets are not overwritten. Validation artifacts are separate from release packages.
+Pushes, pull requests and manual runs upload package artifacts. Version tags publish the four desktop archives, four helpers, Android APK, Android Local runtime and relink archives, and `SHA256SUMS` only after checks and native builds succeed. Missing or unexpected files fail validation; published assets are not overwritten. Validation artifacts are separate from release packages.
 
 ## Unverified behavior
 

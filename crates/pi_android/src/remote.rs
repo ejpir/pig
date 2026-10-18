@@ -2,11 +2,13 @@
 //! installs immutable content objects and activates one stable helper path. The
 //! phone uses that explicit selection rather than directory mtimes.
 
-use crate::ssh::{Connection, Pipe, quote};
+use crate::ssh::{BytePipe, Connection, Pipe, quote};
 use anyhow::{Context as _, Result, bail, ensure};
 use pi_core::{
     pairing::HelperCapabilities,
-    remote_files::{FILE_PROTOCOL_VERSION, Request as FileRequest, Tree},
+    remote_files::{
+        Document, FILE_PROTOCOL_VERSION, Recovery, RecoveryArtifact, Request as FileRequest, Tree,
+    },
     ssh::{PROTOCOL_VERSION, RemoteBackend, SshTarget},
 };
 use semver::Version;
@@ -158,6 +160,22 @@ impl Helper {
         self.protocol == Some(PROTOCOL_VERSION)
             && self.capabilities.durable
             && self.capabilities.watchers
+    }
+
+    pub fn can_edit_files(&self) -> bool {
+        self.protocol == Some(PROTOCOL_VERSION) && self.capabilities.file_editing
+    }
+
+    pub fn require_file_editing(&self) -> Result<()> {
+        self.require_capability(self.can_edit_files(), "saving project files")
+    }
+
+    pub fn can_open_terminal(&self) -> bool {
+        self.protocol == Some(PROTOCOL_VERSION) && self.capabilities.terminal
+    }
+
+    pub fn require_terminal(&self) -> Result<()> {
+        self.require_capability(self.can_open_terminal(), "opening a terminal")
     }
 
     pub fn require_attach(&self, action: &str) -> Result<()> {
@@ -323,8 +341,8 @@ pub fn choose(listing: &str) -> Result<Helper> {
 }
 
 pub async fn find(connection: &Connection) -> Result<Helper> {
-    // A paired key cannot run a shell to search the account. Its forced gateway
-    // exposes only discover, --version, --capabilities and the helper API.
+    // Discovery still uses the forced gateway rather than searching the account;
+    // it is one of the explicitly allowlisted helper operations.
     let discovered = connection.run("pi-desktop-remote discover".into()).await?;
     if discovered.status == Some(0)
         && let Ok(helper) = serde_json::from_str::<pi_core::pairing::Helper>(&discovered.stdout)
@@ -655,15 +673,26 @@ async fn files_channel(
 ) -> Result<Pipe> {
     let pipe = connection.pipe(helper.command("files --stdio")?).await?;
     let target = SshTarget::new(host.to_owned(), cwd.to_owned())?;
-    file_request(
+    // Protocol 1 supports safe list/read against older installed helpers.
+    // Protocol 2 adds transactional saves and explicit recovery management.
+    let version = if helper.capabilities.file_editing {
+        FILE_PROTOCOL_VERSION
+    } else {
+        1
+    };
+    let attached = file_request(
         &pipe,
         "phone-files-attach",
         FileRequest::FilesAttach {
-            version: FILE_PROTOCOL_VERSION,
-            target,
+            version,
+            target: target.clone(),
         },
     )
     .await?;
+    ensure!(
+        attached["version"] == version && attached["target"] == serde_json::to_value(target)?,
+        "Remote file channel identity mismatch"
+    );
     Ok(pipe)
 }
 
@@ -702,28 +731,118 @@ pub async fn project_files(
         .collect())
 }
 
-/// A text file in a project, up to 1 MB, read-only.
+/// A text file in a project, including the revision required for an
+/// optimistic save.
 pub async fn read_file(
     connection: &Connection,
     helper: &Helper,
     host: &str,
     cwd: &str,
     path: &str,
-) -> Result<String> {
+) -> Result<Document> {
     let pipe = files_channel(connection, helper, host, cwd).await?;
-    let document: pi_core::remote_files::Document = serde_json::from_value(
+    Ok(serde_json::from_value(
         file_request(
             &pipe,
             "phone-files-read",
             FileRequest::FilesRead { path: path.into() },
         )
         .await?,
-    )?;
-    Ok(document.text)
+    )?)
+}
+
+pub async fn file_recoveries(
+    connection: &Connection,
+    helper: &Helper,
+    host: &str,
+    cwd: &str,
+) -> Result<Vec<Recovery>> {
+    helper.require_file_editing()?;
+    let pipe = files_channel(connection, helper, host, cwd).await?;
+    Ok(serde_json::from_value(
+        file_request(
+            &pipe,
+            "phone-files-recoveries",
+            FileRequest::FilesRecoveries,
+        )
+        .await?,
+    )?)
+}
+
+pub async fn read_file_recovery(
+    connection: &Connection,
+    helper: &Helper,
+    host: &str,
+    cwd: &str,
+    id: String,
+    artifact: RecoveryArtifact,
+) -> Result<Document> {
+    helper.require_file_editing()?;
+    let pipe = files_channel(connection, helper, host, cwd).await?;
+    Ok(serde_json::from_value(
+        file_request(
+            &pipe,
+            "phone-files-recovery-read",
+            FileRequest::FilesRecoveryRead { id, artifact },
+        )
+        .await?,
+    )?)
+}
+
+pub async fn delete_file_recovery(
+    connection: &Connection,
+    helper: &Helper,
+    host: &str,
+    cwd: &str,
+    id: String,
+) -> Result<()> {
+    helper.require_file_editing()?;
+    let pipe = files_channel(connection, helper, host, cwd).await?;
+    file_request(
+        &pipe,
+        "phone-files-recovery-delete",
+        FileRequest::FilesRecoveryDelete { id },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Saves only against the exact revision that was read. Revision failures are
+/// returned to the caller and are never retried automatically.
+pub async fn save_file(
+    connection: &Connection,
+    helper: &Helper,
+    host: &str,
+    cwd: &str,
+    path: &str,
+    text: String,
+    revision: String,
+) -> Result<Document> {
+    helper.require_file_editing()?;
+    let pipe = files_channel(connection, helper, host, cwd).await?;
+    Ok(serde_json::from_value(
+        file_request(
+            &pipe,
+            "phone-files-save",
+            FileRequest::FilesSave {
+                path: path.into(),
+                text,
+                revision,
+            },
+        )
+        .await?,
+    )?)
 }
 
 /// Attaches to a session, starting its daemon if it isn't up. Records from
 /// the session arrive on the pipe; commands go into it.
+pub async fn open_terminal(connection: &Connection, helper: &Helper) -> Result<BytePipe> {
+    helper.require_terminal()?;
+    connection
+        .byte_pipe(helper.command("terminal --stdio")?)
+        .await
+}
+
 pub async fn attach(connection: &Connection, helper: &Helper, target: &SshTarget) -> Result<Pipe> {
     helper.require_attach("opening sessions")?;
     let pipe = connection.pipe(helper.command("connect --stdio")?).await?;

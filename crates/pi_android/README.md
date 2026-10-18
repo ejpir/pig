@@ -83,10 +83,12 @@ Then tap **On your computer** and **Scan computer QR** in the Android app, scan 
 compare the six-digit confirmation code shown on both devices. Press Enter on
 the computer to allow it. The QR expires after two minutes and its one-use key
 is replaced with the phone's permanent Ed25519 key only after confirmation.
-The installed key is restricted to Pi helper commands, and pairing uses the
-computer's existing SSH server—there is no extra listening port or pairing
-daemon. The QR also pins the SSH host fingerprint, so the first connection is
-not trust-on-first-use.
+The installed key is restricted to Pi helper commands, including file editing
+on Linux/macOS and a Linux helper-owned shell running as that account. Pairing uses the computer's
+existing SSH server—there is no extra listening port or pairing daemon. The QR
+also pins the SSH host fingerprint, so the first connection is not
+trust-on-first-use. Existing pairings gain Terminal on Linux when their helper is updated;
+activation upgrades the old forced command in place.
 
 Manual setup is behind **Set up with an SSH key instead**. Enter `you@computer` (an IP
 address or a Tailscale name works where `.local` names don't), and tap Connect.
@@ -95,9 +97,10 @@ step into `~/.ssh/authorized_keys` there, and connect again. The computer's host
 key is kept then; a different one later is refused until the computer is
 forgotten in Settings.
 
-Connecting is step one. Step two offers recent projects and a read-only folder
-browser on that computer: Home, parent folders, hidden folders, and an optional
-path field. Choose **Use this folder** to open the new-session composer. No
+Connecting is step one. Step two offers recent projects and a folder browser
+on that computer: Home, parent folders, hidden folders, and an optional path
+field. Project text files open in the native source workspace described below.
+Choose **Use this folder** to open the new-session composer. No
 session starts while browsing. **Just view sessions** skips project selection.
 The last chosen project is remembered separately for each computer. Folder
 browsing requires the updated helper's `directories` command; an older helper
@@ -113,6 +116,30 @@ shows an update message and leaves recent projects available.
   optional manual path entry. The prompt shows at once, then Pi's turns: the stages its
   tools went through, the files it changed with Pi's own diffs, the last check
   it ran, and its answer.
+- **Native source workspace:** tap a text file in the project browser to open a
+  retained editor tab with a monospace, no-wrap source view, horizontal and
+  vertical scrolling, IME/selection/clipboard support, line and column status,
+  and a 128 KiB mobile editing limit. Up to eight tabs keep their drafts and selection.
+  The folder button reopens the file drawer. Bundled Tree-sitter grammars and
+  Zed queries provide real incremental highlighting, syntax breadcrumbs,
+  expand-selection, and the Structure sheet; unsupported languages remain plain
+  text rather than pretending to have semantic or LSP data.
+
+  Saving is explicit and optimistic: the phone submits the exact revision it
+  read, and the helper atomically replaces only that file. A successful reply
+  advances the saved baseline without replacing text typed while the request was
+  in flight. Conflicts keep both the local draft and the newer remote document,
+  then offer **Reload** or the explicit **Keep mine** rebase. If transport loss
+  makes the result uncertain, Pi only re-reads on **Check** and never silently
+  replays the write. CRLF is preserved; mixed legacy endings are read-only. Files
+  over 128 KiB and within the helper's 1 MiB text limit show a bounded read-only
+  preview; unsupported larger files fail closed. Older helpers can still browse
+  and read files but must advertise `fileEditing` before the phone enables writes.
+- **Remote terminal:** tap the terminal icon in a session to open its project in
+  an account shell. Back keeps that shell, scrollback and zoom ready to restore;
+  **Close** ends it, and opening an exited shell starts a fresh one. Pinch applies
+  one resize when the gesture ends, avoiding repeated full-screen reflow. Terminal
+  bytes stay outside Pi's transcript and model context.
 - **Follow-ups, Stop and the queue:** a follow-up during a run waits for it;
   Stop aborts the run on the computer. New tasks, follow-ups and revisions use
   the same multiline composer, with separate model and thinking controls.
@@ -389,7 +416,8 @@ discovery before a session exists, prompts, image bytes reaching the provider,
 follow-ups, a second watcher, host-key rejection and deletion that keeps project
 files. It then creates a one-use QR offer, pins the host key, exchanges the
 bootstrap key after confirmation, reconnects with the phone key, and proves the
-permanent forced-command key cannot run a shell. It never changes the account's
+permanent forced-command key cannot bypass the helper allowlist to run an arbitrary
+SSH command. It never changes the account's
 SSH service, real authorized keys or provider configuration; detached test
 daemons and temporary keys are cleaned up. The Rust tests refuse keys/projects
 outside this harness's temporary folder.

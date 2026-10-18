@@ -5,27 +5,35 @@
 //! (embedded) layout, blocks below the cursor, search highlights and hover tooltips,
 //! and paints the cursor and selection itself.
 
-use crate::{TerminalStyle, TerminalView};
-use gpui::{
-    App, BorderStyle, Bounds, ContentMask, DispatchPhase, Element, ElementId, Entity, FocusHandle,
-    Font, FontFeatures, FontStyle, FontWeight, GlobalElementId, HighlightStyle, Hitbox, Hsla,
-    InputHandler, InteractiveElement, Interactivity, IntoElement, LayoutId, ModifiersChangedEvent,
-    MouseButton, MouseMoveEvent, Pixels, Point as GpuiPoint, ShapedLine,
-    StatefulInteractiveElement, StrikethroughStyle, TextRun, TextStyle, UTF16Selection,
-    UnderlineStyle, WhiteSpace, Window, fill, outline, point, px, relative, size,
-};
-use itertools::Itertools;
-use settings::Settings;
-use std::mem;
-use terminal::{
-    Cell, Color, Content, CursorShape, IndexedCell, Modes, MouseInputMode, NamedColor, Point,
+use crate::terminal::{
+    self, Cell, Color, Content, CursorShape, IndexedCell, Modes, MouseInputMode, NamedColor, Point,
     Range, Terminal, TerminalBounds,
     is_app_chosen_exact_color as terminal_is_app_chosen_exact_color, is_default_background_color,
     terminal_settings::TerminalSettings,
 };
+use crate::{INPUT_SENTINEL, TerminalStyle, TerminalView};
+use gpui::{
+    App, BorderStyle, Bounds, ContentMask, DispatchPhase, Element, ElementId, Entity, FocusHandle,
+    Font, FontFeatures, FontStyle, FontWeight, GlobalElementId, HighlightStyle, Hitbox, Hsla,
+    InputHandler, InteractiveElement, Interactivity, IntoElement, LayoutId, LongPressEvent,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point as GpuiPoint, ShapedLine, StatefulInteractiveElement, StrikethroughStyle,
+    TextInputAction, TextInputConfiguration, TextRun, TextStyle, TouchPhase, UTF16Selection,
+    UnderlineStyle, WhiteSpace, Window, fill, outline, point, px, relative, size,
+};
+use itertools::Itertools;
+#[cfg(not(target_os = "android"))]
+use settings::Settings;
+use std::mem;
+#[cfg(not(target_os = "android"))]
 use ui::utils::ensure_minimum_contrast;
 use util::ResultExt;
 use zed_theme::{ActiveTheme, Theme};
+
+#[cfg(target_os = "android")]
+fn ensure_minimum_contrast(foreground: Hsla, _: Hsla, _: f32) -> Hsla {
+    foreground
+}
 
 /// The information generated during layout that is necessary for painting.
 pub struct LayoutState {
@@ -646,10 +654,78 @@ impl TerminalElement {
             let focus = focus.clone();
             move |e, window, cx| {
                 window.focus(&focus, cx);
+                window.request_virtual_keyboard();
                 terminal.update(cx, |terminal, cx| {
                     terminal.mouse_down(e, mouse_input_mode, cx);
                     cx.notify();
                 })
+            }
+        });
+
+        window.on_mouse_event({
+            let terminal = self.terminal.clone();
+            let hitbox = hitbox.clone();
+            let focus = focus.clone();
+            move |event: &LongPressEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                if event.phase == TouchPhase::Started {
+                    if !hitbox.is_hovered(window) {
+                        return;
+                    }
+                } else if !window.has_long_press_capture(&terminal) {
+                    return;
+                }
+                match event.phase {
+                    TouchPhase::Started => {
+                        window.focus(&focus, cx);
+                        window.request_virtual_keyboard();
+                        terminal.update(cx, |terminal, cx| {
+                            terminal.mouse_down(
+                                &MouseDownEvent {
+                                    button: MouseButton::Left,
+                                    position: event.start_position,
+                                    click_count: 2,
+                                    ..Default::default()
+                                },
+                                MouseInputMode::LocalSelection,
+                                cx,
+                            );
+                            cx.notify();
+                        });
+                        window.capture_long_press(&terminal);
+                    }
+                    TouchPhase::Moved => terminal.update(cx, |terminal, cx| {
+                        terminal.mouse_drag(
+                            &MouseMoveEvent {
+                                position: event.position,
+                                pressed_button: Some(MouseButton::Left),
+                                ..Default::default()
+                            },
+                            hitbox.bounds,
+                            MouseInputMode::LocalSelection,
+                            cx,
+                        );
+                        cx.notify();
+                    }),
+                    TouchPhase::Ended | TouchPhase::Cancelled => {
+                        terminal.update(cx, |terminal, cx| {
+                            terminal.mouse_up(
+                                &MouseUpEvent {
+                                    button: MouseButton::Left,
+                                    position: event.position,
+                                    ..Default::default()
+                                },
+                                MouseInputMode::LocalSelection,
+                                cx,
+                            );
+                            cx.notify();
+                        });
+                    }
+                }
+                window.prevent_default();
+                cx.stop_propagation();
             }
         });
 
@@ -793,7 +869,16 @@ impl Element for TerminalElement {
             cx,
             |_, _, hitbox, window, cx| {
                 let hitbox = hitbox.unwrap();
-                let style = cx.global::<TerminalStyle>().clone();
+                let base_style = cx.global::<TerminalStyle>().clone();
+                let (paint_font_scale, terminal_font_scale) = {
+                    let view = self.view.read(cx);
+                    (view.paint_font_scale(), view.terminal_font_scale())
+                };
+                let terminal_font_size = base_style.font_size * terminal_font_scale;
+                let terminal_line_height = base_style.line_height * terminal_font_scale;
+                let mut style = base_style;
+                style.font_size *= paint_font_scale;
+                style.line_height *= paint_font_scale;
                 let minimum_contrast = TerminalSettings::get_global(cx).minimum_contrast;
                 let theme = cx.theme().clone();
 
@@ -810,6 +895,7 @@ impl Element for TerminalElement {
                 let text_style = TextStyle {
                     font_family: style.font_family.clone(),
                     font_features: FontFeatures::disable_ligatures(),
+                    font_fallbacks: style.font_fallbacks.clone(),
                     font_weight: FontWeight::NORMAL,
                     font_size: style.font_size.into(),
                     font_style: FontStyle::Normal,
@@ -821,58 +907,101 @@ impl Element for TerminalElement {
                     ..Default::default()
                 };
 
-                let dimensions = {
+                let (dimensions, terminal_dimensions) = {
                     let font_id = cx.text_system().resolve_font(&text_style.font());
-                    let cell_width = cx
-                        .text_system()
-                        .advance(font_id, style.font_size, 'm')
-                        .map(|advance| advance.width)
-                        .unwrap_or(style.font_size * 0.6);
+                    let advance = |font_size| {
+                        cx.text_system()
+                            .advance(font_id, font_size, 'm')
+                            .map(|advance| advance.width)
+                            .unwrap_or(font_size * 0.6)
+                    };
+                    let cell_width = advance(style.font_size);
+                    let terminal_cell_width = advance(terminal_font_size);
 
-                    let mut size = bounds.size;
-                    // A one-column terminal makes alacritty misbehave on wide
-                    // characters (Zed issue 2750).
-                    if size.width < cell_width * 2.0 {
-                        size.width = cell_width * 2.0;
-                    }
-
-                    // Whole rows only; the spare height goes above the rows while
-                    // the output sits at the bottom, as in a native terminal.
-                    let mut origin = bounds.origin;
                     let anchor_to_bottom = {
                         let content = self.terminal.read(cx).last_content();
                         content.mode.contains(Modes::ALT_SCREEN)
                             || (content.scrolled_to_bottom && content.bottom_row_occupied)
                     };
                     let scale_factor = window.scale_factor().max(1.0);
-                    let line_height_device_px = (f32::from(style.line_height) * scale_factor)
-                        .round()
-                        .max(1.0) as i32;
-                    let available_height_device_px =
-                        (f32::from(size.height) * scale_factor).floor().max(0.0) as i32;
-                    let rows = (available_height_device_px / line_height_device_px).max(1);
-                    let snapped_height_device_px = rows * line_height_device_px;
-                    let padding_device_px =
-                        (available_height_device_px - snapped_height_device_px).max(0);
-                    size.height = px(snapped_height_device_px as f32 / scale_factor);
-                    if anchor_to_bottom {
-                        origin.y += px(padding_device_px as f32 / scale_factor);
-                    }
-
-                    // Snap to device pixels, so glyphs do not shift while resizing.
                     let snap = |value: Pixels| {
                         Pixels::from((f32::from(value) * scale_factor).floor() / scale_factor)
                     };
-                    origin.x = snap(origin.x);
-                    origin.y = snap(origin.y);
 
-                    TerminalBounds::new(style.line_height, cell_width, Bounds { origin, size })
+                    // The PTY keeps one stable grid for the duration of a pinch.
+                    // A one-column terminal makes alacritty misbehave on wide
+                    // characters (Zed issue 2750).
+                    let mut terminal_size = bounds.size;
+                    terminal_size.width = terminal_size.width.max(terminal_cell_width * 2.0);
+                    // Keep a 120-column canvas on a phone: common shell
+                    // greetings and system summaries fit without wrapping.
+                    #[cfg(target_os = "android")]
+                    {
+                        terminal_size.width = terminal_size.width.max(terminal_cell_width * 120.0);
+                    }
+                    let line_height_device_px = (f32::from(terminal_line_height) * scale_factor)
+                        .round()
+                        .max(1.0) as i32;
+                    let available_height_device_px = (f32::from(terminal_size.height)
+                        * scale_factor)
+                        .floor()
+                        .max(0.0) as i32;
+                    let rows = (available_height_device_px / line_height_device_px).max(1);
+                    terminal_size.height = px((rows * line_height_device_px) as f32 / scale_factor);
+                    let mut terminal_origin = bounds.origin;
+                    if anchor_to_bottom {
+                        terminal_origin.y += bounds.size.height - terminal_size.height;
+                    }
+                    terminal_origin.x = snap(terminal_origin.x);
+                    terminal_origin.y = snap(terminal_origin.y);
+                    let terminal_dimensions = TerminalBounds::new(
+                        terminal_line_height,
+                        terminal_cell_width,
+                        Bounds {
+                            origin: terminal_origin,
+                            size: terminal_size,
+                        },
+                    );
+
+                    // Paint the same cells at the live preview scale. This is
+                    // immediate visual feedback only: set_size below still sees
+                    // terminal_dimensions until the gesture ends.
+                    let width_ratio =
+                        f32::from(cell_width) / f32::from(terminal_cell_width).max(f32::EPSILON);
+                    let height_ratio = f32::from(style.line_height)
+                        / f32::from(terminal_line_height).max(f32::EPSILON);
+                    let paint_size = size(
+                        terminal_dimensions.width() * width_ratio,
+                        terminal_dimensions.height() * height_ratio,
+                    );
+                    let mut paint_origin = bounds.origin;
+                    if anchor_to_bottom {
+                        paint_origin.y += bounds.size.height - paint_size.height;
+                    }
+                    paint_origin.x = snap(paint_origin.x);
+                    paint_origin.y = snap(paint_origin.y);
+                    let mut dimensions = TerminalBounds::new(
+                        style.line_height,
+                        cell_width,
+                        Bounds {
+                            origin: paint_origin,
+                            size: paint_size,
+                        },
+                    );
+                    let horizontal_max = (dimensions.width() - bounds.size.width).max(px(0.));
+                    let horizontal_offset = self
+                        .view
+                        .update(cx, |view, _| view.horizontal_layout(horizontal_max));
+                    dimensions.bounds.origin.x -= horizontal_offset;
+                    let mut input_dimensions = terminal_dimensions;
+                    input_dimensions.bounds.origin.x -= horizontal_offset;
+                    (dimensions, input_dimensions)
                 };
 
                 let background_color = theme.colors().terminal_background;
 
                 let hover_match = self.terminal.update(cx, |terminal, cx| {
-                    terminal.set_size(dimensions);
+                    terminal.set_size(terminal_dimensions);
                     terminal.sync(window, cx);
 
                     let hovered_link = self.view.read(cx).hovered_link.as_ref();
@@ -1164,12 +1293,16 @@ impl InputHandler for TerminalInputHandler {
         &mut self,
         _ignore_disabled_input: bool,
         _: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> Option<UTF16Selection> {
-        // Always a selection, so the IME window follows the cursor even in
-        // full-screen programs.
+        let view = self.view.read(cx);
+        let range = view
+            .marked_selection
+            .clone()
+            .map(|range| range.start + 1..range.end + 1)
+            .unwrap_or(1..1);
         Some(UTF16Selection {
-            range: 0..0,
+            range,
             reversed: false,
         })
     }
@@ -1183,29 +1316,38 @@ impl InputHandler for TerminalInputHandler {
             .read(cx)
             .marked_text
             .as_ref()
-            .map(|text| 0..text.encode_utf16().count())
+            .map(|text| 1..1 + text.encode_utf16().count())
     }
 
     fn text_for_range(
         &mut self,
-        _: std::ops::Range<usize>,
-        _: &mut Option<std::ops::Range<usize>>,
+        range: std::ops::Range<usize>,
+        actual_range: &mut Option<std::ops::Range<usize>>,
         _: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> Option<String> {
-        None
+        let view = self.view.read(cx);
+        let mut document: Vec<u16> = INPUT_SENTINEL.encode_utf16().collect();
+        if let Some(text) = view.marked_text.as_deref() {
+            document.extend(text.encode_utf16());
+        } else if let Some(text) = view.pending_ime_commit.as_deref() {
+            document.extend(text.encode_utf16());
+        }
+        let start = range.start.min(document.len());
+        let end = range.end.max(start).min(document.len());
+        *actual_range = Some(start..end);
+        Some(String::from_utf16_lossy(&document[start..end]))
     }
 
     fn replace_text_in_range(
         &mut self,
-        _replacement_range: Option<std::ops::Range<usize>>,
+        replacement_range: Option<std::ops::Range<usize>>,
         text: &str,
         window: &mut Window,
         cx: &mut App,
     ) {
         self.view.update(cx, |view, cx| {
-            view.set_marked_text(None, cx);
-            view.commit_text(text, cx);
+            view.replace_ime_text(replacement_range, text, cx);
         });
         window.invalidate_character_coordinates();
     }
@@ -1214,18 +1356,50 @@ impl InputHandler for TerminalInputHandler {
         &mut self,
         _range_utf16: Option<std::ops::Range<usize>>,
         new_text: &str,
-        _new_marked_range: Option<std::ops::Range<usize>>,
+        new_marked_range: Option<std::ops::Range<usize>>,
         _window: &mut Window,
         cx: &mut App,
     ) {
         self.view.update(cx, |view, cx| {
-            view.set_marked_text(Some(new_text.to_owned()), cx)
+            view.set_marked_text(Some(new_text.to_owned()), new_marked_range, cx)
         });
     }
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut App) {
         self.view
-            .update(cx, |view, cx| view.set_marked_text(None, cx));
+            .update(cx, |view, cx| view.defer_marked_commit(cx));
+    }
+
+    fn set_selected_text_range(
+        &mut self,
+        range_utf16: std::ops::Range<usize>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        let selection = range_utf16.start.saturating_sub(1)..range_utf16.end.saturating_sub(1);
+        self.view
+            .update(cx, |view, cx| view.set_marked_selection(selection, cx));
+    }
+
+    fn text_length_utf16(&mut self, _: &mut Window, cx: &mut App) -> Option<usize> {
+        let view = self.view.read(cx);
+        Some(
+            1 + view
+                .marked_text
+                .as_ref()
+                .or(view.pending_ime_commit.as_ref())
+                .map(|text| text.encode_utf16().count())
+                .unwrap_or(0),
+        )
+    }
+
+    fn text_input_configuration(&mut self, _: &mut Window, _: &mut App) -> TextInputConfiguration {
+        TextInputConfiguration {
+            autocorrect: false,
+            autocapitalize: gpui::Autocapitalize::None,
+            suggestions: false,
+            input_action: TextInputAction::Enter,
+        }
     }
 
     fn bounds_for_range(
@@ -1243,7 +1417,7 @@ impl InputHandler for TerminalInputHandler {
             .terminal_bounds
             .cell_width;
         let mut bounds = self.cursor_bounds?;
-        bounds.origin.x += cell_width * range_utf16.start as f32;
+        bounds.origin.x += cell_width * range_utf16.start.saturating_sub(1) as f32;
         Some(bounds)
     }
 

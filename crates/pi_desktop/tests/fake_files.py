@@ -17,7 +17,7 @@ for line in sys.stdin:
         log.write(json.dumps(request, ensure_ascii=False) + "\n")
     response = {"type": "response", "id": request["id"], "command": request["type"], "success": True}
     if request["type"] == "files_attach":
-        response["data"] = {"version": 1, "target": request["target"]}
+        response["data"] = {"version": 2, "target": request["target"]}
     elif request["type"] == "files_list":
         if os.environ.get("PI_DESKTOP_TEST_FILE_LIST_ERROR"):
             response.update(success=False, error="Remote directory unavailable")

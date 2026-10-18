@@ -25,6 +25,8 @@ const DEFAULT_LIFETIME: u64 = 120;
 const MAX_REQUEST: u64 = 16 * 1024;
 const BOOTSTRAP_COMMENT: &str = "pi-pair-bootstrap:";
 const PHONE_COMMENT: &str = "pi-phone:";
+const AUTHORIZED_KEYS_RECOVERY_PREFIX: &str = ".pi-authorized-keys-recovery-";
+const MAX_AUTHORIZED_KEYS_RECOVERIES: usize = 64;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +44,41 @@ struct BootstrapGuard(State);
 impl Drop for BootstrapGuard {
     fn drop(&mut self) {
         cleanup(&self.0).ok();
+    }
+}
+
+/// Rolls a newly installed phone authorization back unless its approval
+/// response was durably published and its forced-command commit marker exists.
+struct PhoneAuthorization {
+    path: PathBuf,
+    authorization_id: String,
+    installed: Vec<u8>,
+    armed: bool,
+}
+
+impl PhoneAuthorization {
+    fn publish(&mut self) -> Result<()> {
+        write_private(
+            &authorization_path(&self.authorization_id)?,
+            b"authorized\n",
+            true,
+        )?;
+        self.armed = false;
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> Result<()> {
+        if self.armed {
+            rollback_phone_authorization(&self.path, &self.installed)?;
+            self.armed = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PhoneAuthorization {
+    fn drop(&mut self) {
+        self.rollback().ok();
     }
 }
 
@@ -144,8 +181,10 @@ pub fn pair(arguments: &[String]) -> Result<()> {
     let helper = helper_at(&stable, true)?;
     let forced = forced_command(&helper.path, &["pair", "exchange", &id])?;
     let line = format!("restrict,command={forced} {bootstrap_public}\n");
-    edit_authorized_keys(&[&marker], None, Some(&line))?;
+    // Arm cleanup before publication. Reserve one ordinary recovery slot for
+    // the phone-key install; compensating removals bypass the admission cap.
     let _bootstrap = BootstrapGuard(state.clone());
+    edit_authorized_keys_reserved(&[&marker], None, Some(&line), 1)?;
     write_json(&state_path(&id)?, &state)?;
 
     let offer = Offer {
@@ -200,23 +239,34 @@ pub fn pair(arguments: &[String]) -> Result<()> {
     let approved = if options.yes {
         true
     } else {
+        println!("This grants Pi access plus an interactive shell as this account.");
         print!("Type y or yes to allow, anything else to deny: ");
         io::stdout().flush()?;
         read_confirmation(&mut io::stdin().lock())?
     };
 
+    if approved && pairing::now() > state.expires_at {
+        cleanup(&state)?;
+        bail!("Pairing expired before approval; no phone key was authorized");
+    }
+
+    let mut authorization = None;
     let response = if approved {
-        let (permanent, phone_marker) = permanent_line(&helper.path, phone_key.clone())?;
+        let authorization_id = random_id();
+        let (permanent, phone_marker) =
+            staged_permanent_line(&helper.path, phone_key.clone(), &authorization_id)?;
         // Re-pairing the same phone upgrades its forced command to this helper
         // instead of leaving an older matching key earlier in the file. Match
         // the key material too: a key copied during manual setup has a different
         // comment and no Pi marker, but OpenSSH would otherwise accept that
         // unrestricted entry before reaching the gateway entry below it.
-        edit_authorized_keys(
-            &[&marker, &phone_marker],
-            Some(&phone_key),
-            Some(&permanent),
-        )?;
+        authorization = Some(install_phone_authorization(
+            &marker,
+            &phone_marker,
+            phone_key,
+            &permanent,
+            authorization_id,
+        )?);
         Response {
             version: VERSION,
             approved: true,
@@ -224,7 +274,7 @@ pub fn pair(arguments: &[String]) -> Result<()> {
             helper: Some(helper),
         }
     } else {
-        edit_authorized_keys(&[&marker], None, None)?;
+        edit_authorized_keys_cleanup(&[&marker], None)?;
         Response {
             version: VERSION,
             approved: false,
@@ -232,11 +282,23 @@ pub fn pair(arguments: &[String]) -> Result<()> {
             helper: None,
         }
     };
-    write_json(&response_path(&id)?, &response)?;
+    if let Err(error) = write_json(&response_path(&id)?, &response) {
+        if let Some(authorization) = &mut authorization {
+            authorization
+                .rollback()
+                .context("Pairing response failed and the phone key could not be rolled back")?;
+        }
+        return Err(error.context("Could not publish the pairing response"));
+    }
+    if let Some(authorization) = &mut authorization {
+        authorization
+            .publish()
+            .context("Could not activate the published phone authorization")?;
+    }
     wait_for_done(&id, Duration::from_secs(10))?;
     cleanup_files(&id);
     if approved {
-        println!("Paired. The phone now has restricted access to Pi's helper.");
+        println!("Paired. The phone can access Pi and open a shell as this account.");
         Ok(())
     } else {
         bail!("Pairing denied; no phone key was authorized")
@@ -259,13 +321,13 @@ pub fn exchange(id: &str) -> Result<()> {
         Err(error) => {
             // A killed foreground pairing process may have installed the key
             // just before its state write. Its only usable command removes it.
-            edit_authorized_keys(&[&marker], None, None).ok();
+            edit_authorized_keys_cleanup(&[&marker], None).ok();
             cleanup_files(id);
             return Err(error).context("This pairing code is no longer active");
         }
     };
     if state.id != id || pairing::now() > state.expires_at {
-        edit_authorized_keys(&[&marker], None, None).ok();
+        edit_authorized_keys_cleanup(&[&marker], None).ok();
         cleanup_files(id);
         bail!("This pairing code expired");
     }
@@ -336,10 +398,12 @@ fn helper_at(executable: &Path, gateway: bool) -> Result<Helper> {
             watchers: true,
             sessions: true,
             directories: true,
+            file_editing: cfg!(any(target_os = "linux", target_os = "macos")),
             commands: true,
             jj_history: true,
             delete_sessions: cfg!(unix),
             image_prompts: cfg!(feature = "bundled-durable"),
+            terminal: cfg!(target_os = "linux"),
         },
     })
 }
@@ -365,7 +429,8 @@ fn gateway_arguments(original: &str) -> Result<Vec<String>> {
         [one] if matches!(one.as_str(), "sessions" | "models" | "commands" | "discover" | "--version" | "--capabilities")
     ) || matches!(command.as_slice(), [one, two] if
         (one == "connect" || one == "files" || one == "schedules") && two == "--stdio"
-    ) || matches!(command.as_slice(), [one, two, _] if one == "directories" && two == "--path")
+    ) || command.as_slice() == ["terminal", "--stdio"]
+        || matches!(command.as_slice(), [one, two, _] if one == "directories" && two == "--path")
         || matches!(command.as_slice(), [one, two, _] if matches!(one.as_str(), "jj-history" | "jj-enable") && two == "--path")
         || matches!(command.as_slice(), [one, two, _, three, _] if one == "jj-restore" && two == "--path" && three == "--operation")
         || matches!(command.as_slice(), [one, two, _, three] if one == "directories" && two == "--path" && three == "--show-hidden");
@@ -389,10 +454,26 @@ fn validate_request(state: &State, request: &Request) -> Result<PublicKey> {
     Ok(key)
 }
 
+#[cfg(test)]
 fn permanent_line(path: &str, mut key: PublicKey) -> Result<(String, String)> {
     let device = phone_marker(&key);
     key.set_comment(device.as_str());
-    let forced = forced_command(path, &["gateway", &device])?;
+    let forced = forced_command(path, &["gateway", "2", &device])?;
+    Ok((
+        format!("restrict,command={forced} {}\n", key.to_openssh()?),
+        device,
+    ))
+}
+
+fn staged_permanent_line(
+    path: &str,
+    mut key: PublicKey,
+    authorization_id: &str,
+) -> Result<(String, String)> {
+    valid_id(authorization_id)?;
+    let device = phone_marker(&key);
+    key.set_comment(device.as_str());
+    let forced = forced_command(path, &["gateway", "3", &device, authorization_id])?;
     Ok((
         format!("restrict,command={forced} {}\n", key.to_openssh()?),
         device,
@@ -512,6 +593,42 @@ fn pairing_dir() -> Result<PathBuf> {
         .join(".pi/desktop/pairing"))
 }
 
+fn authorization_path(id: &str) -> Result<PathBuf> {
+    valid_id(id)?;
+    Ok(dirs::home_dir()
+        .context("This account has no home folder")?
+        .join(".pi/desktop/authorizations")
+        .join(format!("{id}.authorized")))
+}
+
+pub fn require_gateway_authorization(id: &str) -> Result<()> {
+    require_gateway_authorization_at(&authorization_path(id)?)
+}
+
+fn require_gateway_authorization_at(path: &Path) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .context("This phone authorization is not committed")?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "The phone authorization marker is not a regular file"
+    );
+    let mut bytes = Vec::new();
+    file.take(32).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes == b"authorized\n",
+        "The phone authorization marker is invalid"
+    );
+    Ok(())
+}
+
 fn state_path(id: &str) -> Result<PathBuf> {
     Ok(pairing_dir()?.join(format!("{id}.state.json")))
 }
@@ -534,28 +651,159 @@ fn authorized_keys_path() -> Result<PathBuf> {
         .join(".ssh/authorized_keys"))
 }
 
-fn edit_authorized_keys(
+fn edit_authorized_keys_reserved(
     remove_markers: &[&str],
     remove_key: Option<&PublicKey>,
     append: Option<&str>,
+    reserve_recoveries: usize,
 ) -> Result<()> {
-    edit_authorized_keys_at(authorized_keys_path()?, remove_markers, remove_key, append)
+    edit_authorized_keys_at_reserved(
+        authorized_keys_path()?,
+        remove_markers,
+        remove_key,
+        append,
+        reserve_recoveries,
+    )
 }
 
+fn edit_authorized_keys_cleanup(
+    remove_markers: &[&str],
+    remove_key: Option<&PublicKey>,
+) -> Result<()> {
+    edit_authorized_keys_at_with_quota(
+        authorized_keys_path()?,
+        remove_markers,
+        remove_key,
+        None,
+        None,
+    )
+}
+
+fn install_phone_authorization(
+    bootstrap_marker: &str,
+    phone_marker: &str,
+    phone_key: PublicKey,
+    permanent: &str,
+    authorization_id: String,
+) -> Result<PhoneAuthorization> {
+    let path = authorized_keys_path()?;
+    let encoded_key = public_key_fields(&phone_key)?;
+    let mut attempted = false;
+    let update = update_authorized_keys_at_reserved(path.clone(), 0, |original| {
+        attempted = true;
+        let mut next = Vec::with_capacity(original.len() + permanent.len());
+        for raw in original.split_inclusive(|byte| *byte == b'\n') {
+            let body = line_body(raw);
+            let remove_marker = managed_entry(body).is_some_and(|entry| {
+                entry.marker == bootstrap_marker || entry.marker == phone_marker
+            });
+            if !remove_marker && !line_contains_public_key(body, &encoded_key) {
+                next.extend_from_slice(raw);
+            }
+        }
+        append_authorized_line(&mut next, permanent);
+        Ok(next)
+    });
+    let mut authorization = PhoneAuthorization {
+        path,
+        authorization_id,
+        installed: permanent.as_bytes().to_vec(),
+        armed: attempted,
+    };
+    if let Err(error) = update {
+        if let Err(rollback) = authorization.rollback() {
+            return Err(error.context(format!(
+                "Phone authorization publication failed and rollback also failed: {rollback:#}"
+            )));
+        }
+        return Err(error);
+    }
+    authorization.armed = true;
+    Ok(authorization)
+}
+
+fn rollback_phone_authorization(path: &Path, installed: &[u8]) -> Result<()> {
+    let installed = line_body(installed);
+    update_authorized_keys_at_with_quota(path.to_owned(), None, |current| {
+        if !current
+            .split_inclusive(|byte| *byte == b'\n')
+            .any(|raw| line_body(raw) == installed)
+        {
+            return Ok(current.to_vec());
+        }
+        // Rollback is removal-only. Restoring an older same-key authorization
+        // would transiently republish it if an external revocation raced the
+        // compare/exchange. The displaced generation remains in recovery.
+        let mut next = Vec::with_capacity(current.len());
+        for raw in current.split_inclusive(|byte| *byte == b'\n') {
+            if line_body(raw) != installed {
+                next.extend_from_slice(raw);
+            }
+        }
+        Ok(next)
+    })
+}
+
+fn public_key_fields(key: &PublicKey) -> Result<(String, String)> {
+    let line = key.to_openssh()?;
+    let mut fields = line.split_whitespace();
+    Ok((
+        fields
+            .next()
+            .context("Public key has no algorithm")?
+            .to_owned(),
+        fields.next().context("Public key has no data")?.to_owned(),
+    ))
+}
+
+fn append_authorized_line(next: &mut Vec<u8>, line: &str) {
+    let wanted = line.trim_end_matches(['\r', '\n']).as_bytes();
+    let exists = next
+        .split_inclusive(|byte| *byte == b'\n')
+        .any(|raw| line_body(raw) == wanted);
+    if !exists {
+        if !next.is_empty() && !next.ends_with(b"\n") {
+            next.push(b'\n');
+        }
+        next.extend_from_slice(line.as_bytes());
+    }
+}
+
+#[cfg(test)]
 fn edit_authorized_keys_at(
     requested: PathBuf,
     remove_markers: &[&str],
     remove_key: Option<&PublicKey>,
     append: Option<&str>,
 ) -> Result<()> {
-    let remove_key = remove_key
-        .map(PublicKey::to_openssh)
-        .transpose()?
-        .and_then(|line| {
-            let mut fields = line.split_whitespace();
-            Some((fields.next()?.to_owned(), fields.next()?.to_owned()))
-        });
-    update_authorized_keys_at(requested, |original| {
+    edit_authorized_keys_at_reserved(requested, remove_markers, remove_key, append, 0)
+}
+
+fn edit_authorized_keys_at_reserved(
+    requested: PathBuf,
+    remove_markers: &[&str],
+    remove_key: Option<&PublicKey>,
+    append: Option<&str>,
+    reserve_recoveries: usize,
+) -> Result<()> {
+    edit_authorized_keys_at_with_quota(
+        requested,
+        remove_markers,
+        remove_key,
+        append,
+        Some(reserve_recoveries),
+    )
+}
+
+fn edit_authorized_keys_at_with_quota(
+    requested: PathBuf,
+    remove_markers: &[&str],
+    remove_key: Option<&PublicKey>,
+    append: Option<&str>,
+    recovery_quota: Option<usize>,
+) -> Result<()> {
+    let remove_key = remove_key.map(public_key_fields).transpose()?;
+    update_authorized_keys_at_with_quota(requested, recovery_quota, |original| {
         let mut next = Vec::with_capacity(original.len() + append.map_or(0, str::len));
         for raw in original.split_inclusive(|byte| *byte == b'\n') {
             let body = line_body(raw);
@@ -569,16 +817,7 @@ fn edit_authorized_keys_at(
             }
         }
         if let Some(line) = append {
-            let wanted = line.trim_end_matches(['\r', '\n']).as_bytes();
-            let exists = next
-                .split_inclusive(|byte| *byte == b'\n')
-                .any(|raw| line_body(raw) == wanted);
-            if !exists {
-                if !next.is_empty() && !next.ends_with(b"\n") {
-                    next.push(b'\n');
-                }
-                next.extend_from_slice(line.as_bytes());
-            }
+            append_authorized_line(&mut next, line);
         }
         Ok(next)
     })
@@ -601,6 +840,7 @@ fn migrate_phone_entries_at(requested: PathBuf, stable: &Path) -> Result<usize> 
         .context("The stable helper path is not valid UTF-8")?;
     let mut migrated = 0;
     update_authorized_keys_at(requested, |original| {
+        migrated = 0;
         let mut next = Vec::with_capacity(original.len());
         for raw in original.split_inclusive(|byte| *byte == b'\n') {
             let body = line_body(raw);
@@ -609,10 +849,13 @@ fn migrate_phone_entries_at(requested: PathBuf, stable: &Path) -> Result<usize> 
                 next.extend_from_slice(raw);
                 continue;
             };
-            let replacement = format!(
-                "command={}",
-                forced_command(stable, &["gateway", entry.marker])?
-            );
+            let forced = match entry.authorization_id.as_deref() {
+                Some(authorization_id) => {
+                    forced_command(stable, &["gateway", "3", entry.marker, authorization_id])?
+                }
+                None => forced_command(stable, &["gateway", "2", entry.marker])?,
+            };
+            let replacement = format!("command={forced}");
             let option = &entry.command_option;
             if entry.text[option.clone()] == replacement {
                 next.extend_from_slice(raw);
@@ -631,7 +874,23 @@ fn migrate_phone_entries_at(requested: PathBuf, stable: &Path) -> Result<usize> 
 
 fn update_authorized_keys_at(
     requested: PathBuf,
-    update: impl FnOnce(&[u8]) -> Result<Vec<u8>>,
+    update: impl FnMut(&[u8]) -> Result<Vec<u8>>,
+) -> Result<()> {
+    update_authorized_keys_at_reserved(requested, 0, update)
+}
+
+fn update_authorized_keys_at_reserved(
+    requested: PathBuf,
+    reserve_recoveries: usize,
+    update: impl FnMut(&[u8]) -> Result<Vec<u8>>,
+) -> Result<()> {
+    update_authorized_keys_at_with_quota(requested, Some(reserve_recoveries), update)
+}
+
+fn update_authorized_keys_at_with_quota(
+    requested: PathBuf,
+    recovery_quota: Option<usize>,
+    mut update: impl FnMut(&[u8]) -> Result<Vec<u8>>,
 ) -> Result<()> {
     let requested_parent = requested
         .parent()
@@ -665,23 +924,406 @@ fn update_authorized_keys_at(
     #[cfg(not(unix))]
     set_mode(&lock_path, 0o600)?;
     lock.lock_exclusive()?;
-    let original = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let next = update(&original)?;
-    if next != original {
-        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    for _ in 0..16 {
+        let (original, existed) = read_authorized_keys(&path)?;
+        let next = update(&original)?;
+        if next == original {
+            fs2::FileExt::unlock(&lock)?;
+            return Ok(());
+        }
+        let recoveries = fs::read_dir(parent)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(AUTHORIZED_KEYS_RECOVERY_PREFIX)
+            })
+            .count();
+        if let Some(reserve_recoveries) = recovery_quota {
+            ensure!(
+                recoveries
+                    .saturating_add(1)
+                    .saturating_add(reserve_recoveries)
+                    <= MAX_AUTHORIZED_KEYS_RECOVERIES,
+                "Too many authorized_keys recovery files in {}; inspect and remove obsolete {}* files",
+                parent.display(),
+                AUTHORIZED_KEYS_RECOVERY_PREFIX
+            );
+        }
+        let mut temporary = tempfile::Builder::new()
+            .prefix(AUTHORIZED_KEYS_RECOVERY_PREFIX)
+            .tempfile_in(parent)?;
         temporary.write_all(&next)?;
         temporary.as_file().sync_all()?;
         set_mode(temporary.path(), 0o600)?;
-        temporary.persist(&path).map_err(|error| error.error)?;
-        #[cfg(unix)]
-        fs::File::open(parent)?.sync_all()?;
+        let exchanged =
+            match compare_exchange_authorized_keys(temporary.path(), &path, &original, existed) {
+                Ok(exchanged) => exchanged,
+                Err(error) => {
+                    // Once an exchange has started, this pathname may contain a
+                    // displaced external edit rather than Pi's proposal. Never let
+                    // NamedTempFile unlink it on an error: keep it as an explicit
+                    // recovery record beside authorized_keys and report its path.
+                    let (recovery, keep_error) = preserve_authorized_keys_recovery(temporary);
+                    let sync_error = sync_directory(parent).err();
+                    fs2::FileExt::unlock(&lock).ok();
+                    let mut detail = format!(
+                        "authorized_keys recovery was preserved at {}",
+                        recovery.display()
+                    );
+                    if let Some(keep_error) = keep_error {
+                        detail.push_str(&format!(" (could not mark it persistent: {keep_error})"));
+                    }
+                    if let Some(sync_error) = sync_error {
+                        detail.push_str(&format!(" (directory sync failed: {sync_error})"));
+                    }
+                    return Err(error.context(detail));
+                }
+            };
+        if exchanged {
+            // The displaced inode can still have external writers holding old
+            // descriptors. Keep it reachable so even writes that arrive after
+            // our final comparison cannot disappear when this scope exits.
+            let recovery = existed.then(|| preserve_authorized_keys_recovery(temporary));
+            if let Err(error) = sync_directory(parent) {
+                eprintln!(
+                    "Warning: authorized_keys was published but its directory could not be synced: {error}"
+                );
+            }
+            if let Err(error) = fs2::FileExt::unlock(&lock) {
+                eprintln!(
+                    "Warning: authorized_keys was published but its advisory lock could not be explicitly released: {error}"
+                );
+            }
+            if let Some((recovery, Some(error))) = recovery {
+                eprintln!(
+                    "Warning: authorized_keys recovery remains at {} but could not be marked persistent: {error}",
+                    recovery.display()
+                );
+            }
+            return Ok(());
+        }
+        if existed {
+            // A failed comparison also made Pi's proposal briefly live. Keep
+            // that provisional inode reachable because an external writer may
+            // still hold it and write after restoration validation completes.
+            let (recovery, keep_error) = preserve_authorized_keys_recovery(temporary);
+            if let Some(error) = keep_error {
+                eprintln!(
+                    "Warning: provisional authorized_keys recovery remains at {} but could not be marked persistent: {error}",
+                    recovery.display()
+                );
+            }
+            if let Err(error) = sync_directory(parent) {
+                eprintln!(
+                    "Warning: provisional authorized_keys recovery could not be synced: {error}"
+                );
+            }
+        }
     }
     fs2::FileExt::unlock(&lock)?;
-    Ok(())
+    bail!("authorized_keys kept changing while Pi tried to update it")
+}
+
+fn preserve_authorized_keys_recovery(
+    temporary: tempfile::NamedTempFile,
+) -> (PathBuf, Option<String>) {
+    let recovery = temporary.path().to_path_buf();
+    match temporary.keep() {
+        Ok((_file, path)) => (path, None),
+        Err(keep_error) => {
+            // `keep` normally only disables automatic unlinking. If even that
+            // bookkeeping fails, leak the owner intentionally: dropping it
+            // would destroy the only pathname for a displaced generation.
+            let message = keep_error.error.to_string();
+            std::mem::forget(keep_error.file);
+            (recovery, Some(message))
+        }
+    }
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+fn read_authorized_keys(path: &Path) -> Result<(Vec<u8>, bool)> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), false)),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        file.metadata()?.is_file(),
+        "authorized_keys is not a regular file"
+    );
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok((bytes, true))
+}
+
+/// Installs `temporary` only if `path` still contains the bytes that were used
+/// to derive it. Atomic exchange makes the displaced live file inspectable; a
+/// concurrent external edit is exchanged straight back and retried instead of
+/// being overwritten.
+fn compare_exchange_authorized_keys(
+    temporary: &Path,
+    path: &Path,
+    expected: &[u8],
+    existed: bool,
+) -> Result<bool> {
+    if existed {
+        let installed = inode_identity(temporary)?;
+        match rename_exchange(temporary, path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        let displaced = read_authorized_keys(temporary);
+        match displaced {
+            Ok((bytes, true)) if bytes == expected => return Ok(true),
+            Ok(_) => {}
+            Err(error) => {
+                restore_displaced_authorized_keys(temporary, path, installed)
+                    .context("Could not restore authorized_keys after comparison failed")?;
+                return Err(error.context("Could not inspect displaced authorized_keys"));
+            }
+        }
+        restore_displaced_authorized_keys(temporary, path, installed)
+            .context("Could not restore a concurrently edited authorized_keys")?;
+        Ok(false)
+    } else {
+        match rename_no_replace(temporary, path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct InodeIdentity {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    mode: u32,
+    user: u32,
+    group: u32,
+    digest: [u8; 32],
+    // Pin ordinary files so a removed inode cannot be reused while it is the
+    // generation against which an exchange is being checked.
+    _pin: fs::File,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl InodeIdentity {
+    fn same_generation(&self, other: &Self) -> bool {
+        self.device == other.device
+            && self.inode == other.inode
+            && self.length == other.length
+            && self.modified_seconds == other.modified_seconds
+            && self.modified_nanoseconds == other.modified_nanoseconds
+            && self.mode == other.mode
+            && self.user == other.user
+            && self.group == other.group
+            && self.digest == other.digest
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn inode_identity(path: &Path) -> Result<InodeIdentity> {
+    use sha2::{Digest as _, Sha256};
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    for _ in 0..16 {
+        let before = fs::symlink_metadata(path)?;
+        ensure!(before.is_file(), "authorized_keys is not a regular file");
+        let mut pin_options = OpenOptions::new();
+        pin_options.read(true).custom_flags(libc::O_NOFOLLOW);
+        let pin = pin_options.open(path)?;
+        let pinned = pin.metadata()?;
+        if before.dev() != pinned.dev() || before.ino() != pinned.ino() {
+            continue;
+        }
+
+        let mut reader = &pin;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let digest = hasher.finalize().into();
+
+        let after = pin.metadata()?;
+        if pinned.dev() == after.dev()
+            && pinned.ino() == after.ino()
+            && pinned.len() == after.len()
+            && pinned.ctime() == after.ctime()
+            && pinned.ctime_nsec() == after.ctime_nsec()
+            && pinned.mtime() == after.mtime()
+            && pinned.mtime_nsec() == after.mtime_nsec()
+        {
+            return Ok(InodeIdentity {
+                device: after.dev(),
+                inode: after.ino(),
+                length: after.len(),
+                modified_seconds: after.mtime(),
+                modified_nanoseconds: after.mtime_nsec(),
+                mode: after.mode(),
+                user: after.uid(),
+                group: after.gid(),
+                digest,
+                _pin: pin,
+            });
+        }
+    }
+    bail!("authorized_keys generation kept changing while Pi inspected it")
+}
+
+/// Restores the newest external generation displaced by a failed compare and
+/// exchange. Each exchange is checked by inode identity. If another editor
+/// replaces `path` during restoration, its newly displaced generation is
+/// rotated back next instead of being deleted with the temporary file.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn restore_displaced_authorized_keys(
+    temporary: &Path,
+    path: &Path,
+    mut expected_live: InodeIdentity,
+) -> Result<()> {
+    let mut candidate = inode_identity(temporary)?;
+    for _ in 0..64 {
+        match rename_exchange(temporary, path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // A concurrent deletion of the live path is a newer edit and
+                // wins. Distinguish it from interference with our temporary.
+                return match fs::symlink_metadata(path) {
+                    Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(()),
+                    _ => Err(error.into()),
+                };
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let displaced = inode_identity(temporary)?;
+        if displaced.same_generation(&expected_live) {
+            return Ok(());
+        }
+        expected_live = candidate;
+        candidate = displaced;
+    }
+    bail!("authorized_keys kept changing while Pi restored an external edit")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+struct InodeIdentity;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn inode_identity(_: &Path) -> Result<InodeIdentity> {
+    bail!("atomic authorized_keys exchange is unsupported")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn restore_displaced_authorized_keys(_: &Path, _: &Path, _: InodeIdentity) -> Result<()> {
+    bail!("atomic authorized_keys exchange is unsupported")
+}
+
+#[cfg(target_os = "linux")]
+fn rename_exchange(left: &Path, right: &Path) -> io::Result<()> {
+    renameat2(left, right, libc::RENAME_EXCHANGE)
+}
+
+#[cfg(target_os = "linux")]
+fn rename_no_replace(left: &Path, right: &Path) -> io::Result<()> {
+    renameat2(left, right, libc::RENAME_NOREPLACE)
+}
+
+#[cfg(target_os = "linux")]
+fn renameat2(left: &Path, right: &Path, flags: libc::c_uint) -> io::Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
+    let left = CString::new(left.as_os_str().as_bytes())?;
+    let right = CString::new(right.as_os_str().as_bytes())?;
+    if unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            left.as_ptr(),
+            libc::AT_FDCWD,
+            right.as_ptr(),
+            flags,
+        )
+    } == -1
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_exchange(left: &Path, right: &Path) -> io::Result<()> {
+    renameatx_np(left, right, libc::RENAME_SWAP)
+}
+
+#[cfg(target_os = "macos")]
+fn rename_no_replace(left: &Path, right: &Path) -> io::Result<()> {
+    renameatx_np(left, right, libc::RENAME_EXCL)
+}
+
+#[cfg(target_os = "macos")]
+fn renameatx_np(left: &Path, right: &Path, flags: libc::c_uint) -> io::Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
+    let left = CString::new(left.as_os_str().as_bytes())?;
+    let right = CString::new(right.as_os_str().as_bytes())?;
+    if unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            left.as_ptr(),
+            libc::AT_FDCWD,
+            right.as_ptr(),
+            flags,
+        )
+    } == -1
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn rename_exchange(_: &Path, _: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic authorized_keys exchange is unsupported",
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn rename_no_replace(_: &Path, _: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic authorized_keys replacement is unsupported",
+    ))
 }
 
 fn line_body(raw: &[u8]) -> &[u8] {
@@ -699,6 +1341,7 @@ struct ManagedEntry<'a> {
     text: &'a str,
     command_option: std::ops::Range<usize>,
     marker: &'a str,
+    authorization_id: Option<String>,
     kind: ManagedKind,
 }
 
@@ -732,14 +1375,33 @@ fn managed_entry(line: &[u8]) -> Option<ManagedEntry<'_>> {
     if !program.is_absolute() || !managed_helper_name(program.file_name()?.to_str()?) {
         return None;
     }
-    let kind = match command.as_slice() {
+    let (kind, authorization_id) = match command.as_slice() {
         [exec, _program, gateway, argument]
             if exec == "exec"
                 && gateway == "gateway"
                 && argument == marker
                 && marker == phone_marker(&key) =>
         {
-            ManagedKind::Phone
+            (ManagedKind::Phone, None)
+        }
+        [exec, _program, gateway, version, argument]
+            if exec == "exec"
+                && gateway == "gateway"
+                && version == "2"
+                && argument == marker
+                && marker == phone_marker(&key) =>
+        {
+            (ManagedKind::Phone, None)
+        }
+        [exec, _program, gateway, version, argument, authorization_id]
+            if exec == "exec"
+                && gateway == "gateway"
+                && version == "3"
+                && argument == marker
+                && marker == phone_marker(&key)
+                && valid_id(authorization_id).is_ok() =>
+        {
+            (ManagedKind::Phone, Some(authorization_id.clone()))
         }
         [exec, _program, pair, exchange, id]
             if exec == "exec"
@@ -748,7 +1410,7 @@ fn managed_entry(line: &[u8]) -> Option<ManagedEntry<'_>> {
                 && marker == format!("{BOOTSTRAP_COMMENT}{id}")
                 && valid_id(id).is_ok() =>
         {
-            ManagedKind::Bootstrap
+            (ManagedKind::Bootstrap, None)
         }
         _ => return None,
     };
@@ -757,6 +1419,7 @@ fn managed_entry(line: &[u8]) -> Option<ManagedEntry<'_>> {
         command_option: fields[0].start + command_option.start
             ..fields[0].start + command_option.end,
         marker,
+        authorization_id,
         kind,
     })
 }
@@ -871,18 +1534,60 @@ fn public_key(line: &str, fields: &[std::ops::Range<usize>]) -> Option<(usize, P
     })
 }
 
-/// Finds the adjacent OpenSSH key type and base64 fields even when the entry
-/// starts with quoted options whose forced command contains spaces.
+/// Matches only the OpenSSH key type and base64 fields. The trailing comment
+/// is deliberately never decoded or parsed: OpenSSH treats it as opaque bytes,
+/// so invalid UTF-8 or unmatched quotes there cannot hide a same-key entry.
 fn line_contains_public_key(line: &[u8], key: &(String, String)) -> bool {
-    let Ok(text) = std::str::from_utf8(line) else {
+    fn skip_space(line: &[u8], cursor: &mut usize) {
+        while line.get(*cursor).is_some_and(u8::is_ascii_whitespace) {
+            *cursor += 1;
+        }
+    }
+
+    fn plain_field<'a>(line: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
+        skip_space(line, cursor);
+        let start = *cursor;
+        while line
+            .get(*cursor)
+            .is_some_and(|byte| !byte.is_ascii_whitespace())
+        {
+            *cursor += 1;
+        }
+        (start != *cursor).then_some(&line[start..*cursor])
+    }
+
+    let mut cursor = 0;
+    skip_space(line, &mut cursor);
+    let first_start = cursor;
+    let mut quoted = false;
+    while let Some(byte) = line.get(cursor).copied() {
+        match byte {
+            b'\\' if quoted => {
+                cursor += 1;
+                if cursor == line.len() {
+                    return false;
+                }
+                cursor += 1;
+            }
+            b'"' => {
+                quoted = !quoted;
+                cursor += 1;
+            }
+            byte if !quoted && byte.is_ascii_whitespace() => break,
+            _ => cursor += 1,
+        }
+    }
+    if quoted || first_start == cursor {
         return false;
-    };
-    let Some(fields) = authorized_fields(text) else {
-        return false;
-    };
-    fields
-        .windows(2)
-        .any(|pair| text[pair[0].clone()] == key.0 && text[pair[1].clone()] == key.1)
+    }
+    let first = &line[first_start..cursor];
+    let key_type = key.0.as_bytes();
+    let key_data = key.1.as_bytes();
+    if first == key_type {
+        return plain_field(line, &mut cursor) == Some(key_data);
+    }
+    plain_field(line, &mut cursor) == Some(key_type)
+        && plain_field(line, &mut cursor) == Some(key_data)
 }
 
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
@@ -944,7 +1649,7 @@ fn wait_for_done(id: &str, duration: Duration) -> Result<()> {
 }
 
 fn cleanup(state: &State) -> Result<()> {
-    edit_authorized_keys(&[&state.bootstrap_marker], None, None)?;
+    edit_authorized_keys_cleanup(&[&state.bootstrap_marker], None)?;
     cleanup_files(&state.id);
     Ok(())
 }
@@ -1140,6 +1845,31 @@ mod tests {
     }
 
     #[test]
+    fn staged_phone_gateways_require_their_durable_commit_marker() {
+        let directory = isolated();
+        let marker = directory.path().join("authorization");
+        assert!(require_gateway_authorization_at(&marker).is_err());
+        fs::write(&marker, b"wrong\n").unwrap();
+        assert!(require_gateway_authorization_at(&marker).is_err());
+        fs::write(&marker, b"authorized\n").unwrap();
+        require_gateway_authorization_at(&marker).unwrap();
+
+        let private = PrivateKey::from(Ed25519Keypair::from_seed(&[19; 32]));
+        let authorization_id = "44444444444444444444444444444444";
+        let (line, phone_marker) = staged_permanent_line(
+            "/tmp/pi-desktop-remote",
+            private.public_key().clone(),
+            authorization_id,
+        )
+        .unwrap();
+        let entry = managed_entry(line_body(line.as_bytes())).unwrap();
+        assert_eq!(entry.marker, phone_marker);
+        assert_eq!(entry.authorization_id.as_deref(), Some(authorization_id));
+        assert!(line.contains("gateway 3"));
+        assert!(line.contains(authorization_id));
+    }
+
+    #[test]
     fn terminal_qr_forces_standard_black_on_white_colors() {
         let rendered = terminal_qr("pi://pair/v1#test").unwrap();
         assert!(rendered.starts_with("\x1b[30;47m"));
@@ -1209,6 +1939,158 @@ mod tests {
         assert_eq!(fs::read(&victim).unwrap(), b"victim\n");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn late_writes_to_the_displaced_authorized_keys_remain_reachable() {
+        use std::io::{Seek as _, SeekFrom};
+
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        fs::write(&keys, b"original\n").unwrap();
+        let mut old = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&keys)
+            .unwrap();
+
+        edit_authorized_keys_at(keys.clone(), &[], None, Some("pi update\n")).unwrap();
+        old.set_len(0).unwrap();
+        old.seek(SeekFrom::Start(0)).unwrap();
+        old.write_all(b"late external write\n").unwrap();
+        old.sync_all().unwrap();
+
+        assert_eq!(fs::read(&keys).unwrap(), b"original\npi update\n");
+        let recoveries = fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(AUTHORIZED_KEYS_RECOVERY_PREFIX)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(recoveries.len(), 1);
+        assert_eq!(
+            fs::read(recoveries[0].path()).unwrap(),
+            b"late external write\n"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn authorized_keys_exchange_preserves_a_concurrent_external_edit() {
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        fs::write(&keys, b"original\n").unwrap();
+        let mut proposed = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        proposed.write_all(b"pi update\n").unwrap();
+        proposed.as_file().sync_all().unwrap();
+
+        // This is the exact boundary race: another editor replaced the file
+        // after Pi derived its proposed contents but before the atomic swap.
+        fs::write(&keys, b"external update\n").unwrap();
+        assert!(
+            !compare_exchange_authorized_keys(proposed.path(), &keys, b"original\n", true,)
+                .unwrap()
+        );
+        assert_eq!(fs::read(&keys).unwrap(), b"external update\n");
+        assert_eq!(fs::read(proposed.path()).unwrap(), b"pi update\n");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn authorized_keys_restoration_preserves_a_second_external_edit() {
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        fs::write(&keys, b"first external update\n").unwrap();
+        let mut proposed = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        proposed.write_all(b"pi update\n").unwrap();
+        proposed.as_file().sync_all().unwrap();
+        let installed = inode_identity(proposed.path()).unwrap();
+
+        // Set up the state immediately after a failed comparison: Pi's update
+        // is live and the first external update was displaced for restoration.
+        rename_exchange(proposed.path(), &keys).unwrap();
+        assert_eq!(fs::read(&keys).unwrap(), b"pi update\n");
+        assert_eq!(
+            fs::read(proposed.path()).unwrap(),
+            b"first external update\n"
+        );
+
+        // A second editor replaces Pi's live inode in the restoration window.
+        // Restoration must rotate this newest generation back instead of
+        // blindly replacing it with the older external update.
+        let newest = directory.path().join("newest");
+        fs::write(&newest, b"second external update\n").unwrap();
+        fs::rename(&newest, &keys).unwrap();
+        restore_displaced_authorized_keys(proposed.path(), &keys, installed).unwrap();
+
+        assert_eq!(fs::read(&keys).unwrap(), b"second external update\n");
+        assert_eq!(
+            fs::read(proposed.path()).unwrap(),
+            b"first external update\n"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn provisional_generation_keeps_late_writes_after_restoration() {
+        use std::io::{Seek as _, SeekFrom};
+
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        fs::write(&keys, b"external update\n").unwrap();
+        let mut proposed = tempfile::Builder::new()
+            .prefix(AUTHORIZED_KEYS_RECOVERY_PREFIX)
+            .tempfile_in(directory.path())
+            .unwrap();
+        proposed.write_all(b"pi update\n").unwrap();
+        proposed.as_file().sync_all().unwrap();
+        let installed = inode_identity(proposed.path()).unwrap();
+        rename_exchange(proposed.path(), &keys).unwrap();
+        let mut late = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&keys)
+            .unwrap();
+
+        restore_displaced_authorized_keys(proposed.path(), &keys, installed).unwrap();
+        let (recovery, keep_error) = preserve_authorized_keys_recovery(proposed);
+        assert!(keep_error.is_none());
+        late.set_len(0).unwrap();
+        late.seek(SeekFrom::Start(0)).unwrap();
+        late.write_all(b"late provisional write\n").unwrap();
+        late.sync_all().unwrap();
+
+        assert_eq!(fs::read(&keys).unwrap(), b"external update\n");
+        assert_eq!(fs::read(recovery).unwrap(), b"late provisional write\n");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn authorized_keys_restoration_preserves_an_in_place_external_edit() {
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        fs::write(&keys, b"first external update\n").unwrap();
+        let mut proposed = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        proposed.write_all(b"pi update\n").unwrap();
+        proposed.as_file().sync_all().unwrap();
+        let installed = inode_identity(proposed.path()).unwrap();
+        rename_exchange(proposed.path(), &keys).unwrap();
+
+        // Even an editor that truncates and rewrites Pi's provisional inode,
+        // rather than publishing by rename, owns the newest generation.
+        fs::write(&keys, b"in-place external update\n").unwrap();
+        restore_displaced_authorized_keys(proposed.path(), &keys, installed).unwrap();
+
+        assert_eq!(fs::read(&keys).unwrap(), b"in-place external update\n");
+        assert_eq!(
+            fs::read(proposed.path()).unwrap(),
+            b"first external update\n"
+        );
+    }
+
     #[test]
     fn qr_pairing_replaces_every_entry_with_the_same_phone_key() {
         let directory = isolated();
@@ -1218,11 +2100,13 @@ mod tests {
         let openssh = public.to_openssh().unwrap();
         let encoded = openssh.split_whitespace().nth(1).unwrap();
         let (old, old_marker) = permanent_line("/old helper", public.clone()).unwrap();
-        fs::write(
-            &keys,
-            format!("ssh-ed25519 unrelated user@host\n{openssh} manual-copy\n{old}"),
-        )
-        .unwrap();
+        let mut original =
+            format!("ssh-ed25519 unrelated user@host\n{openssh} manual-copy\n").into_bytes();
+        original.extend_from_slice(format!("ssh-ed25519 {encoded} opaque-").as_bytes());
+        original.extend_from_slice(b"\xff-comment\n");
+        original.extend_from_slice(format!("ssh-ed25519 {encoded} unmatched-\"\n").as_bytes());
+        original.extend_from_slice(old.as_bytes());
+        fs::write(&keys, original).unwrap();
         let (permanent, marker) = permanent_line("/new helper", public.clone()).unwrap();
 
         edit_authorized_keys_at(
@@ -1243,6 +2127,91 @@ mod tests {
     }
 
     #[test]
+    fn unpublished_phone_authorization_rolls_back_without_losing_other_edits() {
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        let private = PrivateKey::from(Ed25519Keypair::from_seed(&[8; 32]));
+        let (permanent, _) = permanent_line("/new helper", private.public_key().clone()).unwrap();
+        fs::write(&keys, format!("keep\n{permanent}external\n")).unwrap();
+
+        let mut authorization = PhoneAuthorization {
+            path: keys.clone(),
+            authorization_id: "11111111111111111111111111111111".into(),
+            installed: permanent.as_bytes().to_vec(),
+            armed: true,
+        };
+        authorization.rollback().unwrap();
+
+        let text = fs::read_to_string(keys).unwrap();
+        assert!(text.contains("keep\n"));
+        assert!(text.contains("external\n"));
+        assert!(!text.contains("/new helper"));
+    }
+
+    #[test]
+    fn rollback_never_resurrects_a_concurrently_revoked_phone_key() {
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        let private = PrivateKey::from(Ed25519Keypair::from_seed(&[17; 32]));
+        let (permanent, _) = permanent_line("/new helper", private.public_key().clone()).unwrap();
+
+        // Pi installed its entry, but a newer external generation revoked every
+        // authorization for this key before response publication failed.
+        fs::write(&keys, b"keep\nexternal revocation\n").unwrap();
+        let mut authorization = PhoneAuthorization {
+            path: keys.clone(),
+            authorization_id: "22222222222222222222222222222222".into(),
+            installed: permanent.as_bytes().to_vec(),
+            armed: true,
+        };
+        authorization.rollback().unwrap();
+
+        assert_eq!(fs::read(&keys).unwrap(), b"keep\nexternal revocation\n");
+    }
+
+    #[test]
+    fn rollback_bypasses_a_full_recovery_quota() {
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        let private = PrivateKey::from(Ed25519Keypair::from_seed(&[18; 32]));
+        let public = private.public_key().clone();
+        let (permanent, _) = permanent_line("/new helper", public.clone()).unwrap();
+        fs::write(&keys, format!("keep\n{permanent}")).unwrap();
+        for index in 0..MAX_AUTHORIZED_KEYS_RECOVERIES {
+            fs::write(
+                directory
+                    .path()
+                    .join(format!("{AUTHORIZED_KEYS_RECOVERY_PREFIX}{index}")),
+                b"old\n",
+            )
+            .unwrap();
+        }
+        assert!(edit_authorized_keys_at(keys.clone(), &[], None, Some("ordinary\n")).is_err());
+
+        let mut authorization = PhoneAuthorization {
+            path: keys.clone(),
+            authorization_id: "33333333333333333333333333333333".into(),
+            installed: permanent.as_bytes().to_vec(),
+            armed: true,
+        };
+        authorization.rollback().unwrap();
+
+        let text = fs::read_to_string(keys).unwrap();
+        assert_eq!(text, "keep\n");
+        let recovery_count = fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(AUTHORIZED_KEYS_RECOVERY_PREFIX)
+            })
+            .count();
+        assert_eq!(recovery_count, MAX_AUTHORIZED_KEYS_RECOVERIES + 1);
+    }
+
+    #[test]
     fn managed_helper_names_are_exact_release_artifacts() {
         for name in [
             "pi-desktop-remote",
@@ -1258,12 +2227,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn migration_changes_only_recognized_phone_gateways_and_is_idempotent() {
+    fn migration_upgrades_old_phone_gateways_and_ignores_unrecognized_lines() {
         let directory = isolated();
         let keys = directory.path().join("authorized_keys");
         let private = PrivateKey::from(Ed25519Keypair::from_seed(&[9; 32]));
         let (old, marker) =
             permanent_line("/old/hash/pi-desktop-remote", private.public_key().clone()).unwrap();
+        // Entries created before gateway v2 are upgraded to the current
+        // command while retaining the same restricted key.
+        let old = old.replace("gateway 2 ", "gateway ");
         let old = old
             .replacen(
                 "restrict,command=",
@@ -1313,9 +2285,49 @@ mod tests {
         let migrated = String::from_utf8_lossy(&once);
         assert!(migrated.contains("from=\"10.0.0.0/8\",restrict,command="));
         assert!(migrated.contains(",no-port-forwarding ssh-ed25519 "));
-        assert!(migrated.contains(&format!("exec {} gateway {marker}", stable.display())));
+        assert!(migrated.contains(&format!("exec {} gateway 2 {marker}", stable.display())));
         assert_eq!(migrate_phone_entries_at(keys.clone(), stable).unwrap(), 0);
         assert_eq!(fs::read(&keys).unwrap(), once);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_preserves_gateway_v2_terminal_access() {
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        let private = PrivateKey::from(Ed25519Keypair::from_seed(&[10; 32]));
+        let (old, marker) =
+            permanent_line("/old/hash/pi-desktop-remote", private.public_key().clone()).unwrap();
+        fs::write(&keys, old).unwrap();
+        let stable = Path::new("/home/me/.pi/desktop/bin/pi-desktop-remote");
+
+        assert_eq!(migrate_phone_entries_at(keys.clone(), stable).unwrap(), 1);
+        let migrated = fs::read_to_string(keys).unwrap();
+        assert!(migrated.contains(&format!("exec {} gateway 2 {marker}", stable.display())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_preserves_gateway_v3_commit_identity() {
+        let directory = isolated();
+        let keys = directory.path().join("authorized_keys");
+        let private = PrivateKey::from(Ed25519Keypair::from_seed(&[20; 32]));
+        let authorization_id = "55555555555555555555555555555555";
+        let (old, marker) = staged_permanent_line(
+            "/old/hash/pi-desktop-remote",
+            private.public_key().clone(),
+            authorization_id,
+        )
+        .unwrap();
+        fs::write(&keys, old).unwrap();
+        let stable = Path::new("/home/me/.pi/desktop/bin/pi-desktop-remote");
+
+        assert_eq!(migrate_phone_entries_at(keys.clone(), stable).unwrap(), 1);
+        let migrated = fs::read_to_string(keys).unwrap();
+        assert!(migrated.contains(&format!(
+            "exec {} gateway 3 {marker} {authorization_id}",
+            stable.display()
+        )));
     }
 
     #[test]
@@ -1325,7 +2337,7 @@ mod tests {
         assert_eq!(helper.path, stable.to_str().unwrap());
         let key = PrivateKey::from(Ed25519Keypair::from_seed(&[11; 32]));
         let (line, marker) = permanent_line(&helper.path, key.public_key().clone()).unwrap();
-        assert!(line.contains(&format!("exec {} gateway {marker}", stable.display())));
+        assert!(line.contains(&format!("exec {} gateway 2 {marker}", stable.display())));
         let bootstrap = forced_command(
             &helper.path,
             &["pair", "exchange", "0123456789abcdef0123456789abcdef"],
@@ -1359,6 +2371,7 @@ mod tests {
     fn the_forced_gateway_never_allows_activation() {
         assert!(gateway_arguments("pi-desktop-remote sessions").is_ok());
         assert!(gateway_arguments("pi-desktop-remote activate").is_err());
+        assert!(gateway_arguments("pi-desktop-remote terminal --stdio").is_ok());
     }
 
     #[test]

@@ -73,6 +73,9 @@ pub fn init(cx: &mut App) {
     if let Err(error) = assets::load_fonts(cx) {
         log::error!("Could not load the fonts: {error:#}");
     }
+    zed_theme::init(zed_theme::LoadThemes::JustBase, cx);
+    pi_terminal::init(cx);
+    theme::sync_terminal_theme(theme::Theme::new(true), cx);
     use text_area::*;
     let context = Some(CONTEXT);
     cx.bind_keys([

@@ -35,10 +35,11 @@ pub(crate) struct CommandScreenState {
     pub(crate) tab: CommandTab,
     pub(crate) command_scroll: ScrollHandle,
     pub(crate) output_list: ListState,
+    pub(crate) output_vertical: ScrollHandle,
     pub(crate) output_horizontal: ScrollHandle,
     output_source: Option<CommandOutputSource>,
     output_width: f32,
-    output_wrap: bool,
+    pub(crate) output_wrap: bool,
     output_rows: Arc<Vec<SharedString>>,
 }
 
@@ -52,6 +53,7 @@ impl CommandScreenState {
             tab: CommandTab::Output,
             command_scroll: ScrollHandle::new(),
             output_list,
+            output_vertical: ScrollHandle::new(),
             output_horizontal: ScrollHandle::new(),
             output_source: None,
             output_width: 0.,
@@ -273,8 +275,12 @@ impl PhoneApp {
             return;
         };
         view.tab = tab;
-        if tab == CommandTab::Output && view.output_list.is_following_tail() {
-            view.output_list.scroll_to_end();
+        if tab == CommandTab::Output {
+            if view.output_wrap {
+                view.output_vertical.scroll_to_bottom();
+            } else if view.output_list.is_following_tail() {
+                view.output_list.scroll_to_end();
+            }
         }
         cx.notify();
     }
@@ -387,12 +393,21 @@ impl PhoneApp {
         let tab = view.tab;
         let command_scroll = view.command_scroll.clone();
         let output_list = view.output_list.clone();
+        let output_vertical = view.output_vertical.clone();
         let output_horizontal = view.output_horizontal.clone();
         let output_rows = view.output_rows.clone();
         let output_width = view.output_width;
-        let output_follow = output_list.is_following_tail();
+        let output_follow = if wrap {
+            crate::app::is_scrolled_to_bottom(&output_vertical)
+        } else {
+            output_list.is_following_tail()
+        };
         if tab == CommandTab::Output && output_follow {
-            output_list.scroll_to_end();
+            if wrap {
+                output_vertical.scroll_to_bottom();
+            } else {
+                output_list.scroll_to_end();
+            }
         }
 
         let status: SharedString = if !tool.finished {
@@ -493,6 +508,30 @@ impl PhoneApp {
                             &colors,
                         ))
                         .into_any_element()
+                } else if wrap {
+                    let displayed: SharedString = tool.output_for_display().into_owned().into();
+                    scroll_area(
+                        ("command-output-wrapped-scroll", token as usize),
+                        &output_vertical,
+                    )
+                    .flex_1()
+                    .min_h_0()
+                    .bg(colors.canvas)
+                    .child(
+                        div()
+                            .id("command-output-wrapped")
+                            .debug_selector(|| "command-output-wrapped".into())
+                            .relative()
+                            .min_w_0()
+                            .p(px(20.))
+                            .font_family(MONO)
+                            .text_size(px(12.))
+                            .line_height(px(18.))
+                            .text_color(colors.plain)
+                            .child(super::stream::output_block(displayed.clone(), &colors))
+                            .child(self.copyable(displayed, cx)),
+                    )
+                    .into_any_element()
                 } else {
                     div()
                         .id("command-output")
@@ -618,7 +657,10 @@ mod tests {
         for selector in ["command-tab-command", "command-tab-output"] {
             assert!(cx.debug_bounds(selector).unwrap().size.height >= px(48.));
         }
-        assert!(cx.debug_bounds("command-output").is_some());
+        assert!(
+            cx.debug_bounds("command-output").is_some()
+                || cx.debug_bounds("command-output-wrapped").is_some()
+        );
 
         let command_tab = cx.debug_bounds("command-tab-command").unwrap();
         cx.simulate_click(command_tab.center(), gpui::Modifiers::none());
@@ -736,6 +778,83 @@ mod tests {
             let view = &app.command_views[&token];
             assert!(view.output_list.logical_scroll_top().item_ix > 0);
             assert!(view.output_list.is_following_tail());
+        });
+    }
+
+    #[gpui::test]
+    fn wrapped_output_uses_a_continuous_scroll_surface(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(px(384.), px(640.)));
+        let (token, tool_id) = cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("verifying", window, cx);
+                app.update_prefs(cx, |prefs| prefs.wrap_lines = true);
+                let (turn, kind, tool, tool_id) = running_bash(app);
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == SessionId(1))
+                    .unwrap()
+                    .turns[turn]
+                    .stages[kind.index()]
+                .tools[tool]
+                    .output = (0..120)
+                    .map(|line| format!("wrapped output line {line} {}", "wide ".repeat(20)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                app.open_call_detail(SessionId(1), turn, kind, tool, window, cx);
+                let Route::Command(_, token) = app.route() else {
+                    panic!("command route");
+                };
+                (token, tool_id)
+            })
+        });
+        cx.run_until_parked();
+
+        let bounds = cx.debug_bounds("command-output-wrapped").unwrap();
+        let viewport_point = gpui::point(bounds.center().x, px(500.));
+        let before = app.read_with(cx, |app, _| {
+            let scroll = &app.command_views[&token].output_vertical;
+            assert!(scroll.max_offset().y > px(0.));
+            assert!(crate::app::is_scrolled_to_bottom(scroll));
+            scroll.offset().y
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport_point,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(500.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        let away = app.read_with(cx, |app, _| {
+            let scroll = &app.command_views[&token].output_vertical;
+            assert!(scroll.offset().y > before);
+            assert!(!crate::app::is_scrolled_to_bottom(scroll));
+            scroll.offset().y
+        });
+
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .flat_map(|session| &mut session.turns)
+                    .flat_map(|turn| &mut turn.stages)
+                    .flat_map(|stage| &mut stage.tools)
+                    .find(|tool| tool.id == tool_id)
+                    .unwrap()
+                    .output
+                    .push_str("\na new wrapped line");
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.command_views[&token].output_vertical.offset().y, away);
         });
     }
 

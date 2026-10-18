@@ -1,5 +1,13 @@
 use super::*;
 use gpui::{TestAppContext, VisualContext as _, VisualTestContext, px, rgb};
+#[cfg(feature = "mobile")]
+use std::{
+    borrow::Cow,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 fn setup(cx: &mut TestAppContext) -> VisualTestContext {
     cx.executor().allow_parking();
@@ -8,6 +16,7 @@ fn setup(cx: &mut TestAppContext) -> VisualTestContext {
         theme_settings::init(zed_theme::LoadThemes::JustBase, cx);
         cx.set_global(TerminalStyle {
             font_family: "Courier".into(),
+            font_fallbacks: None,
             font_size: px(12.),
             line_height: px(18.),
             cursor: rgb(0x6a9fcc).into(),
@@ -171,6 +180,227 @@ fn a_display_only_terminal_is_not_busy(cx: &mut TestAppContext) {
         assert!(!is_busy(terminal));
         assert!(terminal.get_content().contains("green plain"));
     });
+}
+
+#[cfg(feature = "mobile")]
+#[derive(Default)]
+struct TestExternalPty {
+    writes: Mutex<Vec<u8>>,
+    shutdown: AtomicBool,
+}
+
+#[cfg(feature = "mobile")]
+impl ExternalPty for TestExternalPty {
+    fn write(&self, bytes: Cow<'static, [u8]>) {
+        self.writes.lock().unwrap().extend_from_slice(&bytes);
+    }
+
+    fn resize(&self, _: TerminalBounds) {}
+
+    fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(feature = "mobile")]
+#[gpui::test]
+fn external_stream_accepts_raw_output_and_shuts_down(cx: &mut TestAppContext) {
+    let cx = &mut setup(cx);
+    let pty = Arc::new(TestExternalPty::default());
+    let terminal = cx.update(|window, cx| {
+        spawn_external(
+            ExternalTerminalBackend {
+                pty: pty.clone(),
+                path_style: PathStyle::Unix,
+            },
+            window,
+            cx,
+        )
+    });
+    let view = cx.new_window_entity(|window, cx| TerminalView::new(terminal.clone(), window, cx));
+    cx.update(|window, cx| window.replace_root(cx, |_, _| RootView(view.clone())));
+    terminal.update(cx, |terminal, cx| {
+        terminal.write_pty_output(b"raw-\0-output", cx)
+    });
+    view.update(cx, |view, cx| view.send_text("typed", cx));
+    cx.run_until_parked();
+
+    assert!(content(&view, cx).contains("raw-"));
+    assert_eq!(&*pty.writes.lock().unwrap(), b"typed");
+    view.update(cx, |view, cx| {
+        view.disconnect(cx);
+        view.disconnect(cx);
+    });
+    assert!(pty.shutdown.load(Ordering::Acquire));
+}
+
+#[cfg(feature = "mobile")]
+#[gpui::test]
+fn soft_keyboard_sentinel_deletion_sends_backspace(cx: &mut TestAppContext) {
+    let cx = &mut setup(cx);
+    let pty = Arc::new(TestExternalPty::default());
+    let terminal = cx.update(|window, cx| {
+        spawn_external(
+            ExternalTerminalBackend {
+                pty: pty.clone(),
+                path_style: PathStyle::Unix,
+            },
+            window,
+            cx,
+        )
+    });
+    let view = cx.new_window_entity(|window, cx| TerminalView::new(terminal, window, cx));
+
+    view.update(cx, |view, cx| view.send_key("backspace", cx));
+    let expected = std::mem::take(&mut *pty.writes.lock().unwrap());
+    assert!(!expected.is_empty());
+    view.update(cx, |view, cx| {
+        view.replace_ime_text(Some(0..1), "", cx);
+    });
+    assert_eq!(&*pty.writes.lock().unwrap(), &expected);
+
+    pty.writes.lock().unwrap().clear();
+    view.update(cx, |view, cx| {
+        view.replace_ime_text(Some(1..1), "a", cx);
+        // Java can report deletion before the mirror reset requested by the
+        // first edit reaches InputConnection.
+        view.replace_ime_text(Some(1..2), "", cx);
+    });
+    assert_eq!(
+        &*pty.writes.lock().unwrap(),
+        &[b"a".as_slice(), expected.as_slice()].concat()
+    );
+
+    pty.writes.lock().unwrap().clear();
+    view.update(cx, |view, cx| {
+        view.set_marked_text(Some("x".into()), Some(1..1), cx);
+        view.replace_ime_text(Some(0..1), "", cx);
+    });
+    assert!(
+        pty.writes.lock().unwrap().is_empty(),
+        "deleting inside a real composition is not a shell backspace"
+    );
+}
+
+#[cfg(feature = "mobile")]
+#[gpui::test]
+fn corrected_commit_and_new_preedit_are_each_sent_once(cx: &mut TestAppContext) {
+    let cx = &mut setup(cx);
+    let pty = Arc::new(TestExternalPty::default());
+    let terminal = cx.update(|window, cx| {
+        spawn_external(
+            ExternalTerminalBackend {
+                pty: pty.clone(),
+                path_style: PathStyle::Unix,
+            },
+            window,
+            cx,
+        )
+    });
+    let view = cx.new_window_entity(|window, cx| TerminalView::new(terminal, window, cx));
+
+    view.update(cx, |view, cx| {
+        view.set_marked_text(Some("helo".into()), Some(4..4), cx);
+        view.defer_marked_commit(cx);
+        view.replace_ime_text(Some(4..5), "lo ", cx);
+        view.set_marked_text(Some("n".into()), Some(1..1), cx);
+        assert_eq!(view.marked_text.as_deref(), Some("n"));
+    });
+    assert_eq!(&*pty.writes.lock().unwrap(), b"hello ");
+
+    view.update(cx, |view, cx| view.defer_marked_commit(cx));
+    cx.run_until_parked();
+    assert_eq!(&*pty.writes.lock().unwrap(), b"hello n");
+}
+
+#[gpui::test]
+fn horizontal_gesture_pans_and_clamps_the_mobile_canvas(cx: &mut TestAppContext) {
+    let cx = &mut setup(cx);
+    let terminal = cx.new(|cx| {
+        TerminalBuilder::new_display_only(
+            CursorShape::Bar,
+            AlternateScroll::On,
+            None,
+            0,
+            cx.background_executor(),
+            PathStyle::Unix,
+        )
+        .subscribe(cx)
+    });
+    let view = cx.new_window_entity(|window, cx| TerminalView::new(terminal, window, cx));
+    let pan = |delta| ScrollWheelEvent {
+        position: Default::default(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(delta), px(0.))),
+        modifiers: gpui::Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    };
+
+    view.update(cx, |view, cx| {
+        view.horizontal_layout(px(40.));
+        view.scroll_wheel(&pan(-25.), cx);
+        assert_eq!(view.horizontal_offset, px(25.));
+        view.scroll_wheel(&pan(-25.), cx);
+        assert_eq!(view.horizontal_offset, px(40.));
+        view.scroll_wheel(&pan(100.), cx);
+        assert_eq!(view.horizontal_offset, px(0.));
+    });
+}
+
+#[gpui::test]
+fn pinch_previews_live_and_commits_one_terminal_geometry(cx: &mut TestAppContext) {
+    let cx = &mut setup(cx);
+    let terminal = cx.new(|cx| {
+        TerminalBuilder::new_display_only(
+            CursorShape::Bar,
+            AlternateScroll::On,
+            None,
+            0,
+            cx.background_executor(),
+            PathStyle::Unix,
+        )
+        .subscribe(cx)
+    });
+    let view = cx.new_window_entity(|window, cx| TerminalView::new(terminal, window, cx));
+    cx.update(|window, cx| window.replace_root(cx, |_, _| RootView(view.clone())));
+    cx.run_until_parked();
+    let before = view.read_with(cx, |view, cx| {
+        view.terminal.read(cx).last_content.terminal_bounds
+    });
+
+    view.update(cx, |view, cx| {
+        view.pinch_zoom(gpui::TouchPhase::Started, 0., cx);
+        view.pinch_zoom(gpui::TouchPhase::Moved, 0.25, cx);
+        view.pinch_zoom(gpui::TouchPhase::Moved, 0.2, cx);
+        assert_eq!(view.paint_font_scale(), 1.5, "preview follows the fingers");
+        assert_eq!(
+            view.terminal_font_scale(),
+            1.,
+            "PTY geometry stays fixed while pinching"
+        );
+    });
+    cx.run_until_parked();
+    let during = view.read_with(cx, |view, cx| {
+        view.terminal.read(cx).last_content.terminal_bounds
+    });
+    assert_eq!(during, before, "preview must not reflow the PTY");
+
+    view.update(cx, |view, cx| {
+        view.pinch_zoom(gpui::TouchPhase::Ended, 0., cx);
+        assert_eq!(view.paint_font_scale(), 1.5);
+        assert_eq!(view.terminal_font_scale(), 1.5);
+    });
+    cx.run_until_parked();
+    let after = view.read_with(cx, |view, cx| {
+        view.terminal.read(cx).last_content.terminal_bounds
+    });
+    assert_ne!(after, before, "gesture end commits the new PTY geometry");
+}
+
+#[test]
+fn ime_commit_applies_the_correction_delta_to_the_whole_preedit() {
+    // Android reports Commit("helo") followed by Replace(4..5, "lo ").
+    assert_eq!(apply_ime_replacement("helo", 4..5, "lo "), "hello ");
+    assert_eq!(apply_ime_replacement("猫", 2..2, "!"), "猫!");
 }
 
 #[gpui::test]

@@ -68,9 +68,14 @@ jobs:
           cargo clippy --locked -p pi_android --features bun-backend-test --all-targets --no-deps -- -D warnings
           cargo test --locked -p pi_android --features bun-backend-test
           python -m unittest discover -s experiments/bun-embedding -p 'test_*_tooling.py' -v
+      - name: Verify generated inputs and lockfiles are current
+        run: |
+          cargo install cargo-about --version 0.9.2 --locked
+          python scripts/rust_notices.py --check
+          git diff --exit-code
       # Do not traverse/format the sibling Zed checkout.
       - name: Format
-        run: cargo fmt -p pi_visual -p pi_visual_ui -p pi_markdown -p pi_core -p pi_remote -p pi_android -p gpui_android -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p pi_terminal -p pi-desktop -- --check
+        run: cargo fmt -p pi_visual -p pi_visual_ui -p pi_markdown -p pi_core -p pi_remote -p pi_android -p gpui_android -p pi_editor -p pi_jj -p pi_lsp_bridge -p pi_settings -p terminal -p pi_terminal -p pi_terminal_mobile -p pi-desktop -- --check
       - name: Rust tests
         run: cargo test --locked --workspace
       - name: Android scheduling UI tests (sample only)
@@ -360,6 +365,17 @@ jobs:
           export PI_ANDROID_BUN_LIBRARY="$(find "$RUNNER_TEMP/bun-runtime/extracted" -name libbunembeddingpoc.so -type f)"
           test -f "$PI_ANDROID_BUN_LIBRARY"
           python crates/pi_android/scripts/build_apk.py --out dist/pi-android-arm64.apk
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          test -x "$apksigner"
+          "$apksigner" verify --verbose --print-certs dist/pi-android-arm64.apk | tee "$RUNNER_TEMP/apk-signature.txt"
+          if [[ '${{ github.ref }}' == refs/tags/v* ]]; then
+            expected='4b1d0ec031843d23e95f0e4a2e70125241b5e80041bdb1caecceac99a9774e71'
+            actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p; s/^V[0-9.]* Signer: certificate SHA-256 digest: //p' "$RUNNER_TEMP/apk-signature.txt" | head -1)"
+            [[ "$actual" == "$expected" ]] || {
+              echo "::error::Release APK signer $actual does not match the pinned v0.0.19 update signer"
+              exit 1
+            }
+          fi
           python scripts/release_desktop.py --tag "v$(python -c 'import tomllib;print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')" --android-apk dist/pi-android-arm64.apk
       - uses: actions/upload-artifact@v4
         with:

@@ -18,7 +18,9 @@ use serde_json::Value;
 use std::{
     fmt,
     future::Future,
+    net::Ipv6Addr,
     path::Path,
+    str::FromStr,
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
@@ -32,34 +34,106 @@ pub struct Address {
 }
 
 impl Address {
+    pub fn from_parts(user: String, host: String, port: u16) -> Self {
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(&host);
+        // Normalize equivalent numeric spellings before they become trust or
+        // preference keys. Scoped link-local literals retain their interface.
+        let host = if let Some((address, scope)) = host.split_once('%') {
+            Ipv6Addr::from_str(address)
+                .map(|address| format!("{address}%{scope}"))
+                .unwrap_or_else(|_| host.to_owned())
+        } else {
+            Ipv6Addr::from_str(host)
+                .map(|address| address.to_string())
+                .unwrap_or_else(|_| host.to_owned())
+        };
+        Self { user, host, port }
+    }
+
+    /// Address spelling used before IPv6 hosts were bracketed. It remains a
+    /// lookup alias so an app upgrade never turns a pinned host key back into
+    /// first-use trust.
+    pub fn legacy_string(&self) -> Option<String> {
+        self.host.contains(':').then(|| {
+            let port = if self.port == 22 {
+                String::new()
+            } else {
+                format!(":{}", self.port)
+            };
+            format!("{}@{}{}", self.user, self.host, port)
+        })
+    }
+
+    /// A v0.0.19 saved non-default IPv6 address was ambiguous because its port
+    /// was appended without brackets. Try this only as a pinned reconnect
+    /// fallback after the literal-as-host interpretation is unreachable.
+    pub fn legacy_port_candidate(text: &str) -> Option<Self> {
+        let (user, rest) = text.trim().split_once('@')?;
+        if rest.starts_with('[') {
+            return None;
+        }
+        let (host, port) = rest.rsplit_once(':')?;
+        if !host.contains(':') || Ipv6Addr::from_str(host).is_err() {
+            return None;
+        }
+        let port = port.parse().ok()?;
+        Some(Self::from_parts(user.into(), host.into(), port))
+    }
+
+    /// All spelling aliases that are safe to associate only after this exact
+    /// address has authenticated with the already-pinned host key.
+    pub fn matches_alias(&self, text: &str) -> bool {
+        Self::parse(text).is_ok_and(|address| address == *self)
+            || Self::legacy_port_candidate(text).is_some_and(|address| address == *self)
+            || self.legacy_string().as_deref() == Some(text.trim())
+    }
+
     pub fn parse(text: &str) -> Result<Self> {
         let text = text.trim();
         let Some((user, rest)) = text.split_once('@') else {
             bail!("Add your user name on the computer, like you@studio-mac.local.");
         };
-        let (host, port) = match rest.rsplit_once(':') {
-            Some((host, port)) if !host.contains(':') => (
-                host,
-                port.parse()
+        let (host, port) = if let Some(bracketed) = rest.strip_prefix('[') {
+            let Some(end) = bracketed.find(']') else {
+                bail!("Close the IPv6 address with ‘]’.");
+            };
+            let host = &bracketed[..end];
+            let suffix = &bracketed[end + 1..];
+            let port = match suffix {
+                "" => 22,
+                suffix if suffix.starts_with(':') => suffix[1..]
+                    .parse()
                     .map_err(|_| anyhow!("The port after “:” should be a number."))?,
-            ),
-            _ => (rest, 22),
+                _ => bail!("Put the port after the IPv6 address, like [::1]:2222."),
+            };
+            (host, port)
+        } else {
+            match rest.rsplit_once(':') {
+                Some((host, port)) if !host.contains(':') => (
+                    host,
+                    port.parse()
+                        .map_err(|_| anyhow!("The port after “:” should be a number."))?,
+                ),
+                _ => (rest, 22),
+            }
         };
-        let host = host.trim_start_matches('[').trim_end_matches(']');
         if user.is_empty() || host.is_empty() || text.contains(char::is_whitespace) {
             bail!("Enter the computer's SSH address, like you@studio-mac.local.");
         }
-        Ok(Self {
-            user: user.into(),
-            host: host.into(),
-            port,
-        })
+        Ok(Self::from_parts(user.into(), host.into(), port))
     }
 }
 
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}@{}", self.user, self.host)?;
+        if self.host.contains(':') {
+            write!(f, "{}@[{}]", self.user, self.host)?;
+        } else {
+            write!(f, "{}@{}", self.user, self.host)?;
+        }
         if self.port != 22 {
             write!(f, ":{}", self.port)?;
         }
@@ -230,6 +304,14 @@ pub struct Output {
     pub stderr: String,
 }
 
+/// A running command with an opaque, binary-safe stdin/stdout stream.
+pub struct BytePipe {
+    pub output: async_channel::Receiver<Vec<u8>>,
+    pub input: async_channel::Sender<Vec<u8>>,
+    /// Why it ended: bounded stderr, or its exit status.
+    pub ended: async_channel::Receiver<String>,
+}
+
 /// A running command that speaks JSON lines: records in, records out.
 pub struct Pipe {
     pub records: async_channel::Receiver<Value>,
@@ -329,6 +411,66 @@ impl Connection {
             })
         })
         .await
+    }
+
+    /// Starts `command` and exchanges arbitrary bytes with it. Channel setup is
+    /// bounded so a server that never acknowledges exec cannot leak tasks.
+    pub async fn byte_pipe(&self, command: String) -> Result<BytePipe> {
+        let handle = self.handle.clone();
+        let (output_out, output) = async_channel::bounded::<Vec<u8>>(64);
+        let (input, input_in) = async_channel::bounded::<Vec<u8>>(64);
+        let (ended_out, ended) = async_channel::bounded::<String>(1);
+        on_runtime(async move {
+            let channel = tokio::time::timeout(Duration::from_secs(15), async {
+                let channel = handle.channel_open_session().await?;
+                channel.exec(true, command).await?;
+                Result::<_>::Ok(channel)
+            })
+            .await
+            .context("The computer took too long to open the terminal")??;
+            let (mut reader, writer) = channel.split();
+            tokio::spawn(async move {
+                while let Ok(bytes) = input_in.recv().await {
+                    if writer.data_bytes(bytes).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = writer.eof().await;
+                let _ = writer.close().await;
+            });
+            tokio::spawn(async move {
+                let (mut stderr, mut status) = (Vec::new(), None);
+                while let Some(message) = reader.wait().await {
+                    match message {
+                        ChannelMsg::Data { data } => {
+                            if output_out.send(data.to_vec()).await.is_err() {
+                                return;
+                            }
+                        }
+                        ChannelMsg::ExtendedData { data, .. } if stderr.len() < 8192 => {
+                            let remaining = 8192 - stderr.len();
+                            stderr.extend_from_slice(&data[..data.len().min(remaining)]);
+                        }
+                        ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                        _ => {}
+                    }
+                }
+                let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
+                let reason = match (stderr.is_empty(), status) {
+                    (false, _) => stderr,
+                    (true, Some(status)) => format!("It exited with status {status}"),
+                    (true, None) => "The connection closed".into(),
+                };
+                let _ = ended_out.send(reason).await;
+            });
+            Ok(())
+        })
+        .await?;
+        Ok(BytePipe {
+            output,
+            input,
+            ended,
+        })
     }
 
     /// Starts `command` and exchanges JSON lines with it until either side ends.
@@ -590,9 +732,37 @@ mod tests {
         );
         assert_eq!(Address::parse("dev@10.0.4.12:2222").unwrap().port, 2222);
         assert_eq!(Address::parse("dev@[fe80::1]").unwrap().host, "fe80::1");
+        assert_eq!(Address::parse("dev@fe80::1").unwrap().host, "fe80::1");
         assert_eq!(
             Address::parse("dev@10.0.4.12:2222").unwrap().to_string(),
             "dev@10.0.4.12:2222"
+        );
+        let ipv6 = Address::parse("dev@[2001:db8::1]:2222").unwrap();
+        assert_eq!((ipv6.host.as_str(), ipv6.port), ("2001:db8::1", 2222));
+        assert_eq!(ipv6.to_string(), "dev@[2001:db8::1]:2222");
+        assert_eq!(
+            ipv6.legacy_string().as_deref(),
+            Some("dev@2001:db8::1:2222")
+        );
+        assert_eq!(Address::parse(&ipv6.to_string()).unwrap(), ipv6);
+        assert_eq!(
+            Address::parse("dev@[2001:0DB8:0:0:0:0:0:1]:2222")
+                .unwrap()
+                .to_string(),
+            "dev@[2001:db8::1]:2222"
+        );
+        assert!(ipv6.matches_alias("dev@2001:0DB8:0:0:0:0:0:1:2222"));
+        assert_eq!(
+            Address::legacy_port_candidate("dev@2001:db8::1:2222"),
+            Some(ipv6.clone())
+        );
+        assert_eq!(
+            Address::from_parts("dev".into(), "[2001:db8::1]".into(), 2222),
+            ipv6
+        );
+        assert_eq!(
+            Address::parse("dev@2001:db8::1").unwrap().to_string(),
+            "dev@[2001:db8::1]"
         );
         assert!(Address::parse("studio-mac.local").is_err());
         assert!(Address::parse("nick@studio mac").is_err());

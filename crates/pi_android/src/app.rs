@@ -37,6 +37,33 @@ use std::{
 
 actions!(pi_android, [GoBack]);
 
+async fn open_remote_helper(
+    address: Address,
+    identity: Identity,
+    known: Option<String>,
+) -> anyhow::Result<(Address, Connection, remote::Helper)> {
+    let connection = Connection::open(address.clone(), identity, known).await?;
+    let helper = remote::find(&connection).await?;
+    Ok((address, connection, helper))
+}
+
+async fn open_remote_helper_with_legacy_fallback(
+    address: Address,
+    fallback: Option<Address>,
+    identity: Identity,
+    known: Option<String>,
+) -> anyhow::Result<(Address, Connection, remote::Helper)> {
+    match open_remote_helper(address, identity.clone(), known.clone()).await {
+        Err(error)
+            if matches!(error.downcast_ref(), Some(ssh::Failure::Unreachable(_)))
+                && fallback.is_some() =>
+        {
+            open_remote_helper(fallback.unwrap(), identity, known).await
+        }
+        result => result,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Route {
     Connect,
@@ -48,11 +75,13 @@ pub enum Route {
     ScheduleHistory,
     Projects,
     Start,
-    /// A file from the project browser, read-only.
+    /// The native editor workspace, with or without an active file.
     File,
     Thread(SessionId),
     /// A live shell call, bound by an opaque screen token to its stable tool ID.
     Command(SessionId, u64),
+    /// A session-owned helper account shell. Its token/view survives hiding.
+    Terminal(SessionId, u64),
     Review(SessionId),
     History(SessionId),
     Diagnostics(SessionId),
@@ -145,6 +174,12 @@ pub enum Sheet {
     Model,
     Thinking,
     Project,
+    /// Pick the folder that becomes the editor's working directory.
+    EditorRoot,
+    /// Browse only files below the editor's working directory.
+    EditorFiles,
+    FileStructure,
+    FileRecoveries,
     More(SessionId),
     Models,
     Resources,
@@ -164,7 +199,7 @@ pub enum Sheet {
     /// What the app logged lately, from Settings.
     Logs,
     Computers,
-    /// Text from the thread, to select part of and copy.
+    /// Text opened by an explicit source/output viewer, outside chat.
     SelectText,
     InlineSource,
     InlineUpdate,
@@ -386,6 +421,8 @@ pub struct PhoneApp {
     pub(crate) swarm_views: HashMap<(SessionId, CrewPick), crate::screens::swarm::SwarmScreenState>,
     pub(crate) next_command_view: u64,
     pub(crate) command_views: HashMap<u64, crate::screens::command::CommandScreenState>,
+    pub(crate) next_terminal_view: u64,
+    pub(crate) terminal_views: HashMap<u64, crate::screens::terminal::TerminalScreenState>,
     /// A sheet transition gives focus back to the app once, before its fields can focus.
     sheet_focus_pending: bool,
     /// Open disclosures in the details sheet.
@@ -395,8 +432,11 @@ pub struct PhoneApp {
     pub(crate) render_stats: RenderStats,
     pub(crate) focus: FocusHandle,
     pub(crate) address: Entity<TextArea>,
-    /// The text a long press opened, to select and copy parts of.
+    /// Text shown by explicit source viewers in the legacy selection sheet.
     pub(crate) selectable: Entity<TextArea>,
+    /// The one Markdown block currently being selected directly in the thread.
+    pub(crate) inline_selectable: Entity<TextArea>,
+    pub(crate) inline_selection: Option<String>,
     pub(crate) connect_error: Option<SharedString>,
     pub(crate) connecting: bool,
     /// Identifies the connection attempt that is still allowed to update the app.
@@ -447,12 +487,26 @@ pub struct PhoneApp {
     pub(crate) start_visible_height: Option<gpui::Pixels>,
     pub(crate) project: usize,
     pub(crate) project_browser: ProjectBrowser,
+    /// The remote folder that bounds every editor read, save, and file-drawer action.
+    pub(crate) editor_root: Option<String>,
+    /// The shared browser is repurposed for the editor only while this is set.
+    pub(crate) project_browser_editor: bool,
     /// Retained rows for the project sheet; only the viewport is laid out.
     pub(crate) project_list: ListState,
     pub(crate) project_tree_rows: Vec<ProjectRow>,
     pub(crate) project_overview_shape: Option<(usize, bool)>,
     pub(crate) project_list_offset: Pixels,
     pub(crate) file_view: Option<FileView>,
+    /// Inactive editor tabs. The active buffer stays in `file_view` to keep
+    /// existing route and preview ownership simple.
+    pub(crate) file_tabs: Vec<FileView>,
+    pub(crate) file_recoveries: crate::projects::FileRecoveryState,
+    pub(crate) file_recovery_delete_armed: Option<String>,
+    /// The current File route was pushed from the project chooser, so Back
+    /// restores that chooser. Workspace resumes explicitly clear this.
+    pub(crate) file_return_to_project: bool,
+    pub(crate) file_exit_armed: bool,
+    file_exit_generation: u64,
     /// Tool images decoded once, by key.
     pub(crate) tool_images: std::cell::RefCell<HashMap<String, crate::screens::ShownImage>>,
     /// Image keys whose cards have actually intersected a viewport. Keeping
@@ -588,6 +642,7 @@ impl PhoneApp {
         });
         let review = cx.new(|cx| Composer::new("Add a follow-up…", cx));
         let selectable = cx.new(|cx| TextArea::read_only(12, cx));
+        let inline_selectable = cx.new(|cx| TextArea::read_only(100_000, cx));
         let subscriptions = vec![
             cx.subscribe(&selectable, |this, _, event: &TextAreaEvent, cx| {
                 if *event == TextAreaEvent::Copied {
@@ -595,28 +650,43 @@ impl PhoneApp {
                     this.notify_user("Copied", cx);
                 }
             }),
+            cx.subscribe(&inline_selectable, |this, _, event: &TextAreaEvent, cx| {
+                if matches!(event, TextAreaEvent::Copied | TextAreaEvent::Dismissed) {
+                    let copied = *event == TextAreaEvent::Copied;
+                    this.inline_selection = None;
+                    if copied {
+                        this.notify_user("Copied", cx);
+                    } else {
+                        cx.notify();
+                    }
+                }
+            }),
             cx.subscribe_in(&address, window, |this, _, event, window, cx| match event {
                 TextAreaEvent::Submit => this.connect(window, cx),
-                TextAreaEvent::Changed => {
+                TextAreaEvent::Changed(_) => {
                     this.connect_error = None;
                     cx.notify();
                 }
-                TextAreaEvent::Copied => {}
+                TextAreaEvent::SelectionChanged
+                | TextAreaEvent::Copied
+                | TextAreaEvent::Dismissed => {}
             }),
             cx.subscribe(&search, |_, _, _: &TextAreaEvent, cx| cx.notify()),
             cx.subscribe(&model_search, |this, _, event: &TextAreaEvent, cx| {
-                if *event == TextAreaEvent::Changed {
+                if matches!(event, TextAreaEvent::Changed(_)) {
                     this.sheet_scroll.set_offset(gpui::Point::default());
                 }
                 cx.notify();
             }),
             cx.subscribe_in(&folder, window, |this, _, event, window, cx| match event {
                 TextAreaEvent::Submit => this.submit_folder_search(window, cx),
-                TextAreaEvent::Changed => {
+                TextAreaEvent::Changed(_) => {
                     this.sheet_scroll.set_offset(gpui::Point::default());
                     cx.notify();
                 }
-                TextAreaEvent::Copied => {}
+                TextAreaEvent::SelectionChanged
+                | TextAreaEvent::Copied
+                | TextAreaEvent::Dismissed => {}
             }),
             cx.subscribe_in(&start, window, |this, _, event, window, cx| {
                 this.composer_event(Target::Start, event, window, cx)
@@ -717,6 +787,8 @@ impl PhoneApp {
             swarm_views: HashMap::new(),
             next_command_view: 1,
             command_views: HashMap::new(),
+            next_terminal_view: 1,
+            terminal_views: HashMap::new(),
             sheet_focus_pending: false,
             expanded: HashSet::new(),
             notice: None,
@@ -725,6 +797,8 @@ impl PhoneApp {
             focus: cx.focus_handle(),
             address,
             selectable,
+            inline_selectable,
+            inline_selection: None,
             connect_error: None,
             connecting: false,
             connection_generation: 0,
@@ -762,12 +836,20 @@ impl PhoneApp {
             start_visible_height: None,
             project: 0,
             project_browser: ProjectBrowser::default(),
+            editor_root: None,
+            project_browser_editor: false,
             project_list: ListState::new(0, ListAlignment::Top, px(240.))
                 .with_uniform_item_height(px(48.)),
             project_tree_rows: Vec::new(),
             project_overview_shape: None,
             project_list_offset: px(0.),
             file_view: None,
+            file_tabs: Vec::new(),
+            file_recoveries: crate::projects::FileRecoveryState::Idle,
+            file_recovery_delete_armed: None,
+            file_return_to_project: false,
+            file_exit_armed: false,
+            file_exit_generation: 0,
             tool_images: Default::default(),
             tool_image_demands: Default::default(),
             inline_pages: Default::default(),
@@ -827,7 +909,7 @@ impl PhoneApp {
             app.address
                 .update(cx, |field, cx| field.set_text(address.clone(), cx));
             if sample {
-                app.open_store(&address);
+                app.open_store(&address, cx);
             } else {
                 app.resume(address, window, cx);
             }
@@ -876,9 +958,14 @@ impl PhoneApp {
             Route::Command(_, token) => {
                 if let Some(view) = self.command_views.get(&token)
                     && view.tab == crate::screens::command::CommandTab::Output
-                    && view.output_list.is_following_tail()
                 {
-                    view.output_list.scroll_to_end();
+                    if view.output_wrap {
+                        if is_scrolled_to_bottom(&view.output_vertical) {
+                            view.output_vertical.scroll_to_bottom();
+                        }
+                    } else if view.output_list.is_following_tail() {
+                        view.output_list.scroll_to_end();
+                    }
                 }
             }
             _ => {}
@@ -983,11 +1070,13 @@ impl PhoneApp {
         };
         let palette = Theme::new(dark);
         cx.set_global(palette);
+        crate::theme::sync_terminal_theme(palette, cx);
         activity::set_bar_icons(match appearance {
             Appearance::System => activity::BarIcons::System,
             _ if dark => activity::BarIcons::Light,
             _ => activity::BarIcons::Dark,
         });
+        self.recolor_file_editors(cx);
         cx.notify();
     }
 
@@ -1010,6 +1099,29 @@ impl PhoneApp {
         self.entered(window, cx);
     }
 
+    /// Replaces navigation while deterministically closing terminals excluded
+    /// by the replacement (for example when changing stores or following a
+    /// direct link). Ordinary Back deliberately does not use this cleanup.
+    fn replace_routes(&mut self, routes: Vec<Route>, cx: &mut Context<Self>) {
+        let retained: HashSet<u64> = routes
+            .iter()
+            .filter_map(|route| match route {
+                Route::Terminal(_, token) => Some(*token),
+                _ => None,
+            })
+            .collect();
+        let removed: Vec<u64> = self
+            .terminal_views
+            .keys()
+            .copied()
+            .filter(|token| !retained.contains(token))
+            .collect();
+        self.routes = routes;
+        for token in removed {
+            self.close_terminal_view(token, cx);
+        }
+    }
+
     /// Goes to a session from anywhere, with the list behind it.
     pub(crate) fn show_session(
         &mut self,
@@ -1017,7 +1129,7 @@ impl PhoneApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.routes = vec![Route::Sessions];
+        self.replace_routes(vec![Route::Sessions], cx);
         self.push_session(id, window, cx);
     }
 
@@ -1044,6 +1156,7 @@ impl PhoneApp {
         let shown = match self.route() {
             Route::Thread(id)
             | Route::Command(id, _)
+            | Route::Terminal(id, _)
             | Route::Review(id)
             | Route::History(id)
             | Route::Diagnostics(id)
@@ -1059,6 +1172,7 @@ impl PhoneApp {
     }
 
     fn entered(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.inline_selection = None;
         self.show_live();
         if let Route::Thread(id) = self.route() {
             self.begin_thread_loading(id);
@@ -1070,6 +1184,7 @@ impl PhoneApp {
         window.focus(&self.focus, cx);
         if let Route::Thread(id)
         | Route::Command(id, _)
+        | Route::Terminal(id, _)
         | Route::Review(id)
         | Route::History(id)
         | Route::Diagnostics(id)
@@ -1124,7 +1239,7 @@ impl PhoneApp {
         const RESOURCES: &str = "resources";
         let required = match sheet {
             Sheet::Resources => Some(RESOURCES),
-            Sheet::Project => Some("workspace_browse"),
+            Sheet::Project | Sheet::EditorRoot | Sheet::EditorFiles => Some("workspace_browse"),
             Sheet::RestoreHistory(_, _) | Sheet::EnableJj(_) => Some("file_history"),
             _ => None,
         };
@@ -1132,6 +1247,7 @@ impl PhoneApp {
             self.notify_user("This backend does not support that feature", cx);
             return;
         }
+        self.inline_selection = None;
         self.closing_sheet = None;
         // A different sheet can be much taller than the last measured one. Until
         // this panel is laid out, use the viewport fallback so its first frame is
@@ -1158,8 +1274,37 @@ impl PhoneApp {
         }
         self.image_zoom = 1.;
         self.image_pan = gpui::Point::default();
-        if sheet == Sheet::Project {
-            self.open_project_browser(false, cx);
+        match sheet {
+            Sheet::Project => {
+                if self.project_browser_editor {
+                    self.project_browser.clear();
+                }
+                self.project_browser_editor = false;
+                self.open_project_browser(false, cx);
+            }
+            Sheet::EditorRoot => {
+                self.project_browser.clear();
+                self.project_browser_editor = true;
+                self.folder.update(cx, |area, cx| area.set_text("", cx));
+                self.go_to_folder(self.home_folder(), cx);
+            }
+            Sheet::EditorFiles => {
+                let Some(root) = self.editor_root.clone() else {
+                    self.notify_user("Choose an editor folder first", cx);
+                    self.sheet = None;
+                    return;
+                };
+                if !self.project_browser_editor
+                    || self.project_browser.root.as_deref() != Some(root.as_str())
+                {
+                    self.project_browser.clear();
+                    self.project_browser_editor = true;
+                    self.project_browser.root = Some(root.clone());
+                    self.load_editor_tree(root, cx);
+                }
+                self.folder.update(cx, |area, cx| area.set_text("", cx));
+            }
+            _ => {}
         }
         self.sheet_focus_pending = true;
         cx.notify();
@@ -1244,8 +1389,10 @@ impl PhoneApp {
                         let delta = event.delta.pixel_delta(px(20.));
                         let (along, across) = (delta.y, delta.x);
                         let shown_sheet = this.sheet.or(this.closing_sheet);
-                        let project_list = shown_sheet == Some(Sheet::Project)
-                            && this.folder.read(cx).text().trim().is_empty();
+                        let project_list = matches!(
+                            shown_sheet,
+                            Some(Sheet::Project | Sheet::EditorRoot | Sheet::EditorFiles)
+                        ) && this.folder.read(cx).text().trim().is_empty();
                         let activity_list = matches!(shown_sheet, Some(Sheet::Activity(..)))
                             .then(|| this.activity_view.as_ref())
                             .flatten();
@@ -1317,6 +1464,11 @@ impl PhoneApp {
 
     /// One step back; false when there is nothing to go back to.
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.inline_selection.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return true;
+        }
         #[cfg(feature = "local-backend")]
         if self.local_providers.visible {
             self.close_provider_accounts();
@@ -1363,6 +1515,29 @@ impl PhoneApp {
             cx.notify();
             return true;
         }
+        if self.route() == Route::File
+            && !self.file_exit_armed
+            && self.editor_workspace_needs_attention(cx)
+        {
+            self.file_exit_armed = true;
+            self.file_exit_generation += 1;
+            let generation = self.file_exit_generation;
+            self.notify_user(
+                "Unsaved or unconfirmed file changes remain. Tap Back again to return; this workspace will stay open.",
+                cx,
+            );
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(4)).await;
+                this.update(cx, |this, _| {
+                    if this.file_exit_generation == generation {
+                        this.file_exit_armed = false;
+                    }
+                })
+                .ok();
+            })
+            .detach();
+            return true;
+        }
         if self.routes.len() > 1 {
             let left = self.routes.pop();
             if left == Some(Route::ScheduleConfirm) {
@@ -1379,14 +1554,18 @@ impl PhoneApp {
             if let Some(Route::Command(_, token)) = left {
                 self.command_views.remove(&token);
             }
+            // A terminal is session-owned rather than route-owned. Popping its
+            // screen hides it while its shell, scrollback and zoom/pan state
+            // remain available from the session's Open terminal action.
             self.show_live();
             if let Route::Thread(id) = self.route() {
                 self.begin_thread_loading(id);
             }
-            if left == Some(Route::File)
-                && self.file_view.as_ref().is_some_and(|view| view.from_sheet)
-            {
-                self.open_sheet(Sheet::Project, cx);
+            if left == Some(Route::File) {
+                if std::mem::take(&mut self.file_return_to_project) {
+                    self.open_sheet(Sheet::Project, cx);
+                }
+                self.file_exit_armed = false;
             }
             if !matches!(self.route(), Route::Review(_)) {
                 self.review_call = None;
@@ -1436,11 +1615,11 @@ impl PhoneApp {
     // Connecting
 
     /// The sample sessions, for trying the app without a computer.
-    pub(crate) fn open_store(&mut self, address: &str) {
-        self.install_store(Store::sample(Computer::from_address(address)));
+    pub(crate) fn open_store(&mut self, address: &str, cx: &mut Context<Self>) -> bool {
+        self.install_store(Store::sample(Computer::from_address(address)), cx)
     }
-    pub(crate) fn install_store(&mut self, store: Store) {
-        self.replace_store(Some(store));
+    pub(crate) fn install_store(&mut self, store: Store, cx: &mut Context<Self>) -> bool {
+        self.replace_store(Some(store), cx)
     }
     pub(crate) fn preserve_local_drafts(&mut self, cx: &mut Context<Self>) {
         #[cfg(feature = "local-backend")]
@@ -1461,7 +1640,32 @@ impl PhoneApp {
         #[cfg(not(feature = "local-backend"))]
         let _ = cx;
     }
-    pub(crate) fn replace_store(&mut self, store: Option<Store>) {
+    pub(crate) fn replace_store(&mut self, store: Option<Store>, cx: &mut Context<Self>) -> bool {
+        let retaining_editor = self
+            .store
+            .as_ref()
+            .and_then(|store| store.live.as_ref().map(|_| store.computer.address.as_str()))
+            .zip(
+                store
+                    .as_ref()
+                    .and_then(|store| store.live.as_ref().map(|_| store.computer.address.as_str())),
+            )
+            .is_some_and(|(current, next)| current == next);
+        if !retaining_editor && self.editor_workspace_needs_attention(cx) {
+            self.notify_user(
+                "Save or resolve every open file before changing computers",
+                cx,
+            );
+            return false;
+        }
+        let retained_editor = retaining_editor.then(|| {
+            (
+                self.editor_root.take(),
+                self.file_view.take(),
+                std::mem::take(&mut self.file_tabs),
+            )
+        });
+
         #[cfg(feature = "local-backend")]
         if store.as_ref().is_some_and(|store| store.local.is_none()) {
             let _ = std::fs::remove_file(self.data_dir.join("local-backend-preferred"));
@@ -1485,14 +1689,24 @@ impl PhoneApp {
         self.reset_swarm_views();
         self.schedules.invalidate();
         self.project_browser.clear();
+        self.project_browser_editor = false;
+        self.editor_root = None;
         self.project_files_generation += 1;
+        self.file_generation += 1;
+        self.file_view = None;
+        self.file_tabs.clear();
+        self.file_return_to_project = false;
+        self.file_exit_armed = false;
         self.project = 0;
         self.deferred_updates.clear();
-        self.routes = vec![if store.is_some() {
-            Route::Sessions
-        } else {
-            Route::Connect
-        }];
+        self.replace_routes(
+            vec![if store.is_some() {
+                Route::Sessions
+            } else {
+                Route::Connect
+            }],
+            cx,
+        );
         self.store = store;
         self.review_session = None;
         self.review_lines.clear();
@@ -1523,9 +1737,28 @@ impl PhoneApp {
         self.subagent_projected_revisions.clear();
         self.subagent_composers.clear();
         self._pump = None;
+
+        if let Some((root, active, tabs)) = retained_editor {
+            self.editor_root = root;
+            self.file_view = active;
+            self.file_tabs = tabs;
+            if let Some(root) = self.editor_root.clone() {
+                self.project_browser_editor = true;
+                self.project_browser.root = Some(root.clone());
+                self.load_editor_tree(root, cx);
+            }
+        }
+        true
     }
 
     pub(crate) fn open_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor_workspace_needs_attention(cx) {
+            self.notify_user(
+                "Save or resolve every open file before opening the samples",
+                cx,
+            );
+            return;
+        }
         self.preserve_local_drafts(cx);
         if self.is_local() {
             self.start.update(cx, |start, cx| start.clear(cx));
@@ -1539,7 +1772,9 @@ impl PhoneApp {
         } else {
             typed
         };
-        self.open_store(&address);
+        if !self.open_store(&address, cx) {
+            return;
+        }
         self.start.update(cx, |start, _| {
             start.set_workspace(true);
             start.use_files(None);
@@ -1590,7 +1825,8 @@ impl PhoneApp {
         if self.connecting {
             return;
         }
-        let address = match Address::parse(self.address.read(cx).text()) {
+        let entered_address = self.address.read(cx).text().trim().to_owned();
+        let address = match Address::parse(&entered_address) {
             Ok(address) => address,
             Err(error) => {
                 self.connect_error = Some(error.to_string().into());
@@ -1598,6 +1834,16 @@ impl PhoneApp {
                 return;
             }
         };
+        let retaining_editor = self.store.as_ref().is_some_and(|store| {
+            store.live.is_some() && address.matches_alias(&store.computer.address)
+        });
+        if !retaining_editor && self.editor_workspace_needs_attention(cx) {
+            self.notify_user(
+                "Save or resolve every open file before changing computers",
+                cx,
+            );
+            return;
+        }
         let identity = match self.identity() {
             Ok(identity) => identity,
             Err(error) => {
@@ -1606,7 +1852,23 @@ impl PhoneApp {
                 return;
             }
         };
-        let known = self.prefs(cx).host_keys.get(&address.to_string()).cloned();
+        let legacy_fallback = self
+            .resuming
+            .as_ref()
+            .filter(|resume| resume.address.trim() == entered_address)
+            .and_then(|_| Address::legacy_port_candidate(&entered_address))
+            .filter(|fallback| fallback != &address);
+        let known = self
+            .prefs(cx)
+            .host_keys
+            .iter()
+            .find(|(saved, _)| {
+                address.matches_alias(saved)
+                    || legacy_fallback
+                        .as_ref()
+                        .is_some_and(|fallback| fallback.matches_alias(saved))
+            })
+            .map(|(_, key)| key.clone());
         let generation = self.begin_connection_attempt();
         self.pairing_status = None;
         self.connect_error = None;
@@ -1615,14 +1877,19 @@ impl PhoneApp {
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let reached = async {
-                let connection = Connection::open(address.clone(), identity, known).await?;
-                let helper = remote::find(&connection).await?;
+                let (address, connection, helper) = open_remote_helper_with_legacy_fallback(
+                    address,
+                    legacy_fallback,
+                    identity,
+                    known,
+                )
+                .await?;
                 let listed = if helper.can_list_sessions() {
                     remote::sessions(&connection, &helper).await?
                 } else {
                     Vec::new()
                 };
-                anyhow::Ok((connection, helper, listed))
+                anyhow::Ok((address, connection, helper, listed))
             }
             .await;
             this.update_in(cx, |this, window, cx| {
@@ -1631,7 +1898,7 @@ impl PhoneApp {
                 }
                 this.connecting = false;
                 match reached {
-                    Ok((connection, helper, listed)) => {
+                    Ok((address, connection, helper, listed)) => {
                         this.connected(address, connection, helper, listed, window, cx)
                     }
                     Err(error) => {
@@ -1743,6 +2010,17 @@ impl PhoneApp {
             cx.notify();
             return;
         }
+        let address = Address::from_parts(offer.user.clone(), offer.hosts[0].clone(), offer.port);
+        let retaining_editor = self.store.as_ref().is_some_and(|store| {
+            store.live.is_some() && store.computer.address == address.to_string()
+        });
+        if !retaining_editor && self.editor_workspace_needs_attention(cx) {
+            self.notify_user(
+                "Save or resolve every open file before changing computers",
+                cx,
+            );
+            return;
+        }
         let identity = match self.identity() {
             Ok(identity) => identity,
             Err(error) => {
@@ -1753,11 +2031,6 @@ impl PhoneApp {
         };
         let public_key = identity.public_line();
         let code = pi_core::pairing::confirmation_code(&offer.id, &public_key);
-        let address = Address {
-            user: offer.user.clone(),
-            host: offer.hosts[0].clone(),
-            port: offer.port,
-        };
         self.address
             .update(cx, |field, cx| field.set_text(address.to_string(), cx));
         let generation = self.begin_connection_attempt();
@@ -1807,6 +2080,59 @@ impl PhoneApp {
     ) {
         self.pairing_status = None;
         self.stop_resuming();
+        let canonical_address = address.to_string();
+        // Migrate every equivalent authenticated spelling together. Host-key
+        // trust, seen state, projects, and command catalogs must not split when
+        // IPv6 gains brackets or normalizes its numeric spelling.
+        let aliases: BTreeSet<String> = {
+            let prefs = self.prefs(cx);
+            prefs
+                .host_keys
+                .keys()
+                .chain(prefs.seen.keys())
+                .chain(prefs.projects.keys())
+                .chain(prefs.command_catalogs.keys())
+                .filter(|saved| saved.as_str() != canonical_address && address.matches_alias(saved))
+                .cloned()
+                .collect()
+        };
+        if !aliases.is_empty() {
+            self.update_prefs(cx, |prefs| {
+                for alias in &aliases {
+                    if let Some(key) = prefs.host_keys.remove(alias) {
+                        prefs
+                            .host_keys
+                            .entry(canonical_address.clone())
+                            .or_insert(key);
+                    }
+                    if let Some(seen) = prefs.seen.remove(alias) {
+                        prefs.seen.entry(canonical_address.clone()).or_insert(seen);
+                    }
+                    if let Some(project) = prefs.projects.remove(alias) {
+                        prefs
+                            .projects
+                            .entry(canonical_address.clone())
+                            .or_insert(project);
+                    }
+                    if let Some(catalogs) = prefs.command_catalogs.remove(alias) {
+                        let current = prefs
+                            .command_catalogs
+                            .entry(canonical_address.clone())
+                            .or_default();
+                        for (project, commands) in catalogs {
+                            current.entry(project).or_insert(commands);
+                        }
+                    }
+                }
+                if prefs
+                    .computer
+                    .as_ref()
+                    .is_some_and(|saved| address.matches_alias(saved))
+                {
+                    prefs.computer = Some(canonical_address.clone());
+                }
+            });
+        }
         let fingerprint = connection.fingerprint.clone();
         let prefs = self.prefs(cx);
         let wanted = prefs
@@ -1842,29 +2168,19 @@ impl PhoneApp {
             .get(&address.to_string())
             .map(|path| store.add_project(path))
             .unwrap_or(0);
-        self.project_browser.clear();
-        self.deferred_updates.clear();
-        self.thread_lists.clear();
-        self.thread_list_shapes.clear();
-        self.thread_loading.clear();
-        self.thread_loading_release_scheduled.clear();
-        self.thread_failed_layouts.clear();
-        self.thread_pending_remeasure.clear();
-        self.thread_snapshots.clear();
-        self.thread_list_offsets.clear();
-        self.reset_swarm_views();
-        self.reset_inline_pages();
         self.preserve_local_drafts(cx);
         if self.is_local() {
             self.start.update(cx, |start, cx| start.clear(cx));
         }
-        self.install_store(store);
+        if !self.install_store(store, cx) {
+            return;
+        }
         // Sessions that end while the phone is away are new to you then.
         if first_look {
             self.save_seen(cx);
         }
         self.project = project;
-        self.routes = vec![Route::Sessions, Route::Projects];
+        self.replace_routes(vec![Route::Sessions, Route::Projects], cx);
         self.threads.clear();
         self.pending_compacts.clear();
         self.jj_histories.clear();
@@ -1878,9 +2194,11 @@ impl PhoneApp {
         self.key_refused = false;
         self.last_listed = Instant::now();
         self.update_prefs(cx, |prefs| {
-            prefs.computer = Some(address.to_string());
+            prefs.computer = Some(canonical_address.clone());
             prefs.sample = false;
-            prefs.host_keys.insert(address.to_string(), fingerprint);
+            prefs
+                .host_keys
+                .insert(canonical_address.clone(), fingerprint);
         });
         self.load_project_files(self.project, cx);
         self.start_pump(cx);
@@ -2094,12 +2412,14 @@ impl PhoneApp {
                     return;
                 };
                 let mut helper_changed = false;
+                let mut file_editing = None;
                 match reached {
                     Ok((connection, helper)) => {
                         let helper_release = helper
                             .release
                             .as_ref()
                             .map(|release| format!("Helper {release}"));
+                        file_editing = Some(helper.can_edit_files());
                         store.computer.pi_version = helper_release.clone();
                         store.computer.connected = true;
                         if let Some(computer) = store.computers.first_mut() {
@@ -2120,6 +2440,9 @@ impl PhoneApp {
                         }
                     }
                 }
+                if let Some(file_editing) = file_editing {
+                    this.refresh_file_editing_capability(file_editing, cx);
+                }
                 if helper_changed {
                     this.update_helper_notification(cx);
                 }
@@ -2132,6 +2455,13 @@ impl PhoneApp {
 
     #[cfg(feature = "local-backend")]
     pub(crate) fn select_local_backend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_local() && self.editor_workspace_needs_attention(cx) {
+            self.notify_user(
+                "Save or resolve every open file before switching to Local",
+                cx,
+            );
+            return;
+        }
         #[cfg(feature = "local-backend")]
         if !self.local_providers.is_synthetic() {
             let _ = std::fs::write(self.data_dir.join("local-backend-preferred"), "local");
@@ -2148,18 +2478,21 @@ impl PhoneApp {
         self.close_provider_accounts();
         self.start.update(cx, |c, cx| c.clear(cx));
         if let Some(backend) = self.parked_local.take() {
-            self.install_store(backend);
+            self.install_store(backend, cx);
         } else {
             let synthetic = self.local_providers.is_synthetic();
             let Some(vault) = crate::provider_accounts::vault(synthetic) else {
                 self.notify_user("Android credential storage is unavailable", cx);
                 return;
             };
-            self.install_store(Store::local(crate::local_chat::Local::new(
-                pi_local::auth::Provider::Claude,
-                vault,
-                synthetic,
-            )));
+            self.install_store(
+                Store::local(crate::local_chat::Local::new(
+                    pi_local::auth::Provider::Claude,
+                    vault,
+                    synthetic,
+                )),
+                cx,
+            );
         }
         if let Some((text, attachments)) = self.parked_local_start.take() {
             self.start.update(cx, |c, cx| {
@@ -2204,6 +2537,7 @@ impl PhoneApp {
         match self.route() {
             Route::Thread(id)
             | Route::Command(id, _)
+            | Route::Terminal(id, _)
             | Route::Review(id)
             | Route::History(id)
             | Route::Diagnostics(id)
@@ -2303,6 +2637,13 @@ impl PhoneApp {
 
     /// Leaves the computer: back to Connect, its host key forgotten.
     pub(crate) fn forget_computer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor_workspace_needs_attention(cx) {
+            self.notify_user(
+                "Save or resolve every open file before forgetting this computer",
+                cx,
+            );
+            return;
+        }
         if self.is_local() {
             self.start.update(cx, |start, cx| start.clear(cx));
         }
@@ -2326,6 +2667,13 @@ impl PhoneApp {
         self.thread_snapshots.clear();
         self.thread_list_offsets.clear();
         self.project_browser.clear();
+        self.project_browser_editor = false;
+        self.editor_root = None;
+        self.file_generation += 1;
+        self.file_view = None;
+        self.file_tabs.clear();
+        self.file_return_to_project = false;
+        self.file_exit_armed = false;
         self._pump = None;
         self.threads.clear();
         self.pending_compacts.clear();
@@ -2339,7 +2687,7 @@ impl PhoneApp {
                 prefs.host_keys.remove(address);
             }
         });
-        self.routes = vec![Route::Connect];
+        self.replace_routes(vec![Route::Connect], cx);
         self.entered(window, cx);
     }
 
@@ -2477,7 +2825,7 @@ impl PhoneApp {
 
     fn viewing(&self, id: SessionId) -> bool {
         self.visible
-            && matches!(self.route(), Route::Thread(shown) | Route::Command(shown, _) | Route::Review(shown) | Route::History(shown) | Route::Diagnostics(shown) | Route::Subagents(shown) | Route::Swarm(shown, _) | Route::SwarmPeer(shown, _, _) | Route::Subagent(shown, _) if shown == id)
+            && matches!(self.route(), Route::Thread(shown) | Route::Command(shown, _) | Route::Terminal(shown, _) | Route::Review(shown) | Route::History(shown) | Route::Diagnostics(shown) | Route::Subagents(shown) | Route::Swarm(shown, _) | Route::SwarmPeer(shown, _, _) | Route::Subagent(shown, _) if shown == id)
     }
 
     fn alert(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -2616,6 +2964,7 @@ impl PhoneApp {
         if self.visible
             && let Route::Thread(id)
             | Route::Command(id, _)
+            | Route::Terminal(id, _)
             | Route::Review(id)
             | Route::History(id)
             | Route::Diagnostics(id)
@@ -2669,7 +3018,7 @@ impl PhoneApp {
         }
         if url == "pi://helper-update" {
             self.close_sheet(cx);
-            self.routes = vec![Route::Sessions];
+            self.replace_routes(vec![Route::Sessions], cx);
             cx.notify();
             return;
         }
@@ -2846,6 +3195,7 @@ impl PhoneApp {
             let session = match self.route() {
                 Route::Thread(id)
                 | Route::Command(id, _)
+                | Route::Terminal(id, _)
                 | Route::Review(id)
                 | Route::History(id)
                 | Route::Diagnostics(id)
@@ -2882,7 +3232,7 @@ impl PhoneApp {
                 Ok(offer) => self.pair(offer, window, cx),
                 Err(error) => {
                     self.connect_error = Some(error.to_string().into());
-                    self.routes = vec![Route::Connect];
+                    self.replace_routes(vec![Route::Connect], cx);
                     cx.notify();
                 }
             }
@@ -3126,10 +3476,18 @@ impl PhoneApp {
             .collect();
         self.command_views
             .retain(|token, _| !command_tokens.contains(token));
+        let terminal_tokens: Vec<u64> = self
+            .terminal_views
+            .iter()
+            .filter_map(|(token, state)| (state.session == id).then_some(*token))
+            .collect();
+        for token in terminal_tokens {
+            self.close_terminal_view(token, cx);
+        }
         self.scrolls
             .retain(|route, _| !matches!(route, Route::SwarmPeer(session, _, _) if *session == id));
         self.preview_transport_diagnostics.remove(&id);
-        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Command(session, _) | Route::Review(session) | Route::History(session) | Route::Diagnostics(session) | Route::Subagents(session) | Route::Swarm(session, _) | Route::SwarmPeer(session, _, _) | Route::Subagent(session, _) if *session == id));
+        self.routes.retain(|route| !matches!(route, Route::Thread(session) | Route::Command(session, _) | Route::Terminal(session, _) | Route::Review(session) | Route::History(session) | Route::Diagnostics(session) | Route::Subagents(session) | Route::Swarm(session, _) | Route::SwarmPeer(session, _, _) | Route::Subagent(session, _) if *session == id));
         if matches!(self.sheet, Some(Sheet::Delete(session) | Sheet::Activity(session, _, _)) if session == id)
         {
             self.close_sheet(cx);
@@ -4394,6 +4752,7 @@ impl Render for PhoneApp {
                 Route::File => self.file_screen(window, cx).into_any_element(),
                 Route::Thread(id) => self.thread_screen(id, window, cx),
                 Route::Command(id, token) => self.command_screen(id, token, window, cx),
+                Route::Terminal(id, token) => self.terminal_screen(id, token, window, cx),
                 Route::Review(id) => self.review_screen(id, window, cx),
                 Route::History(id) => self.history_screen(id, window, cx),
                 Route::Diagnostics(id) => self.diagnostics_screen(id, window, cx),
@@ -4451,7 +4810,13 @@ impl Render for PhoneApp {
                         .max_h(max_sheet_height)
                         // Virtual lists need a definite viewport; long sheets keep their
                         // header fixed while only their retained rows scroll.
-                        .when(sheet == Sheet::Project, |panel| panel.h(max_sheet_height))
+                        .when(
+                            matches!(
+                                sheet,
+                                Sheet::Project | Sheet::EditorRoot | Sheet::EditorFiles
+                            ),
+                            |panel| panel.h(max_sheet_height),
+                        )
                         .when_some(activity_height, |panel, height| panel.h(height))
                         .flex()
                         .flex_col()
@@ -5077,9 +5442,12 @@ mod tests {
                     .insert(child, std::sync::Arc::new(cached));
                 app.subagent_composer(parent, "child-a", "Steer…", window, cx);
 
-                app.replace_store(Some(crate::store::Store::sample(
-                    crate::model::Computer::from_address("new@computer.local"),
-                )));
+                app.replace_store(
+                    Some(crate::store::Store::sample(
+                        crate::model::Computer::from_address("new@computer.local"),
+                    )),
+                    cx,
+                );
 
                 assert!(app.subagent_ids.is_empty());
                 assert!(app.subagent_sessions.is_empty());

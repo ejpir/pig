@@ -18,7 +18,7 @@ A native desktop app for the [pi](https://github.com/earendil-works/pi) coding a
 - **Changes** as split or unified diffs; each run that edits files can become a jj change you can undo.
 - **Files, terminal, language servers, models and settings** in the same window.
 - **Remote sessions over SSH** that keep running when you disconnect ([docs/remote.md](docs/remote.md)).
-- **[Pi for Android](crates/pi_android/README.md)** follows sessions over SSH, or runs **experimental Local** chats on this phone with bundled Bun/Durable, Claude/Codex subscriptions and SQLite persistence. Local is not sandboxed; its tools use Android sh, not GNU Bash/Linux tools. Get `pi-android-arm64.apk` from the [releases](https://github.com/ejpir/pig/releases).
+- **[Pi for Android](crates/pi_android/README.md)** follows sessions over SSH, edits remote files on Linux/macOS hosts, and opens an isolated remote terminal on Linux hosts. It can also run **experimental Local** chats on this phone with bundled Bun/Durable, Claude/Codex subscriptions and SQLite persistence. Local is not sandboxed; its tools use Android sh, not GNU Bash/Linux tools. Get `pi-android-arm64.apk` from the [releases](https://github.com/ejpir/pig/releases).
 
 ## Build and run
 
@@ -85,7 +85,7 @@ target/release/pi-desktop-remote activate
 
 Activation keeps the executable under `~/.pi/desktop/bin/<sha256>/` and atomically selects it with the stable `~/.pi/desktop/bin/pi-desktop-remote` symlink.
 
-In the Android app, tap **Scan computer QR** and scan the code in the terminal. Check that both devices show the same six-digit code, then press Enter on the computer. Pairing goes through the computer's own SSH server and installs a phone key that can run only the helper. If the phone can't reach the address it found, add `--host <address>`; a Tailscale name or an IP works. The QR expires after two minutes (`--expires <seconds>` changes that). See [Pi for Android](crates/pi_android/README.md#connect) for manual SSH-key setup.
+In the Android app, tap **Scan computer QR** and scan the code in the terminal. Check that both devices show the same six-digit code, then press Enter on the computer. Pairing goes through the computer's own SSH server and installs a phone key restricted to the helper; the helper can edit files and open a shell as that account. If the phone can't reach the address it found, add `--host <address>`; a Tailscale name or an IP works. The QR expires after two minutes (`--expires <seconds>` changes that). See [Pi for Android](crates/pi_android/README.md#connect) for manual SSH-key setup.
 
 See [docs/remote.md](docs/remote.md#experimental-durable-backend) for what it supports and how to install the helper, and [backend/durable](backend/durable/README.md) for its tests.
 

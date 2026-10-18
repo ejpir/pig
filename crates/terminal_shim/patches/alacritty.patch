@@ -1,0 +1,112 @@
+--- /tmp/tmp.igAe9C3VX6	2026-10-18 02:06:57.929989885 +0200
++++ vendor/zed-terminal/src/alacritty.rs	2026-10-18 02:06:02.091904731 +0200
+@@ -2,7 +2,16 @@
+ use std::num::NonZeroU32;
+ #[cfg(unix)]
+ use std::os::fd::AsRawFd;
+-use std::{borrow::Cow, io, ops::RangeInclusive, path::PathBuf, sync::Arc};
++use std::{
++    borrow::Cow,
++    io,
++    ops::RangeInclusive,
++    path::PathBuf,
++    sync::{
++        Arc,
++        atomic::{AtomicUsize, Ordering},
++    },
++};
+
+ mod hyperlinks;
+
+@@ -54,8 +63,41 @@
+ pub(super) type AlacrittyGridIterator<'a> = GridIterator<'a, AlacCell>;
+ pub(super) type AlacrittyHyperlink = AlacHyperlink;
+
++const MAX_PENDING_EVENTS: usize = 4096;
++
+ #[derive(Clone)]
+-pub(super) struct ZedListener(UnboundedSender<PtyEvent>);
++pub(super) struct ZedListener {
++    sender: UnboundedSender<PtyEvent>,
++    pending: Arc<AtomicUsize>,
++}
++
++impl ZedListener {
++    pub(super) fn new(sender: UnboundedSender<PtyEvent>) -> Self {
++        Self {
++            sender,
++            pending: Arc::new(AtomicUsize::new(0)),
++        }
++    }
++
++    pub(super) fn pending(&self) -> Arc<AtomicUsize> {
++        self.pending.clone()
++    }
++
++    pub(super) fn send_pty_event(&self, event: PtyEvent) {
++        if self
++            .pending
++            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
++                (pending < MAX_PENDING_EVENTS).then_some(pending + 1)
++            })
++            .is_err()
++        {
++            return;
++        }
++        if self.sender.unbounded_send(event).is_err() {
++            self.pending.fetch_sub(1, Ordering::Relaxed);
++        }
++    }
++}
+
+ #[derive(Clone, Debug)]
+ pub(super) struct AlacrittySearch {
+@@ -188,10 +230,10 @@
+ pub(super) fn new_term(
+     config: &AlacrittyTermConfig,
+     bounds: TerminalBounds,
+-    events_tx: UnboundedSender<PtyEvent>,
++    listener: ZedListener,
+     alternate_scroll: AlternateScroll,
+ ) -> Arc<AlacrittyTermLock> {
+-    let mut term = Term::new(config.clone(), &bounds, ZedListener(events_tx));
++    let mut term = Term::new(config.clone(), &bounds, listener);
+
+     if let AlternateScroll::Off = alternate_scroll {
+         term.unset_private_mode(PrivateMode::Named(NamedPrivateMode::AlternateScroll));
+@@ -202,11 +244,11 @@
+
+ pub(super) fn spawn_event_loop(
+     term: Arc<AlacrittyTermLock>,
+-    events_tx: UnboundedSender<PtyEvent>,
++    listener: ZedListener,
+     pty: AlacrittyPty,
+     drain_on_exit: bool,
+ ) -> Result<PtySender> {
+-    let event_loop = EventLoop::new(term, ZedListener(events_tx), pty, drain_on_exit, false)
++    let event_loop = EventLoop::new(term, listener, pty, drain_on_exit, false)
+         .context("failed to create event loop")?;
+     let pty_tx = event_loop.channel();
+     let _io_thread = event_loop.spawn();
+@@ -325,7 +367,7 @@
+
+ impl EventListener for ZedListener {
+     fn send_event(&self, event: AlacTermEvent) {
+-        self.0.unbounded_send(PtyEvent::Event(event.into())).ok();
++        self.send_pty_event(PtyEvent::Event(event.into()));
+     }
+ }
+
+@@ -1188,7 +1230,11 @@
+     fn semantic_selection_stops_at_tree_branch() {
+         let config = pty_term_config(1000, SettingsCursorShape::default());
+         let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
+-        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
++        let mut term = Term::new(
++            config,
++            &TerminalBounds::default(),
++            ZedListener::new(events_tx),
++        );
+         for character in "└─zms-demo.target".chars() {
+             term.input(character);
+         }

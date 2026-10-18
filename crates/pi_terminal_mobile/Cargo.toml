@@ -1,0 +1,29 @@
+[package]
+name = "pi_terminal_mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "../pi_terminal/src/pi_terminal.rs"
+
+[features]
+default = ["mobile"]
+mobile = []
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+util.workspace = true
+zed_theme.workspace = true
+itertools = "0.14"
+terminal_shim = { package = "terminal", path = "../terminal_shim" }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+settings.workspace = true
+ui.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+theme_settings.workspace = true

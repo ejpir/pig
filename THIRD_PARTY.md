@@ -23,6 +23,10 @@ The native-input workarounds do not require changing sibling Zed code. The later
 
 The shared native SVG frontend uses roxmltree 0.21.1 and svgtypes 0.16.1 (Yevhenii Reizner), and kurbo 0.13.1 (Raph Levien / Linebender). `pi_visual_ui` uses Lyon 1.0.16 (Nicolas Silva and contributors) for bounded native tessellation. Their MIT notices are preserved in `licenses/{ROXMLTREE,SVGTYPES,KURBO,LYON}-MIT.txt` and packaged with both desktop and Android. The local Lyon output adapter enforces scene budgets before GPUI mesh expansion; no sibling renderer/shader modifications are needed for Visualize.
 
+## Remote terminal PTY
+
+The remote helper uses portable-pty 0.9.0 (Wez Furlong and contributors) to create and control the account shell's pseudoterminal. It is distributed under the MIT license; the upstream notice is preserved in `licenses/PORTABLE-PTY-MIT.txt` and printed by the helper's `--licenses` command.
+
 ## Fonts
 
 Copied, unmodified, from Zed's `assets/fonts/`:
@@ -32,7 +36,11 @@ Copied, unmodified, from Zed's `assets/fonts/`:
 
 Commit Mono 400 Regular is embedded for code/labels, matching the study's named font. Source: `eigilnikolajsen/commit-mono`, revision `d407cd2bf8e01ca1db70544052fbbb9606406c3b`, `src/fonts/fontlab/CommitMonoV143-400Regular.otf`. Modified in its name table only: the subfamily name `400 Regular` (ID 17) is removed and the family is named explicitly for Windows (IDs 21 and 22: `CommitMonoV143`, `Regular`), and the empty `DSIG` table is dropped. Glyphs and metrics are unchanged. SIL Open Font License: `licenses/COMMIT-MONO-OFL.txt`.
 
+Android terminals additionally embed the unmodified `Meslo LG M Regular for Powerline` 1.21 file carried in the pinned Nerd Fonts 3.5.1 source tree. It is the upstream Apache-2.0 Meslo-for-Powerline font, not the patched Nerd Fonts composite: its private-use cmap has only eight legacy Powerline-era entries and excludes the unlicensed Font Logos set. SHA-256: `be991137ccbe87765db7cbcdc034447b15913aa2fad01acebabbcb65b1d4a8a8`. Provenance, copyright notice, and the full Apache 2.0 terms are in `licenses/MESLO-POWERLINE-APACHE-2.0.txt` and packaged in the APK.
+
 Fonts are embedded in the executable, so launch does not depend on locally installed UI/code fonts. Georgia (macOS/Windows) and DejaVu Serif (Linux) are system title-font fallbacks; no proprietary Plantin font is distributed.
+
+The Android APK also carries `licenses/RUST-DEPENDENCY-NOTICES.html`, generated with cargo-about 0.9.2 for `pi_android`'s `local-backend` feature and the `aarch64-linux-android` target. It inventories the Rust packages linked into that build, including all bundled Tree-sitter grammars, and includes their detected full license texts. `about.toml` and `about.hbs` are the reviewed generation policy and template.
 
 ## Icons
 

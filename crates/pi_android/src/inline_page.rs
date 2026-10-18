@@ -222,6 +222,12 @@ impl PhoneApp {
                     .on_click({
                         let key = key.clone();
                         cx.listener(move |this, _, window, cx| {
+                            // A drag or the tail of a fling over this compact
+                            // header must keep scrolling the conversation, not
+                            // turn into an expand click at finger-up.
+                            if crate::scroll::in_motion() {
+                                return;
+                            }
                             window.dismiss_virtual_keyboard();
                             window.focus(&this.focus, cx);
                             let mut state = this.inline_pages.borrow_mut();
@@ -298,7 +304,8 @@ impl PhoneApp {
                             *slot.borrow_mut() = Some(
                                 serde_json::json!({ "id": key, "revision": revision,
                             "bounds": rectangle(bounds, window.scale_factor()),
-                            "clip": rectangle(clip, window.scale_factor()), "dark": dark })
+                            "clip": rectangle(clip, window.scale_factor()), "dark": dark,
+                            "expanded": expanded })
                                 .to_string(),
                             );
                         },

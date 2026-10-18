@@ -19,8 +19,10 @@ from package_remote import asset_name
 from package_remote import package as package_remote
 from release_desktop import (
     ANDROID_APK,
+    ANDROID_FONT,
     ANDROID_LICENSES,
     BUN_RUNTIME_ASSETS,
+    DEPENDENCY_SOURCE_ARCHIVES,
     manifest,
     release_android_manifest,
     validate_android_notices,
@@ -89,6 +91,8 @@ class PackagingTests(unittest.TestCase):
             "NotoEmoji-OFL.txt": root / "crates/gpui_android/assets/fonts/OFL.txt",
             "IBM-PLEX-OFL.txt": root / "licenses/IBM-PLEX-OFL.txt",
             "COMMIT-MONO-OFL.txt": root / "licenses/COMMIT-MONO-OFL.txt",
+            "MESLO-POWERLINE-APACHE-2.0.txt": root
+            / "licenses/MESLO-POWERLINE-APACHE-2.0.txt",
             "QUICKJS-NG-MIT.txt": root / "licenses/QUICKJS-NG-MIT.txt",
             "RQUICKJS-MIT.txt": root / "licenses/RQUICKJS-MIT.txt",
             **{
@@ -101,19 +105,48 @@ class PackagingTests(unittest.TestCase):
                 )
             },
         }
+        legal_sources = {
+            "LICENSE": root / "LICENSE",
+            "THIRD_PARTY.md": root / "THIRD_PARTY.md",
+            "RUST-DEPENDENCY-NOTICES.html": root
+            / "licenses/RUST-DEPENDENCY-NOTICES.html",
+            "ZED-APACHE-2.0": root / "licenses/ZED-APACHE-2.0",
+            "ZED-GPL-3.0": root / "licenses/ZED-GPL-3.0",
+            "ZED-ICONS-ISC.txt": root / "licenses/ZED-ICONS-ISC.txt",
+        }
         with zipfile.ZipFile(output) as apk:
+            all_sources = sources | legal_sources
             self.assertEqual(
-                set(apk.namelist()), {f"assets/licenses/{name}" for name in sources}
+                all_sources,
+                ANDROID_LICENSES,
+                "APK builder and release validator notice inventories drifted",
             )
-            for name, source in sources.items():
-                with self.subTest(font=name):
-                    notice = apk.read(f"assets/licenses/{name}")
-                    self.assertEqual(notice, source.read_bytes())
-                    self.assertIn(b"Copyright", notice)
-                    if name.endswith("OFL.txt"):
-                        self.assertIn(b"SIL OPEN FONT LICENSE", notice)
-                    else:
-                        self.assertIn(b"Permission is hereby granted", notice)
+            self.assertEqual(
+                set(apk.namelist()),
+                {f"assets/licenses/{name}" for name in all_sources},
+            )
+            for name, source in all_sources.items():
+                with self.subTest(notice=name):
+                    self.assertEqual(
+                        apk.read(f"assets/licenses/{name}"), source.read_bytes()
+                    )
+            for name in sources:
+                notice = apk.read(f"assets/licenses/{name}")
+                self.assertIn(b"Copyright", notice)
+                if name.endswith("OFL.txt"):
+                    self.assertIn(b"SIL OPEN FONT LICENSE", notice)
+                elif name.startswith("MESLO-POWERLINE"):
+                    for required in [
+                        b"b894ea7803af6aade63d60a4381e006098ec9c4d",
+                        b"be991137ccbe87765db7cbcdc034447b15913aa2fad01acebabbcb65b1d4a8a8",
+                        b"contains none of Nerd Fonts' unlicensed Font Logos",
+                        b"Apache License",
+                    ]:
+                        self.assertIn(required, notice)
+                elif "APACHE-2.0" in name:
+                    self.assertIn(b"Apache License", notice)
+                else:
+                    self.assertIn(b"Permission is hereby granted", notice)
 
     def android_apk(self, path, missing=None, incomplete=None):
         library = bytearray(64)
@@ -137,15 +170,16 @@ class PackagingTests(unittest.TestCase):
             apk.writestr("AndroidManifest.xml", release_android_manifest())
             apk.writestr("assets/local-runtime.json", json.dumps(metadata))
             apk.writestr("assets/bun-local.mjs", bundle)
-            apk.writestr("lib/arm64-v8a/libpi_android.so", bundle)
+            font = ANDROID_FONT.read_bytes()
+            apk.writestr("lib/arm64-v8a/libpi_android.so", bundle + font)
             apk.writestr("lib/arm64-v8a/libbunembeddingpoc.so", library)
-            for name in [
-                "LICENSE.bun.md",
-                "BUN-LINKED-NOTICES.txt",
-                "BUN-DURABLE-NOTICES.txt",
-                "LOCAL-AUTH-NPM-NOTICES.txt",
-            ]:
+            for name in ["LICENSE.bun.md", "BUN-LINKED-NOTICES.txt"]:
                 apk.writestr("assets/licenses/" + name, "Synthetic nonempty notice")
+            for name in ["BUN-DURABLE-NOTICES.txt", "LOCAL-AUTH-NPM-NOTICES.txt"]:
+                apk.writestr(
+                    "assets/licenses/" + name,
+                    (Path(__file__).parent.parent / "crates/pi_local/generated" / name).read_bytes(),
+                )
             for name, source in ANDROID_LICENSES.items():
                 if name != missing:
                     apk.writestr(
@@ -157,16 +191,88 @@ class PackagingTests(unittest.TestCase):
         return bytes(library)
 
     def runtime_archives(self, output, library):
-        for name, entries in [
-            ("pi-bun-android-arm64-runtime.tar.gz", {"libbunembeddingpoc.so": library}),
+        notices = {
+            "LICENSE.bun.md": b"Synthetic nonempty notice",
+            "BUN-LINKED-NOTICES.txt": b"Synthetic nonempty notice",
+        }
+        relink_entries = {
+            "RELINKING.md": b"instructions",
+            "scripts/relink.py": b"# synthetic test",
+            "inputs/native.o": b"synthetic object",
+            "sources/bun-v1.4.3-source.tar.gz": b"bun source",
+            "sources/WebKit-0c06faadf65bf8e8c8ad3a5a8aca83e1e9ed653f.tar.gz": b"jsc source",
+            "bridge/embedding.rs": b"embedding source",
+            "bridge/jni.cpp": b"jni source",
+            "bridge/patched-runtime-lib.rs": b"patched runtime source",
+        }
+        members = {
+            name: {"bytes": len(value), "sha256": hashlib.sha256(value).hexdigest()}
+            for name, value in relink_entries.items()
+        }
+        provenance = {
+            "schema": 1,
+            "target": "aarch64-linux-android28",
+            "library_sha256": hashlib.sha256(library).hexdigest(),
+            "bun": {
+                "tag": "bun-v1.4.3",
+                "commit": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+                "source_archive_sha256": members[
+                    "sources/bun-v1.4.3-source.tar.gz"
+                ]["sha256"],
+            },
+            "jsc": {
+                "commit": "0c06faadf65bf8e8c8ad3a5a8aca83e1e9ed653f",
+                "source_archive_sha256": members[
+                    "sources/WebKit-0c06faadf65bf8e8c8ad3a5a8aca83e1e9ed653f.tar.gz"
+                ]["sha256"],
+                "prebuilt_archive_sha256": hashlib.sha256(b"jsc prebuilt").hexdigest(),
+            },
+            "dependency_source_archives": DEPENDENCY_SOURCE_ARCHIVES,
+            "bridge": {
+                "embedding.rs": members["bridge/embedding.rs"]["sha256"],
+                "jni.cpp": members["bridge/jni.cpp"]["sha256"],
+            },
+            "patched_runtime_lib_sha256": members["bridge/patched-runtime-lib.rs"][
+                "sha256"
+            ],
+            "inputs": [
+                {"member": "inputs/native.o", **members["inputs/native.o"]}
+            ],
+            "relink_members": members,
+        }
+        import release_desktop
+
+        pinned = {
+            "BUN_SOURCE_SHA256": provenance["bun"]["source_archive_sha256"],
+            "JSC_SOURCE_SHA256": provenance["jsc"]["source_archive_sha256"],
+            "JSC_PREBUILT_SHA256": provenance["jsc"]["prebuilt_archive_sha256"],
+        }
+        previous = {name: getattr(release_desktop, name) for name in pinned}
+        for name, value in pinned.items():
+            setattr(release_desktop, name, value)
+        self.addCleanup(
+            lambda: [setattr(release_desktop, name, value) for name, value in previous.items()]
+        )
+        provenance_bytes = json.dumps(provenance, sort_keys=True).encode()
+        archives = [
+            (
+                "pi-bun-android-arm64-runtime.tar.gz",
+                {
+                    "libbunembeddingpoc.so": library,
+                    **notices,
+                    "BUN-RUNTIME-PROVENANCE.json": provenance_bytes,
+                },
+            ),
             (
                 "pi-bun-android-arm64-relink.tar.gz",
                 {
-                    "objects/native.o": b"synthetic object",
-                    "relink.py": b"# synthetic test",
+                    **relink_entries,
+                    **notices,
+                    "BUN-RUNTIME-PROVENANCE.json": provenance_bytes,
                 },
             ),
-        ]:
+        ]
+        for name, entries in archives:
             with tarfile.open(output / name, "w:gz") as archive:
                 for path, value in entries.items():
                     info = tarfile.TarInfo(path)

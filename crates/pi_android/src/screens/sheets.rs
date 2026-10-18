@@ -761,15 +761,20 @@ impl PhoneApp {
         if sheet == Sheet::Model {
             return self.model_sheet(&colors, cx).into_any_element();
         }
-        if sheet == Sheet::Project {
-            return self.project_sheet(&colors, cx).into_any_element();
+        if matches!(
+            sheet,
+            Sheet::Project | Sheet::EditorRoot | Sheet::EditorFiles
+        ) {
+            return self.project_sheet(sheet, &colors, cx).into_any_element();
         }
         let content = match sheet {
             Sheet::Details(id) => self.details_sheet(id, &colors, cx),
             Sheet::Attach(target) => self.attach_sheet(target, &colors, cx),
             Sheet::Model => self.model_sheet(&colors, cx),
             Sheet::Thinking => self.thinking_sheet(&colors, cx),
-            Sheet::Project => div(),
+            Sheet::Project | Sheet::EditorRoot | Sheet::EditorFiles => div(),
+            Sheet::FileStructure => self.file_structure_sheet(&colors, cx),
+            Sheet::FileRecoveries => self.file_recoveries_sheet(&colors, cx),
             Sheet::More(id) => self.more_sheet(id, &colors, cx),
             Sheet::Models => self.models_sheet(&colors, cx),
             Sheet::Resources => self.resources_sheet(&colors, cx),
@@ -950,6 +955,10 @@ impl PhoneApp {
                     Sheet::Model => "Choose model".into(),
                     Sheet::Thinking => "Thinking level".into(),
                     Sheet::Project => format!("Projects on {}", self.computer_name()).into(),
+                    Sheet::EditorRoot => "Choose an editor folder".into(),
+                    Sheet::EditorFiles => "Editor files".into(),
+                    Sheet::FileStructure => "File structure".into(),
+                    Sheet::FileRecoveries => "File recovery records".into(),
                     Sheet::More(id) => self
                         .session(id)
                         .map_or_else(|| "Session".into(), |s| s.title.clone().into()),
@@ -1243,7 +1252,7 @@ impl PhoneApp {
                             this.preserve_local_drafts(cx);
                             if this.is_local() {
                                 this.start.update(cx, |c, cx| c.clear(cx));
-                                this.replace_store(None);
+                                this.replace_store(None, cx);
                             }
                             #[cfg(feature = "local-backend")]
                             this.close_provider_accounts();
@@ -1300,10 +1309,34 @@ impl PhoneApp {
             ),
         )
         .child(div().mt(px(8.)).mx(px(-20.)).h(px(1.)).bg(colors.line))
+        .when(
+            self.store.is_some()
+                && !self.is_local()
+                && (self.backend_supports("workspace_browse") || self.editor_root.is_some()),
+            |menu| {
+                menu.child(
+                    link(
+                        "open-editor",
+                        "folder",
+                        if self.editor_root.is_some() {
+                            "Return to editor"
+                        } else {
+                            "Editor"
+                        },
+                    )
+                    .debug_selector(|| "open-editor".into())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_editor_workspace(window, cx);
+                    })),
+                )
+            },
+        )
         .when(self.store.is_some() && !self.is_local(), |menu| {
+            let editor = self.backend_supports("workspace_browse");
             menu.child(
                 link("open-schedules", "calendar", "Schedules")
                     .debug_selector(|| "open-schedules".into())
+                    .when(editor, |row| row.border_t_1())
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_schedules(window, cx);
                     })),
@@ -3370,6 +3403,14 @@ impl PhoneApp {
                 "File history",
                 colors.muted,
                 Box::new(move |this, window, cx| this.open_history(id, window, cx)),
+            ));
+        }
+        if self.terminal_available(id) {
+            rows.push((
+                "term",
+                "Open terminal",
+                colors.muted,
+                Box::new(move |this, window, cx| this.open_terminal(id, window, cx)),
             ));
         }
         rows.push((

@@ -21,6 +21,7 @@ mod stream;
 mod subagents;
 pub(crate) mod swarm;
 mod swarm_map;
+pub(crate) mod terminal;
 mod thread;
 
 use crate::{app::PhoneApp, theme::Theme, ui};

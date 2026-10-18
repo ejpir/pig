@@ -38,7 +38,7 @@ Optional arguments:
 
 ```bash
 ./.pi/skills/android-local-install/scripts/install.sh \
-  --tag v0.0.19 \
+  --tag v0.0.20 \
   --serial 'adb-device-serial'
 
 # Run only one half when diagnosing or repeating an operation:

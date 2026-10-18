@@ -65,8 +65,9 @@ pub(crate) enum Action {
 #[derive(Default)]
 pub(crate) struct Touches {
     next: u64,
-    /// Contacts that are down: Android's id, GPUI's id, last reported position.
-    active: Vec<(i32, TouchId, Point<Pixels>)>,
+    /// Contacts that are down: Android's id, GPUI's id, last position, and
+    /// whether the portable one-finger stream was cancelled for a pinch.
+    active: Vec<(i32, TouchId, Point<Pixels>, bool)>,
     /// While two fingers are down: their middle and how far apart they are.
     spread: Option<(Point<Pixels>, f32)>,
 }
@@ -138,7 +139,7 @@ impl Touches {
     /// The pinch the last translated motion made, if two fingers are or were down.
     pub fn pinch(&mut self) -> Option<Pinch> {
         let now = match self.active.as_slice() {
-            [(_, _, a), (_, _, b), ..] => Some((
+            [(_, _, a, _), (_, _, b, _), ..] => Some((
                 Point::new((a.x + b.x) / 2., (a.y + b.y) / 2.),
                 (*a - *b).magnitude() as f32,
             )),
@@ -171,15 +172,30 @@ impl Touches {
         }
     }
 
+    /// Cancel the portable tap/drag/long-press stream while retaining Android
+    /// contacts for native pinch geometry. Remaining fingers stay suppressed
+    /// until the whole gesture ends.
+    pub fn cancel_for_pinch(&mut self, events: &mut Vec<TouchEvent>) {
+        for (_, touch, position, cancelled) in &mut self.active {
+            if !*cancelled {
+                events.push(event(*touch, TouchPhase::Cancelled, *position, None));
+                *cancelled = true;
+            }
+        }
+    }
+
     fn start(&mut self, contact: &Contact, events: &mut Vec<TouchEvent>) {
         if let Some(index) = self.active.iter().position(|(id, ..)| *id == contact.id) {
             // Android reused a pointer id we still think is down.
-            let (_, touch, position) = self.active.remove(index);
-            events.push(event(touch, TouchPhase::Cancelled, position, None));
+            let (_, touch, position, cancelled) = self.active.remove(index);
+            if !cancelled {
+                events.push(event(touch, TouchPhase::Cancelled, position, None));
+            }
         }
         let touch = TouchId(self.next);
         self.next += 1;
-        self.active.push((contact.id, touch, contact.position));
+        self.active
+            .push((contact.id, touch, contact.position, false));
         events.push(event(
             touch,
             TouchPhase::Started,
@@ -189,7 +205,8 @@ impl Touches {
     }
 
     fn moved(&mut self, contact: &Contact, events: &mut Vec<TouchEvent>) {
-        let Some((_, touch, last)) = self.active.iter_mut().find(|(id, ..)| *id == contact.id)
+        let Some((_, touch, last, cancelled)) =
+            self.active.iter_mut().find(|(id, ..)| *id == contact.id)
         else {
             return;
         };
@@ -197,24 +214,30 @@ impl Touches {
             return;
         }
         *last = contact.position;
-        events.push(event(
-            *touch,
-            TouchPhase::Moved,
-            contact.position,
-            contact.force,
-        ));
+        if !*cancelled {
+            events.push(event(
+                *touch,
+                TouchPhase::Moved,
+                contact.position,
+                contact.force,
+            ));
+        }
     }
 
     fn end(&mut self, contact: &Contact, phase: TouchPhase, events: &mut Vec<TouchEvent>) {
         if let Some(index) = self.active.iter().position(|(id, ..)| *id == contact.id) {
-            let (_, touch, _) = self.active.remove(index);
-            events.push(event(touch, phase, contact.position, contact.force));
+            let (_, touch, _, cancelled) = self.active.remove(index);
+            if !cancelled {
+                events.push(event(touch, phase, contact.position, contact.force));
+            }
         }
     }
 
     fn cancel_all(&mut self, events: &mut Vec<TouchEvent>) {
-        for (_, touch, position) in self.active.drain(..) {
-            events.push(event(touch, TouchPhase::Cancelled, position, None));
+        for (_, touch, position, cancelled) in self.active.drain(..) {
+            if !cancelled {
+                events.push(event(touch, TouchPhase::Cancelled, position, None));
+            }
         }
     }
 }
@@ -333,6 +356,50 @@ mod tests {
         );
         assert_eq!(touches.pinch().unwrap().phase, TouchPhase::Ended);
         assert_eq!(touches.pinch(), None);
+    }
+
+    #[test]
+    fn pinch_cancels_and_suppresses_the_portable_touch_stream() {
+        let mut touches = Touches::default();
+        touches.translate(Action::Down, &[], &[contact(0, 0., 0.)]);
+        let mut events = touches.translate(
+            Action::PointerDown(1),
+            &[],
+            &[contact(0, 0., 0.), contact(1, 100., 0.)],
+        );
+        assert_eq!(touches.pinch().unwrap().phase, TouchPhase::Started);
+        touches.cancel_for_pinch(&mut events);
+        assert_eq!(
+            phases(&events),
+            [
+                (1, TouchPhase::Started),
+                (0, TouchPhase::Cancelled),
+                (1, TouchPhase::Cancelled)
+            ]
+        );
+        assert!(
+            touches
+                .translate(
+                    Action::Move,
+                    &[],
+                    &[contact(0, -10., 0.), contact(1, 110., 0.)],
+                )
+                .is_empty()
+        );
+        assert!(
+            touches
+                .translate(
+                    Action::PointerUp(0),
+                    &[],
+                    &[contact(0, -10., 0.), contact(1, 110., 0.)],
+                )
+                .is_empty()
+        );
+        assert!(
+            touches
+                .translate(Action::Up, &[], &[contact(1, 110., 0.)])
+                .is_empty()
+        );
     }
 
     #[test]

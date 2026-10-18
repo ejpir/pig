@@ -4,6 +4,7 @@ from pathlib import Path
 from functools import lru_cache
 from io import BytesIO
 import json
+import re
 import subprocess
 
 from PIL import Image, ImageChops
@@ -80,7 +81,8 @@ def main():
     load("usage", (1344, 740))
     assert "not reported" in text("usage")  # Demo has no active-tool inventory.
     assert "cache hits (tokens)" in text("usage")  # Explicitly requested inspector.
-    assert "62.4k" in text("usage").replace("62 4k", "62.4k")  # OCR may drop the dot.
+    # OCR may drop the decimal point or render it as a short underscore.
+    assert re.search(r"62[\W_]*4k", text("usage"))
     assert "throw" not in text("moonstone")  # Diff details start collapsed.
     load("edit-details", (1344, 740))
     load("bash-details", (1344, 740))

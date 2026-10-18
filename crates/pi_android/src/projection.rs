@@ -488,7 +488,17 @@ fn turns(pi: &Pi, cwd: &str) -> (Vec<Turn>, Option<Duration>) {
                 }
                 let text = text_of(message);
                 if !text.trim().is_empty() {
-                    turn.flow.push(crate::model::Flow::Text(text.clone()));
+                    // Providers may split one uninterrupted answer into
+                    // adjacent assistant messages. Treat those as one prose
+                    // surface so text selection does not stop at an invisible
+                    // wire-message boundary. A thought, tool, image or other
+                    // visible flow item still remains an honest boundary.
+                    if let Some(crate::model::Flow::Text(previous)) = turn.flow.last_mut() {
+                        previous.push_str("\n\n");
+                        previous.push_str(&text);
+                    } else {
+                        turn.flow.push(crate::model::Flow::Text(text.clone()));
+                    }
                 }
                 for block in message["content"].as_array().into_iter().flatten() {
                     if block["type"] != "toolCall" {
@@ -1302,6 +1312,32 @@ mod tests {
         }
         let single_paragraph = "Long unbroken answer ".repeat(1000);
         assert_eq!(summary(&single_paragraph).body, single_paragraph.trim());
+    }
+
+    #[test]
+    fn adjacent_assistant_messages_are_one_continuous_prose_surface() {
+        let pi = session(&[json!({
+            "type": "response",
+            "command": "get_messages",
+            "success": true,
+            "data": {"messages": [
+                {"role": "user", "content": "Report"},
+                {"role": "assistant", "content": "Before the list."},
+                {"role": "assistant", "content": "- One\n- Two"},
+                {"role": "assistant", "content": "After the list."}
+            ]}
+        })]);
+        let turn = &project(&pi, facts(&[])).turns[0];
+        assert_eq!(
+            turn.flow,
+            [Flow::Text(
+                "Before the list.\n\n- One\n- Two\n\nAfter the list.".into()
+            )]
+        );
+        assert_eq!(
+            turn.summary.as_ref().unwrap().source.as_deref(),
+            Some("Before the list.\n\n- One\n- Two\n\nAfter the list.")
+        );
     }
 
     const DIFF: &str = "   210 const a = 1;\n-  211 old();\n+  211 new();\n+  212 more();\n   213 end\n     ...\n   300 x\n+  301 y";

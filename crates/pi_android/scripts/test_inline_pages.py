@@ -203,6 +203,13 @@ def scrolling_and_lifecycle(phone):
     phone.tap("back")
     phone.wait(lambda state: state["route"] == "Sessions" and "inline-page-clip" not in state["bounds"], "leaving the thread removes the native browser window")
     phone.capture("07b-session-list")
+    if "session-row-1" not in phone.settled_state()["bounds"]:
+        phone.scroll_into_view("seen-today", 'scroll:Name("sessions")')
+        phone.tap("seen-today")
+        phone.wait(
+            lambda state: "session-row-1" in state["bounds"],
+            "the cached session group opens before selecting its retained row",
+        )
     phone.scroll_into_view("session-row-1", 'scroll:Name("sessions")')
     phone.tap("session-row-1")
     phone.wait(lambda state: state["route"] == "Thread(SessionId(1))", "cached session reopens")
@@ -342,8 +349,7 @@ def main():
     try:
         phone.run("shell", "pm", "path", PACKAGE)
         phone.run("shell", "am", "force-stop", PACKAGE)
-        phone.run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
-        phone.run("shell", "wm", "dismiss-keyguard")
+        phone.wake()
         for case in args.case or ["calculator", "scrolling", "keyboard", "boundary", "recovery"]:
             {"calculator": calculator, "scrolling": scrolling_and_lifecycle, "keyboard": keyboard, "boundary": boundary, "recovery": recovery}[case](phone)
     except Exception:

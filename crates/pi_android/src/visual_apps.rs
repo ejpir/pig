@@ -174,8 +174,13 @@ impl PhoneApp {
             return div()
                 .relative()
                 .min_w_0()
-                .child(crate::message::render(source, colors))
-                .child(self.copyable(source.to_owned(), cx));
+                .child(crate::message::render_selectable(
+                    source,
+                    format!("thread:{}:turn:{turn}:visual:{slot}", session.id.0),
+                    colors,
+                    self,
+                    cx,
+                ));
         }
         let mut column = div().min_w_0().flex().flex_col().gap(px(12.));
         // A flow's slot is its Flow index; aggregate summaries use slot zero.
@@ -199,9 +204,20 @@ impl PhoneApp {
                 .sum::<usize>()
         });
         let mut examined = preceding;
-        for part in parsed.parts() {
+        for (part_index, part) in parsed.parts().enumerate() {
             match part {
-                Part::Markdown(text) => column = column.child(crate::message::render(text, colors)),
+                Part::Markdown(text) => {
+                    column = column.child(crate::message::render_selectable(
+                        text,
+                        format!(
+                            "thread:{}:turn:{turn}:visual:{slot}:part:{part_index}",
+                            session.id.0
+                        ),
+                        colors,
+                        self,
+                        cx,
+                    ))
+                }
                 Part::App {
                     source,
                     raw,
@@ -224,7 +240,16 @@ impl PhoneApp {
                     if let Some(card) = card {
                         column = column.child(card);
                     } else {
-                        column = column.child(crate::message::render(raw, colors));
+                        column = column.child(crate::message::render_selectable(
+                            raw,
+                            format!(
+                                "thread:{}:turn:{turn}:visual:{slot}:raw:{part_index}",
+                                session.id.0
+                            ),
+                            colors,
+                            self,
+                            cx,
+                        ));
                     }
                 }
             }

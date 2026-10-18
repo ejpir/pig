@@ -1,0 +1,426 @@
+--- /tmp/tmp.QZEz72sL26	2026-10-18 02:06:57.928989812 +0200
++++ vendor/zed-terminal/src/terminal.rs	2026-10-18 02:06:11.712608580 +0200
+@@ -45,7 +45,7 @@
+     process::ExitStatus,
+     sync::{
+         Arc,
+-        atomic::{AtomicU64, Ordering},
++        atomic::{AtomicU64, AtomicUsize, Ordering},
+     },
+     time::{Duration, Instant},
+ };
+@@ -63,7 +63,7 @@
+ use crate::alacritty::current_child_signal_mask;
+ use crate::alacritty::{
+     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
+-    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
++    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches, ZedListener,
+     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
+     display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
+     make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
+@@ -823,6 +823,15 @@
+     }
+ }
+
++/// A terminal byte stream whose PTY is owned outside this crate, such as a
++/// remote helper reached over SSH. Methods must enqueue without blocking the UI
++/// thread. `shutdown` must be idempotent.
++pub trait ExternalPty: Send + Sync + 'static {
++    fn write(&self, bytes: Cow<'static, [u8]>);
++    fn resize(&self, bounds: TerminalBounds);
++    fn shutdown(&self);
++}
++
+ fn normalize_terminal_bounds(mut bounds: TerminalBounds) -> TerminalBounds {
+     bounds.bounds.size.height = cmp::max(bounds.line_height, bounds.height());
+     bounds.bounds.size.width = cmp::max(bounds.cell_width, bounds.width());
+@@ -977,6 +986,7 @@
+ pub struct TerminalBuilder {
+     terminal: Terminal,
+     events_rx: UnboundedReceiver<PtyEvent>,
++    pending_events: Arc<AtomicUsize>,
+ }
+
+ impl TerminalBuilder {
+@@ -1016,7 +1026,9 @@
+         let config = display_only_term_config(scrolling_history, cursor_shape);
+
+         let (events_tx, events_rx) = unbounded();
+-        let term = new_term(&config, terminal_bounds, events_tx, alternate_scroll);
++        let listener = ZedListener::new(events_tx);
++        let pending_events = listener.pending();
++        let term = new_term(&config, terminal_bounds, listener, alternate_scroll);
+
+         let terminal = Terminal {
+             task: None,
+@@ -1080,9 +1092,45 @@
+         TerminalBuilder {
+             terminal,
+             events_rx,
++            pending_events,
+         }
+     }
+
++    /// Builds an interactive terminal around a PTY byte stream owned by the
++    /// caller. OSC 52 is disabled, as for display-only terminals, so untrusted
++    /// remote output cannot access the local clipboard.
++    pub fn new_external(
++        external: Arc<dyn ExternalPty>,
++        title_override: Option<String>,
++        cursor_shape: SettingsCursorShape,
++        alternate_scroll: AlternateScroll,
++        max_scroll_history_lines: Option<usize>,
++        path_hyperlink_regexes: Vec<String>,
++        path_hyperlink_timeout: Duration,
++        window_id: u64,
++        background_executor: &BackgroundExecutor,
++        path_style: PathStyle,
++    ) -> TerminalBuilder {
++        let mut builder = Self::new_display_only(
++            cursor_shape,
++            alternate_scroll,
++            max_scroll_history_lines,
++            window_id,
++            background_executor,
++            path_style,
++        );
++        builder.terminal.terminal_type = TerminalType::External {
++            pty: Some(external),
++        };
++        builder.terminal.title_override = title_override;
++        builder.terminal.hyperlink_regex_searches =
++            RegexSearches::new(&path_hyperlink_regexes, path_hyperlink_timeout);
++        builder.terminal.is_remote_terminal = true;
++        builder.terminal.template.path_hyperlink_regexes = path_hyperlink_regexes;
++        builder.terminal.template.path_hyperlink_timeout = path_hyperlink_timeout;
++        builder
++    }
++
+     pub fn new(
+         working_directory: Option<PathBuf>,
+         mode: TerminalMode,
+@@ -1214,11 +1262,13 @@
+             //Spawn a task so the Alacritty EventLoop (or the subprocess reader) can communicate with us
+             //TODO: Remove with a bounded sender which can be dispatched on &self
+             let (events_tx, events_rx) = unbounded();
++            let listener = ZedListener::new(events_tx);
++            let pending_events = listener.pending();
+             //Set up the terminal...
+             let term = new_term(
+                 &config,
+                 TerminalBounds::default(),
+-                events_tx.clone(),
++                listener.clone(),
+                 alternate_scroll,
+             );
+
+@@ -1239,7 +1289,7 @@
+                     env.clone(),
+                     working_directory.clone(),
+                     term.clone(),
+-                    events_tx,
++                    listener,
+                     &background_executor,
+                 ) {
+                     Ok(subprocess) => subprocess,
+@@ -1293,7 +1343,7 @@
+
+                 //And connect them together
+                 let pty_tx =
+-                    spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
++                    spawn_event_loop(term.clone(), listener, pty, pty_options.drain_on_exit)?;
+
+                 (
+                     TerminalType::Pty {
+@@ -1400,6 +1450,7 @@
+             Ok(TerminalBuilder {
+                 terminal,
+                 events_rx,
++                pending_events,
+             })
+         };
+         cx.background_spawn(fut)
+@@ -1409,6 +1460,7 @@
+         //Event loop
+         self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
+             while let Some(event) = self.events_rx.next().await {
++                self.pending_events.fetch_sub(1, Ordering::Relaxed);
+                 terminal.update(cx, |terminal, cx| {
+                     //Process the first event immediately for lowered latency
+                     terminal.process_pty_event(event, cx);
+@@ -1431,6 +1483,7 @@
+                             _ = timer => break,
+                             event = self.events_rx.next() => {
+                                 if let Some(event) = event {
++                                    self.pending_events.fetch_sub(1, Ordering::Relaxed);
+                                     if matches!(event, PtyEvent::Event(TerminalBackendEvent::Wakeup))
+                                     {
+                                         wakeup = true;
+@@ -1501,6 +1554,9 @@
+         resources: PtyResources,
+         info: Arc<PtyProcessInfo>,
+     },
++    External {
++        pty: Option<Arc<dyn ExternalPty>>,
++    },
+     DisplayOnly,
+ }
+
+@@ -1725,12 +1781,18 @@
+                     self.last_content.terminal_bounds.num_columns() != new_bounds.num_columns();
+                 self.last_content.terminal_bounds = new_bounds;
+
+-                if let TerminalType::Pty {
+-                    resources: PtyResources::Active(pty_tx),
+-                    ..
+-                } = &self.terminal_type
+-                {
+-                    pty_tx.resize(new_bounds);
++                match &self.terminal_type {
++                    TerminalType::Pty {
++                        resources: PtyResources::Active(pty_tx),
++                        ..
++                    } => pty_tx.resize(new_bounds),
++                    TerminalType::External { pty: Some(pty) } => pty.resize(new_bounds),
++                    TerminalType::Pty {
++                        resources: PtyResources::Released,
++                        ..
++                    }
++                    | TerminalType::External { pty: None }
++                    | TerminalType::DisplayOnly => {}
+                 }
+
+                 resize(term, new_bounds);
+@@ -1972,6 +2034,10 @@
+     }
+
+     /// Terminal byte streams already contain their control sequences and must not be normalized.
++    pub fn write_pty_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
++        self.write_raw_output(bytes, cx);
++    }
++
+     fn write_raw_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+         let mut term = self.term.lock();
+         self.output_processor
+@@ -2122,19 +2188,27 @@
+         let input = input.into();
+         #[cfg(any(test, feature = "test-support"))]
+         self.pty_write_log.borrow_mut().push(input.to_vec());
+-        if let TerminalType::Pty {
+-            resources: PtyResources::Active(pty_tx),
+-            ..
+-        } = &self.terminal_type
+-        {
+-            if log::log_enabled!(log::Level::Debug) {
+-                if let Ok(str) = str::from_utf8(&input) {
+-                    log::debug!("Writing to PTY: {:?}", str);
+-                } else {
+-                    log::debug!("Writing to PTY: {:?}", input);
++        match &self.terminal_type {
++            TerminalType::Pty {
++                resources: PtyResources::Active(pty_tx),
++                ..
++            } => {
++                if log::log_enabled!(log::Level::Debug) {
++                    if let Ok(str) = str::from_utf8(&input) {
++                        log::debug!("Writing to PTY: {:?}", str);
++                    } else {
++                        log::debug!("Writing to PTY: {:?}", input);
++                    }
+                 }
++                pty_tx.notify(input);
++            }
++            TerminalType::External { pty: Some(pty) } => pty.write(input),
++            TerminalType::Pty {
++                resources: PtyResources::Released,
++                ..
+             }
+-            pty_tx.notify(input);
++            | TerminalType::External { pty: None }
++            | TerminalType::DisplayOnly => {}
+         }
+     }
+
+@@ -2214,7 +2288,10 @@
+     }
+
+     pub fn is_pty(&self) -> bool {
+-        matches!(self.terminal_type, TerminalType::Pty { .. })
++        matches!(
++            self.terminal_type,
++            TerminalType::Pty { .. } | TerminalType::External { .. }
++        )
+     }
+
+     pub fn write_init_command_after_startup(
+@@ -2916,7 +2993,7 @@
+                 .read()
+                 .as_ref()
+                 .and_then(|process| foreground_process_command_from_argv(&process.argv)),
+-            TerminalType::DisplayOnly => None,
++            TerminalType::External { .. } | TerminalType::DisplayOnly => None,
+         }
+     }
+
+@@ -2933,7 +3010,7 @@
+                 .read()
+                 .as_ref()
+                 .map(|process| process.cwd.clone()),
+-            TerminalType::DisplayOnly => None,
++            TerminalType::External { .. } | TerminalType::DisplayOnly => None,
+         }
+     }
+
+@@ -3035,7 +3112,9 @@
+                             format!("{process_file} — {process_name}")
+                         })
+                         .unwrap_or_else(|| "Terminal".to_string()),
+-                    TerminalType::DisplayOnly => "Terminal".to_string(),
++                    TerminalType::External { .. } | TerminalType::DisplayOnly => {
++                        "Terminal".to_string()
++                    }
+                 }),
+         }
+     }
+@@ -3058,6 +3137,8 @@
+                         subprocess.kill();
+                     }
+                 }
++                TerminalType::External { pty: Some(pty) } => pty.shutdown(),
++                TerminalType::External { pty: None } => {}
+             }
+         }
+     }
+@@ -3069,7 +3150,7 @@
+             TerminalType::Pty {
+                 resources: PtyResources::Active(_),
+                 ..
+-            }
++            } | TerminalType::External { pty: Some(_) }
+         )
+     }
+
+@@ -3079,42 +3160,51 @@
+     ///
+     /// Calling this method after the resources have already been released is a no-op.
+     pub fn release_pty_resources(&mut self) {
+-        let TerminalType::Pty { resources, info } = &mut self.terminal_type else {
+-            return;
+-        };
+-        let PtyResources::Active(pty_tx) = std::mem::replace(resources, PtyResources::Released)
+-        else {
+-            return;
+-        };
+-        let info = info.clone();
++        match &mut self.terminal_type {
++            TerminalType::Pty { resources, info } => {
++                let PtyResources::Active(pty_tx) =
++                    std::mem::replace(resources, PtyResources::Released)
++                else {
++                    return;
++                };
++                let info = info.clone();
+
+-        // The terminal is retained past the command, so drop the parse buffer's
+-        // reservation; `write_output` builds a new one if it is called again.
+-        self.output_processor = None;
+-
+-        pty_tx.shutdown();
+-        info.terminate_child_process();
+-
+-        let timer = self.background_executor.timer(Duration::from_millis(100));
+-        self.background_executor
+-            .spawn(async move {
+-                timer.await;
+-                info.kill_child_process();
+-            })
+-            .detach();
++                // The terminal is retained past the command, so drop the parse buffer's
++                // reservation; `write_output` builds a new one if it is called again.
++                self.output_processor = None;
++
++                pty_tx.shutdown();
++                info.terminate_child_process();
++
++                let timer = self.background_executor.timer(Duration::from_millis(100));
++                self.background_executor
++                    .spawn(async move {
++                        timer.await;
++                        info.kill_child_process();
++                    })
++                    .detach();
++            }
++            TerminalType::External { pty } => {
++                if let Some(pty) = pty.take() {
++                    self.output_processor = None;
++                    pty.shutdown();
++                }
++            }
++            TerminalType::DisplayOnly => {}
++        }
+     }
+
+     pub fn pid(&self) -> Option<sysinfo::Pid> {
+         match &self.terminal_type {
+             TerminalType::Pty { info, .. } => info.pid(),
+-            TerminalType::DisplayOnly => None,
++            TerminalType::External { .. } | TerminalType::DisplayOnly => None,
+         }
+     }
+
+     pub fn pid_getter(&self) -> Option<&ProcessIdGetter> {
+         match &self.terminal_type {
+             TerminalType::Pty { info, .. } => Some(info.pid_getter()),
+-            TerminalType::DisplayOnly => None,
++            TerminalType::External { .. } | TerminalType::DisplayOnly => None,
+         }
+     }
+
+@@ -3316,7 +3406,7 @@
+     env: HashMap<String, String>,
+     working_directory: Option<PathBuf>,
+     term: Arc<AlacrittyTermLock>,
+-    events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
++    listener: ZedListener,
+     executor: &BackgroundExecutor,
+ ) -> Result<SubprocessHandle> {
+     use futures::io::AsyncReadExt as _;
+@@ -3344,7 +3434,7 @@
+             type BoxedReader = Box<dyn futures::io::AsyncRead + Unpin + Send>;
+             let pump = |reader: Option<BoxedReader>| {
+                 let term = term.clone();
+-                let events_tx = events_tx.clone();
++                let listener = listener.clone();
+                 async move {
+                     let Some(mut reader) = reader else { return };
+                     let mut processor = Processor::<StdSyncHandler>::new();
+@@ -3364,9 +3454,9 @@
+                                     let mut term = term.lock();
+                                     processor.advance(&mut *term, &converted);
+                                 }
+-                                events_tx
+-                                    .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
+-                                    .ok();
++                                listener.send_pty_event(PtyEvent::Event(
++                                    TerminalBackendEvent::Wakeup,
++                                ));
+                             }
+                         }
+                     }
+@@ -3399,7 +3489,7 @@
+                 Some(status) => TerminalBackendEvent::ChildExit(status),
+                 None => TerminalBackendEvent::Exit,
+             };
+-            events_tx.unbounded_send(PtyEvent::Event(event)).ok();
++            listener.send_pty_event(PtyEvent::Event(event));
+         }
+     });
+
+@@ -5893,6 +5983,7 @@
+                 info.pid_getter().fallback_pid(),
+                 info.current.read().is_some()
+             ),
++            TerminalType::External { .. } => "external".to_string(),
+             TerminalType::DisplayOnly => "display-only".to_string(),
+         });
+         panic!(

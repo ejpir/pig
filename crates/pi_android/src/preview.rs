@@ -224,7 +224,7 @@ impl PhoneApp {
             cx.notify();
             return;
         }
-        self.open_store(ADDRESS);
+        self.open_store(ADDRESS, cx);
         if name == "schedules" || name.starts_with("schedules-") || name.starts_with("schedule-") {
             self.preview_schedules(name, window, cx);
             return;
@@ -517,6 +517,14 @@ impl PhoneApp {
                 .to_owned();
                 if name == "inline-input" {
                     html = html.replace("<main class=\"calculator\"", "<label style=\"display:block;padding:12px;font-size:14px\">Page note<input aria-label=\"Page note\" placeholder=\"Page note\" style=\"display:block;width:100%;min-height:48px;font-size:16px\"></label><main class=\"calculator\"");
+                }
+                if name == "inline-scroll" {
+                    // The compact host must hand vertical drags to chat even
+                    // when the HTML itself has enough content to scroll.
+                    html = html.replace(
+                        "</body>",
+                        "<div aria-hidden=\"true\" style=\"height:1200px\"></div></body>",
+                    );
                 }
                 if let Some(session) = self
                     .store
@@ -2780,6 +2788,416 @@ mod tests {
     }
 
     #[gpui::test]
+    fn editor_chooses_a_root_and_keeps_its_file_drawer_inside_it(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("computers", window, cx)));
+        cx.run_until_parked();
+        let (sessions, projects, selected) = app.read_with(cx, |app, _| {
+            let store = app.store.as_ref().unwrap();
+            (store.sessions.len(), store.projects.len(), app.project)
+        });
+        let click = |cx: &mut gpui::VisualTestContext, name: &'static str| {
+            let bounds = cx
+                .debug_bounds(name)
+                .unwrap_or_else(|| panic!("{name} is shown"));
+            cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+        };
+
+        click(cx, "open-editor");
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.route(), Route::Sessions);
+            assert_eq!(app.sheet, Some(Sheet::EditorRoot));
+        });
+        click(cx, "roll:~/repos");
+        click(cx, "node:~/repos/pi");
+        click(cx, "use-folder");
+        app.read_with(cx, |app, _| {
+            let store = app.store.as_ref().unwrap();
+            assert_eq!(app.route(), Route::File);
+            assert_eq!(app.sheet, None);
+            assert_eq!(app.editor_root.as_deref(), Some("/Users/nick/repos/pi"));
+            assert!(app.file_view.is_none());
+            assert_eq!(store.sessions.len(), sessions);
+            assert_eq!(store.projects.len(), projects);
+            assert_eq!(app.project, selected);
+        });
+        assert!(cx.debug_bounds("empty-editor").is_some());
+
+        click(cx, "file-drawer");
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.sheet, Some(Sheet::EditorFiles));
+            assert_eq!(
+                app.project_browser.root.as_deref(),
+                Some("/Users/nick/repos/pi")
+            );
+        });
+        assert!(cx.debug_bounds("project-choice-0").is_none());
+        assert!(cx.debug_bounds("crumb-0").is_none());
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.folder
+                    .update(cx, |area, cx| area.set_text("/Users/nick", cx));
+            })
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("outside-editor-folder").is_some());
+        assert!(cx.debug_bounds("go-to-path").is_none());
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.folder.update(cx, |area, cx| area.set_text("", cx));
+            })
+        });
+        cx.run_until_parked();
+        click(cx, "node:~/repos/pi/README.md");
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.route(), Route::File);
+            assert_eq!(app.sheet, None);
+            assert_eq!(app.file_view.as_ref().unwrap().path, "README.md");
+            assert!(!app.file_return_to_project);
+        });
+        let actions = [
+            "file-drawer",
+            "expand-syntax",
+            "file-structure",
+            "save-file",
+        ]
+        .map(|name| cx.debug_bounds(name).unwrap());
+        assert!(actions.iter().all(|bounds| bounds.top() < gpui::px(64.)));
+        assert!(
+            actions
+                .windows(2)
+                .all(|pair| pair[0].top() == pair[1].top())
+        );
+
+        let editor = app.read_with(cx, |app, _| app.file_view.as_ref().unwrap().editor.clone());
+        let editor_id = editor.entity_id();
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.back(window, cx));
+                assert_eq!(app.route(), Route::Sessions);
+                app.open_sheet(Sheet::Computers, cx);
+            })
+        });
+        cx.run_until_parked();
+        click(cx, "open-editor");
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.route(), Route::File);
+            assert_eq!(
+                app.file_view.as_ref().unwrap().editor.entity_id(),
+                editor_id,
+                "returning through the computer menu resumes the same buffer"
+            );
+        });
+
+        editor.update(cx, |editor, cx| {
+            let end = editor.text().len();
+            editor.replace(end..end, "\nunsaved", cx);
+        });
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.use_editor_folder("/Users/nick/repos/minivm", window, cx)
+            })
+        });
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.editor_root.as_deref(), Some("/Users/nick/repos/pi"));
+            assert!(app.file_view.as_ref().unwrap().dirty(cx));
+        });
+
+        click(cx, "file-drawer");
+        assert!(cx.debug_bounds("change-editor-folder").is_some());
+        assert!(cx.debug_bounds("close-editor").is_some());
+        click(cx, "change-editor-folder");
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.sheet, Some(Sheet::EditorFiles));
+            assert_eq!(app.editor_root.as_deref(), Some("/Users/nick/repos/pi"));
+        });
+        click(cx, "close-editor");
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.route(), Route::File);
+            assert_eq!(app.sheet, Some(Sheet::EditorFiles));
+            assert!(app.file_view.as_ref().unwrap().dirty(cx));
+        });
+
+        let saved = app.read_with(cx, |app, _| {
+            app.file_view.as_ref().unwrap().saved_text.clone()
+        });
+        editor.update(cx, |editor, cx| editor.set_text(saved, cx));
+        click(cx, "change-editor-folder");
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.sheet, Some(Sheet::EditorRoot));
+            assert_eq!(app.editor_root.as_deref(), Some("/Users/nick/repos/pi"));
+            assert_eq!(
+                app.file_view.as_ref().unwrap().editor.entity_id(),
+                editor_id
+            );
+        });
+        click(cx, "roll:~/repos");
+        click(cx, "node:~/repos/minivm");
+        click(cx, "use-folder");
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.route(), Route::File);
+            assert_eq!(app.sheet, None);
+            assert_eq!(app.editor_root.as_deref(), Some("/Users/nick/repos/minivm"));
+            assert!(app.file_view.is_none());
+            assert!(app.file_tabs.is_empty());
+        });
+
+        click(cx, "file-drawer");
+        click(cx, "close-editor");
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.route(), Route::Sessions);
+            assert_eq!(app.sheet, None);
+            assert!(app.editor_root.is_none());
+            assert!(app.file_view.is_none());
+            assert!(app.file_tabs.is_empty());
+        });
+        cx.update(|_, cx| app.update(cx, |app, cx| app.open_sheet(Sheet::Computers, cx)));
+        cx.run_until_parked();
+        click(cx, "open-editor");
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.route(), Route::Sessions);
+            assert_eq!(app.sheet, Some(Sheet::EditorRoot));
+        });
+    }
+
+    #[gpui::test]
+    fn selectable_markdown_links_remain_tappable(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("markdown", window, cx);
+                let session = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == QWEN)
+                    .unwrap();
+                session
+                    .turns
+                    .last_mut()
+                    .unwrap()
+                    .summary
+                    .as_mut()
+                    .unwrap()
+                    .source = Some("[documentation](https://example.com/mobile-link)".into());
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        let link = cx
+            .debug_bounds("markdown-text-block-0")
+            .expect("the linked Markdown block is visible");
+        cx.simulate_click(
+            gpui::point(link.left() + gpui::px(40.), link.center().y),
+            gpui::Modifiers::none(),
+        );
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://example.com/mobile-link")
+        );
+    }
+
+    #[gpui::test]
+    fn store_changes_and_project_files_cannot_discard_editor_work(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("computers", window, cx);
+                let root = format!("{}/repos/pi", crate::projects::SAMPLE_HOME);
+                app.use_editor_folder(&root, window, cx);
+                let file = app
+                    .project_browser
+                    .find("retry.ts")
+                    .into_iter()
+                    .find(|node| !node.folder)
+                    .expect("sample editor file");
+                app.open_file(&file, window, cx);
+            })
+        });
+        cx.run_until_parked();
+
+        let (editor, editor_id, original_address) = app.read_with(cx, |app, _| {
+            (
+                app.file_view.as_ref().unwrap().editor.clone(),
+                app.file_view.as_ref().unwrap().editor.entity_id(),
+                app.store.as_ref().unwrap().computer.address.clone(),
+            )
+        });
+        editor.update(cx, |editor, cx| {
+            let end = editor.text().len();
+            editor.replace(end..end, "\nlocal draft", cx);
+        });
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert!(!app.replace_store(
+                    Some(crate::store::Store::sample(
+                        crate::model::Computer::from_address("other@computer.local"),
+                    )),
+                    cx,
+                ));
+                app.forget_computer(window, cx);
+                app.open_sample(window, cx);
+            })
+        });
+        app.read_with(cx, |app, cx| {
+            assert_eq!(
+                app.store.as_ref().unwrap().computer.address,
+                original_address
+            );
+            assert_eq!(
+                app.file_view.as_ref().unwrap().editor.entity_id(),
+                editor_id
+            );
+            assert!(app.file_view.as_ref().unwrap().dirty(cx));
+        });
+
+        let saved = app.read_with(cx, |app, _| {
+            app.file_view.as_ref().unwrap().saved_text.clone()
+        });
+        editor.update(cx, |editor, cx| editor.set_text(saved, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.file_view.as_mut().unwrap().save = crate::projects::FileSaveState::Saving;
+                let outside = crate::projects::Node {
+                    name: "README.md".into(),
+                    path: format!("{}/repos/minivm/README.md", crate::projects::SAMPLE_HOME),
+                    folder: false,
+                    project: false,
+                    tag: None,
+                    size: Some(128),
+                    root: Some(format!("{}/repos/minivm", crate::projects::SAMPLE_HOME)),
+                };
+                app.sheet = Some(Sheet::Project);
+                app.open_file(&outside, window, cx);
+                assert!(!app.replace_store(
+                    Some(crate::store::Store::sample(
+                        crate::model::Computer::from_address("other@computer.local"),
+                    )),
+                    cx,
+                ));
+            })
+        });
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.editor_root.as_deref(), Some("/Users/nick/repos/pi"));
+            assert_eq!(
+                app.file_view.as_ref().unwrap().editor.entity_id(),
+                editor_id
+            );
+            assert!(matches!(
+                app.file_view.as_ref().unwrap().save,
+                crate::projects::FileSaveState::Saving
+            ));
+        });
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.file_view.as_mut().unwrap().save = crate::projects::FileSaveState::Idle;
+                let outside = crate::projects::Node {
+                    name: "README.md".into(),
+                    path: format!("{}/repos/minivm/README.md", crate::projects::SAMPLE_HOME),
+                    folder: false,
+                    project: false,
+                    tag: None,
+                    size: Some(128),
+                    root: Some(format!("{}/repos/minivm", crate::projects::SAMPLE_HOME)),
+                };
+                app.sheet = Some(Sheet::Project);
+                app.open_file(&outside, window, cx);
+            })
+        });
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.editor_root.as_deref(), Some("/Users/nick/repos/minivm"));
+            assert_eq!(
+                app.file_view.as_ref().unwrap().root,
+                "/Users/nick/repos/minivm"
+            );
+            assert!(app.file_tabs.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn chat_and_editor_switches_retain_both_workspaces(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("done", window, cx);
+                let composer = app.thread_composer(QWEN, window, cx);
+                composer.update(cx, |composer, cx| {
+                    composer.set_text("Retained chat draft", cx)
+                });
+
+                let root = format!("{}/repos/pi", crate::projects::SAMPLE_HOME);
+                app.use_editor_folder(&root, window, cx);
+                let file = app
+                    .project_browser
+                    .find("retry.ts")
+                    .into_iter()
+                    .find(|node| !node.folder)
+                    .expect("sample editor file");
+                app.open_file(&file, window, cx);
+            })
+        });
+        cx.run_until_parked();
+
+        let (editor, editor_id) = app.read_with(cx, |app, _| {
+            let editor = app.file_view.as_ref().unwrap().editor.clone();
+            let id = editor.entity_id();
+            (editor, id)
+        });
+        editor.update(cx, |editor, cx| {
+            editor.replace(0..0, "// local editor draft\n", cx);
+            editor.select_range(3..8, cx);
+        });
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert!(
+                    app.back(window, cx),
+                    "the dirty draft first asks to stay open"
+                );
+                assert_eq!(app.route(), Route::File);
+                assert!(app.back(window, cx), "the workspace parks behind chat");
+                assert_eq!(app.route(), Route::Thread(QWEN));
+            })
+        });
+        cx.run_until_parked();
+
+        app.read_with(cx, |app, cx| {
+            assert_eq!(
+                app.threads[&QWEN].read(cx).area.read(cx).text(),
+                "Retained chat draft"
+            );
+        });
+        let resume = cx
+            .debug_bounds("thread-editor")
+            .expect("chat exposes the retained editor workspace");
+        cx.simulate_click(resume.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.route(), Route::File);
+            let view = app.file_view.as_ref().expect("active buffer is retained");
+            assert_eq!(view.editor.entity_id(), editor_id);
+            assert!(
+                view.editor
+                    .read(cx)
+                    .text()
+                    .starts_with("// local editor draft\n")
+            );
+            assert_eq!(view.editor.read(cx).selection(), 3..8);
+            assert!(view.dirty(cx));
+        });
+    }
+
+    #[gpui::test]
     fn the_tree_rolls_out_opens_files_and_comes_back(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
@@ -2826,6 +3244,103 @@ mod tests {
             assert_eq!(store.projects[app.project].path, "/Users/nick/repos/minivm");
             assert_eq!(store.sessions.len(), count);
             assert_eq!(app.sheet, None);
+        });
+    }
+
+    #[gpui::test]
+    fn source_drafts_guard_back_and_save_without_replacing_the_editor(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("project", window, cx)));
+        cx.run_until_parked();
+        let readme = cx.debug_bounds("node:~/repos/pi/README.md").unwrap();
+        cx.simulate_click(readme.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        let editor = app.read_with(cx, |app, _| app.file_view.as_ref().unwrap().editor.clone());
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.selection(), 0..0, "new files open at the beginning");
+        });
+        let editor_bounds = editor.read_with(cx, |editor, _| {
+            editor.paint_bounds().expect("the source editor is shown")
+        });
+        assert!(editor_bounds.size.height > gpui::px(200.));
+        cx.update(|_, cx| app.update(cx, |app, cx| app.open_sheet(Sheet::FileStructure, cx)));
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.sheet, Some(Sheet::FileStructure))
+        });
+        cx.update(|_, cx| app.update(cx, |app, cx| app.close_sheet(cx)));
+        cx.run_until_parked();
+
+        editor.update(cx, |editor, cx| {
+            let end = editor.text().len();
+            editor.replace(end..end, "\nlocal draft", cx);
+        });
+        app.read_with(cx, |app, cx| {
+            assert!(app.file_view.as_ref().unwrap().dirty(cx))
+        });
+
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.back(window, cx));
+                assert_eq!(app.route(), Route::File, "the first Back only confirms");
+                app.save_active_file(cx);
+            })
+        });
+        app.read_with(cx, |app, cx| {
+            assert!(!app.file_view.as_ref().unwrap().dirty(cx));
+            assert_eq!(
+                app.file_view.as_ref().unwrap().save,
+                crate::projects::FileSaveState::Idle
+            );
+        });
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.back(window, cx));
+                assert_eq!(app.route(), Route::Start);
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn failed_save_reconciliation_unblocks_a_buffer_reverted_while_in_flight(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("project-file", window, cx)));
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let view = app.file_view.as_mut().expect("sample file is open");
+                let current = match &view.text {
+                    crate::projects::Load::Ready(document) => document.clone(),
+                    _ => panic!("sample document is loaded"),
+                };
+                let pending = crate::projects::PendingSave {
+                    normalized: format!("{}attempted edit", view.saved_text),
+                    wire: format!("{}attempted edit", current.text),
+                    revision: current.revision.clone(),
+                };
+                view.save = crate::projects::FileSaveState::Saving;
+                view.pending = Some(pending.clone());
+                crate::projects::reconcile_save(
+                    view,
+                    pending,
+                    current,
+                    "simulated transport failure".into(),
+                    cx,
+                );
+            })
+        });
+        app.read_with(cx, |app, cx| {
+            let view = app.file_view.as_ref().unwrap();
+            assert!(!view.dirty(cx));
+            assert_eq!(view.save, crate::projects::FileSaveState::Idle);
+            assert!(view.pending.is_none());
         });
     }
 
@@ -4120,6 +4635,225 @@ mod tests {
             (reading.item_ix, reading.offset_in_item),
             "even a small upward scroll belongs to the reader"
         );
+    }
+
+    #[gpui::test]
+    fn chat_text_is_selected_and_copied_in_place_without_a_drawer(cx: &mut TestAppContext) {
+        use gpui::InputEvent;
+
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("markdown", window, cx)));
+        cx.run_until_parked();
+
+        let block = [
+            "markdown-text-block-0",
+            "markdown-text-block-1",
+            "markdown-text-block-2",
+            "markdown-text-block-3",
+            "markdown-text-block-4",
+            "markdown-text-block-5",
+            "markdown-text-block-6",
+            "markdown-text-block-7",
+            "markdown-text-block-8",
+            "markdown-text-block-9",
+            "markdown-text-block-10",
+            "markdown-text-block-11",
+        ]
+        .into_iter()
+        .filter_map(|selector| cx.debug_bounds(selector))
+        .find(|bounds| bounds.bottom() > gpui::px(100.) && bounds.top() < gpui::px(720.))
+        .expect("a visible Markdown text block");
+        let position = gpui::point(
+            block.center().x,
+            block.center().y.max(gpui::px(110.)).min(gpui::px(710.)),
+        );
+        for phase in [gpui::TouchPhase::Started, gpui::TouchPhase::Ended] {
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    gpui::TouchEvent {
+                        id: gpui::TouchId(96),
+                        position,
+                        phase,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            if phase == gpui::TouchPhase::Started {
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(501));
+                cx.run_until_parked();
+                let area = app.read_with(cx, |app, _| app.inline_selectable.clone());
+                cx.update(|window, _| {
+                    assert!(
+                        window.has_long_press_capture(&area),
+                        "the replacement text area owns the rest of the hold-and-drag"
+                    )
+                });
+            }
+        }
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+
+        let expected = app.read_with(cx, |app, cx| {
+            assert!(app.sheet.is_none(), "selection must not open a drawer");
+            assert!(app.inline_selection.is_some());
+            let area = app.inline_selectable.read(cx);
+            let range = area.selection();
+            assert!(!range.is_empty(), "the held word is selected");
+            area.text()[range].to_owned()
+        });
+        let menu = cx
+            .debug_bounds("text-menu")
+            .expect("Copy appears beside the selected chat word");
+        let copy = gpui::point(menu.left() + menu.size.width / 4., menu.center().y);
+        cx.simulate_click(copy, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some(expected.as_str())
+        );
+        app.read_with(cx, |app, _| {
+            assert!(app.sheet.is_none());
+            assert!(app.inline_selection.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn selection_handles_cross_paragraph_and_bullet_boundaries(cx: &mut TestAppContext) {
+        use gpui::InputEvent;
+
+        let expected = "Intro before the list.\n\n• Alpha café\n• Beta 中文\n• Gamma emoji 👩🏽‍💻\n\nOutro after the list.";
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(384.), gpui::px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("markdown", window, cx);
+                let session = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == QWEN)
+                    .unwrap();
+                session.turns[0].summary.as_mut().unwrap().source = Some(
+                    "Intro before the list.\n\n- Alpha café\n- Beta 中文\n- Gamma emoji 👩🏽‍💻\n\nOutro after the list."
+                        .into(),
+                );
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        let block = cx
+            .debug_bounds("markdown-text-block-0")
+            .expect("the bullet list is one rendered text region");
+        let position = gpui::point(block.left() + gpui::px(80.), block.top() + gpui::px(56.));
+        for phase in [gpui::TouchPhase::Started, gpui::TouchPhase::Ended] {
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    gpui::TouchEvent {
+                        id: gpui::TouchId(97),
+                        position,
+                        phase,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            if phase == gpui::TouchPhase::Started {
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(501));
+                cx.run_until_parked();
+            }
+        }
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+
+        app.read_with(cx, |app, cx| {
+            assert!(app.sheet.is_none());
+            assert_eq!(app.inline_selectable.read(cx).text(), expected);
+        });
+        let selected_block = cx
+            .debug_bounds("markdown-text-block-0")
+            .expect("selected list remains in place");
+        assert_eq!(selected_block.size.width, block.size.width);
+        assert!(
+            selected_block.size.height >= block.size.height - gpui::px(4.)
+                && selected_block.size.height <= block.size.height + gpui::px(4.),
+            "selection must not substantially reflow the list: {block:?} -> {selected_block:?}"
+        );
+        let drag = |cx: &mut gpui::VisualTestContext,
+                    id: u64,
+                    from: gpui::Point<gpui::Pixels>,
+                    to: gpui::Point<gpui::Pixels>| {
+            for (phase, position) in [
+                (gpui::TouchPhase::Started, from),
+                (gpui::TouchPhase::Moved, to),
+                (gpui::TouchPhase::Ended, to),
+            ] {
+                cx.update(|window, cx| {
+                    window.dispatch_event(
+                        gpui::TouchEvent {
+                            id: gpui::TouchId(id),
+                            position,
+                            phase,
+                            ..Default::default()
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                });
+                cx.run_until_parked();
+            }
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+        };
+        let (start_handle, before_list) = app.read_with(cx, |app, cx| {
+            let area = app.inline_selectable.read(cx);
+            (
+                area.selection_handle_position(true).unwrap(),
+                area.selection_drag_position(0).unwrap(),
+            )
+        });
+        drag(cx, 98, start_handle, before_list);
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.inline_selectable.read(cx).selection().start, 0);
+        });
+        let (end_handle, after_list) = app.read_with(cx, |app, cx| {
+            let area = app.inline_selectable.read(cx);
+            (
+                area.selection_handle_position(false).unwrap(),
+                area.selection_drag_position(expected.len()).unwrap(),
+            )
+        });
+        drag(cx, 99, end_handle, after_list);
+        app.read_with(cx, |app, cx| {
+            assert_eq!(
+                app.inline_selectable.read(cx).selection(),
+                0..expected.len(),
+                "both handles cross the paragraph/list boundaries"
+            );
+        });
+        let menu = cx
+            .debug_bounds("text-menu")
+            .expect("selection menu remains");
+        cx.simulate_click(
+            gpui::point(menu.left() + gpui::px(25.), menu.center().y),
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some(expected)
+        );
+        app.read_with(cx, |app, _| assert!(app.inline_selection.is_none()));
     }
 
     #[gpui::test]

@@ -40,17 +40,26 @@ PI = build_apk.App(
     qr_scanner=True,
     deep_links=(("pi", "pair"),),
     launcher=(Path(__file__).resolve().parents[1] / "assets" / "launcher", 0xFF161D27),
-    licenses=tuple(
+    licenses=(
+        build_apk.WORKSPACE / "LICENSE",
+        build_apk.WORKSPACE / "THIRD_PARTY.md",
+    )
+    + tuple(
         build_apk.WORKSPACE / "licenses" / name
         for name in (
             "IBM-PLEX-OFL.txt",
             "COMMIT-MONO-OFL.txt",
+            "MESLO-POWERLINE-APACHE-2.0.txt",
+            "RUST-DEPENDENCY-NOTICES.html",
             "RQUICKJS-MIT.txt",
             "QUICKJS-NG-MIT.txt",
             "ROXMLTREE-MIT.txt",
             "SVGTYPES-MIT.txt",
             "KURBO-MIT.txt",
             "LYON-MIT.txt",
+            "ZED-APACHE-2.0",
+            "ZED-GPL-3.0",
+            "ZED-ICONS-ISC.txt",
         )
     ),
 )

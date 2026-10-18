@@ -1,7 +1,7 @@
 //! Moonstone (light) and Evening (dark), from Pi Desktop's `theme.rs`, with the
 //! phone's stage hues from design/android.
 
-use gpui::{App, Global, Hsla, Rgba, rgb, rgba};
+use gpui::{App, FontFallbacks, Global, Hsla, Rgba, px, rgb, rgba};
 use serde::{Deserialize, Serialize};
 
 pub const SANS: &str = "IBM Plex Sans";
@@ -140,6 +140,63 @@ impl Theme {
 
 pub fn theme(cx: &App) -> Theme {
     *cx.global::<Theme>()
+}
+
+/// Keeps the shared terminal renderer aligned with the phone palette without
+/// loading Zed's desktop settings/filesystem stack on Android.
+pub fn sync_terminal_theme(palette: Theme, cx: &mut App) {
+    // Production initializes Zed's base theme before opening a window. GPUI
+    // tests construct PhoneApp directly, so keep palette synchronization safe
+    // in that smaller harness too.
+    if !cx.has_global::<zed_theme::GlobalTheme>() {
+        zed_theme::init(zed_theme::LoadThemes::JustBase, cx);
+    }
+    cx.set_global(pi_terminal::TerminalStyle {
+        font_family: MONO.into(),
+        font_fallbacks: Some(FontFallbacks::from_fonts(vec![
+            "Meslo LG M for Powerline".to_owned(),
+        ])),
+        // Fit a 120-column shell canvas in portrait. Pinching can enlarge it;
+        // the renderer then exposes the overflow through horizontal panning.
+        font_size: px(5.),
+        line_height: px(8.),
+        cursor: palette.accent,
+        selection: palette.selected,
+        link: palette.read,
+    });
+
+    let mut active = (**zed_theme::GlobalTheme::theme(cx)).clone();
+    let colors = &mut active.styles.colors;
+    colors.terminal_background = palette.canvas;
+    colors.terminal_ansi_background = palette.canvas;
+    colors.terminal_foreground = palette.plain;
+    colors.terminal_bright_foreground = palette.text;
+    colors.terminal_dim_foreground = palette.muted;
+    colors.terminal_ansi_black = palette.canvas;
+    colors.terminal_ansi_bright_black = palette.muted;
+    colors.terminal_ansi_dim_black = palette.faint;
+    colors.terminal_ansi_red = palette.coral;
+    colors.terminal_ansi_bright_red = palette.coral;
+    colors.terminal_ansi_dim_red = palette.coral.opacity(0.7);
+    colors.terminal_ansi_green = palette.green;
+    colors.terminal_ansi_bright_green = palette.green;
+    colors.terminal_ansi_dim_green = palette.green.opacity(0.7);
+    colors.terminal_ansi_yellow = palette.amber;
+    colors.terminal_ansi_bright_yellow = palette.amber;
+    colors.terminal_ansi_dim_yellow = palette.amber.opacity(0.7);
+    colors.terminal_ansi_blue = palette.read;
+    colors.terminal_ansi_bright_blue = palette.accent;
+    colors.terminal_ansi_dim_blue = palette.read.opacity(0.7);
+    colors.terminal_ansi_magenta = palette.keyword;
+    colors.terminal_ansi_bright_magenta = palette.keyword;
+    colors.terminal_ansi_dim_magenta = palette.keyword.opacity(0.7);
+    colors.terminal_ansi_cyan = palette.accent;
+    colors.terminal_ansi_bright_cyan = palette.accent;
+    colors.terminal_ansi_dim_cyan = palette.accent.opacity(0.7);
+    colors.terminal_ansi_white = palette.plain;
+    colors.terminal_ansi_bright_white = palette.text;
+    colors.terminal_ansi_dim_white = palette.muted;
+    zed_theme::GlobalTheme::update_theme(cx, std::sync::Arc::new(active));
 }
 
 #[cfg(test)]

@@ -935,6 +935,13 @@ compiler reproducibility across different host paths or toolchain revisions.
             for p in sorted((work / "cache/tarballs").glob("*.tar.gz"))
             if p.is_file()
         }
+        expected_dependency_archives = json.loads(
+            (ROOT / "dependency-sources-v1.4.3.json").read_text()
+        )
+        if dependency_archives != expected_dependency_archives:
+            raise ValueError(
+                "Downloaded dependency source inventory does not match the pinned manifest"
+            )
         inventory = {
             name: {"sha256": sha256(path), "bytes": path.stat().st_size}
             for name, path in sorted(files.items())

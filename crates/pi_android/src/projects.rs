@@ -7,8 +7,12 @@
 use crate::{
     app::{PhoneApp, Route, Sheet, size_label},
     remote,
+    text_area::{TextArea, TextAreaEvent},
+    theme::theme,
 };
-use gpui::{Context, Window};
+use gpui::{App, AppContext as _, Context, Entity, Subscription, Window};
+use pi_core::remote_files::{Document, Recovery, RecoveryArtifact};
+use pi_markdown::{SyntaxDocument, SyntaxEdit};
 use std::collections::{HashMap, HashSet};
 
 /// A rolled-out folder shows this many entries before "N more".
@@ -42,6 +46,13 @@ impl Node {
 pub(crate) enum Load<T> {
     Loading,
     Ready(T),
+    Failed(String),
+}
+
+pub(crate) enum FileRecoveryState {
+    Idle,
+    Loading,
+    Loaded(Vec<Recovery>),
     Failed(String),
 }
 
@@ -119,6 +130,48 @@ fn parent(path: &str) -> &str {
 
 fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+pub(crate) fn language_for_path(path: &str) -> Option<&'static str> {
+    let name = file_name(path).to_ascii_lowercase();
+    if name == "go.mod" {
+        return Some("gomod");
+    }
+    if name == "go.work" {
+        return Some("gowork");
+    }
+    if name == "commit_editmsg" {
+        return Some("gitcommit");
+    }
+    Some(
+        match name.rsplit_once('.').map_or("", |(_, extension)| extension) {
+            "rs" => "rust",
+            "ts" => "typescript",
+            "tsx" => "tsx",
+            "js" | "jsx" | "mjs" | "cjs" => "javascript",
+            "py" => "python",
+            "go" => "go",
+            "c" | "h" => "c",
+            "cc" | "cpp" | "cxx" | "hpp" => "cpp",
+            "sh" | "bash" | "zsh" => "bash",
+            "json" => "json",
+            "jsonc" => "jsonc",
+            "css" => "css",
+            "md" | "markdown" => "markdown",
+            "jsdoc" => "jsdoc",
+            "regex" => "regex",
+            "yaml" | "yml" => "yaml",
+            "diff" | "patch" => "diff",
+            _ => return None,
+        },
+    )
+}
+
+fn set_file_recoveries(app: &mut PhoneApp, result: anyhow::Result<Vec<Recovery>>) {
+    app.file_recoveries = match result {
+        Ok(records) => FileRecoveryState::Loaded(records),
+        Err(error) => FileRecoveryState::Failed(format!("{error:#}")),
+    };
 }
 
 fn join(root: &str, relative: &str) -> String {
@@ -368,16 +421,67 @@ impl ProjectBrowser {
     }
 }
 
-/// A file opened read-only from the tree.
+const EDIT_LIMIT: usize = 128 * 1024;
+const MAX_FILE_TABS: usize = 8;
+const HELPER_READ_ONLY: &str =
+    "Update the computer's Pi helper to edit files. Browsing remains available.";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum LineEnding {
+    #[default]
+    Lf,
+    CrLf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingSave {
+    pub normalized: String,
+    pub wire: String,
+    pub revision: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum FileSaveState {
+    #[default]
+    Idle,
+    Saving,
+    Failed(String),
+    /// The helper may or may not have committed the request. Saving again is
+    /// deliberately disabled until a fresh read resolves it.
+    Uncertain(String),
+    /// A newer remote document is retained while the local draft stays intact.
+    Conflict(String),
+}
+
+enum SaveAttempt {
+    Saved(Document),
+    Failed {
+        message: String,
+        current: Result<Document, String>,
+    },
+}
+
+/// One retained source buffer. Moving it between active and parked tabs keeps
+/// IME selection, scroll position, undo-adjacent composition state and draft.
 pub(crate) struct FileView {
     /// The project it is in, on the computer.
     pub root: String,
     /// From the project's root.
     pub path: String,
     pub size: Option<u64>,
-    pub text: Load<String>,
-    /// Back goes to the projects sheet it was opened from.
-    pub from_sheet: bool,
+    pub text: Load<Document>,
+    pub editor: Entity<TextArea>,
+    /// Normalized LF text at the current optimistic revision.
+    pub saved_text: String,
+    pub line_ending: LineEnding,
+    pub editable: bool,
+    pub read_only_reason: Option<String>,
+    pub syntax: Option<SyntaxDocument>,
+    pub save: FileSaveState,
+    pub pending: Option<PendingSave>,
+    pub conflict: Option<Document>,
+    pub request: u64,
+    pub _subscription: Subscription,
 }
 
 impl FileView {
@@ -385,13 +489,211 @@ impl FileView {
         file_name(&self.path)
     }
 
-    /// The folder it is in: "packages/ai/src", or "" at the root.
-    pub fn folder(&self) -> &str {
-        parent(&self.path)
+    pub fn dirty(&self, cx: &App) -> bool {
+        matches!(self.text, Load::Ready(_)) && self.editor.read(cx).text() != self.saved_text
+    }
+
+    pub fn revision(&self) -> Option<&str> {
+        match &self.text {
+            Load::Ready(document) => Some(&document.revision),
+            _ => None,
+        }
+    }
+
+    pub fn wire_text(&self, normalized: &str) -> String {
+        match self.line_ending {
+            LineEnding::Lf => normalized.to_owned(),
+            LineEnding::CrLf => normalized.replace('\n', "\r\n"),
+        }
+    }
+
+    pub fn saving_blocked(&self) -> bool {
+        matches!(
+            self.save,
+            FileSaveState::Saving | FileSaveState::Uncertain(_) | FileSaveState::Conflict(_)
+        )
     }
 }
 
+fn normalized_document(text: &str) -> Result<(String, LineEnding), &'static str> {
+    let bytes = text.as_bytes();
+    let mut crlf = false;
+    let mut bare_lf = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
+                crlf = true;
+                index += 2;
+            }
+            b'\r' => {
+                return Err(
+                    "This file uses mixed or legacy line endings, so it is read-only on mobile.",
+                );
+            }
+            b'\n' => {
+                bare_lf = true;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    if crlf && bare_lf {
+        return Err("This file uses mixed or legacy line endings, so it is read-only on mobile.");
+    }
+    if crlf {
+        Ok((text.replace("\r\n", "\n"), LineEnding::CrLf))
+    } else {
+        Ok((text.to_owned(), LineEnding::Lf))
+    }
+}
+
+fn finish_saved(view: &mut FileView, pending: PendingSave, document: Document) {
+    // A success can arrive after more typing. Advance only the saved baseline
+    // and revision; never replace the editor's newer contents.
+    view.saved_text = pending.normalized;
+    view.text = Load::Ready(document);
+    view.save = FileSaveState::Idle;
+    view.pending = None;
+    view.conflict = None;
+}
+
+pub(crate) fn reconcile_save(
+    view: &mut FileView,
+    pending: PendingSave,
+    current: Document,
+    failure: String,
+    cx: &App,
+) {
+    if current.text == pending.wire {
+        finish_saved(view, pending, current);
+        return;
+    }
+    if current.revision == pending.revision {
+        let clean = if let Ok((remote_text, ending)) = normalized_document(&current.text) {
+            let clean = view.editor.read(cx).text() == remote_text;
+            view.saved_text = remote_text;
+            view.line_ending = ending;
+            clean
+        } else {
+            false
+        };
+        view.text = Load::Ready(current);
+        view.save = if clean {
+            FileSaveState::Idle
+        } else {
+            FileSaveState::Failed(failure)
+        };
+        view.pending = None;
+        view.conflict = None;
+        return;
+    }
+    view.save = FileSaveState::Conflict(format!(
+        "The file changed on the computer while this draft was open. {failure}"
+    ));
+    view.conflict = Some(current);
+    view.pending = None;
+}
+
+fn install_document(
+    view: &mut FileView,
+    document: Document,
+    helper_allows_editing: bool,
+    cx: &mut Context<PhoneApp>,
+) {
+    let actual_size = document.text.len();
+    let normalized = normalized_document(&document.text);
+    let (mut shown, line_ending, ending_error) = match normalized {
+        Ok((text, ending)) => (text, ending, None),
+        Err(error) => (
+            document.text.replace("\r\n", "\n").replace('\r', "\n"),
+            LineEnding::Lf,
+            Some(error),
+        ),
+    };
+    if actual_size > EDIT_LIMIT {
+        let mut end = EDIT_LIMIT.min(shown.len());
+        while !shown.is_char_boundary(end) {
+            end -= 1;
+        }
+        shown.truncate(end);
+    }
+    let reason = ending_error
+        .map(str::to_owned)
+        .or_else(|| {
+            (actual_size > EDIT_LIMIT).then(|| {
+                format!(
+                    "Files larger than {} are read-only on mobile; this shows the first {}.",
+                    size_label(EDIT_LIMIT as u64),
+                    size_label(EDIT_LIMIT as u64)
+                )
+            })
+        })
+        .or_else(|| (!helper_allows_editing).then(|| HELPER_READ_ONLY.into()));
+    view.size = Some(actual_size as u64);
+    view.saved_text = shown.clone();
+    view.line_ending = line_ending;
+    view.editable = reason.is_none();
+    view.read_only_reason = reason;
+    view.save = FileSaveState::Idle;
+    view.pending = None;
+    view.conflict = None;
+    view.text = Load::Ready(document);
+    let syntax = view
+        .syntax
+        .as_mut()
+        .map(|syntax| {
+            syntax.set_source(shown.clone());
+            syntax
+                .highlights(theme(cx).syntax_palette())
+                .into_iter()
+                .filter_map(|(range, style)| style.color.map(|color| (range, color)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let editable = view.editable;
+    let line_count = shown.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    view.editor.update(cx, |editor, cx| {
+        editor.set_read_only(!editable, cx);
+        editor.set_max_lines(line_count);
+        editor.set_text_at_start(shown, cx);
+        editor.set_syntax(syntax, cx);
+    });
+}
+
 impl PhoneApp {
+    /// A reconnect can replace the helper without replacing retained buffers.
+    /// Refresh only the capability-derived restriction; size and line-ending
+    /// restrictions remain attached to the document that was actually read.
+    pub(crate) fn refresh_file_editing_capability(
+        &mut self,
+        helper_allows_editing: bool,
+        cx: &mut Context<Self>,
+    ) {
+        for view in self.file_view.iter_mut().chain(self.file_tabs.iter_mut()) {
+            if !matches!(view.text, Load::Ready(_)) {
+                continue;
+            }
+            let helper_restricted = view.read_only_reason.as_deref() == Some(HELPER_READ_ONLY);
+            let editable = if helper_allows_editing {
+                if helper_restricted {
+                    view.read_only_reason = None;
+                }
+                view.read_only_reason.is_none()
+            } else {
+                if view.read_only_reason.is_none() || helper_restricted {
+                    view.read_only_reason = Some(HELPER_READ_ONLY.into());
+                }
+                false
+            };
+            if view.editable != editable {
+                view.editable = editable;
+                view.editor
+                    .update(cx, |editor, cx| editor.set_read_only(!editable, cx));
+            }
+        }
+    }
+
     pub(crate) fn home_folder(&self) -> String {
         self.store
             .as_ref()
@@ -462,9 +764,21 @@ impl PhoneApp {
         }
     }
 
+    fn editor_browser_allows(&self, path: &str) -> bool {
+        self.sheet != Some(Sheet::EditorFiles)
+            || self
+                .editor_root
+                .as_ref()
+                .is_some_and(|root| within(path, root))
+    }
+
     /// Starts the tree at `path`.
     pub(crate) fn go_to_folder(&mut self, path: String, cx: &mut Context<Self>) {
         if !self.backend_supports("workspace_browse") {
+            return;
+        }
+        if !self.editor_browser_allows(&path) {
+            self.notify_user("That path is outside the editor folder", cx);
             return;
         }
         self.project_browser.root = Some(path.clone());
@@ -484,7 +798,7 @@ impl PhoneApp {
     }
 
     pub(crate) fn toggle_folder(&mut self, node: &Node, cx: &mut Context<Self>) {
-        if !self.backend_supports("workspace_browse") {
+        if !self.backend_supports("workspace_browse") || !self.editor_browser_allows(&node.path) {
             return;
         }
         let browser = &mut self.project_browser;
@@ -501,7 +815,7 @@ impl PhoneApp {
 
     /// Picks `path` and rolls out every folder down to it.
     pub(crate) fn reveal_folder(&mut self, path: &str, cx: &mut Context<Self>) {
-        if !self.backend_supports("workspace_browse") {
+        if !self.backend_supports("workspace_browse") || !self.editor_browser_allows(path) {
             return;
         }
         let browser = &mut self.project_browser;
@@ -517,7 +831,7 @@ impl PhoneApp {
     }
 
     pub(crate) fn retry_folder(&mut self, path: String, cx: &mut Context<Self>) {
-        if !self.backend_supports("workspace_browse") {
+        if !self.backend_supports("workspace_browse") || !self.editor_browser_allows(&path) {
             return;
         }
         let browser = &mut self.project_browser;
@@ -638,6 +952,130 @@ impl PhoneApp {
         .detach();
     }
 
+    pub(crate) fn load_editor_tree(&mut self, root: String, cx: &mut Context<Self>) {
+        if self.editor_root.as_deref() != Some(root.as_str()) {
+            return;
+        }
+        self.project_browser.root = Some(root.clone());
+        self.load_project_tree(root, cx);
+    }
+
+    pub(crate) fn use_picked_editor_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let browser = &self.project_browser;
+        let Some(path) = browser.picked.clone().or_else(|| browser.root.clone()) else {
+            return;
+        };
+        self.use_editor_folder(&path, window, cx);
+    }
+
+    fn enter_file_route(
+        &mut self,
+        return_to_project: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.route() == Route::File {
+            self.close_sheet(cx);
+        } else {
+            self.file_return_to_project = return_to_project;
+            self.push(Route::File, window, cx);
+        }
+    }
+
+    /// Resume the retained workspace when one already exists. Choosing a root
+    /// is a first-open action, not something chat navigation should repeat.
+    pub(crate) fn open_editor_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor_root.is_none() {
+            self.editor_root = self.file_view.as_ref().map(|view| view.root.clone());
+        }
+        if self.editor_root.is_some() {
+            self.enter_file_route(false, window, cx);
+        } else {
+            self.open_sheet(Sheet::EditorRoot, cx);
+        }
+    }
+
+    pub(crate) fn editor_workspace_needs_attention(&self, cx: &App) -> bool {
+        self.file_view
+            .iter()
+            .chain(self.file_tabs.iter())
+            .any(|view| view.dirty(cx) || !matches!(view.save, FileSaveState::Idle))
+    }
+
+    /// Opens a cancellable root picker without disturbing the current workspace.
+    pub(crate) fn choose_another_editor_folder(&mut self, cx: &mut Context<Self>) {
+        if self.editor_workspace_needs_attention(cx) {
+            self.notify_user(
+                "Save or resolve every open file before changing the editor folder",
+                cx,
+            );
+            return;
+        }
+        self.open_sheet(Sheet::EditorRoot, cx);
+    }
+
+    /// Forgets a clean workspace. Drafts and uncertain saves must be resolved first.
+    pub(crate) fn close_editor_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor_workspace_needs_attention(cx) {
+            self.notify_user(
+                "Save or resolve every open file before closing the editor",
+                cx,
+            );
+            return;
+        }
+
+        self.file_generation += 1;
+        self.editor_root = None;
+        self.file_view = None;
+        self.file_tabs.clear();
+        self.project_browser.clear();
+        self.project_browser_editor = false;
+        self.folder.update(cx, |area, cx| area.set_text("", cx));
+        self.file_exit_armed = false;
+
+        self.close_sheet(cx);
+        if self.route() == Route::File && !self.back(window, cx) {
+            self.routes = vec![Route::Sessions];
+            window.dismiss_virtual_keyboard();
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn use_editor_folder(
+        &mut self,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.backend_supports("workspace_browse") {
+            return;
+        }
+        let changing = self.editor_root.as_deref() != Some(path);
+        if changing && self.editor_workspace_needs_attention(cx) {
+            self.notify_user(
+                "Save or resolve every open file before changing the editor folder",
+                cx,
+            );
+            return;
+        }
+        if changing {
+            self.file_generation += 1;
+            self.file_view = None;
+            self.file_tabs.clear();
+        }
+        let path = path.to_owned();
+        self.editor_root = Some(path.clone());
+        self.project_browser.clear();
+        self.project_browser_editor = true;
+        self.project_browser.root = Some(path.clone());
+        self.project_browser.picked = None;
+        self.folder.update(cx, |area, cx| area.set_text("", cx));
+        self.load_editor_tree(path, cx);
+        self.enter_file_route(false, window, cx);
+        cx.notify();
+    }
+
     /// Starts a session in the picked folder, or the one the tree starts at.
     pub(crate) fn use_picked_folder(&mut self, cx: &mut Context<Self>) {
         if !self.backend_supports("workspace_browse") {
@@ -675,46 +1113,599 @@ impl PhoneApp {
         if !self.backend_supports("workspace_browse") {
             return;
         }
-        let Some(root) = node.root.clone() else {
+        let editor_drawer = self.sheet == Some(Sheet::EditorFiles);
+        let Some(root) = (if editor_drawer {
+            self.editor_root.clone()
+        } else {
+            node.root.clone()
+        }) else {
             return;
         };
-        let path = node.path[root.len()..].trim_start_matches('/').to_owned();
-        self.file_view = Some(FileView {
+        if !within(&node.path, &root) {
+            self.notify_user("That file is outside the selected folder", cx);
+            return;
+        }
+        let Some(relative) = node.path.strip_prefix(root.trim_end_matches('/')) else {
+            return;
+        };
+        let path = relative.trim_start_matches('/').to_owned();
+        if path.is_empty() {
+            return;
+        }
+        if self.editor_root.as_deref() != Some(root.as_str()) {
+            if self.editor_workspace_needs_attention(cx) {
+                self.notify_user(
+                    "Save or resolve every open file before changing folders",
+                    cx,
+                );
+                return;
+            }
+            self.editor_root = Some(root.clone());
+            self.file_view = None;
+            self.file_tabs.clear();
+            self.file_exit_armed = false;
+        }
+        let return_to_project = self.sheet == Some(Sheet::Project);
+
+        // A tab is a retained editor entity, not a reconstructed string view.
+        if self
+            .file_view
+            .as_ref()
+            .is_some_and(|view| view.root == root && view.path == path)
+        {
+            self.enter_file_route(return_to_project, window, cx);
+            return;
+        }
+        if let Some(index) = self
+            .file_tabs
+            .iter()
+            .position(|view| view.root == root && view.path == path)
+        {
+            let selected = self.file_tabs.remove(index);
+            if let Some(active) = self.file_view.replace(selected) {
+                self.file_tabs.push(active);
+            }
+            self.file_exit_armed = false;
+            self.enter_file_route(return_to_project, window, cx);
+            cx.notify();
+            return;
+        }
+
+        if self.file_tabs.len() + usize::from(self.file_view.is_some()) >= MAX_FILE_TABS {
+            if let Some(index) = self
+                .file_tabs
+                .iter()
+                .position(|view| !view.dirty(cx) && matches!(view.save, FileSaveState::Idle))
+            {
+                self.file_tabs.remove(index);
+            } else if self
+                .file_view
+                .as_ref()
+                .is_some_and(|view| !view.dirty(cx) && matches!(view.save, FileSaveState::Idle))
+            {
+                self.file_view = None;
+            } else {
+                self.notify_user(
+                    "Save one of the eight open file drafts before opening another file.",
+                    cx,
+                );
+                return;
+            }
+        }
+
+        self.file_generation += 1;
+        let request = self.file_generation;
+        let editor = cx.new(|cx| {
+            let mut editor = TextArea::code(10_000, cx);
+            editor.set_read_only(true, cx);
+            editor
+        });
+        let watched_root = root.clone();
+        let watched_path = path.clone();
+        let subscription = cx.subscribe(&editor, move |this, _, event: &TextAreaEvent, cx| {
+            this.file_editor_event(&watched_root, &watched_path, event, cx)
+        });
+        let view = FileView {
             root: root.clone(),
             path: path.clone(),
             size: node.size,
             text: Load::Loading,
-            from_sheet: self.sheet == Some(Sheet::Project),
-        });
-        self.push(Route::File, window, cx);
-        self.file_generation += 1;
-        let generation = self.file_generation;
+            editor,
+            saved_text: String::new(),
+            line_ending: LineEnding::Lf,
+            editable: false,
+            read_only_reason: None,
+            syntax: language_for_path(&path).and_then(SyntaxDocument::new),
+            save: FileSaveState::Idle,
+            pending: None,
+            conflict: None,
+            request,
+            _subscription: subscription,
+        };
+        if let Some(active) = self.file_view.replace(view) {
+            self.file_tabs.push(active);
+        }
+        self.file_exit_armed = false;
+        self.enter_file_route(return_to_project, window, cx);
+        cx.notify();
+
         let Some(store) = &self.store else { return };
         let Some(live) = &store.live else {
-            if let Some(view) = &mut self.file_view {
-                view.text = Load::Ready(sample_text(&path));
+            let document = Document {
+                path: path.clone(),
+                text: sample_text(&path),
+                revision: "sample-1".into(),
+            };
+            if let Some(view) = self.file_buffer_mut(&root, &path, request) {
+                install_document(view, document, true, cx);
             }
+            cx.notify();
             return;
         };
         let (connection, helper) = (live.connection.clone(), live.helper.clone());
+        let editable = helper.can_edit_files();
         let host = store.computer.address.clone();
         cx.spawn(async move |this, cx| {
             let result = remote::read_file(&connection, &helper, &host, &root, &path).await;
             this.update(cx, |this, cx| {
-                if this.file_generation != generation {
+                let Some(view) = this.file_buffer_mut(&root, &path, request) else {
                     return;
-                }
-                if let Some(view) = &mut this.file_view {
-                    view.text = match result {
-                        Ok(text) => Load::Ready(text),
-                        Err(error) => Load::Failed(format!("{error:#}")),
-                    };
+                };
+                match result {
+                    Ok(document) => install_document(view, document, editable, cx),
+                    Err(error) => view.text = Load::Failed(format!("{error:#}")),
                 }
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    fn file_editor_event(
+        &mut self,
+        root: &str,
+        path: &str,
+        event: &TextAreaEvent,
+        cx: &mut Context<Self>,
+    ) {
+        self.file_exit_armed = false;
+        let view = self
+            .file_view
+            .as_mut()
+            .filter(|view| view.root == root && view.path == path)
+            .or_else(|| {
+                self.file_tabs
+                    .iter_mut()
+                    .find(|view| view.root == root && view.path == path)
+            });
+        if let Some(view) = view {
+            if matches!(event, TextAreaEvent::Changed(_))
+                && matches!(view.save, FileSaveState::Failed(_))
+            {
+                view.save = FileSaveState::Idle;
+            }
+            if let TextAreaEvent::Changed(edit) = event {
+                let source = view.editor.read(cx).text().to_owned();
+                let syntax = view
+                    .syntax
+                    .as_mut()
+                    .map(|syntax| {
+                        syntax.update_source(
+                            source,
+                            SyntaxEdit::new(edit.old_range.clone(), edit.new_range.clone()),
+                        );
+                        syntax
+                            .highlights(theme(cx).syntax_palette())
+                            .into_iter()
+                            .filter_map(|(range, style)| style.color.map(|color| (range, color)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                view.editor
+                    .update(cx, |editor, cx| editor.set_syntax(syntax, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    fn file_buffer_mut(&mut self, root: &str, path: &str, request: u64) -> Option<&mut FileView> {
+        if self
+            .file_view
+            .as_ref()
+            .is_some_and(|view| view.root == root && view.path == path && view.request == request)
+        {
+            return self.file_view.as_mut();
+        }
+        self.file_tabs
+            .iter_mut()
+            .find(|view| view.root == root && view.path == path && view.request == request)
+    }
+
+    pub(crate) fn recolor_file_editors(&mut self, cx: &mut Context<Self>) {
+        let palette = theme(cx).syntax_palette();
+        for view in self.file_view.iter_mut().chain(self.file_tabs.iter_mut()) {
+            let spans = view
+                .syntax
+                .as_ref()
+                .map(|syntax| {
+                    syntax
+                        .highlights(palette)
+                        .into_iter()
+                        .filter_map(|(range, style)| style.color.map(|color| (range, color)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            view.editor
+                .update(cx, |editor, cx| editor.set_syntax(spans, cx));
+        }
+    }
+
+    pub(crate) fn activate_file_tab(&mut self, root: &str, path: &str, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .file_tabs
+            .iter()
+            .position(|view| view.root == root && view.path == path)
+        else {
+            return;
+        };
+        let selected = self.file_tabs.remove(index);
+        if let Some(active) = self.file_view.replace(selected) {
+            self.file_tabs.push(active);
+        }
+        self.file_exit_armed = false;
+        cx.notify();
+    }
+
+    pub(crate) fn retry_active_file(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = &mut self.file_view else {
+            return;
+        };
+        if !matches!(view.text, Load::Failed(_)) {
+            return;
+        }
+        self.file_generation += 1;
+        view.request = self.file_generation;
+        let (root, path, request) = (view.root.clone(), view.path.clone(), view.request);
+        view.text = Load::Loading;
+        view.read_only_reason = None;
+        view.editor
+            .update(cx, |editor, cx| editor.set_read_only(true, cx));
+
+        let Some(store) = &self.store else { return };
+        let Some(live) = &store.live else {
+            install_document(
+                view,
+                Document {
+                    path: path.clone(),
+                    text: sample_text(&path),
+                    revision: "sample-retry".into(),
+                },
+                true,
+                cx,
+            );
+            cx.notify();
+            return;
+        };
+        let (connection, helper) = (live.connection.clone(), live.helper.clone());
+        let editable = helper.can_edit_files();
+        let host = store.computer.address.clone();
+        cx.spawn(async move |this, cx| {
+            let result = remote::read_file(&connection, &helper, &host, &root, &path).await;
+            this.update(cx, |this, cx| {
+                let Some(view) = this.file_buffer_mut(&root, &path, request) else {
+                    return;
+                };
+                match result {
+                    Ok(document) => install_document(view, document, editable, cx),
+                    Err(error) => view.text = Load::Failed(format!("{error:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn open_file_recoveries(&mut self, cx: &mut Context<Self>) {
+        self.file_recovery_delete_armed = None;
+        self.file_recoveries = FileRecoveryState::Loading;
+        self.open_sheet(Sheet::FileRecoveries, cx);
+        let Some(root) = self.editor_root.clone() else {
+            self.file_recoveries =
+                FileRecoveryState::Failed("Choose an editor folder first.".into());
+            return;
+        };
+        let Some(store) = &self.store else {
+            self.file_recoveries = FileRecoveryState::Failed(
+                "Recovery records are available for remote projects.".into(),
+            );
+            return;
+        };
+        let Some(live) = &store.live else {
+            self.file_recoveries = FileRecoveryState::Failed(
+                "Recovery records are unavailable in this preview.".into(),
+            );
+            return;
+        };
+        let (connection, helper) = (live.connection.clone(), live.helper.clone());
+        let host = store.computer.address.clone();
+        cx.spawn(async move |this, cx| {
+            let result = remote::file_recoveries(&connection, &helper, &host, &root).await;
+            this.update(cx, |this, cx| {
+                if this.editor_root.as_deref() != Some(root.as_str()) {
+                    return;
+                }
+                self::set_file_recoveries(this, result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn read_file_recovery(
+        &mut self,
+        id: String,
+        artifact: RecoveryArtifact,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.editor_root.clone() else {
+            return;
+        };
+        let Some(store) = &self.store else { return };
+        let Some(live) = &store.live else { return };
+        let (connection, helper) = (live.connection.clone(), live.helper.clone());
+        let host = store.computer.address.clone();
+        self.notify_user("Reading recovery artifact…", cx);
+        cx.spawn(async move |this, cx| {
+            let result =
+                remote::read_file_recovery(&connection, &helper, &host, &root, id, artifact).await;
+            this.update(cx, |this, cx| {
+                if this.editor_root.as_deref() != Some(root.as_str()) {
+                    return;
+                }
+                match result {
+                    Ok(document) => {
+                        this.selectable
+                            .update(cx, |area, cx| area.show_selected(document.text, cx));
+                        this.open_sheet(Sheet::SelectText, cx);
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        this.notify_user(format!("Could not read recovery: {error:#}"), cx)
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn delete_file_recovery(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.file_recovery_delete_armed.as_deref() != Some(&id) {
+            self.file_recovery_delete_armed = Some(id);
+            cx.notify();
+            return;
+        }
+        self.file_recovery_delete_armed = None;
+        let Some(root) = self.editor_root.clone() else {
+            return;
+        };
+        let Some(store) = &self.store else { return };
+        let Some(live) = &store.live else { return };
+        let (connection, helper) = (live.connection.clone(), live.helper.clone());
+        let host = store.computer.address.clone();
+        self.file_recoveries = FileRecoveryState::Loading;
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                remote::delete_file_recovery(&connection, &helper, &host, &root, id).await?;
+                remote::file_recoveries(&connection, &helper, &host, &root).await
+            }
+            .await;
+            this.update(cx, |this, cx| {
+                if this.editor_root.as_deref() != Some(root.as_str()) {
+                    return;
+                }
+                set_file_recoveries(this, result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn save_active_file(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = &mut self.file_view else {
+            return;
+        };
+        if !view.editable || view.saving_blocked() {
+            return;
+        }
+        let normalized = view.editor.read(cx).text().to_owned();
+        if normalized == view.saved_text {
+            view.save = FileSaveState::Idle;
+            cx.notify();
+            return;
+        }
+        let Some(revision) = view.revision().map(str::to_owned) else {
+            return;
+        };
+        let wire = view.wire_text(&normalized);
+        if wire.len() > EDIT_LIMIT {
+            view.save = FileSaveState::Failed(format!(
+                "This draft is larger than the {} mobile editing limit. Shorten it before saving.",
+                size_label(EDIT_LIMIT as u64)
+            ));
+            view.pending = None;
+            cx.notify();
+            return;
+        }
+        let pending = PendingSave {
+            wire,
+            normalized,
+            revision,
+        };
+        let root = view.root.clone();
+        let path = view.path.clone();
+        let request = view.request;
+
+        let Some(store) = &self.store else { return };
+        let Some(live) = &store.live else {
+            let revision = format!("sample-{}", self.file_generation.saturating_add(1));
+            let document = Document {
+                path: path.clone(),
+                text: pending.wire.clone(),
+                revision,
+            };
+            finish_saved(view, pending, document);
+            cx.notify();
+            return;
+        };
+        let (connection, helper) = (live.connection.clone(), live.helper.clone());
+        let host = store.computer.address.clone();
+        view.pending = Some(pending.clone());
+        view.conflict = None;
+        view.save = FileSaveState::Saving;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let saved = remote::save_file(
+                &connection,
+                &helper,
+                &host,
+                &root,
+                &path,
+                pending.wire.clone(),
+                pending.revision.clone(),
+            )
+            .await;
+            let attempt = match saved {
+                Ok(document) => SaveAttempt::Saved(document),
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    let current = remote::read_file(&connection, &helper, &host, &root, &path)
+                        .await
+                        .map_err(|error| format!("{error:#}"));
+                    SaveAttempt::Failed { message, current }
+                }
+            };
+            this.update(cx, |this, cx| {
+                let Some(view) = this.file_buffer_mut(&root, &path, request) else {
+                    return;
+                };
+                match attempt {
+                    SaveAttempt::Saved(document) => finish_saved(view, pending, document),
+                    SaveAttempt::Failed { message, current } => match current {
+                        Ok(current) => reconcile_save(view, pending, current, message, cx),
+                        Err(check) => {
+                            view.save = FileSaveState::Uncertain(format!(
+                                "Pi could not confirm whether this save reached the computer: {message}. Check failed: {check}"
+                            ));
+                            view.pending = Some(pending);
+                        }
+                    },
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Explicitly checks an uncertain save. It only reads; it never replays the
+    /// write that may already have reached the computer.
+    pub(crate) fn check_active_file_save(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = &mut self.file_view else {
+            return;
+        };
+        if !matches!(view.save, FileSaveState::Uncertain(_)) {
+            return;
+        }
+        let Some(pending) = view.pending.clone() else {
+            return;
+        };
+        let (root, path, request) = (view.root.clone(), view.path.clone(), view.request);
+        let Some(store) = &self.store else { return };
+        let Some(live) = &store.live else { return };
+        let (connection, helper) = (live.connection.clone(), live.helper.clone());
+        let host = store.computer.address.clone();
+        view.save = FileSaveState::Saving;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let current = remote::read_file(&connection, &helper, &host, &root, &path)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            this.update(cx, |this, cx| {
+                let Some(view) = this.file_buffer_mut(&root, &path, request) else {
+                    return;
+                };
+                match current {
+                    Ok(current) => reconcile_save(
+                        view,
+                        pending,
+                        current,
+                        "The original save did not complete cleanly".into(),
+                        cx,
+                    ),
+                    Err(error) => {
+                        view.save = FileSaveState::Uncertain(format!(
+                            "Pi still cannot confirm the save: {error}"
+                        ));
+                        view.pending = Some(pending);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn reload_conflicted_file(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = &mut self.file_view else {
+            return;
+        };
+        let Some(document) = view.conflict.take() else {
+            return;
+        };
+        install_document(view, document, true, cx);
+        self.file_exit_armed = false;
+        cx.notify();
+    }
+
+    /// Keeps the local draft while adopting the newly read revision. The user
+    /// must still tap Save, making the overwrite explicit.
+    pub(crate) fn keep_local_file(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = &mut self.file_view else {
+            return;
+        };
+        let Some(document) = view.conflict.take() else {
+            return;
+        };
+        if let Ok((remote_text, ending)) = normalized_document(&document.text) {
+            view.saved_text = remote_text;
+            view.line_ending = ending;
+        }
+        view.text = Load::Ready(document);
+        view.save = FileSaveState::Idle;
+        view.pending = None;
+        self.file_exit_armed = false;
+        cx.notify();
+    }
+
+    pub(crate) fn expand_file_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = &mut self.file_view else {
+            return;
+        };
+        let Some(syntax) = &view.syntax else { return };
+        let selected = view.editor.read(cx).selection();
+        let expanded = syntax.expand_selection(selected);
+        if let Some(expanded) = expanded {
+            view.editor
+                .update(cx, |editor, cx| editor.select_range(expanded, cx));
+        }
     }
 
     pub(crate) fn select_project(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1065,5 +2056,27 @@ mod tests {
         assert!(within("/a/b", "/a"));
         assert!(!within("/ab", "/a"));
         assert_eq!(parent("a/b/c"), "a/b");
+    }
+
+    #[test]
+    fn source_languages_use_real_bundled_grammars() {
+        assert_eq!(language_for_path("src/main.rs"), Some("rust"));
+        assert_eq!(language_for_path("web/view.tsx"), Some("tsx"));
+        assert_eq!(language_for_path("go.mod"), Some("gomod"));
+        assert_eq!(language_for_path("notes.txt"), None);
+    }
+
+    #[test]
+    fn line_endings_are_preserved_or_safely_restricted() {
+        assert_eq!(
+            normalized_document("one\ntwo\n"),
+            Ok(("one\ntwo\n".into(), LineEnding::Lf))
+        );
+        assert_eq!(
+            normalized_document("one\r\ntwo\r\n"),
+            Ok(("one\ntwo\n".into(), LineEnding::CrLf))
+        );
+        assert!(normalized_document("one\r\ntwo\rthree").is_err());
+        assert!(normalized_document("one\r\ntwo\nthree").is_err());
     }
 }

@@ -37,6 +37,7 @@ log = "0.4"
 pi_core = { path = "../pi_core" }
 pi_local = { path = "../pi_local", optional = true }
 pi_markdown = { path = "../pi_markdown" }
+pi_terminal = { package = "pi_terminal_mobile", path = "../pi_terminal_mobile" }
 pi_visual = { path = "../pi_visual" }
 pi_visual_ui = { path = "../pi_visual_ui", features = ["android"] }
 # The SSH key; the same rand as russh's ssh-key.
@@ -47,12 +48,14 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 semver = "1.0"
+zed_theme.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
 unicode-segmentation = "1.12"
 
 [dev-dependencies]
 pi_visual_ui = { path = "../pi_visual_ui", features = ["android", "test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+settings.workspace = true
 
 # The preview window. Runtime shaders, as in pi_desktop: a Mac needs no Xcode `metal` tool.
 [target.'cfg(not(target_os = "android"))'.dev-dependencies]

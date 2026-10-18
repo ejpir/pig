@@ -1,12 +1,12 @@
 //! Lets Zed's `ui` scrollbar drive a terminal's scrollback. Adapted from Zed's
 //! `terminal_view::terminal_scrollbar` (GPL-3.0-or-later).
 
+use crate::terminal::Terminal;
 use gpui::{Bounds, Point, point, size};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
-use terminal::Terminal;
 use ui::{Pixels, ScrollableHandle, px};
 
 #[derive(Debug)]

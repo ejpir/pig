@@ -28,6 +28,7 @@ const INPUT_QUIET: Duration = Duration::from_millis(200);
 enum Viewport {
     Scroll(ScrollHandle),
     List(ListState),
+    Area(Bounds<Pixels>),
 }
 
 impl Viewport {
@@ -35,6 +36,7 @@ impl Viewport {
         match self {
             Self::Scroll(handle) => handle.bounds(),
             Self::List(state) => state.viewport_bounds(),
+            Self::Area(bounds) => *bounds,
         }
     }
 }
@@ -132,6 +134,12 @@ pub(crate) fn in_motion() -> bool {
 
 pub(crate) fn note_input(phase: TouchPhase) {
     MOTION.with(|motion| motion.borrow_mut().input(phase, Instant::now()));
+}
+
+/// Text inputs own their scrolling instead of using a GPUI scroll handle, but
+/// participate in the same catch-only fling behavior as every other viewport.
+pub(crate) fn note_area_input(phase: TouchPhase, bounds: Bounds<Pixels>) {
+    note_viewport_input(phase, Viewport::Area(bounds));
 }
 
 /// A hidden or inactive window cannot finish its old gesture reliably. Drop
@@ -722,6 +730,29 @@ mod tests {
             );
             *motion.borrow_mut() = Motion::default();
         });
+    }
+
+    #[test]
+    fn text_areas_identify_their_viewport_while_momentum_moves() {
+        let bounds = Bounds::new(point(px(10.), px(100.)), size(px(300.), px(400.)));
+        cancel_motion();
+        note_area_input(TouchPhase::Started, bounds);
+        note_movement(px(100.));
+        note_input(TouchPhase::Ended);
+        assert!(
+            !release_fling_at(point(px(100.), px(250.))),
+            "a touch inside a flinging editor is catch-only"
+        );
+
+        cancel_motion();
+        note_area_input(TouchPhase::Started, bounds);
+        note_movement(px(100.));
+        note_input(TouchPhase::Ended);
+        assert!(
+            release_fling_at(point(px(100.), px(550.))),
+            "a control outside the editor remains tappable"
+        );
+        cancel_motion();
     }
 
     #[test]

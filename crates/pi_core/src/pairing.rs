@@ -53,6 +53,9 @@ pub struct HelperCapabilities {
     pub sessions: bool,
     #[serde(default)]
     pub directories: bool,
+    /// Optimistic remote file writes through the versioned files protocol.
+    #[serde(default)]
+    pub file_editing: bool,
     #[serde(default)]
     pub commands: bool,
     #[serde(default)]
@@ -61,6 +64,9 @@ pub struct HelperCapabilities {
     pub delete_sessions: bool,
     #[serde(default)]
     pub image_prompts: bool,
+    /// Interactive account-shell access through the terminal protocol.
+    #[serde(default)]
+    pub terminal: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,11 +282,15 @@ mod tests {
             durable_experimental: true,
             image_prompts: true,
             schedules: true,
+            file_editing: true,
+            terminal: true,
             ..Default::default()
         })
         .unwrap();
         assert_eq!(encoded["durableExperimental"], true);
         assert_eq!(encoded["imagePrompts"], true);
         assert_eq!(encoded["schedules"], true);
+        assert_eq!(encoded["fileEditing"], true);
+        assert_eq!(encoded["terminal"], true);
     }
 }

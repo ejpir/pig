@@ -103,7 +103,7 @@ fn activation_self_installs_migrates_once_and_is_idempotent() {
     assert!(migrated.ends_with(b"\r\n"));
     let text = String::from_utf8_lossy(&migrated);
     assert!(!text.contains("/old/hash/pi-desktop-remote"));
-    assert!(text.contains(&format!("{} gateway {marker}", stable.display())));
+    assert!(text.contains(&format!("{} gateway 2 {marker}", stable.display())));
 
     let link_inode = fs::symlink_metadata(&stable).unwrap().ino();
     let second = run_activate(&home, &keys);

@@ -311,7 +311,7 @@ impl PhoneApp {
                         .flex_1()
                         .min_w_0()
                         .pt(px(2.))
-                        .child("Check both screens show the same six digits"),
+                        .child("Check both screens show the same six digits. Approving grants Pi access and a shell as your computer account."),
                 ),
             );
         // Pairing: the steps, then the scanner, in the thumb's reach.

@@ -1317,7 +1317,7 @@ mod ui_tests {
                 app.preview("schedules", window, cx);
                 let host = app.schedule_host().unwrap();
                 let generation = app.schedules.generation;
-                app.open_store("other@computer");
+                app.open_store("other@computer", cx);
                 app.ensure_sample_schedules();
                 let before = app.schedule_cache().jobs;
                 app.finish_schedule_request(

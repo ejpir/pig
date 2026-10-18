@@ -24,8 +24,8 @@ use gpui::{
     ForegroundExecutor, GestureTuning, Image, ImageFormat, Keymap, Keystroke, Menu, MenuItem,
     Modifiers, PathPromptOptions, Platform, PlatformDisplay, PlatformGestures,
     PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow,
-    ScrollPhysics, Task, ThermalState, WindowAppearance, WindowKind, WindowParams, point,
-    popup::PopupNotSupportedError, px,
+    ScrollPhysics, Task, ThermalState, TouchPhase, WindowAppearance, WindowKind, WindowParams,
+    point, popup::PopupNotSupportedError, px,
 };
 use gpui_wgpu::{CosmicTextSystem, GpuContext};
 use ndk::configuration::UiModeNight;
@@ -546,8 +546,15 @@ impl AndroidPlatform {
         // Historical coordinates have device timestamps that GPUI's touch
         // event cannot carry. Do not allocate/replay them at processing speed;
         // the current position is the correctly coalesced sample.
-        let events = window.touches().translate(action, &[], &current);
-        let pinch = window.touches().pinch();
+        let (events, pinch) = {
+            let mut touches = window.touches();
+            let mut events = touches.translate(action, &[], &current);
+            let pinch = touches.pinch();
+            if pinch.is_some_and(|pinch| pinch.phase == TouchPhase::Started) {
+                touches.cancel_for_pinch(&mut events);
+            }
+            (events, pinch)
+        };
         log::debug!(
             "motion {action:?}: {} pointers -> {:?}",
             current.len(),

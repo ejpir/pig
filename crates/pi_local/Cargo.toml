@@ -1,6 +1,6 @@
 [package]
 name = "pi_local"
-version = "0.0.19"
+version = "0.0.20"
 edition = "2024"
 license = "GPL-3.0-or-later"
 publish = false

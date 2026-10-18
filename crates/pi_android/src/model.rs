@@ -27,7 +27,15 @@ pub struct Computer {
 impl Computer {
     pub fn from_address(address: &str) -> Self {
         let host = address.rsplit('@').next().unwrap_or(address);
-        let host = host.split(':').next().unwrap_or(host);
+        let host = if let Some(bracketed) = host.strip_prefix('[') {
+            bracketed
+                .split_once(']')
+                .map_or(bracketed, |(host, _)| host)
+        } else if host.bytes().filter(|byte| *byte == b':').count() == 1 {
+            host.split_once(':').map_or(host, |(host, _)| host)
+        } else {
+            host
+        };
         let name = host.strip_suffix(".local").unwrap_or(host);
         Self {
             name: name.to_owned(),
@@ -890,6 +898,14 @@ mod tests {
         );
         assert_eq!(Computer::from_address("dev@10.0.4.12").name, "10.0.4.12");
         assert_eq!(Computer::from_address("build-box:2222").name, "build-box");
+        assert_eq!(
+            Computer::from_address("dev@[2001:db8::1]:2222").name,
+            "2001:db8::1"
+        );
+        assert_eq!(
+            Computer::from_address("dev@2001:db8::1").name,
+            "2001:db8::1"
+        );
     }
 
     #[test]

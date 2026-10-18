@@ -483,6 +483,7 @@ impl PhoneApp {
                     crate::remote::read_file(&connection, &helper, &host, folder, name)
                         .await
                         .ok()
+                        .map(|document| document.text)
                 }
             })
             .await;

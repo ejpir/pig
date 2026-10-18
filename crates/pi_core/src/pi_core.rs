@@ -15,4 +15,5 @@ pub mod session_actions;
 pub mod skill;
 pub mod ssh;
 pub mod subagent;
+pub mod terminal_transport;
 pub mod transport;

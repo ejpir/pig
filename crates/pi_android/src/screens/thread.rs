@@ -495,6 +495,33 @@ impl PhoneApp {
             .px(px(4.))
             .child(back)
             .child(title)
+            .when(
+                self.backend_supports("workspace_browse") || self.editor_root.is_some(),
+                |bar| {
+                    bar.child(
+                        ui::tap("thread-editor", "folder", colors)
+                            .debug_selector(|| "thread-editor".into())
+                            .aria_label(if self.editor_root.is_some() {
+                                "Return to editor"
+                            } else {
+                                "Open editor"
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_editor_workspace(window, cx)
+                            })),
+                    )
+                },
+            )
+            .when(self.terminal_available(id), |bar| {
+                bar.child(
+                    ui::tap("thread-terminal", "term", colors)
+                        .debug_selector(|| "thread-terminal".into())
+                        .aria_label("Open terminal")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_terminal(id, window, cx)
+                        })),
+                )
+            })
             .child(
                 ui::tap("more", "dots", colors).on_click(
                     cx.listener(move |this, _, _, cx| this.open_sheet(Sheet::More(id), cx)),
@@ -936,10 +963,7 @@ impl PhoneApp {
                         if self.visual_enabled(session, index) && self.visual_has_app(&text) {
                             column.child(self.visual_reply(session, index, 0, &text, colors, cx))
                         } else {
-                            column.children(
-                                reply(turn, index == last, colors)
-                                    .map(|reply| reply.relative().child(self.copyable(text, cx))),
-                            )
+                            column.children(reply(self, id, index, turn, index == last, colors, cx))
                         };
                     column
                         .children(self.image_cards(id, index, turn, colors, cx))
@@ -1052,14 +1076,18 @@ impl PhoneApp {
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
         let id = session.id;
-        turn.flow
-            .iter()
-            .enumerate()
-            .filter_map(|(n, step)| match step {
-                Flow::Text(text) => Some(
-                    self.visual_reply(session, index, n, text, colors, cx)
+        let mut elements = Vec::new();
+        let mut step = 0;
+        while step < turn.flow.len() {
+            if let Some((end, text)) = collapsed_flow_text(turn, step) {
+                elements.push(
+                    self.visual_reply(session, index, step, &text, colors, cx)
                         .into_any_element(),
-                ),
+                );
+                step = end;
+                continue;
+            }
+            let element = match &turn.flow[step] {
                 Flow::Image(n) => self
                     .image_card(id, index, turn, *n, colors, cx)
                     .map(IntoElement::into_any_element),
@@ -1070,18 +1098,21 @@ impl PhoneApp {
                     .handoff_card(id, index, turn, *n, colors, cx)
                     .map(IntoElement::into_any_element),
                 Flow::Compacted(summary) => Some(
-                    self.compacted(id, index, n, summary, colors, cx)
+                    self.compacted(id, index, step, summary, colors, cx)
                         .into_any_element(),
                 ),
                 // In a completed streamed run, thoughts fold with the calls
                 // until its chronological activity is shown again.
                 Flow::Thinking(text) if !turn.streams() => Some(
-                    self.thinking(id, index, n, text, false, colors, cx)
+                    self.thinking(id, index, step, text, false, colors, cx)
                         .into_any_element(),
                 ),
-                Flow::Thinking(_) | Flow::Tool(..) => None,
-            })
-            .collect()
+                Flow::Text(_) | Flow::Thinking(_) | Flow::Tool(..) => None,
+            };
+            elements.extend(element);
+            step += 1;
+        }
+        elements
     }
 
     /// The model's reasoning: one line, "Thinking" while it is the newest
@@ -1150,7 +1181,13 @@ impl PhoneApp {
                         .border_l_2()
                         .border_color(colors.line)
                         .text_color(colors.secondary)
-                        .child(crate::message::render(text, colors)),
+                        .child(crate::message::render_selectable(
+                            text,
+                            format!("thread:{}:turn:{index}:thinking:{step}", id.0),
+                            colors,
+                            self,
+                            cx,
+                        )),
                 )
             })
     }
@@ -1227,12 +1264,15 @@ impl PhoneApp {
                     })),
             )
             .when(open, |column| {
-                column.child(
-                    ui::card(colors)
-                        .p(px(14.))
-                        .min_w_0()
-                        .child(crate::message::render(summary, colors)),
-                )
+                column.child(ui::card(colors).p(px(14.)).min_w_0().child(
+                    crate::message::render_selectable(
+                        summary,
+                        format!("thread:{}:turn:{index}:compacted:{step}", id.0),
+                        colors,
+                        self,
+                        cx,
+                    ),
+                ))
             })
     }
 
@@ -1296,16 +1336,28 @@ impl PhoneApp {
                     // Opened, subagents' answers read as the markdown they wrote.
                     Some((_, said)) if turn.reported && !folded => div()
                         .min_w_0()
-                        .child(crate::message::render(said, colors))
+                        .child(crate::message::render_selectable(
+                            said,
+                            format!("thread:{}:turn:{index}:reported-prompt", id.0),
+                            colors,
+                            self,
+                            cx,
+                        ))
                         .into_any_element(),
                     _ => div()
                         .min_w_0()
                         .when(folded, |text| text.truncate())
-                        .child(if folded {
-                            turn.prompt.lines().next().unwrap_or("").to_owned()
-                        } else {
-                            turn.prompt.clone()
-                        })
+                        .child(crate::message::plain_selectable(
+                            if folded {
+                                turn.prompt.lines().next().unwrap_or("").to_owned()
+                            } else {
+                                turn.prompt.clone()
+                            },
+                            format!("thread:{}:turn:{index}:prompt", id.0),
+                            colors.text,
+                            self,
+                            cx,
+                        ))
                         .into_any_element(),
                 })
                 .when(!turn.attachments.is_empty(), |prompt| {
@@ -1338,7 +1390,6 @@ impl PhoneApp {
                         ),
                     ))
                 })
-                .child(self.copyable(turn.prompt.clone(), cx))
                 .when(!live || turn.reported, |prompt| {
                     prompt.on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(list) = this.thread_lists.get(&id) {
@@ -2212,20 +2263,63 @@ fn waiting_row(session: &Session, line_below: bool, colors: &Theme) -> Div {
         )
 }
 
-fn reply(turn: &Turn, latest: bool, colors: &Theme) -> Option<Div> {
+/// Text separated only by folded thoughts/tools is visually adjacent in the
+/// collapsed flow, so it must also be one selectable surface. Visible media,
+/// handoffs and compactions remain real boundaries.
+fn collapsed_flow_text(turn: &Turn, start: usize) -> Option<(usize, String)> {
+    let Flow::Text(first) = turn.flow.get(start)? else {
+        return None;
+    };
+    let streams = turn.streams();
+    let mut text = first.clone();
+    let mut end = start + 1;
+    while let Some(step) = turn.flow.get(end) {
+        match step {
+            Flow::Text(next) => {
+                text.push_str("\n\n");
+                text.push_str(next);
+            }
+            Flow::Tool(..) | Flow::Thinking(_) if streams => {}
+            _ => break,
+        }
+        end += 1;
+    }
+    Some((end, text))
+}
+
+fn reply(
+    app: &PhoneApp,
+    id: SessionId,
+    index: usize,
+    turn: &Turn,
+    latest: bool,
+    colors: &Theme,
+    cx: &Context<PhoneApp>,
+) -> Option<Div> {
     turn.summary.as_ref().map(|summary| {
         if let Some(source) = summary.source.as_deref() {
-            return div()
-                .min_w_0()
-                .child(crate::message::render(source, colors));
+            return div().min_w_0().child(crate::message::render_selectable(
+                source,
+                format!("thread:{}:turn:{index}:reply", id.0),
+                colors,
+                app,
+                cx,
+            ));
         }
         div()
             .min_w_0()
             .when(!summary.headline.is_empty(), |reply| {
                 reply.child(
-                    ui::serif(summary.headline.clone(), if latest { 22. } else { 18. })
+                    ui::serif("", if latest { 22. } else { 18. })
                         .line_height(px(if latest { 28. } else { 24. }))
-                        .text_color(colors.text),
+                        .text_color(colors.text)
+                        .child(crate::message::plain_selectable(
+                            summary.headline.clone(),
+                            format!("thread:{}:turn:{index}:reply-headline", id.0),
+                            colors.text,
+                            app,
+                            cx,
+                        )),
                 )
             })
             .when(!summary.body.is_empty(), |reply| {
@@ -2236,7 +2330,13 @@ fn reply(turn: &Turn, latest: bool, colors: &Theme) -> Option<Div> {
                         .text_size(px(15.))
                         .line_height(px(22.))
                         .text_color(colors.secondary)
-                        .child(summary.body.clone()),
+                        .child(crate::message::plain_selectable(
+                            summary.body.clone(),
+                            format!("thread:{}:turn:{index}:reply-body", id.0),
+                            colors.secondary,
+                            app,
+                            cx,
+                        )),
                 )
             })
     })
@@ -2551,6 +2651,40 @@ mod tests {
 
         turn.attachments = vec!["2 images".into()];
         assert_eq!(prompt_image_for_attachment(&turn, 0), Some(0));
+    }
+
+    #[test]
+    fn collapsed_flow_text_ignores_only_invisible_boundaries() {
+        let mut turn = Turn::new("", "");
+        turn.flow = vec![
+            Flow::Text("Upper paragraph.".into()),
+            Flow::Tool(StageKind::Understand, 0),
+            Flow::Thinking("Folded thought".into()),
+            Flow::Text("Selected paragraph.\n\n- One\n- Two".into()),
+            Flow::Image(0),
+            Flow::Text("After the image.".into()),
+        ];
+        assert_eq!(
+            collapsed_flow_text(&turn, 0),
+            Some((
+                4,
+                "Upper paragraph.\n\nSelected paragraph.\n\n- One\n- Two".into()
+            ))
+        );
+        assert_eq!(
+            collapsed_flow_text(&turn, 5),
+            Some((6, "After the image.".into()))
+        );
+
+        turn.flow = vec![
+            Flow::Text("Before thought.".into()),
+            Flow::Thinking("Visible thought".into()),
+            Flow::Text("After thought.".into()),
+        ];
+        assert_eq!(
+            collapsed_flow_text(&turn, 0),
+            Some((1, "Before thought.".into()))
+        );
     }
 
     #[gpui::test]
@@ -2978,7 +3112,7 @@ mod tests {
         cx.simulate_resize(gpui::size(px(320.), px(700.)));
         cx.update(|_, cx| {
             app.update(cx, |app, cx| {
-                app.open_store("sample@computer.local");
+                app.open_store("sample@computer.local", cx);
                 app.routes = vec![Route::Sessions, Route::Thread(id)];
                 let session = app
                     .store
@@ -3024,8 +3158,8 @@ mod tests {
 
     fn queued_frame(window: &mut Window, cx: &mut Context<QueuedFrame>) -> QueuedFrame {
         let app = cx.new(|cx| PhoneApp::new(None, window, cx));
-        let snapshot = app.update(cx, |app, _| {
-            app.open_store("sample@computer.local");
+        let snapshot = app.update(cx, |app, cx| {
+            app.open_store("sample@computer.local", cx);
             let store = app.store.as_mut().unwrap();
             let id = SessionId(1);
             store
@@ -3184,7 +3318,7 @@ mod tests {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
-                app.open_store("sample@computer.local");
+                app.open_store("sample@computer.local", cx);
                 let session = app
                     .store
                     .as_mut()
@@ -3251,7 +3385,7 @@ mod tests {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
-                app.open_store("sample@computer.local");
+                app.open_store("sample@computer.local", cx);
                 let session = app
                     .store
                     .as_mut()
@@ -3289,7 +3423,7 @@ mod tests {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
-                app.open_store("sample@computer.local");
+                app.open_store("sample@computer.local", cx);
                 app.visible = true;
                 app.routes = vec![Route::Sessions, Route::Thread(id)];
                 let session = app
@@ -3331,7 +3465,7 @@ mod tests {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
-                app.open_store("sample@computer.local");
+                app.open_store("sample@computer.local", cx);
                 let count = app.store.as_ref().unwrap().session(id).unwrap().turns.len();
                 assert!(count < LARGE_THREAD_ITEMS);
                 app.thread_lists.insert(id, new_thread_list_state(count));
@@ -3354,7 +3488,7 @@ mod tests {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
-                app.open_store("sample@computer.local");
+                app.open_store("sample@computer.local", cx);
                 app.visible = true;
                 app.routes = vec![Route::Sessions, Route::Thread(id)];
                 app.thread_loading.insert(id, 1);
@@ -3403,7 +3537,7 @@ mod tests {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
-                app.open_store("sample@computer.local");
+                app.open_store("sample@computer.local", cx);
                 app.visible = true;
                 app.routes = vec![Route::Sessions, Route::Thread(id)];
                 let session = app
@@ -3470,7 +3604,7 @@ mod tests {
         let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
-                app.open_store("sample@computer.local");
+                app.open_store("sample@computer.local", cx);
                 app.visible = true;
                 app.routes = vec![Route::Sessions, Route::Thread(id)];
                 app.thread_loading.insert(id, 1);

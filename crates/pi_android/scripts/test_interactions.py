@@ -28,21 +28,79 @@ class Phone:
         self.results = []
         self.fixture_name = None
 
+    @staticmethod
+    def focused_window_is_fixture(windows):
+        focus = re.search(r"^\s*mCurrentFocus=Window\{([^\s}]+)[^\n]*$", windows, re.MULTILINE)
+        if not focus:
+            return False
+        token = focus.group(1)
+        if re.search(
+            rf"\b{re.escape(PACKAGE)}/[^\s}}]+",
+            focus.group(0),
+        ):
+            return True
+        # Chromium controls can focus an attached PopupWindow whose short
+        # title omits the package. Parse only complete detailed Window records;
+        # never let a nearby fixture record lend ownership to a foreign token.
+        records = list(
+            re.finditer(
+                r"^\s*Window #\d+ Window\{([^\s}]+)[^\n]*:\s*$",
+                windows,
+                re.MULTILINE,
+            )
+        )
+        for index, record in enumerate(records):
+            if record.group(1) != token:
+                continue
+            end = records[index + 1].start() if index + 1 < len(records) else len(windows)
+            detail = windows[record.end():end]
+            owner = re.search(
+                r"^\s*mOwnerUid=[^\n]*\bpackage=([^\s]+)",
+                detail,
+                re.MULTILINE,
+            )
+            if owner and owner.group(1) == PACKAGE:
+                return True
+        return False
+
+    def assert_input_target(self):
+        # Fixture telemetry can outlive the process or a manual app switch.
+        # Never inject its stale coordinates into the main app/another app.
+        activity = self.run("shell", "dumpsys", "activity", "activities").decode()
+        resumed = [line for line in activity.splitlines()
+                   if "topResumedActivity" in line or "mResumedActivity" in line]
+        if not any(re.search(r"\b" + re.escape(PACKAGE) + r"/", line) for line in resumed):
+            raise AssertionError("UI-test package is not foreground; no input was injected")
+        # A resumed Activity can sit behind an ANR/system/permission window.
+        windows = self.run("shell", "dumpsys", "window").decode()
+        if not self.focused_window_is_fixture(windows):
+            raise AssertionError("UI-test window does not own input focus; no input was injected")
+
     def run(self, *args):
         if args[:2] == ("shell", "input"):
-            # Fixture telemetry can outlive the process or a manual app switch.
-            # Never inject its stale coordinates into the main app/another app.
-            activity = self.run("shell", "dumpsys", "activity", "activities").decode()
-            resumed = [line for line in activity.splitlines()
-                       if "topResumedActivity" in line or "mResumedActivity" in line]
-            if not any(re.search(r"\b" + re.escape(PACKAGE) + r"/", line) for line in resumed):
-                raise AssertionError("UI-test package is not foreground; no input was injected")
-            # A resumed Activity can sit behind an ANR/system/permission window.
-            windows = self.run("shell", "dumpsys", "window").decode()
-            focused = [line for line in windows.splitlines() if "mCurrentFocus=" in line]
-            if not any(re.search(r"\b" + re.escape(PACKAGE) + r"/", line) for line in focused):
-                raise AssertionError("UI-test window does not own input focus; no input was injected")
+            self.assert_input_target()
         return subprocess.check_output(self.adb + list(map(str, args)), stderr=subprocess.STDOUT, timeout=20)
+
+    def start_input_shell(self, command):
+        """Start one compound input command after the same fail-closed checks."""
+        self.assert_input_target()
+        return subprocess.Popen(
+            self.adb + ["shell", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+
+    def wake(self):
+        # Bootstrap is intentionally limited to a system wake event; it has no
+        # app coordinates or editable payload to misdirect while no fixture can
+        # yet own focus. Every later input still goes through run's foreground
+        # and focused-window checks.
+        subprocess.check_output(
+            self.adb + ["shell", "input", "keyevent", "KEYCODE_WAKEUP"],
+            stderr=subprocess.STDOUT,
+            timeout=20,
+        )
+        self.run("shell", "wm", "dismiss-keyguard")
 
     def state(self):
         state = json.loads(self.run("exec-out", "run-as", PACKAGE, "cat", "files/ui-test-state.json"))
@@ -407,12 +465,12 @@ def focus_long_press_during_ime_reflow(phone):
         f"exec input swipe {physical[0]} {physical[1]} "
         f"{physical[0]} {physical[1]} 1200"
     )
-    process = subprocess.Popen(phone.adb + ["shell", command], stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT)
+    process = phone.start_input_shell(command)
     moved_during_hold = False
     try:
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline and process.poll() is None:
+            phone.assert_input_target()
             current = phone.state()
             current_draft, _ = phone.bounds("draft", state=current)
             if abs(current_draft[1] - y) > 1:
@@ -1050,8 +1108,7 @@ def main():
             if time.monotonic() >= stopped_by:
                 raise RuntimeError("The previous isolated app process did not stop")
             time.sleep(0.05)
-        phone.run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
-        phone.run("shell", "wm", "dismiss-keyguard")
+        phone.wake()
         time.sleep(0.5)
         policy = phone.run("shell", "dumpsys", "window", "policy").decode()
         if "mIsShowing=true" in policy and "mKeyguardOccluded=false" in policy:

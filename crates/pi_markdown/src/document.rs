@@ -40,7 +40,10 @@ pub struct Block {
     pub heading: Option<u8>,
     pub code: bool,
     pub language: Option<String>,
+    /// Depth inside the active Markdown list, including continuation blocks.
     pub indent: usize,
+    /// Deterministic identity of the outermost list in this parsed document.
+    pub list_group: Option<usize>,
     pub quote: bool,
     pub media: Option<Media>,
 }
@@ -108,9 +111,18 @@ pub fn blocks(source: &str) -> Vec<Block> {
     let mut block = Block::default();
     let mut style = Span::default();
     let mut lists: Vec<Option<u64>> = Vec::new();
+    let mut list_groups: Vec<usize> = Vec::new();
+    let mut next_list_group = 0usize;
     let mut quote_depth = 0usize;
-    let flush = |block: &mut Block, result: &mut Vec<Block>| {
+    let flush = |block: &mut Block,
+                 result: &mut Vec<Block>,
+                 list_depth: usize,
+                 list_group: Option<usize>| {
         if !block.spans.is_empty() || block.media.is_some() {
+            if list_depth > 0 {
+                block.indent = list_depth;
+                block.list_group = list_group;
+            }
             if block.code
                 && block.language.as_deref() == Some("mermaid")
                 && !block.text().trim().is_empty()
@@ -128,7 +140,12 @@ pub fn blocks(source: &str) -> Vec<Block> {
     for event in Parser::new_ext(source, options) {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
-                flush(&mut block, &mut result);
+                flush(
+                    &mut block,
+                    &mut result,
+                    lists.len(),
+                    list_groups.first().copied(),
+                );
                 block.heading = Some(match level {
                     HeadingLevel::H1 => 1,
                     HeadingLevel::H2 => 2,
@@ -139,7 +156,12 @@ pub fn blocks(source: &str) -> Vec<Block> {
                 });
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                flush(&mut block, &mut result);
+                flush(
+                    &mut block,
+                    &mut result,
+                    lists.len(),
+                    list_groups.first().copied(),
+                );
                 block.code = true;
                 block.language = match kind {
                     CodeBlockKind::Fenced(language) => language
@@ -151,30 +173,73 @@ pub fn blocks(source: &str) -> Vec<Block> {
                 };
             }
             Event::Start(Tag::Image { dest_url, .. }) => {
-                flush(&mut block, &mut result);
+                flush(
+                    &mut block,
+                    &mut result,
+                    lists.len(),
+                    list_groups.first().copied(),
+                );
                 block.media = embedded_image(&dest_url).map(Media::Image);
             }
-            Event::End(TagEnd::Image) => flush(&mut block, &mut result),
+            Event::End(TagEnd::Image) => flush(
+                &mut block,
+                &mut result,
+                lists.len(),
+                list_groups.first().copied(),
+            ),
             Event::Start(Tag::BlockQuote(_)) => {
-                flush(&mut block, &mut result);
+                flush(
+                    &mut block,
+                    &mut result,
+                    lists.len(),
+                    list_groups.first().copied(),
+                );
                 quote_depth += 1;
                 block.quote = true;
             }
             Event::End(TagEnd::BlockQuote(_)) => {
-                flush(&mut block, &mut result);
+                flush(
+                    &mut block,
+                    &mut result,
+                    lists.len(),
+                    list_groups.first().copied(),
+                );
                 quote_depth = quote_depth.saturating_sub(1);
             }
             Event::Start(Tag::List(start)) => {
-                flush(&mut block, &mut result);
+                flush(
+                    &mut block,
+                    &mut result,
+                    lists.len(),
+                    list_groups.first().copied(),
+                );
+                let group = list_groups.first().copied().unwrap_or_else(|| {
+                    let group = next_list_group;
+                    next_list_group += 1;
+                    group
+                });
                 lists.push(start);
+                list_groups.push(group);
             }
             Event::End(TagEnd::List(_)) => {
-                flush(&mut block, &mut result);
+                flush(
+                    &mut block,
+                    &mut result,
+                    lists.len(),
+                    list_groups.first().copied(),
+                );
                 lists.pop();
+                list_groups.pop();
             }
             Event::Start(Tag::Item) => {
-                flush(&mut block, &mut result);
+                flush(
+                    &mut block,
+                    &mut result,
+                    lists.len(),
+                    list_groups.first().copied(),
+                );
                 block.indent = lists.len();
+                block.list_group = list_groups.first().copied();
                 block.quote = quote_depth > 0;
                 let prefix = match lists.last_mut() {
                     Some(Some(number)) => {
@@ -199,8 +264,18 @@ pub fn blocks(source: &str) -> Vec<Block> {
             Event::End(TagEnd::Link) => style.link = None,
             Event::End(
                 TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::Item,
-            ) => flush(&mut block, &mut result),
-            Event::End(TagEnd::TableRow | TagEnd::TableHead) => flush(&mut block, &mut result),
+            ) => flush(
+                &mut block,
+                &mut result,
+                lists.len(),
+                list_groups.first().copied(),
+            ),
+            Event::End(TagEnd::TableRow | TagEnd::TableHead) => flush(
+                &mut block,
+                &mut result,
+                lists.len(),
+                list_groups.first().copied(),
+            ),
             Event::End(TagEnd::TableCell) => block.spans.push(Span {
                 text: "  ".into(),
                 ..style.clone()
@@ -228,17 +303,32 @@ pub fn blocks(source: &str) -> Vec<Block> {
                 ..style.clone()
             }),
             Event::Rule => {
-                flush(&mut block, &mut result);
+                flush(
+                    &mut block,
+                    &mut result,
+                    lists.len(),
+                    list_groups.first().copied(),
+                );
                 block.spans.push(Span {
                     text: "────────".into(),
                     ..Default::default()
                 });
-                flush(&mut block, &mut result);
+                flush(
+                    &mut block,
+                    &mut result,
+                    lists.len(),
+                    list_groups.first().copied(),
+                );
             }
             _ => {}
         }
     }
-    flush(&mut block, &mut result);
+    flush(
+        &mut block,
+        &mut result,
+        lists.len(),
+        list_groups.first().copied(),
+    );
     result
 }
 
@@ -446,6 +536,45 @@ mod tests {
                 .iter()
                 .flat_map(|block| &block.spans)
                 .any(|span| span.link.as_deref() == Some("https://example.com"))
+        );
+    }
+
+    #[test]
+    fn list_blocks_keep_their_root_identity_and_depth() {
+        let blocks =
+            blocks("- one\n- two\n  - nested\n  - [x] done\n- three\n\n1. separate\n2. list");
+        let shown: Vec<_> = blocks
+            .iter()
+            .map(|block| (block.text(), block.indent, block.list_group))
+            .collect();
+        assert_eq!(
+            shown.iter().map(|(_, depth, _)| *depth).collect::<Vec<_>>(),
+            [1, 1, 2, 2, 1, 1, 1]
+        );
+        let first = shown[0].2.expect("bullet-list identity");
+        assert!(shown[..5].iter().all(|(_, _, group)| *group == Some(first)));
+        let second = shown[5].2.expect("ordered-list identity");
+        assert_ne!(first, second);
+        assert!(
+            shown[5..]
+                .iter()
+                .all(|(_, _, group)| *group == Some(second))
+        );
+        assert_eq!(shown[3].0, "• ☑ done");
+    }
+
+    #[test]
+    fn loose_list_continuations_remain_in_their_list() {
+        let blocks = blocks("- first paragraph\n\n  second paragraph\n- final");
+        assert_eq!(
+            blocks.iter().map(Block::text).collect::<Vec<_>>(),
+            ["• first paragraph", "second paragraph", "• final"]
+        );
+        assert!(blocks.iter().all(|block| block.indent == 1));
+        assert!(
+            blocks
+                .iter()
+                .all(|block| block.list_group == blocks[0].list_group)
         );
     }
 

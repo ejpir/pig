@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 
-pub const FILE_PROTOCOL_VERSION: u32 = 1;
+pub const FILE_PROTOCOL_VERSION: u32 = 2;
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_TREE_ENTRIES: usize = 20_000;
 
@@ -29,8 +29,24 @@ pub struct Tree {
 pub struct Document {
     pub path: String,
     pub text: String,
-    /// SHA-256 of the exact remote bytes, used for optimistic saves.
+    /// Revision of the exact remote inode, bytes, and preserved metadata.
     pub revision: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Recovery {
+    pub id: String,
+    pub path: String,
+    pub state: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryArtifact {
+    Original,
+    Boundary,
+    Installed,
+    Draft,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -48,6 +64,14 @@ pub enum Request {
         text: String,
         revision: String,
     },
+    FilesRecoveries,
+    FilesRecoveryRead {
+        id: String,
+        artifact: RecoveryArtifact,
+    },
+    FilesRecoveryDelete {
+        id: String,
+    },
 }
 impl Request {
     pub fn name(&self) -> &'static str {
@@ -56,6 +80,9 @@ impl Request {
             Self::FilesList => "files_list",
             Self::FilesRead { .. } => "files_read",
             Self::FilesSave { .. } => "files_save",
+            Self::FilesRecoveries => "files_recoveries",
+            Self::FilesRecoveryRead { .. } => "files_recovery_read",
+            Self::FilesRecoveryDelete { .. } => "files_recovery_delete",
         }
     }
 }
@@ -138,6 +165,20 @@ impl Client {
                 revision,
             },
         )?)?)
+    }
+    pub fn recoveries(&self) -> Result<Vec<Recovery>> {
+        Ok(serde_json::from_value(
+            self.request(Request::FilesRecoveries)?,
+        )?)
+    }
+    pub fn recovery_read(&self, id: String, artifact: RecoveryArtifact) -> Result<Document> {
+        Ok(serde_json::from_value(
+            self.request(Request::FilesRecoveryRead { id, artifact })?,
+        )?)
+    }
+    pub fn recovery_delete(&self, id: String) -> Result<()> {
+        self.request(Request::FilesRecoveryDelete { id })?;
+        Ok(())
     }
 }
 

@@ -10,15 +10,15 @@
 //! The editing model follows the `touch` example's field in gpui_android,
 //! which is adapted from GPUI's `input` example (Apache-2.0).
 
-use crate::theme::{SANS, theme};
+use crate::theme::{MONO, SANS, theme};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, Corners,
     DispatchPhase, Edges, Element, ElementId, ElementInputHandler, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId, Hitbox, HitboxBehavior,
-    LayoutId, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, Pixels,
-    Point, ScrollWheelEvent, SharedString, Style, TextInputAction, TextInputConfiguration, TextRun,
-    TouchDragEvent, TouchPhase, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div,
-    fill, point, prelude::*, px, relative, size,
+    LayoutId, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, ScrollWheelEvent, SharedString, Style, TextInputAction, TextInputConfiguration,
+    TextRun, TouchDragEvent, TouchPhase, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    actions, div, fill, point, prelude::*, px, relative, size,
 };
 use gpui_android::activity;
 use std::{
@@ -80,13 +80,26 @@ impl MenuItem {
 
 pub const CONTEXT: &str = "TextArea";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One exact UTF-8 edit. Both ranges address their respective text snapshots:
+/// `old_range` is in the text before the change and `new_range` is in the text
+/// after it. This is sufficient to update a retained Tree-sitter tree without
+/// guessing around Unicode or keyboard composition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextEdit {
+    pub old_range: Range<usize>,
+    pub new_range: Range<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextAreaEvent {
-    Changed,
+    Changed(TextEdit),
+    SelectionChanged,
     /// Enter in a field that sends.
     Submit,
     /// The selection was copied from read-only text.
     Copied,
+    /// An in-place read-only selection lost its interaction.
+    Dismissed,
 }
 
 pub struct TextArea {
@@ -133,6 +146,17 @@ pub struct TextArea {
     /// Text to read and copy from, not to edit: no keyboard, and the bar
     /// offers Copy and Select all.
     read_only: bool,
+    /// Code keeps hard lines and scrolls horizontally instead of soft wrapping.
+    soft_wrap: bool,
+    code: bool,
+    /// Non-overlapping UTF-8 ranges produced by Tree-sitter.
+    syntax: Vec<(Range<usize>, gpui::Hsla)>,
+    /// Rich runs borrowed from a rendered chat block while it is selected in place.
+    presented_runs: Option<Vec<TextRun>>,
+    /// The original hold point, resolved only after the replacement block is shaped.
+    presented_at: Option<Point<Pixels>>,
+    /// Distinguishes an in-place chat selection from the legacy selection sheet.
+    presented: bool,
 }
 
 impl EventEmitter<TextAreaEvent> for TextArea {}
@@ -148,6 +172,39 @@ impl TextArea {
     #[cfg(test)]
     pub(crate) fn paint_bounds(&self) -> Option<Bounds<Pixels>> {
         self.bounds
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selection_handle_position(&self, start: bool) -> Option<Point<Pixels>> {
+        let bounds = self.bounds?;
+        let layout = self.layout.as_ref()?;
+        let offset = if start {
+            self.selection.start
+        } else {
+            self.selection.end
+        };
+        let position = layout.position_for_offset(offset);
+        Some(
+            bounds.origin
+                + point(
+                    position.x - self.scroll_x,
+                    position.y - self.scroll + layout.line_height,
+                ),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selection_drag_position(&self, offset: usize) -> Option<Point<Pixels>> {
+        let bounds = self.bounds?;
+        let layout = self.layout.as_ref()?;
+        let position = layout.position_for_offset(offset.min(self.content.len()));
+        Some(
+            bounds.origin
+                + point(
+                    position.x - self.scroll_x,
+                    position.y - self.scroll + layout.line_height / 2.,
+                ),
+        )
     }
 
     pub fn multiline(
@@ -186,6 +243,12 @@ impl TextArea {
             menu_bounds: None,
             clip: None,
             read_only: false,
+            soft_wrap: true,
+            code: false,
+            syntax: Vec::new(),
+            presented_runs: None,
+            presented_at: None,
+            presented: false,
         }
     }
 
@@ -197,15 +260,133 @@ impl TextArea {
         }
     }
 
+    /// A source editor: monospace, no autocorrect, no soft wrapping, and
+    /// independently scrollable in both axes.
+    pub fn code(max_lines: usize, cx: &mut Context<Self>) -> Self {
+        let mut area = Self::multiline("", max_lines, cx);
+        area.configuration = TextInputConfiguration {
+            autocorrect: false,
+            autocapitalize: gpui::Autocapitalize::None,
+            suggestions: false,
+            input_action: TextInputAction::Enter,
+        };
+        area.soft_wrap = false;
+        area.code = true;
+        area
+    }
+
+    pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
+        if self.read_only != read_only {
+            self.read_only = read_only;
+            self.menu = false;
+            self.marked = None;
+            cx.notify();
+        }
+    }
+
+    /// Replaces syntax colors. Invalid or overlapping ranges are ignored so a
+    /// stale background parse can never break shaping.
+    pub fn set_syntax(
+        &mut self,
+        mut spans: Vec<(Range<usize>, gpui::Hsla)>,
+        cx: &mut Context<Self>,
+    ) {
+        spans.sort_by_key(|(range, _)| (range.start, range.end));
+        let mut end = 0;
+        spans.retain(|(range, _)| {
+            let valid = range.start >= end
+                && range.start < range.end
+                && range.end <= self.content.len()
+                && self.content.is_char_boundary(range.start)
+                && self.content.is_char_boundary(range.end);
+            if valid {
+                end = range.end;
+            }
+            valid
+        });
+        self.syntax = spans;
+        self.presented_runs = None;
+        self.presented_at = None;
+        self.presented = false;
+        self.layout = None;
+        cx.notify();
+    }
+
+    pub fn selection(&self) -> Range<usize> {
+        self.selection.clone()
+    }
+
+    pub fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let start = range.start.min(self.content.len());
+        let end = range.end.min(self.content.len()).max(start);
+        if self.content.is_char_boundary(start) && self.content.is_char_boundary(end) {
+            self.select(start..end, cx);
+        }
+    }
+
+    /// One-based caret line and column, counted in Unicode scalar values.
+    pub fn line_column(&self) -> (usize, usize) {
+        let offset = self.selection.end.min(self.content.len());
+        let before = &self.content[..offset];
+        let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let column = before
+            .rsplit_once('\n')
+            .map_or(before, |(_, tail)| tail)
+            .chars()
+            .count()
+            + 1;
+        (line, column)
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.content.bytes().filter(|byte| *byte == b'\n').count() + 1
+    }
+
     /// Shows `text` with all of it selected and the bar over it.
     pub fn show_selected(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.content = normalize_input(&text.into(), self.multiline);
         self.selection = 0..self.content.len();
         self.marked = None;
         self.scroll = px(0.);
+        self.scroll_x = px(0.);
         self.menu = !self.content.is_empty();
+        self.presented_runs = None;
+        self.presented_at = None;
+        self.presented = false;
         // The selection menu must use the new text's measured geometry.
         self.layout = None;
+        self.bounds = None;
+        self.reveal_caret = false;
+        cx.notify();
+    }
+
+    /// Replaces a rendered chat block in place, preserving its rich text runs.
+    /// The hold point is resolved after shaping so the selected word matches what
+    /// was under the finger without exposing an editable input to Android.
+    pub fn show_presented(
+        &mut self,
+        text: impl Into<String>,
+        runs: Vec<TextRun>,
+        at: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.content = normalize_input(&text.into(), self.multiline);
+        let mut end = 0usize;
+        let valid = runs.iter().all(|run| {
+            end = end.saturating_add(run.len);
+            end <= self.content.len() && self.content.is_char_boundary(end)
+        }) && end == self.content.len();
+        self.presented_runs = valid.then_some(runs);
+        self.presented_at = Some(at);
+        self.presented = true;
+        self.selection = 0..0;
+        self.marked = None;
+        self.syntax.clear();
+        self.scroll = px(0.);
+        self.scroll_x = px(0.);
+        self.menu = false;
+        self.layout = None;
+        self.bounds = None;
         self.reveal_caret = false;
         cx.notify();
     }
@@ -220,6 +401,7 @@ impl TextArea {
             multiline: false,
             configuration,
             max_lines: 1,
+            soft_wrap: false,
             ..Self::multiline(placeholder, 1, cx)
         }
     }
@@ -269,25 +451,52 @@ impl TextArea {
     }
 
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        let old_len = self.content.len();
         self.content = normalize_input(&text.into(), self.multiline);
+        self.syntax.clear();
+        self.presented_runs = None;
+        self.presented_at = None;
+        self.presented = false;
         self.selection = self.content.len()..self.content.len();
         self.marked = None;
         self.menu = false;
         self.reveal_caret = true;
-        cx.emit(TextAreaEvent::Changed);
+        cx.emit(TextAreaEvent::Changed(TextEdit {
+            old_range: 0..old_len,
+            new_range: 0..self.content.len(),
+        }));
+        cx.notify();
+    }
+
+    /// Loads a document as a fresh viewport rather than as text typed at the
+    /// current caret. Retained editor entities never call this while tabbing or
+    /// navigating, so their own selection and scroll positions stay intact.
+    pub fn set_text_at_start(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.set_text(text, cx);
+        self.selection = 0..0;
+        self.scroll = px(0.);
+        self.scroll_x = px(0.);
+        self.reveal_caret = false;
         cx.notify();
     }
 
     /// Takes the text, leaving the field empty.
     pub fn take(&mut self, cx: &mut Context<Self>) -> String {
         let text = std::mem::take(&mut self.content);
+        self.syntax.clear();
+        self.presented_runs = None;
+        self.presented_at = None;
+        self.presented = false;
         self.selection = 0..0;
         self.marked = None;
         self.scroll = px(0.);
         self.scroll_x = px(0.);
         self.menu = false;
         self.reveal_caret = true;
-        cx.emit(TextAreaEvent::Changed);
+        cx.emit(TextAreaEvent::Changed(TextEdit {
+            old_range: 0..text.len(),
+            new_range: 0..0,
+        }));
         cx.notify();
         text
     }
@@ -315,12 +524,19 @@ impl TextArea {
         let range = range.start.min(self.content.len())..range.end.min(self.content.len());
         let text = normalize_input(text, self.multiline);
         self.content.replace_range(range.clone(), &text);
+        self.syntax.clear();
+        self.presented_runs = None;
+        self.presented_at = None;
+        self.presented = false;
         let caret = range.start + text.len();
         self.selection = caret..caret;
         self.marked = None;
         self.menu = false;
         self.reveal_caret = true;
-        cx.emit(TextAreaEvent::Changed);
+        cx.emit(TextAreaEvent::Changed(TextEdit {
+            old_range: range.clone(),
+            new_range: range.start..range.start + text.len(),
+        }));
         cx.notify();
     }
 
@@ -338,9 +554,12 @@ impl TextArea {
     /// own fields. Dropping it here instead leaves the keyboard composing a
     /// word the field no longer has, which it then types again at the caret.
     fn select(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
-        self.selection = range;
-        self.reveal_caret = true;
-        cx.notify();
+        if self.selection != range {
+            self.selection = range;
+            self.reveal_caret = true;
+            cx.emit(TextAreaEvent::SelectionChanged);
+            cx.notify();
+        }
     }
 
     /// The field's own edit: replaces the selection, never the keyboard's
@@ -499,9 +718,6 @@ impl TextArea {
             MenuItem::Copy => {
                 self.copy(&CopySelection, window, cx);
                 self.move_to(self.selection.end, cx);
-                if self.read_only {
-                    cx.emit(TextAreaEvent::Copied);
-                }
             }
             MenuItem::Paste => self.paste_text(&Paste, window, cx),
             MenuItem::SelectAll => {
@@ -516,10 +732,16 @@ impl TextArea {
         if !self.selection.is_empty() {
             let text = self.content[self.selection.clone()].to_owned();
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+            if self.read_only {
+                cx.emit(TextAreaEvent::Copied);
+            }
         }
     }
 
     fn cut(&mut self, _: &CutSelection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if !self.selection.is_empty() {
             self.copy(&CopySelection, window, cx);
             self.edit_selection("", window, cx);
@@ -632,8 +854,13 @@ impl TextArea {
         let (Some(layout), Some(bounds)) = (&self.layout, self.bounds) else {
             return;
         };
+        crate::scroll::note_area_input(event.touch_phase, bounds);
         let delta = event.delta.pixel_delta(layout.line_height);
-        let (offset, maximum, delta) = if self.multiline {
+        // Touch drags normally contain a little motion on both axes. A no-wrap
+        // editor should follow the dominant axis instead of letting one pixel
+        // of horizontal jitter suppress vertical scrolling.
+        let horizontal = !self.soft_wrap && delta.x.abs() > delta.y.abs();
+        let (offset, maximum, delta) = if self.multiline && !horizontal {
             (
                 &mut self.scroll,
                 layout.height() - bounds.size.height,
@@ -648,8 +875,9 @@ impl TextArea {
         };
         let next = (*offset - delta).max(px(0.)).min(maximum.max(px(0.)));
         if next != *offset {
+            crate::scroll::note_movement(next - *offset);
             *offset = next;
-            if self.multiline {
+            if self.multiline && !horizontal {
                 self.scrollbar_motion = Some(Instant::now());
             }
             self.reveal_caret = false;
@@ -793,10 +1021,9 @@ impl TextArea {
         // Neither fits, as in a tall field in a sheet: over the field's top.
         let inside = (!above && bounds.bottom() + below + height > clip_bottom - px(8.))
             .then(|| (clip_top.max(bounds.top()) + px(8.)) - bounds.top());
-        let viewport = window.viewport_size().width;
         let left = (bounds.left() + center - width / 2.)
-            .min(viewport - width - px(8.))
-            .max(px(8.))
+            .min(visible.right() - width - px(8.))
+            .max(visible.left() + px(8.))
             - bounds.left();
         let top = if above {
             bounds.top() - gap - height
@@ -810,6 +1037,7 @@ impl TextArea {
             .id("text-menu")
             .debug_selector(|| "text-menu".into())
             .child(crate::testing::probe("text-menu"))
+            .w(width)
             .h(height)
             .px(px(4.))
             .flex()
@@ -826,6 +1054,7 @@ impl TextArea {
                 inset: false,
             }])
             .occlude()
+            .font_family(SANS)
             .text_size(font_size)
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(colors.text)
@@ -896,7 +1125,7 @@ impl TextArea {
     ) -> (SharedString, Vec<TextRun>) {
         let run = TextRun {
             len: 0,
-            font,
+            font: if self.code { gpui::font(MONO) } else { font },
             color,
             background_color: None,
             underline: None,
@@ -912,32 +1141,56 @@ impl TextArea {
             return (text, runs);
         }
         let text = SharedString::from(self.content.clone());
-        let runs = match &self.marked {
-            Some(marked) => [
-                (0..marked.start, None),
-                (
-                    marked.clone(),
-                    Some(UnderlineStyle {
+        if let Some(runs) = &self.presented_runs {
+            return (text, runs.clone());
+        }
+        let mut boundaries = vec![0, text.len()];
+        for (range, _) in &self.syntax {
+            boundaries.extend([range.start, range.end]);
+        }
+        if let Some(marked) = &self.marked {
+            boundaries.extend([marked.start, marked.end]);
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        let mut syntax_index = 0;
+        let runs = boundaries
+            .windows(2)
+            .filter_map(|pair| {
+                let range = pair[0]..pair[1];
+                if range.is_empty() {
+                    return None;
+                }
+                while self
+                    .syntax
+                    .get(syntax_index)
+                    .is_some_and(|(syntax, _)| syntax.end <= range.start)
+                {
+                    syntax_index += 1;
+                }
+                let syntax = self
+                    .syntax
+                    .get(syntax_index)
+                    .filter(|(syntax, _)| syntax.start <= range.start && syntax.end >= range.end)
+                    .map(|(_, color)| *color)
+                    .unwrap_or(color);
+                let underline = self
+                    .marked
+                    .as_ref()
+                    .filter(|marked| marked.start <= range.start && marked.end >= range.end)
+                    .map(|_| UnderlineStyle {
                         color: Some(color),
                         thickness: px(1.),
                         wavy: false,
-                    }),
-                ),
-                (marked.end..text.len(), None),
-            ]
-            .into_iter()
-            .filter(|(range, _)| !range.is_empty())
-            .map(|(range, underline)| TextRun {
-                len: range.len(),
-                underline,
-                ..run.clone()
+                    });
+                Some(TextRun {
+                    len: range.len(),
+                    color: syntax,
+                    underline,
+                    ..run.clone()
+                })
             })
-            .collect(),
-            None => vec![TextRun {
-                len: text.len(),
-                ..run
-            }],
-        };
+            .collect();
         (text, runs)
     }
 }
@@ -1017,11 +1270,18 @@ impl EntityInputHandler for TextArea {
         let range = self.replaced_range(range_utf16);
         let text = normalize_input(text, self.multiline);
         self.content.replace_range(range.clone(), &text);
+        self.syntax.clear();
+        self.presented_runs = None;
+        self.presented_at = None;
+        self.presented = false;
         let caret = range.start + text.len();
         self.selection = caret..caret;
         self.marked = None;
         self.reveal_caret = true;
-        cx.emit(TextAreaEvent::Changed);
+        cx.emit(TextAreaEvent::Changed(TextEdit {
+            old_range: range.clone(),
+            new_range: range.start..range.start + text.len(),
+        }));
         cx.notify();
     }
 
@@ -1040,6 +1300,10 @@ impl EntityInputHandler for TextArea {
         let range = self.replaced_range(range_utf16);
         let text = normalize_input(text, self.multiline);
         self.content.replace_range(range.clone(), &text);
+        self.syntax.clear();
+        self.presented_runs = None;
+        self.presented_at = None;
+        self.presented = false;
         self.marked = (!text.is_empty()).then(|| range.start..range.start + text.len());
         // The selection is relative to the start of the new text.
         self.selection = match selection_utf16 {
@@ -1050,7 +1314,10 @@ impl EntityInputHandler for TextArea {
             None => range.start + text.len()..range.start + text.len(),
         };
         self.reveal_caret = true;
-        cx.emit(TextAreaEvent::Changed);
+        cx.emit(TextAreaEvent::Changed(TextEdit {
+            old_range: range.clone(),
+            new_range: range.start..range.start + text.len(),
+        }));
         cx.notify();
     }
 
@@ -1123,6 +1390,7 @@ impl Render for TextArea {
         if !self.focus.is_focused(window) {
             self.menu = false;
             self.dragging = None;
+            self.mouse_anchor = None;
         }
         let menu = if self.menu && self.dragging.is_none() && self.anchor.is_none() {
             self.menu_bar(window, cx)
@@ -1131,9 +1399,28 @@ impl Render for TextArea {
         };
         self.menu_bounds = menu.as_ref().map(|(_, place)| *place);
         let menu = menu.map(|(bar, _)| bar);
+        let accessibility_value = SharedString::from(self.content.clone());
+        let accessibility_label = if self.code {
+            "Source editor"
+        } else if self.read_only {
+            "Selectable text"
+        } else {
+            "Text field"
+        };
         div()
             .id("text-area")
+            .role(if self.multiline {
+                gpui::Role::MultilineTextInput
+            } else {
+                gpui::Role::TextInput
+            })
+            .aria_label(accessibility_label)
+            .aria_value(accessibility_value)
+            .when(!self.placeholder.is_empty(), |area| {
+                area.aria_placeholder(self.placeholder.clone())
+            })
             .relative()
+            .when(self.code, |area| area.h_full().min_h_0())
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::backspace))
@@ -1157,7 +1444,11 @@ impl Render for TextArea {
                 let on_bar = this
                     .menu_bounds
                     .is_some_and(|place| place.contains(&event.position));
-                if this.menu && !on_bar {
+                if !on_bar && this.presented {
+                    this.menu = false;
+                    cx.emit(TextAreaEvent::Dismissed);
+                    cx.notify();
+                } else if this.menu && !on_bar {
                     this.menu = false;
                     cx.notify();
                 }
@@ -1339,8 +1630,12 @@ impl Element for TextBody {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
         let colors = theme(cx);
+        let fill_height = area.read(cx).code;
         let mut layout_style = Style::default();
         layout_style.size.width = relative(1.).into();
+        if fill_height {
+            layout_style.size.height = relative(1.).into();
+        }
         let id =
             window.request_measured_layout(layout_style, move |known, available, window, cx| {
                 let width = known.width.or(match available.width {
@@ -1349,12 +1644,21 @@ impl Element for TextBody {
                 });
                 let area = area.read(cx);
                 let (text, runs) = area.display(style.color, colors.muted, style.font());
-                let wrap = if area.multiline { width } else { None };
+                let wrap = if area.soft_wrap { width } else { None };
                 let layout = Layout::shape(text, &runs, font_size, line_height, wrap, window);
-                let height = layout
+                let natural_height = layout
                     .height()
                     .min(line_height * area.max_lines as f32)
                     .max(area.min_height);
+                let height = if fill_height {
+                    known.height.or(match available.height {
+                        AvailableSpace::Definite(height) => Some(height),
+                        _ => None,
+                    })
+                } else {
+                    None
+                }
+                .unwrap_or(natural_height);
                 size(width.unwrap_or_default(), height)
             });
         (id, ())
@@ -1380,7 +1684,7 @@ impl Element for TextBody {
             &runs,
             font_size,
             line_height,
-            area.multiline.then_some(bounds.size.width),
+            area.soft_wrap.then_some(bounds.size.width),
             window,
         );
         let empty = area.content.is_empty();
@@ -1408,12 +1712,12 @@ impl Element for TextBody {
         scroll = scroll
             .max(px(0.))
             .min((layout.height() - bounds.size.height).max(px(0.)));
-        let mut scroll_x = if area.multiline {
+        let mut scroll_x = if area.soft_wrap {
             px(0.)
         } else {
             area.scroll_x
         };
-        if reveal && !area.multiline {
+        if reveal && !area.soft_wrap {
             if end.x < scroll_x {
                 scroll_x = end.x;
             } else if end.x + px(2.) > scroll_x + bounds.size.width {
@@ -1443,7 +1747,7 @@ impl Element for TextBody {
         });
         let highlight = colors.accent.opacity(0.25);
         let mut mentions = Vec::new();
-        if area.multiline {
+        if area.multiline && !area.read_only {
             for range in mention_ranges(&area.content) {
                 for span in layout.span_bounds(range) {
                     let rect = Bounds::new(origin + span.origin, span.size);
@@ -1463,40 +1767,18 @@ impl Element for TextBody {
         }
         let mut quads = Vec::new();
         if !selection.is_empty() {
-            if start.y == end.y {
-                quads.push(fill(
-                    Bounds::from_corners(
-                        origin + start,
-                        origin + point(end.x, end.y + line_height),
-                    ),
-                    highlight,
-                ));
-            } else {
-                let right = bounds.size.width;
-                quads.push(fill(
-                    Bounds::from_corners(
-                        origin + start,
-                        origin + point(right, start.y + line_height),
-                    ),
-                    highlight,
-                ));
-                if end.y > start.y + line_height {
-                    quads.push(fill(
-                        Bounds::from_corners(
-                            origin + point(px(0.), start.y + line_height),
-                            origin + point(right, end.y),
-                        ),
-                        highlight,
-                    ));
-                }
-                quads.push(fill(
-                    Bounds::from_corners(
-                        origin + point(px(0.), end.y),
-                        origin + point(end.x, end.y + line_height),
-                    ),
-                    highlight,
-                ));
-            }
+            quads.extend(
+                layout
+                    .span_bounds(selection.clone())
+                    .into_iter()
+                    .filter_map(|span| {
+                        let rect = Bounds::new(origin + span.origin, span.size);
+                        (rect.size.width > px(0.)
+                            && rect.bottom() > bounds.top()
+                            && rect.top() < bounds.bottom())
+                        .then(|| fill(rect, highlight))
+                    }),
+            );
         }
         let padding = area.touch_padding;
         let target = Bounds::from_corners(
@@ -1630,11 +1912,12 @@ impl Element for TextBody {
         }
         self.listen(prepaint, window);
         let (layout, scroll) = (prepaint.layout.clone(), prepaint.scroll);
+        let mut resolved_presented = false;
         self.area.update(cx, |area, cx| {
             // A newly opened selection sheet has no geometry when its menu
             // first renders. Paint supplies it; schedule a render rather than
             // waiting for another tap. Reposition as the sheet animates too.
-            let place_menu = area.menu
+            let mut place_menu = area.menu
                 && (area.layout.is_none()
                     || area.bounds != Some(bounds)
                     || area.clip != Some(clip));
@@ -1643,6 +1926,19 @@ impl Element for TextBody {
             area.clip = Some(clip);
             area.scroll = scroll;
             area.scroll_x = prepaint.scroll_x;
+            if let Some(position) = area.presented_at.take() {
+                let selection = if area.content.is_empty() {
+                    0..0
+                } else {
+                    area.word_at(area.offset_at(position))
+                };
+                area.anchor = Some(selection.clone());
+                area.selection = selection;
+                area.menu = !area.content.is_empty();
+                resolved_presented = true;
+                place_menu = true;
+                cx.emit(TextAreaEvent::SelectionChanged);
+            }
             if prepaint.scrollbar_moved {
                 area.scrollbar_motion = Some(Instant::now());
             }
@@ -1651,6 +1947,9 @@ impl Element for TextBody {
                 cx.on_next_frame(window, |_, _, cx| cx.notify());
             }
         });
+        if resolved_presented {
+            window.dismiss_virtual_keyboard();
+        }
     }
 }
 
@@ -1668,6 +1967,12 @@ impl TextBody {
                 window.prevent_default();
                 cx.stop_propagation();
                 area.update(cx, |area, cx| area.on_mouse_down(event, window, cx));
+            }
+        });
+        let area = self.area.clone();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+                area.update(cx, |area, _| area.mouse_anchor = None);
             }
         });
         // The keyboard can move the focused composer between touch-down and the
@@ -1841,6 +2146,40 @@ mod tests {
     }
 
     #[gpui::test]
+    fn mouse_selection_anchor_ends_on_release_even_outside_the_field(cx: &mut TestAppContext) {
+        let (app, cx) =
+            cx.add_window_view(|window, cx| crate::app::PhoneApp::new(None, window, cx));
+        cx.simulate_resize(size(px(384.), px(854.)));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("start", window, cx);
+                app.start
+                    .update(cx, |composer, cx| composer.set_text("first second", cx));
+            });
+        });
+        cx.run_until_parked();
+        let area = app.read_with(cx, |app, cx| app.start.read(cx).area.clone());
+        let bounds = area.read_with(cx, |area, _| area.bounds.unwrap());
+        let start = bounds.origin + point(px(4.), px(10.));
+        let end = point(bounds.right() - px(4.), bounds.top() + px(10.));
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::none());
+        let selected = area.read_with(cx, |area, _| area.selection.clone());
+        assert!(!selected.is_empty());
+
+        cx.simulate_mouse_up(
+            point(px(0.), px(0.)),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_mouse_move(start, Some(MouseButton::Left), gpui::Modifiers::none());
+        area.read_with(cx, |area, _| {
+            assert_eq!(area.selection, selected);
+            assert!(area.mouse_anchor.is_none());
+        });
+    }
+
+    #[gpui::test]
     fn the_first_hold_in_draft_padding_opens_the_edit_menu(cx: &mut TestAppContext) {
         for text in ["", "Copy this word"] {
             let (app, cx) =
@@ -1963,6 +2302,38 @@ mod tests {
     }
 
     #[gpui::test]
+    fn edit_events_report_exact_utf8_ranges(cx: &mut TestAppContext) {
+        use std::{cell::RefCell, rc::Rc};
+        let area = cx.new(|cx| TextArea::multiline("", 4, cx));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let received = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&area, move |_, event: &TextAreaEvent, _| {
+                if let TextAreaEvent::Changed(edit) = event {
+                    received.borrow_mut().push(edit.clone());
+                }
+            })
+        });
+        area.update(cx, |area, cx| {
+            area.set_text("a中b", cx);
+            area.replace(1..4, "🐈", cx);
+        });
+        assert_eq!(
+            *events.borrow(),
+            [
+                TextEdit {
+                    old_range: 0..0,
+                    new_range: 0..5
+                },
+                TextEdit {
+                    old_range: 1..4,
+                    new_range: 1..5
+                },
+            ]
+        );
+    }
+
+    #[gpui::test]
     fn a_long_press_keeps_the_touch_down_offset_across_reflow(cx: &mut TestAppContext) {
         crate::theme::install_for_tests(cx);
         let area = cx.new(|cx| TextArea::multiline("", 4, cx));
@@ -2025,6 +2396,30 @@ mod tests {
             );
             assert_eq!(&area.content[area.word_at(28)], " ", "between words");
         });
+    }
+
+    #[gpui::test]
+    fn the_edit_menu_stays_inside_the_window_at_the_right_edge(cx: &mut TestAppContext) {
+        crate::theme::install_for_tests(cx);
+        let (area, cx) = cx.add_window_view(|_, cx| TextArea::code(20, cx));
+        cx.simulate_resize(size(px(384.), px(600.)));
+        cx.update(|window, cx| {
+            let focus = area.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            area.update(cx, |area, cx| {
+                area.set_text(format!("{} edge", "long_source_token_".repeat(30)), cx);
+                let end = area.content.len();
+                area.select(end - 4..end, cx);
+                area.menu = true;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let menu = cx
+            .debug_bounds("text-menu")
+            .expect("the edit menu is shown");
+        assert!(menu.left() >= px(8.));
+        assert!(menu.right() <= px(376.));
     }
 
     #[gpui::test]
@@ -2156,6 +2551,114 @@ mod tests {
                 assert_eq!(area.text(), "中文 text");
                 assert!(area.content.is_char_boundary(area.selection.end));
             })
+        });
+    }
+
+    #[gpui::test]
+    fn code_editor_finger_scrolls_inside_its_visible_viewport(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) =
+            cx.add_window_view(|window, cx| crate::app::PhoneApp::new(None, window, cx));
+        cx.simulate_resize(size(px(384.), px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("project-file", window, cx)));
+        cx.run_until_parked();
+        let editor = app.read_with(cx, |app, _| app.file_view.as_ref().unwrap().editor.clone());
+        editor.update(cx, |editor, cx| {
+            editor.set_text(
+                (0..120)
+                    .map(|line| format!("export const line{line} = {line};\n"))
+                    .collect::<String>(),
+                cx,
+            );
+            editor.select_range(0..0, cx);
+        });
+        cx.run_until_parked();
+        let (bounds, document_height, selection) = editor.read_with(cx, |editor, _| {
+            (
+                editor.bounds.unwrap(),
+                editor.layout.as_ref().unwrap().height(),
+                editor.selection.clone(),
+            )
+        });
+        assert!(bounds.size.height > px(200.));
+        assert!(
+            document_height > bounds.size.height,
+            "the text layout must overflow the editor viewport"
+        );
+
+        let start = point(bounds.center().x, bounds.bottom() - px(48.));
+        touch(cx, start, TouchPhase::Started);
+        for step in 1..=12 {
+            touch(
+                cx,
+                point(start.x, start.y - px(14. * step as f32)),
+                TouchPhase::Moved,
+            );
+        }
+        let end = point(start.x, start.y - px(168.));
+        touch(cx, end, TouchPhase::Ended);
+        editor.read_with(cx, |editor, _| {
+            assert!(
+                editor.scroll > px(100.),
+                "an upward finger drag scrolls down"
+            );
+            assert_eq!(
+                editor.selection, selection,
+                "scrolling must not move the caret"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn syntax_expand_at_eof_does_not_select_the_whole_file(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (app, cx) =
+            cx.add_window_view(|window, cx| crate::app::PhoneApp::new(None, window, cx));
+        cx.simulate_resize(size(px(384.), px(854.)));
+        cx.update(|window, cx| app.update(cx, |app, cx| app.preview("project-file", window, cx)));
+        cx.run_until_parked();
+        let editor = app.read_with(cx, |app, _| app.file_view.as_ref().unwrap().editor.clone());
+        let source_len = editor.read_with(cx, |editor, _| {
+            assert_eq!(
+                editor.selection,
+                0..0,
+                "a newly loaded file starts at its top"
+            );
+            editor.content.len()
+        });
+        editor.update(cx, |editor, cx| {
+            editor.select_range(source_len..source_len, cx)
+        });
+        cx.update(|_, cx| app.update(cx, |app, cx| app.expand_file_selection(cx)));
+        editor.read_with(cx, |editor, _| {
+            assert!(!editor.selection.is_empty());
+            assert_ne!(editor.selection, 0..source_len);
+        });
+    }
+
+    #[gpui::test]
+    fn diagonal_touch_jitter_keeps_a_code_editor_scrolling_vertically(cx: &mut TestAppContext) {
+        crate::theme::install_for_tests(cx);
+        let (area, cx) = cx.add_window_view(|_, cx| TextArea::code(200, cx));
+        cx.simulate_resize(size(px(280.), px(500.)));
+        area.update(cx, |area, cx| {
+            area.set_text_at_start(
+                "a very wide source line that can scroll horizontally\n".repeat(80),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let bounds = area.read_with(cx, |area, _| area.bounds.unwrap());
+        cx.simulate_event(ScrollWheelEvent {
+            position: bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(2.), px(-60.))),
+            touch_phase: TouchPhase::Moved,
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        area.read_with(cx, |area, _| {
+            assert!(area.scroll > px(0.));
+            assert_eq!(area.scroll_x, px(0.));
         });
     }
 

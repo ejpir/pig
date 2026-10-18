@@ -169,6 +169,7 @@ pub fn sync_theme(cx: &mut App) {
     }
     cx.set_global(pi_terminal::TerminalStyle {
         font_family: MONO.into(),
+        font_fallbacks: None,
         font_size: px(11.5),
         line_height: px(19.),
         cursor: palette.accent,

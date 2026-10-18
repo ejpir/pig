@@ -132,7 +132,8 @@ final class InlinePageHost {
         }
         if (active != null && active != page) active.hide();
         active = page;
-        page.show(bounds, clip, slot.optBoolean("dark", false));
+        page.show(bounds, clip, slot.optBoolean("dark", false),
+                slot.optBoolean("expanded", false));
     }
     void releaseFocus() {
         activity.runOnUiThread(() -> { if (active != null) active.releaseFocus(); });
@@ -218,6 +219,7 @@ final class InlinePageHost {
         boolean loaded;
         boolean retired;
         boolean dark;
+        boolean expanded;
         int[] lastBounds, lastClip;
 
         @SuppressWarnings("deprecation")
@@ -322,9 +324,10 @@ final class InlinePageHost {
             // DNS/HTTP request, app origin or neighboring file is used.
             web.loadUrl(documentUrl);
         }
-        void show(int[] bounds, int[] clip, boolean nextDark) {
+        void show(int[] bounds, int[] clip, boolean nextDark, boolean nextExpanded) {
             boolean changed = lastBounds == null || !java.util.Arrays.equals(bounds, lastBounds)
                     || !java.util.Arrays.equals(clip, lastClip);
+            expanded = nextExpanded;
             if (nextDark != dark || !loaded) { dark = nextDark; applyTheme(); }
             if (changed) {
                 FrameLayout.LayoutParams layout = new FrameLayout.LayoutParams(bounds[2], bounds[3]);
@@ -366,9 +369,11 @@ final class InlinePageHost {
         }
     }
 
-    /** When the document cannot scroll, vertical drags belong to the chat.
-     * ViewGroup interception cancels the WebView press before forwarding the
-     * claimed gesture, so scrolling cannot also activate a calculator key.
+    /** Compact previews never become nested vertical scroll traps: their
+     * vertical drags belong to the chat even when the document is taller than
+     * its viewport. Expanded pages keep their own scrolling. ViewGroup
+     * interception cancels the WebView press before forwarding the claimed
+     * gesture, so scrolling cannot also activate a page control.
      */
     private final class PageClip extends FrameLayout {
         final Page page;
@@ -385,8 +390,8 @@ final class InlinePageHost {
                 scrolling = false; downX = event.getRawX(); downY = event.getRawY(); page.focus();
             } else if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
                 float dy = event.getRawY() - downY, dx = event.getRawX() - downX;
-                if (event.getPointerCount() == 1 && Math.abs(dy) > slop && Math.abs(dy) > Math.abs(dx)
-                        && !page.web.canScrollVertically(dy > 0 ? -1 : 1)) {
+                if (event.getPointerCount() == 1 && Math.abs(dy) > slop
+                        && Math.abs(dy) > Math.abs(dx) && !page.expanded) {
                     scrolling = true;
                     forward(MotionEvent.ACTION_DOWN, downX, downY);
                     return true;

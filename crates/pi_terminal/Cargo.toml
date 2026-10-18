@@ -7,15 +7,21 @@ license.workspace = true
 [lib]
 path = "src/pi_terminal.rs"
 
+[features]
+mobile = ["dep:terminal_shim"]
+
 [dependencies]
 anyhow.workspace = true
 gpui.workspace = true
-settings.workspace = true
-ui.workspace = true
 util.workspace = true
 zed_theme.workspace = true
 itertools = "0.14"
-terminal = { path = "../../../zed/crates/terminal" }
+terminal_shim = { package = "terminal", path = "../terminal_shim", optional = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+settings.workspace = true
+zed_terminal = { package = "terminal", path = "../../../zed/crates/terminal" }
+ui.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

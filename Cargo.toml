@@ -1,12 +1,12 @@
 [workspace]
-members = ["crates/pi_core", "crates/pi_desktop", "crates/pi_jj", "crates/pi_editor", "crates/pi_lsp_bridge", "crates/pi_settings", "crates/pi_terminal", "crates/pi_remote", "crates/gpui_android", "crates/pi_android", "crates/pi_markdown", "crates/pi_visual", "crates/pi_visual_ui"]
+members = ["crates/pi_core", "crates/pi_desktop", "crates/pi_jj", "crates/pi_editor", "crates/pi_lsp_bridge", "crates/pi_settings", "crates/pi_terminal", "crates/pi_terminal_mobile", "crates/terminal_shim", "crates/pi_remote", "crates/gpui_android", "crates/pi_android", "crates/pi_markdown", "crates/pi_visual", "crates/pi_visual_ui"]
 exclude = ["crates/pi_local"]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
 license = "GPL-3.0-or-later"
-version = "0.0.19"
+version = "0.0.20"
 
 [workspace.dependencies]
 anyhow = "1.0"

@@ -130,7 +130,7 @@ pub(crate) struct WindowState {
     /// Fulfilled after drawing and synchronizing the newly focused field.
     keyboard_requested: Cell<bool>,
     mirror: RefCell<Mirror>,
-    /// A key changed the text since the last sync.
+    /// A keyboard-originated key or IME edit changed text since the last sync.
     keyed: Cell<bool>,
     back_enabled: Cell<bool>,
     input_handler: RefCell<Option<PlatformInputHandler>>,
@@ -519,6 +519,9 @@ impl WindowState {
     /// The keyboard reported its mirror: apply what changed to the app.
     pub fn apply_ime(&self, seq: i32, push_id: i32, state: ImeState) {
         let edits = self.mirror.borrow_mut().reported(seq, push_id, state);
+        if !edits.is_empty() {
+            self.keyed.set(true);
+        }
         for edit in edits {
             if edit == Edit::Enter {
                 self.press("enter");

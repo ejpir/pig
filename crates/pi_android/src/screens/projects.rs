@@ -5,7 +5,7 @@
 
 use super::scroll_area;
 use crate::{
-    app::{PhoneApp, Route},
+    app::{PhoneApp, Route, Sheet},
     projects::Row,
     theme::{Theme, theme},
     ui::{self, Button, icon},
@@ -96,7 +96,12 @@ impl PhoneApp {
 
     /// 01 Projects, from New session's project chip: the title stays, the
     /// tree scrolls, and the one action stays at the bottom.
-    pub(crate) fn project_sheet(&mut self, colors: &Theme, cx: &Context<Self>) -> Div {
+    pub(crate) fn project_sheet(
+        &mut self,
+        sheet: Sheet,
+        colors: &Theme,
+        cx: &Context<Self>,
+    ) -> Div {
         let query = self.folder.read(cx).text().trim().to_owned();
         let browser: AnyElement = if query.is_empty() {
             self.project_browser_list(colors, cx).into_any_element()
@@ -130,7 +135,11 @@ impl PhoneApp {
                                     .text_size(px(22.))
                                     .line_height(px(28.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Projects"),
+                                    .child(match sheet {
+                                        Sheet::EditorRoot => "Choose a folder",
+                                        Sheet::EditorFiles => "Files",
+                                        _ => "Projects",
+                                    }),
                             )
                             .child(
                                 div()
@@ -163,7 +172,44 @@ impl PhoneApp {
                     .pt(px(12.))
                     .border_t_1()
                     .border_color(colors.line)
-                    .child(self.use_folder_button(colors, cx)),
+                    .when(sheet == Sheet::EditorFiles, |footer| {
+                        footer
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                ui::button(
+                                    "change-editor-folder",
+                                    Button::Quiet,
+                                    Some("folder"),
+                                    "Change folder",
+                                    false,
+                                    colors,
+                                )
+                                .debug_selector(|| "change-editor-folder".into())
+                                .flex_1()
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| this.choose_another_editor_folder(cx),
+                                )),
+                            )
+                            .child(
+                                ui::button(
+                                    "close-editor",
+                                    Button::Quiet,
+                                    Some("x"),
+                                    "Close editor",
+                                    false,
+                                    colors,
+                                )
+                                .debug_selector(|| "close-editor".into())
+                                .flex_1()
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.close_editor_workspace(window, cx),
+                                )),
+                            )
+                    })
+                    .when(sheet != Sheet::EditorFiles, |footer| {
+                        footer.child(self.use_folder_button(colors, cx))
+                    }),
             )
     }
 
@@ -207,7 +253,11 @@ impl PhoneApp {
     }
 
     fn sync_project_list(&mut self, rows: &[Row]) {
-        let project_count = self.store.as_ref().map_or(0, |store| store.projects.len());
+        let project_count = if self.project_browser_editor {
+            0
+        } else {
+            self.store.as_ref().map_or(0, |store| store.projects.len())
+        };
         let overview_shape = (project_count, self.project_browser.root.is_some());
         let state = self.project_list.clone();
         if self.project_overview_shape.is_none() {
@@ -317,10 +367,11 @@ impl PhoneApp {
                 .when(current, |row| row.child(icon("check", 20., colors.accent)))
                 .on_click(cx.listener(move |this, _, _, cx| this.select_project(index, cx)))
         });
-        let has_recent = self
-            .store
-            .as_ref()
-            .is_some_and(|store| !store.projects.is_empty());
+        let has_recent = !self.project_browser_editor
+            && self
+                .store
+                .as_ref()
+                .is_some_and(|store| !store.projects.is_empty());
         div()
             .flex()
             .flex_col()
@@ -367,7 +418,7 @@ impl PhoneApp {
             .child(self.crumbs(colors, cx))
     }
 
-    /// "New session in pi": the picked folder, or where the tree starts.
+    /// Starts a session or opens the selected folder as an editor workspace.
     fn use_folder_button(&self, colors: &Theme, cx: &Context<Self>) -> gpui::Stateful<Div> {
         let browser = &self.project_browser;
         let target = browser.picked.as_ref().or(browser.root.as_ref());
@@ -379,13 +430,20 @@ impl PhoneApp {
                 .unwrap_or("/")
                 .to_owned()
         });
+        let editor = self.sheet == Some(Sheet::EditorRoot);
         let button = ui::button(
             "use-folder",
             Button::Primary,
-            Some("plus"),
+            Some(if editor { "folder" } else { "plus" }),
             name.map_or_else(
                 || "Choose a folder".to_owned(),
-                |name| format!("New session in {name}"),
+                |name| {
+                    if editor {
+                        format!("Open {name}")
+                    } else {
+                        format!("New session in {name}")
+                    }
+                },
             ),
             false,
             colors,
@@ -393,7 +451,13 @@ impl PhoneApp {
         .debug_selector(|| "use-folder".into())
         .w_full();
         if target.is_some() {
-            button.on_click(cx.listener(|this, _, _, cx| this.use_picked_folder(cx)))
+            button.on_click(cx.listener(move |this, _, window, cx| {
+                if editor {
+                    this.use_picked_editor_folder(window, cx);
+                } else {
+                    this.use_picked_folder(cx);
+                }
+            }))
         } else {
             ui::disabled(button, colors)
         }
@@ -516,10 +580,11 @@ impl PhoneApp {
                 .when(current, |row| row.child(icon("check", 20., colors.accent)))
                 .on_click(cx.listener(move |this, _, _, cx| this.select_project(index, cx)))
         });
-        let has_recent = self
-            .store
-            .as_ref()
-            .is_some_and(|store| !store.projects.is_empty());
+        let has_recent = !self.project_browser_editor
+            && self
+                .store
+                .as_ref()
+                .is_some_and(|store| !store.projects.is_empty());
         div()
             .flex()
             .flex_col()
@@ -580,6 +645,19 @@ impl PhoneApp {
         let Some(root) = self.project_browser.root.clone() else {
             return div();
         };
+        if self.sheet == Some(Sheet::EditorFiles) {
+            return div()
+                .min_h(px(40.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .overflow_hidden()
+                .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors.text)
+                .child(icon("folder", 16., colors.accent))
+                .child(div().truncate().child(self.short_path(&root)));
+        }
         let short = self.short_path(&root);
         let mut crumbs: Vec<(String, String)> = Vec::new();
         let (first, rest) = if let Some(rest) = short.strip_prefix('~') {
@@ -666,6 +744,8 @@ impl PhoneApp {
         cx: &Context<Self>,
     ) -> gpui::Stateful<Div> {
         let picked = self.project_browser.picked.clone();
+        let editor_files = self.sheet == Some(Sheet::EditorFiles);
+        let editor_picker = self.sheet == Some(Sheet::EditorRoot);
         let guides = |depth: usize| {
             (0..depth).map(|level| {
                 div()
@@ -760,10 +840,12 @@ impl PhoneApp {
                             .child(tag)
                     }))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if node.folder {
+                        if node.folder && editor_files {
+                            this.toggle_folder(&node, cx);
+                        } else if node.folder {
                             this.project_browser.picked = Some(node.path.clone());
                             cx.notify();
-                        } else {
+                        } else if !editor_picker {
                             this.open_file(&node, window, cx);
                         }
                     }))
@@ -821,8 +903,30 @@ impl PhoneApp {
 
     /// 05 What the search found among what is listed, or the path to go to.
     fn found(&self, query: &str, colors: &Theme, cx: &Context<Self>) -> Div {
+        let editor_files = self.sheet == Some(Sheet::EditorFiles);
+        let editor_picker = self.sheet == Some(Sheet::EditorRoot);
         if query.starts_with('~') || query.starts_with('/') {
             let path = self.full_path(query);
+            let allowed = !editor_files
+                || path.as_ref().is_some_and(|path| {
+                    self.editor_root
+                        .as_ref()
+                        .is_some_and(|root| crate::projects::within(path, root))
+                });
+            if !allowed {
+                return div().mt(px(12.)).child(
+                    div()
+                        .id("outside-editor-folder")
+                        .debug_selector(|| "outside-editor-folder".into())
+                        .min_h(px(56.))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .text_color(colors.muted)
+                        .child(icon("alert", 20., colors.muted))
+                        .child("That path is outside the editor folder"),
+                );
+            }
             return div().mt(px(12.)).child(
                 div()
                     .id("go-to-path")
@@ -913,23 +1017,29 @@ impl PhoneApp {
                                 }),
                         ),
                 )
-                .when(node.folder, |row| {
+                .when(node.folder && !editor_files, |row| {
                     let path = path.clone();
                     row.child(
                         ui::button(
                             ("use-found", index),
                             Button::Quiet,
                             None,
-                            "Use",
+                            if editor_picker { "Open" } else { "Use" },
                             true,
                             colors,
                         )
                         .px(px(8.))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.folder.update(cx, |area, cx| area.set_text("", cx));
-                            this.use_folder(&path, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.folder.update(cx, |area, cx| area.set_text("", cx));
+                                if editor_picker {
+                                    this.use_editor_folder(&path, window, cx);
+                                } else {
+                                    this.use_folder(&path, cx);
+                                }
+                            },
+                        )),
                     )
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -938,7 +1048,7 @@ impl PhoneApp {
                     if node.folder {
                         this.folder.update(cx, |area, cx| area.set_text("", cx));
                         this.reveal_folder(&node.path, cx);
-                    } else {
+                    } else if !editor_picker {
                         this.open_file(&node, window, cx);
                     }
                 }))
@@ -962,7 +1072,7 @@ impl PhoneApp {
                 )
             })
             .child(div().mt(px(4.)).flex().flex_col().children(rows))
-            .child(
+            .children((!editor_files).then(|| {
                 div()
                     .id("type-a-path")
                     .relative()
@@ -988,8 +1098,8 @@ impl PhoneApp {
                         this.folder.update(cx, |area, cx| area.set_text("~/", cx));
                         window.focus(&this.folder.read(cx).focus_handle(cx), cx);
                         cx.notify();
-                    })),
-            )
+                    }))
+            }))
     }
 }
 

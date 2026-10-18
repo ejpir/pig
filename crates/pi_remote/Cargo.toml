@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 pi_core = { path = "../pi_core" }
 pi_jj = { path = "../pi_jj" }
+portable-pty = "=0.9.0"
 dirs = "6"
 rand = "0.9"
 sha2 = "0.10"
@@ -43,4 +44,4 @@ sha2 = "0.10"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_Threading"] }

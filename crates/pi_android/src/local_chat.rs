@@ -1139,7 +1139,9 @@ impl PhoneApp {
         let id = session.id;
         let mut store = Store::local(backend);
         store.sessions.push(session);
-        self.install_store(store);
+        if !self.install_store(store, cx) {
+            return false;
+        }
         self.paused = false;
         self.playing = false;
         if !synthetic {
@@ -1338,7 +1340,7 @@ mod tests {
                 session.backend_features =
                     Some(FEATURES.iter().map(|feature| (*feature).into()).collect());
                 store.sessions.push(session);
-                app.install_store(store);
+                app.install_store(store, cx);
                 app.show_session(SessionId(1), window, cx);
                 let composer = app.thread_composer(SessionId(1), window, cx);
                 composer.update(cx, |composer, cx| {

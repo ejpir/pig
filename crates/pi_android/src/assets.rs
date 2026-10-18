@@ -21,7 +21,7 @@ const ICONS: &[(&str, &str, &[u8])] = icons![
     stop, clock, alert, clip, slash, send, spark, dots, settings, info, shield, computer, server,
     key, copy, image, bell, palette, layers, diff, queue, sun, moon, hand, pi, menu, trash, scan,
     restore, chev_l, open, refresh, code, wrap, fork, plan, calendar, maximize, minimize, phone,
-    inbox,
+    inbox, save,
 ];
 
 /// The asset path of a bundled icon.
@@ -54,7 +54,8 @@ impl AssetSource for Assets {
     }
 }
 
-/// IBM Plex Sans and Commit Mono, as on the desktop.
+/// IBM Plex Sans and Commit Mono, plus the Apache-licensed Meslo Powerline
+/// fallback for terminal separators and other legacy prompt glyphs.
 pub fn load_fonts(cx: &App) -> anyhow::Result<()> {
     cx.text_system().add_fonts(vec![
         Cow::Borrowed(PLEX_SANS),
@@ -66,6 +67,9 @@ pub fn load_fonts(cx: &App) -> anyhow::Result<()> {
         )),
         Cow::Borrowed(include_bytes!(
             "../../../assets/fonts/CommitMono-Regular.otf"
+        )),
+        Cow::Borrowed(include_bytes!(
+            "../../../assets/fonts/MesloLGMForPowerline-Regular.ttf"
         )),
     ])
 }

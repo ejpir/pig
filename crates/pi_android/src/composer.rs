@@ -157,7 +157,10 @@ impl Composer {
         let area = cx.new(|cx| TextArea::multiline(placeholder.to_owned(), 8, cx));
         let subscription = cx.subscribe(&area, |this, _, event: &TextAreaEvent, cx| match event {
             TextAreaEvent::Submit => this.send(cx),
-            TextAreaEvent::Changed | TextAreaEvent::Copied => cx.notify(),
+            TextAreaEvent::Changed(_)
+            | TextAreaEvent::SelectionChanged
+            | TextAreaEvent::Copied
+            | TextAreaEvent::Dismissed => cx.notify(),
         });
         Self {
             area,

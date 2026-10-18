@@ -19,11 +19,7 @@ pub async fn enroll(
     let mut last_error = None;
     let mut opened = None;
     for host in &offer.hosts {
-        let address = Address {
-            user: offer.user.clone(),
-            host: host.clone(),
-            port: offer.port,
-        };
+        let address = Address::from_parts(offer.user.clone(), host.clone(), offer.port);
         match Connection::open_with_host_keys(address.clone(), bootstrap.clone(), trusted.clone())
             .await
         {
@@ -76,8 +72,8 @@ pub async fn enroll(
     drop(bootstrap_connection);
 
     let connection = Connection::open_with_host_keys(address.clone(), identity, trusted).await?;
-    // The lasting paired key may run only the gateway's allowlisted discovery,
-    // version and capability commands. Use that same path on every connection.
+    // The lasting paired key may run only the gateway's allowlisted operations,
+    // including the explicitly granted helper-owned terminal endpoint.
     let helper = remote::find(&connection).await?;
     let listed = if helper.can_list_sessions() {
         remote::sessions(&connection, &helper).await?
@@ -175,7 +171,7 @@ mod tests {
         assert_ne!(
             denied.status,
             Some(0),
-            "paired keys must not expose a shell"
+            "paired keys must not bypass the terminal endpoint"
         );
 
         let deadline = Instant::now() + Duration::from_secs(10);
