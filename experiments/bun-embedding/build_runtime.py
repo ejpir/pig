@@ -27,6 +27,7 @@ BUN_TAG = "bun-v1.4.3"
 BUN_COMMIT = "c6da4a4d3010e5553438c60f6bd76d981976867c"
 BUN_SHA256 = "2366bc56d092f8535bbe5827788e20d987fbc96798de4d683e0ca78ea286ebf4"
 JSC_COMMIT = "0c06faadf65bf8e8c8ad3a5a8aca83e1e9ed653f"
+JSC_SOURCE_SHA256 = "88eb566d10e541c392164f164170d1ac1e0c562f23b3bd490b4b856972079b15"
 RUST = "nightly-2026-09-15"
 LIMIT = 2 * 1024**3
 LIBRARY = "libbunembeddingpoc.so"
@@ -159,6 +160,8 @@ def webkit_source_archive(work):
     archive = work / "downloads" / f"WebKit-{JSC_COMMIT}.tar.gz"
     archive.parent.mkdir(parents=True, exist_ok=True)
     make_archive(archive, files)
+    if sha256(archive) != JSC_SOURCE_SHA256:
+        raise ValueError("Corresponding JavaScriptCore source archive mismatch")
     return archive
 
 

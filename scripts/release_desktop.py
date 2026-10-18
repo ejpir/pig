@@ -4,9 +4,11 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import runpy
 import struct
+import subprocess
 import sys
 import tarfile
 import tomllib
@@ -20,8 +22,9 @@ from package_remote import asset_name
 ANDROID_APK = "pi-android-arm64.apk"
 ANDROID_FONT = ROOT / "assets/fonts/MesloLGMForPowerline-Regular.ttf"
 ANDROID_FONT_SHA256 = "be991137ccbe87765db7cbcdc034447b15913aa2fad01acebabbcb65b1d4a8a8"
+ANDROID_SIGNER_SHA256 = "4b1d0ec031843d23e95f0e4a2e70125241b5e80041bdb1caecceac99a9774e71"
 BUN_SOURCE_SHA256 = "2366bc56d092f8535bbe5827788e20d987fbc96798de4d683e0ca78ea286ebf4"
-JSC_SOURCE_SHA256 = "1ced87e263faf73fed1175975b93187efb6642e28457fa32e3714f8d2ad3cd4c"
+JSC_SOURCE_SHA256 = "88eb566d10e541c392164f164170d1ac1e0c562f23b3bd490b4b856972079b15"
 JSC_PREBUILT_SHA256 = "21b9ee241f1b86d5b2db0197e081345ae3d5f0ae182e96dd7d1d3dc71f73b5f1"
 DEPENDENCY_SOURCE_ARCHIVES = json.loads(
     (ROOT / "experiments/bun-embedding/dependency-sources-v1.4.3.json").read_text()
@@ -95,6 +98,36 @@ def release_android_manifest() -> bytes:
     return builder.encode_xml(builder.manifest(app, debuggable=False))
 
 
+def validate_android_signature(apk: Path) -> None:
+    """Require the established update signer, not merely a structurally valid APK."""
+    android_home = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    candidates = (
+        sorted(Path(android_home, "build-tools").glob("*/apksigner"))
+        if android_home
+        else []
+    )
+    if not candidates:
+        raise ValueError("Android apksigner is required for release publication")
+    result = subprocess.run(
+        [str(candidates[-1]), "verify", "--verbose", "--print-certs", str(apk)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"APK signature verification failed: {result.stdout.strip()}")
+    digests = {
+        match.lower()
+        for match in re.findall(
+            r"(?:Signer #\d+ certificate SHA-256 digest|"
+            r"V[0-9.]+ Signer: certificate SHA-256 digest): ([0-9a-fA-F]{64})",
+            result.stdout,
+        )
+    }
+    if digests != {ANDROID_SIGNER_SHA256}:
+        raise ValueError(f"Release APK signer mismatch: {sorted(digests)}")
+
+
 def validate_local_apk(apk: Path) -> dict:
     validate_android_notices(apk)
     try:
@@ -140,6 +173,9 @@ def validate_local_apk(apk: Path) -> dict:
             ):
                 raise ValueError("APK Local runtime identity/version mismatch")
             bundle = archive.read("assets/bun-local.mjs")
+            expected_bundle = (ROOT / "crates/pi_local/generated/bun-local.mjs").read_bytes()
+            if bundle != expected_bundle:
+                raise ValueError("APK SDK bundle does not match the regenerated tagged source")
             if hashlib.sha256(bundle).hexdigest() != metadata["bundleSha256"]:
                 raise ValueError("APK SDK bundle checksum mismatch")
             application = archive.read("lib/arm64-v8a/libpi_android.so")
@@ -334,7 +370,7 @@ def validate_runtime_archives(directory: Path, metadata: dict) -> None:
         raise ValueError("Invalid Bun runtime/relink archives") from error
 
 
-def manifest(directory: Path) -> Path:
+def manifest(directory: Path, verify_android_signer: bool = False) -> Path:
     """Fail closed on missing/extra files rather than publishing a partial matrix."""
     expected = (
         {archive_name(target) for target in TARGETS}
@@ -356,6 +392,8 @@ def manifest(directory: Path) -> Path:
             digest = hashlib.file_digest(source, "sha256").hexdigest()
         lines.append(f"{digest}  {name}\n")
     metadata = validate_local_apk(directory / ANDROID_APK)
+    if verify_android_signer:
+        validate_android_signature(directory / ANDROID_APK)
     validate_runtime_archives(directory, metadata)
     destination = directory / "SHA256SUMS"
     destination.write_text("".join(lines), encoding="ascii")
@@ -368,6 +406,7 @@ def main() -> None:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--android-apk", type=Path)
+    parser.add_argument("--verify-android-signer", action="store_true")
     args = parser.parse_args()
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"][
         "version"
@@ -375,9 +414,11 @@ def main() -> None:
     validate_release_version(args.tag, version)
     if args.android_apk:
         validate_local_apk(args.android_apk)
+        if args.verify_android_signer:
+            validate_android_signature(args.android_apk)
         print("Verified bundled experimental Local APK:", args.android_apk)
     if args.directory:
-        print(manifest(args.directory))
+        print(manifest(args.directory, args.verify_android_signer))
 
 
 if __name__ == "__main__":

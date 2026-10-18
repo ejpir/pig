@@ -115,6 +115,8 @@ The script:
 
 If branch CI fails, fix it in a new commit and rerun from a clean worktree. If tag CI fails, do not retag or manually pre-create the release; inspect the failed run and any partially published assets first.
 
+For a tag run whose artifact jobs succeeded but whose validation-only publish step failed, first land and validate the correction on `main`. Then dispatch `recover-release.yml` from the default branch with the failed first-attempt run ID and the original annotated tag-object SHA recorded by the trusted release checkout. The recovery workflow must reject changed tags, reruns, unexpected jobs/actions/artifacts, existing releases and non-validation failures; it revalidates the original artifacts and publishes through CI only.
+
 ## Required completion report
 
 Report:

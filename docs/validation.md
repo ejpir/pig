@@ -45,7 +45,7 @@ cargo test --locked -p pi_lsp_bridge --features fake-lsp
 cargo clippy --locked -p pi_lsp_bridge --features fake-lsp \
   --all-targets --no-deps -- -D warnings
 
-python3 -m unittest discover -s scripts -p 'test_packaging.py' -v
+python3 -m unittest discover -s scripts -p 'test_*.py' -v
 ```
 
 To test the desktop extension against the embedded pi on Linux arm64 (no provider calls):

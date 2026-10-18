@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import os
 import plistlib
 import struct
 import tarfile
@@ -21,11 +22,13 @@ from release_desktop import (
     ANDROID_APK,
     ANDROID_FONT,
     ANDROID_LICENSES,
+    ANDROID_SIGNER_SHA256,
     BUN_RUNTIME_ASSETS,
     DEPENDENCY_SOURCE_ARCHIVES,
     manifest,
     release_android_manifest,
     validate_android_notices,
+    validate_android_signature,
     validate_local_apk,
     validate_release_version,
     validate_tag,
@@ -152,7 +155,9 @@ class PackagingTests(unittest.TestCase):
         library = bytearray(64)
         library[:6] = b"\x7fELF\x02\x01"
         struct.pack_into("<HH", library, 16, 3, 183)
-        bundle = b"// synthetic SDK fixture, not a native runtime test"
+        bundle = (
+            Path(__file__).parent.parent / "crates/pi_local/generated/bun-local.mjs"
+        ).read_bytes()
         version = tomllib.loads(
             (Path(__file__).resolve().parent.parent / "Cargo.toml").read_text()
         )["workspace"]["package"]["version"]
@@ -279,6 +284,28 @@ class PackagingTests(unittest.TestCase):
                     info.size = len(value)
                     archive.addfile(info, io.BytesIO(value))
 
+    def test_release_requires_the_pinned_android_update_signer(self):
+        sdk = self.root / "sdk"
+        signer = sdk / "build-tools/1/apksigner"
+        signer.parent.mkdir(parents=True)
+        apk = self.root / ANDROID_APK
+        apk.write_bytes(b"fixture")
+        signer.write_text(
+            "#!/bin/sh\necho 'Signer #1 certificate SHA-256 digest: "
+            + ANDROID_SIGNER_SHA256
+            + "'\n"
+        )
+        signer.chmod(0o755)
+        with patch.dict(os.environ, {"ANDROID_HOME": str(sdk)}, clear=False):
+            validate_android_signature(apk)
+            signer.write_text(
+                "#!/bin/sh\necho 'Signer #1 certificate SHA-256 digest: "
+                + "f" * 64
+                + "'\n"
+            )
+            with self.assertRaisesRegex(ValueError, "signer mismatch"):
+                validate_android_signature(apk)
+
     def test_release_rejects_apk_without_the_actual_sdk_or_bun(self):
         apk = self.root / ANDROID_APK
         self.android_apk(apk)
@@ -294,6 +321,25 @@ class PackagingTests(unittest.TestCase):
                 )
         broken.replace(apk)
         with self.assertRaises(ValueError):
+            validate_local_apk(apk)
+
+        # An APK cannot bless and embed its own replacement bundle; tagged source wins.
+        self.android_apk(apk)
+        with zipfile.ZipFile(apk) as original, zipfile.ZipFile(broken, "w") as archive:
+            replacement = b"self-declared replacement SDK"
+            metadata = json.loads(original.read("assets/local-runtime.json"))
+            metadata["bundleSha256"] = hashlib.sha256(replacement).hexdigest()
+            for name in original.namelist():
+                value = original.read(name)
+                if name == "assets/local-runtime.json":
+                    value = json.dumps(metadata).encode()
+                elif name == "assets/bun-local.mjs":
+                    value = replacement
+                elif name == "lib/arm64-v8a/libpi_android.so":
+                    value = replacement + ANDROID_FONT.read_bytes()
+                archive.writestr(name, value)
+        broken.replace(apk)
+        with self.assertRaisesRegex(ValueError, "regenerated tagged source"):
             validate_local_apk(apk)
 
     def test_release_refuses_missing_or_incomplete_android_font_notices(self):

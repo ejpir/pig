@@ -24,21 +24,23 @@ jobs:
       run:
         working-directory: pi-desktop
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          persist-credentials: false
           path: pi-desktop
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          persist-credentials: false
           repository: zed-industries/zed
           ref: ${{ env.ZED_REVISION }}
           path: zed
       - name: Apply reviewed GPUI Android lifecycle and tracing patch
         run: git -C ../zed apply ../pi-desktop/packaging/zed.patch
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.1
           components: clippy, rustfmt
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
       - name: Linux dependencies
@@ -47,11 +49,11 @@ jobs:
           sudo apt-get install -y cmake clang lld libclang-dev libasound2-dev libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libssl-dev mesa-vulkan-drivers xvfb xauth xdotool xclip imagemagick tesseract-ocr fonts-dejavu-extra
           echo 'RUSTFLAGS=-C link-arg=-fuse-ld=lld' >> "$GITHUB_ENV"
           python -m pip install Pillow==12.1.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: pi-desktop
           key: checks
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: '1.4.3'
       - name: Build and validate experimental Local adapters (offline)
@@ -102,7 +104,7 @@ jobs:
           PI_DESKTOP_BACKEND_ARCHIVE="$RUNNER_TEMP/pi/pi-linux-x64.tar.gz" \
             cargo clippy --locked -p pi-desktop --features bundled-backend --all-targets --no-deps -- -D warnings
       - name: Packaging and release-policy tests
-        run: python -m unittest discover -s scripts -p 'test_packaging.py' -v
+        run: python -m unittest discover -s scripts -p 'test_*.py' -v
       - name: Debug build for native UI checks
         run: cargo build --locked -p pi-desktop
       - name: Xvfb screen validation
@@ -113,7 +115,7 @@ jobs:
           xvfb-run -a -s '-screen 0 1440x900x24' bash scripts/capture-tool-selection.sh
           xvfb-run -a -s '-screen 0 1440x900x24' bash scripts/capture-process-scrollbar.sh
           xvfb-run -a -s '-screen 0 1440x1200x24' bash scripts/capture-visualize.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: desktop-validation
@@ -139,25 +141,27 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: '12.0'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          persist-credentials: false
           path: pi-desktop
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          persist-credentials: false
           repository: zed-industries/zed
           ref: ${{ env.ZED_REVISION }}
           path: zed
       - name: Apply reviewed GPUI Android lifecycle and tracing patch
         run: git -C ../zed apply ../pi-desktop/packaging/zed.patch
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.1
           targets: ${{ matrix.target }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
       # npm collects the licenses of the npm packages compiled into pi.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.19.0'
       - name: Validate version tag
@@ -172,7 +176,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake clang lld libclang-dev libasound2-dev libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libssl-dev
           echo 'RUSTFLAGS=-C link-arg=-fuse-ld=lld' >> "$GITHUB_ENV"
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
         if: runner.os == 'Windows'
         with:
           arch: x64
@@ -183,7 +187,7 @@ jobs:
           $clang = 'C:\Program Files\LLVM\bin'
           if (!(Test-Path "$clang/libclang.dll")) { throw 'Hosted runner is missing LLVM/libclang' }
           "LIBCLANG_PATH=$clang" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: pi-desktop
           key: release-${{ matrix.target }}
@@ -192,7 +196,7 @@ jobs:
       - name: Built-in pi
         shell: bash
         run: python scripts/fetch_pi.py --platform ${{ matrix.pi }} --out "$RUNNER_TEMP/pi" --notices
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: runner.os != 'Windows'
         with:
           bun-version: '1.4.3'
@@ -239,7 +243,7 @@ jobs:
           suffix=''
           if [[ '${{ runner.os }}' == 'Windows' ]]; then suffix='.exe'; fi
           python scripts/package_remote.py --target ${{ matrix.target }} --binary "target/${{ matrix.target }}/release/pi-desktop-remote${suffix}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pi-desktop-${{ matrix.name }}
           path: pi-desktop/dist/
@@ -251,8 +255,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         id: runtime-cache
         with:
           path: ${{ runner.temp }}/bun-runtime-out
@@ -260,11 +266,11 @@ jobs:
       - name: Make room for the source/object build (hosted runner only)
         if: steps.runtime-cache.outputs.cache-hit != 'true'
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android/sdk/ndk
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         if: steps.runtime-cache.outputs.cache-hit != 'true'
         with:
           bun-version: '1.4.3'
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         if: steps.runtime-cache.outputs.cache-hit != 'true'
         with:
           toolchain: nightly-2026-09-15
@@ -285,7 +291,7 @@ jobs:
           python3 experiments/bun-embedding/build_runtime.py \
             --work-dir "$RUNNER_TEMP/bun-build" --ndk "$ANDROID_HOME/ndk/29.0.14206865" \
             --llvm /usr/lib/llvm-23 --out-dir "$RUNNER_TEMP/bun-runtime-out" --jobs 2
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pi-desktop-bun-android-arm64
           path: ${{ runner.temp }}/bun-runtime-out/*.tar.gz
@@ -302,35 +308,37 @@ jobs:
       run:
         working-directory: pi-desktop
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          persist-credentials: false
           path: pi-desktop
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          persist-credentials: false
           repository: zed-industries/zed
           ref: ${{ env.ZED_REVISION }}
           path: zed
       - name: Apply reviewed GPUI Android lifecycle and tracing patch
         run: git -C ../zed apply ../pi-desktop/packaging/zed.patch
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: 1.98.1
           targets: aarch64-linux-android
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         with:
           distribution: temurin
           java-version: '17'
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: pi-desktop
           key: android
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: '1.4.3'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: pi-desktop-bun-android-arm64
           path: ${{ runner.temp }}/bun-runtime
@@ -352,9 +360,13 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          keystore=''
+          cleanup_keystore() { [[ -z "$keystore" ]] || rm -f "$keystore"; }
+          trap cleanup_keystore EXIT
           if [[ -n "$ANDROID_KEYSTORE_BASE64" ]]; then
-            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
-            export ANDROID_KEYSTORE="$RUNNER_TEMP/release.keystore"
+            keystore="$RUNNER_TEMP/release.keystore"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore"
+            export ANDROID_KEYSTORE="$keystore"
           elif [[ '${{ github.ref }}' == refs/tags/v* ]]; then
             echo '::error::Set the ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD secrets to sign release APKs'
             exit 1
@@ -365,6 +377,9 @@ jobs:
           export PI_ANDROID_BUN_LIBRARY="$(find "$RUNNER_TEMP/bun-runtime/extracted" -name libbunembeddingpoc.so -type f)"
           test -f "$PI_ANDROID_BUN_LIBRARY"
           python crates/pi_android/scripts/build_apk.py --out dist/pi-android-arm64.apk
+          cleanup_keystore
+          keystore=''
+          unset ANDROID_KEYSTORE ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
           test -x "$apksigner"
           "$apksigner" verify --verbose --print-certs dist/pi-android-arm64.apk | tee "$RUNNER_TEMP/apk-signature.txt"
@@ -377,7 +392,7 @@ jobs:
             }
           fi
           python scripts/release_desktop.py --tag "v$(python -c 'import tomllib;print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')" --android-apk dist/pi-android-arm64.apk
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pi-desktop-android-arm64
           path: pi-desktop/dist/pi-android-arm64.apk
@@ -386,38 +401,72 @@ jobs:
 
   release:
     name: Publish / ${{ github.ref_name }}
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [checks, native, android, bun-runtime]
     runs-on: ubuntu-24.04
+    concurrency:
+      group: release-${{ github.ref }}
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.19.0'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.3'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: pi-desktop-*
           path: ${{ runner.temp }}/release
           merge-multiple: true
+      - name: Rebuild generated Local SDK inputs for exact APK validation
+        run: |
+          (cd crates/pi_local && npm ci --ignore-scripts && bun run build)
+          (cd backend/durable && npm ci --ignore-scripts --omit=dev)
+          python experiments/bun-embedding/build_local.py
       - name: Verify desktop packages/helpers, bundled Local APK and runtime/relink archives
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: python scripts/release_desktop.py --tag "$RELEASE_TAG" --directory "$RUNNER_TEMP/release"
-      # No --clobber: an existing asset is immutable; collisions fail visibly.
+        run: |
+          python scripts/release_desktop.py --tag "$RELEASE_TAG" \
+            --directory "$RUNNER_TEMP/release" --verify-android-signer
+      # Existing releases/assets are immutable; recovery uses recover-release.yml.
       - name: Publish GitHub release
         env:
+          EXPECTED_COMMIT: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/release/* --repo "$REPOSITORY"
-          else
-            notes="docs/releases/$RELEASE_TAG.md"
-            test -s "$notes" || { echo "::error::Missing release notes: $notes"; exit 1; }
-            gh release create "$RELEASE_TAG" "$RUNNER_TEMP"/release/* \
-              --repo "$REPOSITORY" --title "$RELEASE_TAG" --notes-file "$notes"
+          tag_type="$(gh api "repos/$REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.type)"
+          tag_object="$(gh api "repos/$REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)"
+          [[ "$tag_type" == tag ]]
+          tag_commit="$(gh api "repos/$REPOSITORY/git/tags/$tag_object" --jq .object.sha)"
+          [[ "$tag_commit" == "$EXPECTED_COMMIT" ]]
+          if response="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" 2>&1)"; then
+            echo "::error::Release $RELEASE_TAG already exists; refusing to modify it"
+            exit 1
+          elif [[ "$response" != *"HTTP 404"* ]]; then
+            echo "::error::Could not verify that release $RELEASE_TAG is absent: $response"
+            exit 1
           fi
+          notes="docs/releases/$RELEASE_TAG.md"
+          test -s "$notes" || { echo "::error::Missing release notes: $notes"; exit 1; }
+          gh release create "$RELEASE_TAG" "$RUNNER_TEMP"/release/* --verify-tag \
+            --repo "$REPOSITORY" --title "$RELEASE_TAG" --notes-file "$notes"
+          python scripts/verify_published_release.py \
+            --repository "$REPOSITORY" --tag "$RELEASE_TAG" \
+            --commit "$EXPECTED_COMMIT" --tag-object "$tag_object" \
+            --directory "$RUNNER_TEMP/release"

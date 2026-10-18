@@ -71,12 +71,19 @@ if git show-ref --verify --quiet "refs/tags/$TAG"; then
   echo "Local tag already exists: $TAG" >&2
   exit 1
 fi
-if [[ -n $(git ls-remote "$REMOTE" "refs/tags/$TAG") ]]; then
+if ! REMOTE_TAG=$(git ls-remote "$REMOTE" "refs/tags/$TAG"); then
+  echo "Could not inspect remote tag $TAG; refusing to continue." >&2
+  exit 1
+fi
+if [[ -n $REMOTE_TAG ]]; then
   echo "Remote tag already exists: $TAG" >&2
   exit 1
 fi
-if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+if RELEASE_LOOKUP=$(gh api "repos/$REPO/releases/tags/$TAG" 2>&1); then
   echo "GitHub release already exists: $TAG" >&2
+  exit 1
+elif [[ $RELEASE_LOOKUP != *"HTTP 404"* ]]; then
+  echo "Could not inspect GitHub release $TAG; refusing to continue: $RELEASE_LOOKUP" >&2
   exit 1
 fi
 

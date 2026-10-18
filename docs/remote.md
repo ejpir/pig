@@ -108,7 +108,7 @@ Tests use a deterministic fake Pi backend, never a model provider:
 ```sh
 cargo test --locked -p pi_core -p pi_remote
 cargo test --locked -p pi-desktop ssh_tests
-python3 -m unittest discover -s scripts -p test_packaging.py
+python3 -m unittest discover -s scripts -p 'test_*.py'
 ```
 
 The helper integration tests detach during a streamed/tool-using run, reattach to its partial state, wait for completion, and confirm that a second attachment supersedes the first without duplicating messages. Desktop tests cover remote identity rejection, disconnected-versus-idle state, snapshot replacement, disabled local services, detached remote editor buffers and persisted reconnect targets. File-channel tests cover UTF-8/CRLF, bounds, traversal/symlink refusal, atomic saves, permissions, conflicts and reconnecting without starting Pi. Linux loopback OpenSSH installation and streaming reconnection have also been exercised with verified host keys, SFTP upload, a fish login shell and a project path containing spaces/quotes. Native SSH-server behavior on macOS/Windows still requires live validation.
