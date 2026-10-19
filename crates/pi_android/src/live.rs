@@ -48,7 +48,11 @@ pub enum Update {
     /// A fresh listing of the computer's sessions.
     Listed(Result<Vec<Listed>, String>),
     ModelCatalog(u64, Result<Vec<pi_core::protocol::Model>, String>),
-    CommandCatalog(u64, Result<Vec<pi_core::protocol::SlashCommand>, String>),
+    CommandCatalog(
+        u64,
+        Option<String>,
+        Result<Vec<pi_core::protocol::SlashCommand>, String>,
+    ),
 }
 
 /// What a request was for, to act on its response.
@@ -603,7 +607,9 @@ impl Watch {
             Update::Opened(generation, _)
             | Update::Record(generation, _)
             | Update::Ended(generation, _) => *generation == self.generation,
-            Update::Listed(_) | Update::ModelCatalog(_, _) | Update::CommandCatalog(_, _) => false,
+            Update::Listed(_) | Update::ModelCatalog(_, _) | Update::CommandCatalog(_, _, _) => {
+                false
+            }
         }
     }
 }
@@ -636,11 +642,15 @@ pub struct Live {
     pub models: Vec<pi_core::protocol::Model>,
     pub models_loading: bool,
     pub models_error: Option<String>,
-    /// Global catalog replies belong to the connection that requested them.
+    /// Model catalog replies belong to the connection that requested them.
     catalog_generation: u64,
-    /// Commands available before a new session exists. A session-specific
-    /// catalog replaces this once that session attaches.
+    /// Command discovery also changes when the selected project changes, even
+    /// while the SSH connection stays the same.
+    command_generation: u64,
+    /// Commands discovered for this exact project. A matching attached session
+    /// remains authoritative because it can refresh resources after `/reload`.
     pub commands: Vec<pi_core::protocol::SlashCommand>,
+    pub commands_path: Option<String>,
     pub commands_loading: bool,
     pub commands_error: Option<String>,
 }
@@ -666,7 +676,9 @@ impl Live {
             models_loading: false,
             models_error: None,
             catalog_generation: 1,
+            command_generation: 1,
             commands: Vec::new(),
+            commands_path: None,
             commands_loading: false,
             commands_error: None,
         }
@@ -722,24 +734,22 @@ impl Live {
         });
     }
 
-    pub fn refresh_commands(&mut self) {
-        if self.commands_loading {
-            return;
-        }
+    pub fn refresh_commands(&mut self, path: Option<String>) {
+        self.command_generation = self.command_generation.wrapping_add(1);
         self.commands_loading = true;
         self.commands_error = None;
-        let generation = self.catalog_generation;
+        let generation = self.command_generation;
         let (connection, helper, sender) = (
             self.connection.clone(),
             self.helper.clone(),
             self.sender.clone(),
         );
         ssh::spawn(async move {
-            let commands = remote::commands(&connection, &helper)
+            let commands = remote::commands(&connection, &helper, path.as_deref())
                 .await
                 .map_err(|error| format!("{error:#}"));
             let _ = sender
-                .send((None, Update::CommandCatalog(generation, commands)))
+                .send((None, Update::CommandCatalog(generation, path, commands)))
                 .await;
         });
     }
@@ -878,6 +888,7 @@ impl Live {
         self.connection = connection;
         self.helper = helper;
         self.catalog_generation += 1;
+        self.command_generation += 1;
         self.models.clear();
         self.models_error = None;
         self.models_loading = false;
@@ -905,7 +916,6 @@ impl Live {
             self.refresh();
         }
         self.refresh_models();
-        self.refresh_commands();
     }
 
     /// Attach a ledger's existing durable session without sending any prompt,
@@ -1422,11 +1432,14 @@ impl Live {
     }
 
     pub fn commands_for_path(&self, path: &str) -> Option<&[pi_core::protocol::SlashCommand]> {
-        self.watches
-            .values()
-            .find(|watch| watch.target.cwd == path && watch.pi.commands_loaded)
-            .map(|watch| watch.pi.commands.as_slice())
-            .or_else(|| (!self.commands_loading).then_some(self.commands.as_slice()))
+        (self.commands_path.as_deref() == Some(path))
+            .then_some(self.commands.as_slice())
+            .or_else(|| {
+                self.watches
+                    .values()
+                    .find(|watch| watch.target.cwd == path && watch.pi.commands_loaded)
+                    .map(|watch| watch.pi.commands.as_slice())
+            })
     }
 
     pub fn is_stopping(&self, id: SessionId) -> bool {
@@ -1842,12 +1855,14 @@ impl Live {
         update: Update,
     ) -> (Vec<SessionId>, Option<Problem>) {
         let Some(id) = id else {
-            if let Update::CommandCatalog(generation, commands) = update {
-                apply_catalog(
+            if let Update::CommandCatalog(generation, path, commands) = update {
+                apply_command_catalog(
                     generation,
-                    self.catalog_generation,
+                    self.command_generation,
+                    path,
                     commands,
                     &mut self.commands,
+                    &mut self.commands_path,
                     &mut self.commands_loading,
                     &mut self.commands_error,
                 );
@@ -1949,7 +1964,7 @@ impl Live {
                     .record(TransportDirection::Inbound, &record);
                 return Self::record(watch, &record, wanted, thinking, models);
             }
-            Update::Listed(_) | Update::ModelCatalog(_, _) | Update::CommandCatalog(_, _) => {}
+            Update::Listed(_) | Update::ModelCatalog(_, _) | Update::CommandCatalog(_, _, _) => {}
         }
         None
     }
@@ -2913,6 +2928,33 @@ fn thinking_label(level: &str) -> &str {
         "high" => "High",
         "xhigh" => "Max",
         other => other,
+    }
+}
+
+/// Project command replies are correlated independently from models because
+/// changing folders does not replace the SSH connection.
+#[allow(clippy::too_many_arguments)]
+fn apply_command_catalog(
+    generation: u64,
+    current: u64,
+    path: Option<String>,
+    result: Result<Vec<pi_core::protocol::SlashCommand>, String>,
+    values: &mut Vec<pi_core::protocol::SlashCommand>,
+    current_path: &mut Option<String>,
+    loading: &mut bool,
+    error: &mut Option<String>,
+) {
+    if generation != current {
+        return;
+    }
+    *loading = false;
+    match result {
+        Ok(catalog) => {
+            *values = catalog;
+            *current_path = path;
+            *error = None;
+        }
+        Err(reason) => *error = Some(reason),
     }
 }
 
@@ -5291,6 +5333,48 @@ mod tests {
         );
         assert_eq!(models[0].id, "fresh");
         assert_eq!(error.as_deref(), Some("current connection failed"));
+    }
+
+    #[test]
+    fn project_command_catalogs_ignore_stale_folder_replies() {
+        let command = |name: &str| pi_core::protocol::SlashCommand {
+            name: name.into(),
+            description: None,
+            source: "skill".into(),
+            source_info: None,
+        };
+        let mut commands = vec![command("skill:current")];
+        let mut path = Some("/repo/current".into());
+        let mut loading = true;
+        let mut error = None;
+        apply_command_catalog(
+            1,
+            2,
+            Some("/repo/stale".into()),
+            Ok(vec![command("skill:stale")]),
+            &mut commands,
+            &mut path,
+            &mut loading,
+            &mut error,
+        );
+        assert_eq!(commands[0].name, "skill:current");
+        assert_eq!(path.as_deref(), Some("/repo/current"));
+        assert!(loading);
+
+        apply_command_catalog(
+            2,
+            2,
+            Some("/repo/new".into()),
+            Ok(vec![command("skill:project")]),
+            &mut commands,
+            &mut path,
+            &mut loading,
+            &mut error,
+        );
+        assert_eq!(commands[0].name, "skill:project");
+        assert_eq!(path.as_deref(), Some("/repo/new"));
+        assert!(!loading);
+        assert!(error.is_none());
     }
 
     #[test]

@@ -39,6 +39,8 @@ cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
 cargo install cargo-about --version 0.9.2 --locked --features cli
 python scripts/rust_notices.py --check
+python3 -m pip install fonttools==4.67.0
+python3 scripts/generate_terminal_symbols.py --check
 
 # Zed test-support features must run separately from workspace tests.
 cargo test --locked -p pi_lsp_bridge --features fake-lsp

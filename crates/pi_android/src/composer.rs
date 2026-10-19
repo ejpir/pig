@@ -109,8 +109,15 @@ pub(crate) fn compact_instructions(
     })
 }
 
-/// A chip in the suggestion strip: its text, what it puts in the draft, its icon.
-type Suggestion = (String, String, &'static str);
+/// A chip in the suggestion strip. Commands attach structurally so they can be
+/// chosen at the caret while still being serialized first for Pi on Send.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Suggestion {
+    label: String,
+    replacement: String,
+    glyph: &'static str,
+    command: Option<SavedCommand>,
+}
 
 pub struct Composer {
     pub area: Entity<TextArea>,
@@ -147,6 +154,9 @@ pub struct Composer {
     /// What `/` offers. `None` selects the deterministic sample catalog;
     /// remote sessions always supply `Some`, including an authoritative empty list.
     commands: Option<Vec<SavedCommand>>,
+    /// A picker-selected command is independent of the draft's caret position.
+    /// Send puts it first, as Pi's slash-command protocol requires.
+    attached_command: Option<SavedCommand>,
     _area: Subscription,
 }
 
@@ -183,6 +193,7 @@ impl Composer {
             files_loading: false,
             files_error: None,
             commands: None,
+            attached_command: None,
             _area: subscription,
         }
     }
@@ -286,6 +297,10 @@ impl Composer {
         &self.attachments
     }
 
+    pub fn has_attached_command(&self) -> bool {
+        self.attached_command.is_some()
+    }
+
     pub fn attach(&mut self, attachment: Attachment, cx: &mut Context<Self>) {
         self.attachments.push(attachment);
         cx.notify();
@@ -325,6 +340,7 @@ impl Composer {
             area.take(cx);
         });
         self.attachments.clear();
+        self.attached_command = None;
         cx.notify();
     }
 
@@ -386,6 +402,7 @@ impl Composer {
 
     pub fn can_send(&self, cx: &App) -> bool {
         let has_payload = !self.area.read(cx).is_empty()
+            || self.attached_command.is_some()
             || self.attachments.iter().any(|attachment| {
                 !self.inline_review || !matches!(attachment, Attachment::Lines(_))
             });
@@ -401,19 +418,19 @@ impl Composer {
             return;
         }
         // The app clears only after accepting the complete payload. Validation
-        // or connection errors must leave text AND images ready to retry.
-        let text = self.area.read(cx).text().to_owned();
+        // or connection errors must leave text, the selected command, and images
+        // ready to retry. Pi expands commands only at the start of a message.
+        let draft = self.area.read(cx).text().trim().to_owned();
+        let text = match &self.attached_command {
+            Some(command) if draft.is_empty() => format!("/{}", command.name),
+            Some(command) => format!("/{} {draft}", command.name),
+            None => draft,
+        };
         let attachments = self.attachments.clone();
         if self.inline_review {
-            cx.emit(ComposerEvent::StageReview {
-                text: text.trim().to_owned(),
-                attachments,
-            });
+            cx.emit(ComposerEvent::StageReview { text, attachments });
         } else {
-            cx.emit(ComposerEvent::Send {
-                text: text.trim().to_owned(),
-                attachments,
-            });
+            cx.emit(ComposerEvent::Send { text, attachments });
         }
         cx.notify();
     }
@@ -425,7 +442,7 @@ impl Composer {
         }
         let area = self.area.read(cx);
         if self.workspace
-            && let Some((range, word)) = area.token_before_caret('@')
+            && let Some((_range, word)) = area.token_before_caret('@')
         {
             let word = word.to_lowercase();
             let offered: Vec<&str> = match &self.files {
@@ -449,7 +466,12 @@ impl Composer {
                     } else {
                         format!("@{file} ")
                     };
-                    (file.to_string(), mention, glyph)
+                    Suggestion {
+                        label: file.to_string(),
+                        replacement: mention,
+                        glyph,
+                        command: None,
+                    }
                 })
                 .collect();
             let mut title = if self.files_loading {
@@ -468,11 +490,12 @@ impl Composer {
             if "visualize".starts_with(&word) {
                 files.insert(
                     0,
-                    (
-                        "@Visualize · Native mini-app".into(),
-                        "@Visualize ".into(),
-                        "spark",
-                    ),
+                    Suggestion {
+                        label: "@Visualize · Native mini-app".into(),
+                        replacement: "@Visualize ".into(),
+                        glyph: "spark",
+                        command: None,
+                    },
                 );
                 files.truncate(6);
                 if !self.files_loading && self.files_error.is_none() {
@@ -483,63 +506,79 @@ impl Composer {
                     };
                 }
             }
-            let _ = range;
             return (self.files.is_some() || !files.is_empty()).then_some((title, files));
         }
-        if let Some((range, word)) = area.token_before_caret('/')
-            && range.start == 0
-        {
-            let mut offered: Vec<(&str, Option<&str>)> = match &self.commands {
-                Some(commands) => commands
-                    .iter()
-                    .map(|command| {
-                        (
-                            command.name.trim_start_matches('/'),
-                            command.description.as_deref(),
-                        )
-                    })
-                    .collect(),
+        if let Some((_range, word)) = area.token_before_caret('/') {
+            let mut offered: Vec<SavedCommand> = match &self.commands {
+                Some(commands) => commands.clone(),
                 None => COMMANDS
                     .iter()
-                    .map(|(name, description)| (*name, Some(*description)))
+                    .map(|(name, description)| SavedCommand {
+                        name: (*name).into(),
+                        description: Some((*description).into()),
+                    })
                     .collect(),
             };
             // Built-in actions belong to the app, not Pi's resource catalog. A
             // session-local command of the same name wins, matching desktop.
-            if self.session_commands && !offered.iter().any(|(name, _)| *name == "compact") {
-                offered.insert(0, ("compact", Some("Summarize to free context")));
+            if self.session_commands
+                && !offered
+                    .iter()
+                    .any(|command| command.name.trim_start_matches('/') == "compact")
+            {
+                offered.insert(
+                    0,
+                    SavedCommand {
+                        name: "compact".into(),
+                        description: Some("Summarize to free context".into()),
+                    },
+                );
             }
             let commands: Vec<_> = offered
                 .into_iter()
-                .filter(|(name, _)| !name.is_empty() && name.starts_with(word))
+                .filter_map(|command| {
+                    let name = command.name.trim_start_matches('/').to_owned();
+                    let display_name = name.strip_prefix("skill:").unwrap_or(&name);
+                    (!name.is_empty() && (name.starts_with(word) || display_name.starts_with(word)))
+                        .then(|| Suggestion {
+                            label: format!("/{name}"),
+                            replacement: String::new(),
+                            glyph: "slash",
+                            command: Some(SavedCommand {
+                                name,
+                                description: command.description,
+                            }),
+                        })
+                })
                 .take(6)
-                .map(|(name, _)| (format!("/{name}"), format!("/{name} "), "slash"))
                 .collect();
             return (!commands.is_empty()).then_some(("Commands".into(), commands));
         }
         None
     }
 
-    fn accept(&mut self, replacement: String, cx: &mut Context<Self>) {
-        self.area.update(cx, |area, cx| {
-            let token = area
-                .token_before_caret('@')
-                .or_else(|| area.token_before_caret('/'))
-                .map(|(range, _)| range);
-            if let Some(range) = token {
-                area.replace(range, &replacement, cx);
-            }
+    fn accept(&mut self, suggestion: Suggestion, cx: &mut Context<Self>) {
+        let marker = if suggestion.command.is_some() {
+            '/'
+        } else {
+            '@'
+        };
+        let replacement = suggestion.replacement;
+        let accepted = self.area.update(cx, |area, cx| {
+            let Some((range, _)) = area.token_at_caret(marker) else {
+                return false;
+            };
+            area.replace(range, &replacement, cx);
+            true
         });
+        if accepted && let Some(command) = suggestion.command {
+            self.attached_command = Some(command);
+            cx.notify();
+        }
     }
 
     fn start_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.area.update(cx, |area, cx| {
-            if !area.text().starts_with('/') {
-                let text = format!("/{}", area.text());
-                area.set_text(text, cx);
-                area.replace(1..1, "", cx);
-            }
-        });
+        self.area.update(cx, |area, cx| area.insert("/", cx));
         self.focus(window, cx);
     }
 }
@@ -561,6 +600,7 @@ impl Render for Composer {
             && !focused
             && area.read(cx).is_empty()
             && self.attachments.is_empty()
+            && self.attached_command.is_none()
             && self.imports == 0
             && !self.sending;
         // Leave room for the conversation and Send even with a tall keyboard
@@ -728,10 +768,12 @@ impl Render for Composer {
                         }))
                 }))
         });
-        let has_body_attachments = self
-            .attachments
-            .iter()
-            .any(|attachment| !matches!(attachment, Attachment::Lines(_)));
+        let attached_command = self.attached_command.clone();
+        let has_body_attachments = attached_command.is_some()
+            || self
+                .attachments
+                .iter()
+                .any(|attachment| !matches!(attachment, Attachment::Lines(_)));
         let attachments = has_body_attachments.then(|| {
             div()
                 // The dock can be squeezed by the keyboard. Keep the attachment
@@ -742,6 +784,23 @@ impl Render for Composer {
                 .gap(px(12.))
                 .pt(px(4.))
                 .pb(px(10.))
+                .children(attached_command.into_iter().map(|command| {
+                    ui::chip(
+                        "attached-command",
+                        Some("slash"),
+                        format!("/{}", command.name.trim_start_matches('/')),
+                        &colors,
+                    )
+                    .debug_selector(|| "attached-command".into())
+                    .h(px(36.))
+                    .font_family(MONO)
+                    .child(icon("x", 14., colors.muted))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.attached_command = None;
+                        cx.notify();
+                    }))
+                }))
                 .children(
                     self.attachments
                         .iter()
@@ -931,20 +990,25 @@ impl Render for Composer {
                         .flex()
                         .gap(px(8.))
                         .overflow_x_scroll()
-                        .children(items.into_iter().enumerate().map(
-                            |(index, (text, replacement, glyph))| {
-                                let probe = crate::testing::probe(format!("suggestion-{text}"));
-                                ui::chip(("suggestion", index), Some(glyph), text, &colors)
-                                    .child(probe)
-                                    .when(index == 0, |chip| {
-                                        chip.border_color(colors.accent).text_color(colors.text)
-                                    })
-                                    .when(glyph == "slash", |chip| chip.font_family(MONO))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.accept(replacement.clone(), cx)
-                                    }))
-                            },
-                        )),
+                        .children(items.into_iter().enumerate().map(|(index, suggestion)| {
+                            let probe =
+                                crate::testing::probe(format!("suggestion-{}", suggestion.label));
+                            let glyph = suggestion.glyph;
+                            ui::chip(
+                                ("suggestion", index),
+                                Some(glyph),
+                                suggestion.label.clone(),
+                                &colors,
+                            )
+                            .child(probe)
+                            .when(index == 0, |chip| {
+                                chip.border_color(colors.accent).text_color(colors.text)
+                            })
+                            .when(glyph == "slash", |chip| chip.font_family(MONO))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.accept(suggestion.clone(), cx),
+                            ))
+                        })),
                 )
         });
         let attached = strip.is_some() || lines_strip.is_some() || self.joined;
@@ -1237,10 +1301,10 @@ mod tests {
         composer.read_with(cx, |composer, cx| {
             let (title, items) = composer.suggestions(cx).expect("remote suggestions");
             assert_eq!(title, "Files matching “main”");
-            assert_eq!(
-                items[0],
-                ("src/main.rs".into(), "@src/main.rs ".into(), "file")
-            );
+            assert_eq!(items[0].label, "src/main.rs");
+            assert_eq!(items[0].replacement, "@src/main.rs ");
+            assert_eq!(items[0].glyph, "file");
+            assert!(items[0].command.is_none());
         });
 
         composer.update(cx, |composer, cx| {
@@ -1248,14 +1312,9 @@ mod tests {
         });
         composer.read_with(cx, |composer, cx| {
             let (_, items) = composer.suggestions(cx).expect("unicode suggestion");
-            assert_eq!(
-                items[0],
-                (
-                    "docs/中文 guide.md".into(),
-                    "@\"docs/中文 guide.md\" ".into(),
-                    "file"
-                )
-            );
+            assert_eq!(items[0].label, "docs/中文 guide.md");
+            assert_eq!(items[0].replacement, "@\"docs/中文 guide.md\" ");
+            assert_eq!(items[0].glyph, "file");
         });
 
         composer.update(cx, |composer, cx| {
@@ -1265,14 +1324,14 @@ mod tests {
         composer.read_with(cx, |composer, cx| {
             let (title, items) = composer.suggestions(cx).expect("loading state");
             assert_eq!(title, "Loading project files…");
-            assert_eq!(items[0].1, "@Visualize ");
+            assert_eq!(items[0].replacement, "@Visualize ");
         });
 
         composer.update(cx, |composer, _| composer.fail_files("offline".into()));
         composer.read_with(cx, |composer, cx| {
             let (title, items) = composer.suggestions(cx).expect("error state");
             assert_eq!(title, "Project files unavailable");
-            assert_eq!(items[0].1, "@Visualize ");
+            assert_eq!(items[0].replacement, "@Visualize ");
         });
     }
 
@@ -1285,13 +1344,16 @@ mod tests {
             composer.use_files(Some(vec!["Visualize".into()]));
             composer.set_text("Build @vis", cx);
             let (_, items) = composer.suggestions(cx).unwrap();
-            assert_eq!(items[0].1, "@Visualize ");
-            assert_eq!(items[1].1, "@\"Visualize\" ");
-            composer.accept(items[0].1.clone(), cx);
+            assert_eq!(items[0].replacement, "@Visualize ");
+            assert_eq!(items[1].replacement, "@\"Visualize\" ");
+            composer.accept(items[0].clone(), cx);
             assert_eq!(composer.area.read(cx).text(), "Build @Visualize ");
             composer.use_files(Some(vec![]));
             composer.set_text("@V", cx);
-            assert_eq!(composer.suggestions(cx).unwrap().1[0].1, "@Visualize ");
+            assert_eq!(
+                composer.suggestions(cx).unwrap().1[0].replacement,
+                "@Visualize "
+            );
         });
     }
 
@@ -1331,7 +1393,7 @@ mod tests {
         });
         composer.read_with(cx, |composer, cx| {
             let (_, items) = composer.suggestions(cx).expect("session commands");
-            let labels: Vec<_> = items.iter().map(|item| item.0.as_str()).collect();
+            let labels: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
             assert_eq!(labels, ["/compact", "/review", "/skill:lint"]);
             assert!(composer.has_commands());
         });
@@ -1345,7 +1407,10 @@ mod tests {
         });
         composer.read_with(cx, |composer, cx| {
             let (_, items) = composer.suggestions(cx).expect("shadowing command");
-            assert_eq!(items.iter().filter(|item| item.0 == "/compact").count(), 1);
+            assert_eq!(
+                items.iter().filter(|item| item.label == "/compact").count(),
+                1
+            );
         });
     }
 
@@ -1363,7 +1428,7 @@ mod tests {
         composer.read_with(cx, |composer, cx| {
             let (title, items) = composer.suggestions(cx).expect("remote commands");
             assert_eq!(title, "Commands");
-            assert_eq!(items[0].0, "/review");
+            assert_eq!(items[0].label, "/review");
             assert!(composer.has_commands());
         });
 
@@ -1375,5 +1440,76 @@ mod tests {
             assert!(composer.suggestions(cx).is_none());
             assert!(!composer.has_commands());
         });
+    }
+
+    #[gpui::test]
+    fn slash_button_inserts_at_the_utf8_selection_instead_of_the_start(cx: &mut TestAppContext) {
+        crate::theme::install_for_tests(cx);
+        cx.update(|cx| cx.set_global(Prefs::default()));
+        let (composer, cx) = cx.add_window_view(|_, cx| Composer::new("", cx));
+        cx.update(|window, cx| {
+            composer.update(cx, |composer, cx| {
+                composer.set_text("前文 tail", cx);
+                let caret = "前文 ".len();
+                composer
+                    .area
+                    .update(cx, |area, cx| area.select_range(caret..caret, cx));
+                composer.start_command(window, cx);
+                assert_eq!(composer.area.read(cx).text(), "前文 /tail");
+                assert_eq!(composer.area.read(cx).selection(), caret + 1..caret + 1);
+
+                composer
+                    .area
+                    .update(cx, |area, cx| area.select_range(0.."前文".len(), cx));
+                composer.start_command(window, cx);
+                assert_eq!(composer.area.read(cx).text(), "/ /tail");
+                assert_eq!(composer.area.read(cx).selection(), 1..1);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn command_chosen_after_prose_attaches_and_is_serialized_first(cx: &mut TestAppContext) {
+        use std::{cell::RefCell, rc::Rc};
+
+        let composer = cx.new(|cx| Composer::new("", cx));
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let received = sent.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                if let ComposerEvent::Send { text, .. } = event {
+                    received.borrow_mut().push(text.clone());
+                }
+            })
+        });
+        composer.update(cx, |composer, cx| {
+            composer.use_commands(Some(vec![SavedCommand {
+                name: "skill:lint".into(),
+                description: Some("Lint".into()),
+            }]));
+            // Stock Pi displays skills by their skill name even though their
+            // canonical command is namespaced as `skill:<name>`. Completion
+            // replaces the entire token even if the caret is inside it.
+            composer.set_text("Use /lint", cx);
+            let caret = "Use /lin".len();
+            composer
+                .area
+                .update(cx, |area, cx| area.select_range(caret..caret, cx));
+            let (_, items) = composer
+                .suggestions(cx)
+                .expect("slash completion after prose");
+            assert_eq!(items[0].label, "/skill:lint");
+            composer.accept(items[0].clone(), cx);
+            assert_eq!(composer.area.read(cx).text(), "Use ");
+            assert_eq!(
+                composer
+                    .attached_command
+                    .as_ref()
+                    .map(|command| command.name.as_str()),
+                Some("skill:lint")
+            );
+            composer.send(cx);
+        });
+        assert_eq!(&*sent.borrow(), &["/skill:lint Use"]);
     }
 }

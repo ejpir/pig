@@ -154,7 +154,7 @@ pub fn sync_terminal_theme(palette: Theme, cx: &mut App) {
     cx.set_global(pi_terminal::TerminalStyle {
         font_family: MONO.into(),
         font_fallbacks: Some(FontFallbacks::from_fonts(vec![
-            "Meslo LG M for Powerline".to_owned(),
+            "Pi Terminal Symbols Mono".to_owned(),
         ])),
         // Fit a 120-column shell canvas in portrait. Pinching can enlarge it;
         // the renderer then exposes the overflow through horizontal panning.

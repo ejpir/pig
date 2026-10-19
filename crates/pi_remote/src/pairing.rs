@@ -430,6 +430,7 @@ fn gateway_arguments(original: &str) -> Result<Vec<String>> {
     ) || matches!(command.as_slice(), [one, two] if
         (one == "connect" || one == "files" || one == "schedules") && two == "--stdio"
     ) || command.as_slice() == ["terminal", "--stdio"]
+        || matches!(command.as_slice(), [one, two, _] if one == "commands" && two == "--path")
         || matches!(command.as_slice(), [one, two, _] if one == "directories" && two == "--path")
         || matches!(command.as_slice(), [one, two, _] if matches!(one.as_str(), "jj-history" | "jj-enable") && two == "--path")
         || matches!(command.as_slice(), [one, two, _, three, _] if one == "jj-restore" && two == "--path" && three == "--operation")
@@ -2369,6 +2370,22 @@ mod tests {
             "pi-desktop-remote scheduler install --confirm",
             "pi-desktop-remote schedules --stdio; touch /tmp/no",
             "pi-desktop-remote schedules --stdio && true",
+        ] {
+            assert!(gateway_arguments(rejected).is_err(), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn project_command_discovery_is_exactly_allowlisted() {
+        assert_eq!(
+            gateway_arguments("pi-desktop-remote commands --path '/tmp/a project'").unwrap(),
+            vec!["commands", "--path", "/tmp/a project"]
+        );
+        for rejected in [
+            "pi-desktop-remote commands --path",
+            "pi-desktop-remote commands --path /tmp/project extra",
+            "pi-desktop-remote commands --cwd /tmp/project",
+            "pi-desktop-remote commands --path /tmp/project; touch /tmp/no",
         ] {
             assert!(gateway_arguments(rejected).is_err(), "{rejected}");
         }

@@ -554,9 +554,11 @@ pub struct PhoneApp {
     pub(crate) thread_loading_generation: u64,
     /// Height-relevant failed-prompt text, retained across navigation.
     pub(crate) thread_failed_layouts: HashMap<SessionId, Vec<(String, String)>>,
-    /// Shape changes spliced during a fling and awaiting exact remeasurement.
+    /// Failed rows from the same presentation generation as `thread_snapshots`.
+    pub(crate) thread_failed_snapshots: HashMap<SessionId, Arc<Vec<crate::live::FailedPrompt>>>,
+    /// Shape changes spliced during a frozen presentation and awaiting exact remeasurement.
     pub(crate) thread_pending_remeasure: HashSet<SessionId>,
-    /// Immutable transcript snapshots reused for every frame of a fling.
+    /// Immutable transcript snapshots reused during direct manipulation, text entry, and sheets.
     pub(crate) thread_snapshots: HashMap<SessionId, Arc<crate::model::Session>>,
     /// Last virtual-list offset, for settled-fling touch filtering.
     pub(crate) thread_list_offsets: HashMap<SessionId, Pixels>,
@@ -881,6 +883,7 @@ impl PhoneApp {
             thread_loading_release_scheduled: HashMap::new(),
             thread_loading_generation: 0,
             thread_failed_layouts: HashMap::new(),
+            thread_failed_snapshots: HashMap::new(),
             thread_pending_remeasure: HashSet::new(),
             thread_snapshots: HashMap::new(),
             thread_list_offsets: HashMap::new(),
@@ -1267,9 +1270,9 @@ impl PhoneApp {
                 .update(cx, |area, cx| area.set_text("", cx));
         }
         self.sheet = Some(sheet);
-        // The attachment chooser has only two rows; animating it used to
-        // rebuild the potentially huge route underneath for dozens of frames.
-        if matches!(sheet, Sheet::Attach(_)) {
+        // These bounded sheets do not benefit from rebuilding the potentially
+        // huge route underneath for dozens of transition frames.
+        if matches!(sheet, Sheet::Attach(_) | Sheet::Run(..)) {
             self.sheet_motion.finish();
         }
         self.image_zoom = 1.;
@@ -1314,7 +1317,7 @@ impl PhoneApp {
         if let Some(sheet) = self.sheet.take() {
             self.closing_sheet = Some(sheet);
             self.sheet_motion.settle(1.);
-            if matches!(sheet, Sheet::Attach(_)) {
+            if matches!(sheet, Sheet::Attach(_) | Sheet::Run(..)) {
                 self.sheet_motion.finish();
             }
         }
@@ -1727,6 +1730,7 @@ impl PhoneApp {
         self.thread_loading.clear();
         self.thread_loading_release_scheduled.clear();
         self.thread_failed_layouts.clear();
+        self.thread_failed_snapshots.clear();
         self.thread_pending_remeasure.clear();
         self.thread_snapshots.clear();
         self.thread_list_offsets.clear();
@@ -2149,7 +2153,6 @@ impl PhoneApp {
         live.thinking = prefs.thinking.clone();
         if live.helper.can_attach() {
             live.refresh_models();
-            live.refresh_commands();
         }
         let mut computer = Computer::from_address(&address.to_string());
         computer.pi_version = helper_release;
@@ -2168,6 +2171,14 @@ impl PhoneApp {
             .get(&address.to_string())
             .map(|path| store.add_project(path))
             .unwrap_or(0);
+        if let Some(path) = store
+            .projects
+            .get(project)
+            .map(|project| project.path.clone())
+            && let Some(live) = store.live.as_mut()
+        {
+            live.refresh_commands(Some(path));
+        }
         self.preserve_local_drafts(cx);
         if self.is_local() {
             self.start.update(cx, |start, cx| start.clear(cx));
@@ -2276,9 +2287,9 @@ impl PhoneApp {
     fn apply_updates(&mut self, batch: Vec<(Option<SessionId>, Update)>, cx: &mut Context<Self>) {
         let _trace = gpui_android::trace::scope(c"pi.app.updates");
         self.keep_latest_in_view();
-        let global_commands = batch
-            .iter()
-            .any(|(id, update)| id.is_none() && matches!(update, Update::CommandCatalog(_, Ok(_))));
+        let discovered_commands = batch.iter().any(|(id, update)| {
+            id.is_none() && matches!(update, Update::CommandCatalog(_, _, Ok(_)))
+        });
         let command_sessions: HashSet<SessionId> = batch
             .iter()
             .filter_map(|(id, update)| {
@@ -2315,9 +2326,9 @@ impl PhoneApp {
         let catalogs = self.store.as_ref().and_then(|store| {
             let live = store.live.as_ref()?;
             let mut catalogs: HashMap<String, Vec<SavedCommand>> = HashMap::new();
-            if global_commands && let Some(project) = store.projects.get(self.project) {
+            if discovered_commands && let Some(path) = &live.commands_path {
                 catalogs.insert(
-                    project.path.clone(),
+                    path.clone(),
                     live.commands.iter().map(SavedCommand::from).collect(),
                 );
             }
@@ -2342,7 +2353,7 @@ impl PhoneApp {
                     .extend(catalogs);
             });
         }
-        let refresh_commands: HashSet<SessionId> = if global_commands {
+        let refresh_commands: HashSet<SessionId> = if discovered_commands {
             self.threads.keys().copied().collect()
         } else {
             command_sessions
@@ -2426,8 +2437,15 @@ impl PhoneApp {
                             computer.pi_version = helper_release;
                             computer.connected = true;
                         }
+                        let commands_path = store
+                            .projects
+                            .get(this.project)
+                            .map(|project| project.path.clone());
                         if let Some(live) = &mut store.live {
                             live.resume(connection, helper);
+                            if let Some(path) = commands_path {
+                                live.refresh_commands(Some(path));
+                            }
                         }
                         this.last_listed = Instant::now();
                         helper_changed = true;
@@ -2663,6 +2681,7 @@ impl PhoneApp {
         self.thread_loading.clear();
         self.thread_loading_release_scheduled.clear();
         self.thread_failed_layouts.clear();
+        self.thread_failed_snapshots.clear();
         self.thread_pending_remeasure.clear();
         self.thread_snapshots.clear();
         self.thread_list_offsets.clear();
@@ -3421,6 +3440,7 @@ impl PhoneApp {
             self.subagent_projected_revisions.remove(&child);
             self.thread_lists.remove(&child);
             self.thread_list_shapes.remove(&child);
+            self.thread_failed_snapshots.remove(&child);
             self.thread_snapshots.remove(&child);
             self.thread_list_offsets.remove(&child);
         }
@@ -3452,6 +3472,7 @@ impl PhoneApp {
         self.thread_loading.remove(&id);
         self.thread_loading_release_scheduled.remove(&id);
         self.thread_failed_layouts.remove(&id);
+        self.thread_failed_snapshots.remove(&id);
         self.thread_pending_remeasure.remove(&id);
         self.thread_snapshots.remove(&id);
         self.thread_list_offsets.remove(&id);
@@ -4067,7 +4088,10 @@ impl PhoneApp {
             composer.update(cx, |composer, cx| {
                 // An in-flight attachment import disables Send even when a new
                 // draft exists. Never overwrite text/attachments composed later.
-                if composer.area.read(cx).text().is_empty() && composer.attachments().is_empty() {
+                if composer.area.read(cx).text().is_empty()
+                    && composer.attachments().is_empty()
+                    && !composer.has_attached_command()
+                {
                     composer.set_text(draft, cx);
                 }
             });

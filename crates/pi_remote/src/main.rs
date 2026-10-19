@@ -130,8 +130,13 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
             durable::models()?;
         }
         Some("commands") => {
+            let path = match args.next().as_deref() {
+                None => None,
+                Some("--path") => Some(args.next().context("commands needs a path")?.into()),
+                Some(_) => bail!("Unknown commands option"),
+            };
             anyhow::ensure!(args.next().is_none(), "Unexpected commands argument");
-            durable::commands()?;
+            durable::commands(path)?;
         }
         Some("directories") if args.next().as_deref() == Some("--path") => {
             let path = args.next().context("directories needs a path")?;
@@ -196,7 +201,7 @@ fn dispatch(args: Vec<String>, gateway: bool) -> Result<()> {
             server::daemon(target)?;
         }
         _ => bail!(
-            "Usage: pi-desktop-remote activate | pair [OPTIONS] | connect --stdio | files --stdio | terminal --stdio | schedules --stdio | scheduler start/stop/status/install --confirm | sessions | models | commands | directories --path PATH [--show-hidden] | jj-history --path PATH | jj-enable --path PATH | jj-restore --path PATH --operation ID | pi [ARGS] | --version | --licenses"
+            "Usage: pi-desktop-remote activate | pair [OPTIONS] | connect --stdio | files --stdio | terminal --stdio | schedules --stdio | scheduler start/stop/status/install --confirm | sessions | models | commands [--path PATH] | directories --path PATH [--show-hidden] | jj-history --path PATH | jj-enable --path PATH | jj-restore --path PATH --operation ID | pi [ARGS] | --version | --licenses"
         ),
     }
     Ok(())

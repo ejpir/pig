@@ -49,7 +49,7 @@ PI = build_apk.App(
         for name in (
             "IBM-PLEX-OFL.txt",
             "COMMIT-MONO-OFL.txt",
-            "MESLO-POWERLINE-APACHE-2.0.txt",
+            "PI-TERMINAL-SYMBOLS-NOTICES.txt",
             "RUST-DEPENDENCY-NOTICES.html",
             "RQUICKJS-MIT.txt",
             "QUICKJS-NG-MIT.txt",

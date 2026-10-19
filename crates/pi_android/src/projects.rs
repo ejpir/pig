@@ -1731,10 +1731,17 @@ impl PhoneApp {
                 .cwd
                 .update(cx, |area, cx| area.set_text(&project.path, cx));
         }
-        if let Some(store) = &self.store {
-            let address = store.computer.address.clone();
-            let path = store.projects[index].path.clone();
-            if !store.is_sample() {
+        if let Some((address, path, sample)) = self.store.as_ref().map(|store| {
+            (
+                store.computer.address.clone(),
+                store.projects[index].path.clone(),
+                store.is_sample(),
+            )
+        }) {
+            if let Some(live) = self.store.as_mut().and_then(|store| store.live.as_mut()) {
+                live.refresh_commands(Some(path.clone()));
+            }
+            if !sample {
                 self.update_prefs(cx, |prefs| {
                     prefs.projects.insert(address, path);
                 });

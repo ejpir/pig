@@ -94,8 +94,8 @@ class PackagingTests(unittest.TestCase):
             "NotoEmoji-OFL.txt": root / "crates/gpui_android/assets/fonts/OFL.txt",
             "IBM-PLEX-OFL.txt": root / "licenses/IBM-PLEX-OFL.txt",
             "COMMIT-MONO-OFL.txt": root / "licenses/COMMIT-MONO-OFL.txt",
-            "MESLO-POWERLINE-APACHE-2.0.txt": root
-            / "licenses/MESLO-POWERLINE-APACHE-2.0.txt",
+            "PI-TERMINAL-SYMBOLS-NOTICES.txt": root
+            / "licenses/PI-TERMINAL-SYMBOLS-NOTICES.txt",
             "QUICKJS-NG-MIT.txt": root / "licenses/QUICKJS-NG-MIT.txt",
             "RQUICKJS-MIT.txt": root / "licenses/RQUICKJS-MIT.txt",
             **{
@@ -138,12 +138,14 @@ class PackagingTests(unittest.TestCase):
                 self.assertIn(b"Copyright", notice)
                 if name.endswith("OFL.txt"):
                     self.assertIn(b"SIL OPEN FONT LICENSE", notice)
-                elif name.startswith("MESLO-POWERLINE"):
+                elif name.startswith("PI-TERMINAL-SYMBOLS"):
                     for required in [
                         b"b894ea7803af6aade63d60a4381e006098ec9c4d",
-                        b"be991137ccbe87765db7cbcdc034447b15913aa2fad01acebabbcb65b1d4a8a8",
-                        b"contains none of Nerd Fonts' unlicensed Font Logos",
+                        b"5a0737b45bb0ec5b7ce91c35749fa9142eb4a6aef2d89df0d8a88fb6b3694202",
+                        b"Font Logos source is not redistributed",
+                        b"SIL OPEN FONT LICENSE Version 1.1",
                         b"Apache License",
+                        b"Creative Commons Attribution 4.0 International Public License",
                     ]:
                         self.assertIn(required, notice)
                 elif "APACHE-2.0" in name:
@@ -404,6 +406,7 @@ class PackagingTests(unittest.TestCase):
                     "README.md",
                     "THIRD_PARTY.md",
                     "licenses/ZED-GPL-3.0",
+                    "licenses/PI-TERMINAL-SYMBOLS-NOTICES.txt",
                     "share/applications/dev.pi.desktop.desktop",
                     "share/icons/hicolor/128x128/apps/dev.pi.desktop.png",
                 ]:
@@ -425,6 +428,10 @@ class PackagingTests(unittest.TestCase):
             names = zipped.namelist()
             self.assertIn("pi-desktop-windows-amd64/pi-desktop.exe", names)
             self.assertIn("pi-desktop-windows-amd64/licenses/ZED-GPL-3.0", names)
+            self.assertIn(
+                "pi-desktop-windows-amd64/licenses/PI-TERMINAL-SYMBOLS-NOTICES.txt",
+                names,
+            )
             self.assertNotIn("scratch.log", names)
             self.assertFalse(
                 any(".git/" in name or "node_modules/" in name for name in names)
@@ -456,6 +463,12 @@ class PackagingTests(unittest.TestCase):
                 self.assertTrue((bundle / "Contents/MacOS/pi-desktop").is_file())
                 self.assertTrue(
                     (bundle / "Contents/Resources/licenses/ZED-GPL-3.0").is_file()
+                )
+                self.assertTrue(
+                    (
+                        bundle
+                        / "Contents/Resources/licenses/PI-TERMINAL-SYMBOLS-NOTICES.txt"
+                    ).is_file()
                 )
                 with (bundle / "Contents/Info.plist").open("rb") as source:
                     self.assertEqual(

@@ -121,6 +121,7 @@ pub(crate) struct TerminalScreenState {
     pub(crate) session: SessionId,
     pub(crate) view: Entity<TerminalView>,
     pub(crate) status: TerminalStatus,
+    controls_collapsed: bool,
     pty: Arc<RemotePty>,
     pub(crate) _connection: Task<()>,
 }
@@ -312,6 +313,7 @@ impl PhoneApp {
                 session: id,
                 view,
                 status: TerminalStatus::Connecting,
+                controls_collapsed: false,
                 pty,
                 _connection: task,
             },
@@ -352,6 +354,13 @@ impl PhoneApp {
         }
     }
 
+    fn terminal_toggle_controls(&mut self, token: u64, cx: &mut Context<Self>) {
+        if let Some(state) = self.terminal_views.get_mut(&token) {
+            state.controls_collapsed = !state.controls_collapsed;
+            cx.notify();
+        }
+    }
+
     fn terminal_close(&mut self, token: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.close_terminal_view(token, cx);
         self.back(window, cx);
@@ -381,6 +390,7 @@ impl PhoneApp {
         };
         let status = state.status.label();
         let view = state.view.clone();
+        let controls_collapsed = state.controls_collapsed;
         let key = |id: &'static str, label: &'static str, key: &'static str| {
             div()
                 .id((id, token as usize))
@@ -416,6 +426,86 @@ impl PhoneApp {
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| action(this, token, cx)))
         };
+        let controls = if controls_collapsed {
+            div()
+                .flex_none()
+                .flex()
+                .justify_end()
+                .px(px(8.))
+                .py(px(6.))
+                .border_t_1()
+                .border_color(colors.line)
+                .child(action(
+                    "terminal-controls-toggle",
+                    "Show controls",
+                    Self::terminal_toggle_controls,
+                ))
+        } else {
+            div()
+                .flex_none()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.))
+                .px(px(8.))
+                .pt(px(6.))
+                .pb(px(10.))
+                .border_t_1()
+                .border_color(colors.line)
+                .children([
+                    key("terminal-esc", "Esc", "escape"),
+                    key("terminal-tab", "Tab", "tab"),
+                    key("terminal-ctrl-c", "Ctrl-C", "ctrl-c"),
+                    key("terminal-ctrl-d", "Ctrl-D", "ctrl-d"),
+                    key("terminal-ctrl-z", "Ctrl-Z", "ctrl-z"),
+                    key("terminal-left", "←", "left"),
+                    key("terminal-up", "↑", "up"),
+                    key("terminal-down", "↓", "down"),
+                    key("terminal-right", "→", "right"),
+                    action("terminal-copy", "Copy", Self::terminal_copy),
+                    action("terminal-paste", "Paste", Self::terminal_paste),
+                ])
+                .child(
+                    div()
+                        .id(("terminal-keyboard", token as usize))
+                        .h(px(40.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(8.))
+                        .bg(colors.raised)
+                        .text_size(px(13.))
+                        .text_color(colors.plain)
+                        .active(|style| style.bg(colors.selected))
+                        .child("Keyboard")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.terminal_keyboard(token, window, cx)
+                        })),
+                )
+                .child(
+                    div()
+                        .id(("terminal-close", token as usize))
+                        .h(px(40.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(8.))
+                        .bg(colors.raised)
+                        .text_size(px(13.))
+                        .text_color(colors.plain)
+                        .active(|style| style.bg(colors.selected))
+                        .child("Close")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.terminal_close(token, window, cx)
+                        })),
+                )
+                .child(action(
+                    "terminal-controls-toggle",
+                    "Hide controls",
+                    Self::terminal_toggle_controls,
+                ))
+        };
         div()
             .size_full()
             .min_h_0()
@@ -424,67 +514,7 @@ impl PhoneApp {
             .bg(colors.canvas)
             .child(ui::appbar(back, "Terminal", Some(status), &colors))
             .child(div().flex_1().min_h_0().p(px(8.)).child(view))
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(6.))
-                    .px(px(8.))
-                    .pt(px(6.))
-                    .pb(px(10.))
-                    .border_t_1()
-                    .border_color(colors.line)
-                    .children([
-                        key("terminal-esc", "Esc", "escape"),
-                        key("terminal-tab", "Tab", "tab"),
-                        key("terminal-ctrl-c", "Ctrl-C", "ctrl-c"),
-                        key("terminal-ctrl-d", "Ctrl-D", "ctrl-d"),
-                        key("terminal-ctrl-z", "Ctrl-Z", "ctrl-z"),
-                        key("terminal-left", "←", "left"),
-                        key("terminal-up", "↑", "up"),
-                        key("terminal-down", "↓", "down"),
-                        key("terminal-right", "→", "right"),
-                        action("terminal-copy", "Copy", Self::terminal_copy),
-                        action("terminal-paste", "Paste", Self::terminal_paste),
-                    ])
-                    .child(
-                        div()
-                            .id(("terminal-keyboard", token as usize))
-                            .h(px(40.))
-                            .px(px(10.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(8.))
-                            .bg(colors.raised)
-                            .text_size(px(13.))
-                            .text_color(colors.plain)
-                            .active(|style| style.bg(colors.selected))
-                            .child("Keyboard")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.terminal_keyboard(token, window, cx)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id(("terminal-close", token as usize))
-                            .h(px(40.))
-                            .px(px(10.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(8.))
-                            .bg(colors.raised)
-                            .text_size(px(13.))
-                            .text_color(colors.plain)
-                            .active(|style| style.bg(colors.selected))
-                            .child("Close")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.terminal_close(token, window, cx)
-                            })),
-                    ),
-            )
+            .child(controls)
             .into_any_element()
     }
 }
@@ -550,6 +580,7 @@ mod tests {
                         session: id,
                         view,
                         status: TerminalStatus::Live,
+                        controls_collapsed: false,
                         pty,
                         _connection: Task::ready(()),
                     },
@@ -561,6 +592,10 @@ mod tests {
 
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
+                assert!(!app.terminal_views[&token].controls_collapsed);
+                app.terminal_toggle_controls(token, cx);
+                assert!(app.terminal_views[&token].controls_collapsed);
+
                 assert!(app.back(window, cx));
                 assert_eq!(app.route(), Route::Thread(id));
                 assert!(app.terminal_views.contains_key(&token));
@@ -568,6 +603,10 @@ mod tests {
                 app.open_terminal(id, window, cx);
                 assert_eq!(app.route(), Route::Terminal(id, token));
                 assert_eq!(app.terminal_views.len(), 1);
+                assert!(
+                    app.terminal_views[&token].controls_collapsed,
+                    "the control preference belongs to the retained terminal view"
+                );
                 assert!(
                     !app.terminal_views[&token]
                         .pty

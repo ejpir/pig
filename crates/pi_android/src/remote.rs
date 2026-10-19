@@ -488,12 +488,28 @@ pub async fn models(
 pub async fn commands(
     connection: &Connection,
     helper: &Helper,
+    project: Option<&str>,
 ) -> Result<Vec<pi_core::protocol::SlashCommand>> {
     if !helper.capabilities.commands {
         // Session-level get_commands remains available after attaching.
         return Ok(Vec::new());
     }
-    let output = connection.run(helper.command("commands")?).await?;
+    let command = match project {
+        Some(path) => helper.command(&format!("commands --path {}", quote(path)?))?,
+        None => helper.command("commands")?,
+    };
+    let mut output = connection.run(command).await?;
+    if output.status != Some(0)
+        && project.is_some()
+        && (output.stderr.contains("Usage:")
+            || output.stderr.contains("cannot run that command")
+            || output.stderr.contains("Unexpected commands argument"))
+    {
+        // Older helpers can still expose the user's catalog. They cannot include
+        // project resources until updated, but keeping their previous behavior
+        // is better than hiding every command.
+        output = connection.run(helper.command("commands")?).await?;
+    }
     if output.status != Some(0) {
         if output.stderr.contains("Usage:") || output.stderr.contains("cannot run that command") {
             // The session-level get_commands request still discovers commands

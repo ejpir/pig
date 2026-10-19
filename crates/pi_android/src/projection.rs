@@ -423,8 +423,11 @@ fn turns(pi: &Pi, cwd: &str) -> (Vec<Turn>, Option<Duration>) {
                     .cloned()
                     .collect();
                 turn.prompt_images = pi_markdown::tool_images(&images, None);
-                if !images.is_empty() {
-                    turn.attachments.push(match images.len() {
+                // Count only image references that survived projection. A
+                // malformed block must not advertise an unreachable gallery
+                // item in the transcript.
+                if !turn.prompt_images.is_empty() {
+                    turn.attachments.push(match turn.prompt_images.len() {
                         1 => "1 image".into(),
                         count => format!("{count} images"),
                     });
@@ -2052,24 +2055,32 @@ mod tests {
 
     #[test]
     fn images_submitted_with_a_prompt_remain_available_to_open() {
-        let id = "b".repeat(64);
+        let first = "b".repeat(64);
+        let second = "c".repeat(64);
         let pi = session(&[
             json!({"type":"response","command":"get_messages","success":true,"data":{"messages":[
                 {"role":"user","content":[
-                    {"type":"text","text":"Inspect this screenshot"},
-                    {"type":"image","data":"","imageId":id,"mimeType":"image/png","bytes":10}
+                    {"type":"text","text":"Inspect these screenshots"},
+                    {"type":"image","data":"","imageId":first,"mimeType":"image/png","bytes":10},
+                    {"type":"image","data":"","imageId":second,"mimeType":"image/webp","bytes":12},
+                    {"type":"image","mimeType":"image/png"}
                 ]},
-                {"role":"assistant","content":[{"type":"text","text":"I can see it."}],"stopReason":"stop"}
+                {"role":"assistant","content":[{"type":"text","text":"I can see them."}],"stopReason":"stop"}
             ]}}),
         ]);
         let shown = project(&pi, facts(&[]));
         let turn = &shown.turns[0];
-        assert_eq!(turn.prompt, "Inspect this screenshot");
-        assert_eq!(turn.attachments, ["1 image"]);
-        assert_eq!(turn.prompt_images.len(), 1);
-        assert_eq!(turn.prompt_images[0].key, id);
+        assert_eq!(turn.prompt, "Inspect these screenshots");
+        assert_eq!(turn.attachments, ["2 images"]);
+        assert_eq!(turn.prompt_images.len(), 2);
+        assert_eq!(turn.prompt_images[0].key, first);
+        assert_eq!(turn.prompt_images[0].name, "Image (1)");
         assert_eq!(turn.prompt_images[0].mime, "image/png");
         assert_eq!(turn.prompt_images[0].inline, None);
+        assert_eq!(turn.prompt_images[1].key, second);
+        assert_eq!(turn.prompt_images[1].name, "Image (2)");
+        assert_eq!(turn.prompt_images[1].mime, "image/webp");
+        assert_eq!(turn.prompt_images[1].inline, None);
         assert!(turn.images.is_empty());
     }
 

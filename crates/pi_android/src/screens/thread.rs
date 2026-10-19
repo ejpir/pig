@@ -14,8 +14,8 @@ use crate::{
     ui::{self, Button, icon},
 };
 use gpui::{
-    AnyElement, Context, Div, FollowMode, FontWeight, Hsla, ListAlignment, SharedString, Window,
-    div, list, prelude::*, px, relative,
+    AnyElement, Context, Div, Focusable, FollowMode, FontWeight, Hsla, ListAlignment, SharedString,
+    Window, div, list, prelude::*, px, relative,
 };
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
@@ -262,15 +262,15 @@ fn thread_shape_remeasure_range(
     })
 }
 
-/// Failed-prompt recovery can splice the list during a retained-snapshot
-/// fling. Remember that shape change and perform exact measurement on settle.
+/// Failed-prompt recovery can splice the list during a frozen presentation.
+/// Remember that shape change and perform exact measurement after thawing.
 fn thread_shape_remeasure_needed(
     pending: &mut HashSet<SessionId>,
     id: SessionId,
-    scrolling: bool,
+    frozen: bool,
     shape_changed: bool,
 ) -> bool {
-    if scrolling {
+    if frozen {
         if shape_changed {
             pending.insert(id);
         }
@@ -594,14 +594,39 @@ impl PhoneApp {
         let back = ui::tap("back", "back", &colors).on_click(cx.listener(|this, _, window, cx| {
             this.back(window, cx);
         }));
-        // Keep one immutable transcript while a modal panel moves. The panel
-        // spring invalidates the root every frame, but its background route has
-        // not changed and must not deep-compare/clone a long session each time.
-        let scrolling = self.scroll_in_motion()
+        // Keep one immutable transcript while the person manipulates it, types,
+        // or inspects a modal panel. Remote updates continue in Store, but the
+        // busy background must not deep-compare, clone, or remeasure a long live
+        // turn while its viewport is also changing. Session and failed rows are
+        // frozen as one presentation generation and catch up together on thaw.
+        let composer_focused = composer
+            .read(cx)
+            .area
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        let modal = self.sheet.is_some() || self.closing_sheet.is_some();
+        let freeze_requested = self.scroll_in_motion()
+            || composer_focused
+            || modal
             || self.sheet_motion.dragging()
             || self.sheet_motion.animating();
+        // Focusing may coincide with a run starting or stopping. Refresh that
+        // shell transition immediately so Stop and the working rail never lag;
+        // once its state is current, streamed growth can stay frozen again.
+        let focused_state_is_current = !composer_focused
+            || modal
+            || self
+                .thread_snapshots
+                .get(&id)
+                .zip(self.store.as_ref().and_then(|store| store.session(id)))
+                .is_some_and(|(shown, current)| shown.state == current.state);
+        let background_frozen = freeze_requested
+            && focused_state_is_current
+            && self.thread_snapshots.contains_key(&id)
+            && self.thread_failed_snapshots.contains_key(&id);
         let mut layout_changes = ThreadLayoutChanges::default();
-        let cached = scrolling
+        let cached = background_frozen
             .then(|| self.thread_snapshots.get(&id).cloned())
             .flatten();
         let session = cached.or_else(|| {
@@ -629,8 +654,13 @@ impl PhoneApp {
         let computer_name = store.computer.name.clone();
         let stopping = store.is_stopping(id);
         let queues = store.supports("prompt_queue");
+        // Control gating must use current model state even while transcript
+        // presentation is deliberately frozen.
+        let send_blocked = store
+            .session(id)
+            .is_none_or(|current| !queues && current.state.is_running());
         composer.update(cx, |composer, _| {
-            composer.set_send_blocked(!queues && session.state.is_running());
+            composer.set_send_blocked(send_blocked);
         });
         let compacting = self.compact_pending(id)
             || store
@@ -638,13 +668,24 @@ impl PhoneApp {
                 .as_ref()
                 .is_some_and(|live| live.is_compacting(id))
             || session.activity == "Compacting";
-        let failed_prompts = store
-            .live
-            .as_ref()
-            .map(|live| live.failed_prompts(id).to_vec())
-            .unwrap_or_default();
+        let failed_prompts = if background_frozen {
+            self.thread_failed_snapshots
+                .get(&id)
+                .cloned()
+                .expect("a frozen thread has a failed-prompt snapshot")
+        } else {
+            let snapshot = Arc::new(
+                store
+                    .live
+                    .as_ref()
+                    .map(|live| live.failed_prompts(id).to_vec())
+                    .unwrap_or_default(),
+            );
+            self.thread_failed_snapshots.insert(id, snapshot.clone());
+            snapshot
+        };
         let failed_layouts = failed_prompt_layouts(&failed_prompts);
-        let failed_layout_changes = if scrolling {
+        let failed_layout_changes = if background_frozen {
             Vec::new()
         } else {
             let changes =
@@ -721,10 +762,10 @@ impl PhoneApp {
         let shape_remeasure = thread_shape_remeasure_needed(
             &mut self.thread_pending_remeasure,
             id,
-            scrolling,
+            background_frozen,
             shape_changed,
         );
-        if !scrolling {
+        if !background_frozen {
             for index in layout_changes.turns {
                 if index < turn_count {
                     list_state.remeasure_items(index..index + 1);
@@ -1294,6 +1335,7 @@ impl PhoneApp {
         div().flex().justify_end().child(
             div()
                 .id(("prompt", index))
+                .debug_selector(move || format!("turn-{index}-prompt-bubble"))
                 .max_w(relative(0.86))
                 .min_w_0()
                 .px(px(16.))
@@ -2602,6 +2644,41 @@ mod tests {
     }
 
     #[gpui::test]
+    fn selecting_an_intrinsic_prompt_does_not_reflow_its_bubble(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = cx.new(|cx| PhoneApp::new(None, window, cx));
+            let mut session = crate::demo::new_session(id, 0, "Test".into(), Vec::new());
+            session.turns[0].prompt = "Hold this message".into();
+            PromptFrame { app, session }
+        });
+        cx.simulate_resize(gpui::size(px(384.), px(600.)));
+        cx.run_until_parked();
+        let before = cx.debug_bounds("turn-0-prompt-bubble").unwrap();
+        let text = cx.debug_bounds("plain-chat-text").unwrap();
+        cx.simulate_event(gpui::LongPressEvent {
+            phase: gpui::TouchPhase::Started,
+            start_position: text.center(),
+            position: text.center(),
+        });
+        cx.run_until_parked();
+        let after = cx.debug_bounds("turn-0-prompt-bubble").unwrap();
+        view.read_with(cx, |view, cx| {
+            assert!(view.app.read(cx).inline_selection.is_some());
+        });
+        assert!(
+            (f32::from(before.size.width - after.size.width)).abs() <= 1.
+                && (f32::from(before.size.height - after.size.height)).abs() <= 1.
+                && (f32::from(before.right() - after.right())).abs() <= 1.,
+            "selection changed the intrinsic prompt from {before:?} to {after:?}"
+        );
+        assert!(
+            after.size.width > px(100.),
+            "the bubble collapsed to {after:?}"
+        );
+    }
+
+    #[gpui::test]
     fn submitted_image_chip_opens_its_detail_sheet(cx: &mut TestAppContext) {
         let id = SessionId(1);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -3375,6 +3452,97 @@ mod tests {
                     offset_in_item: px(3.),
                 });
                 assert_eq!(retained.logical_scroll_top().item_ix, 7);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn focused_composer_freezes_one_transcript_generation_until_blur(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_store("sample@computer.local", cx);
+                let _ = app.thread_screen(id, window, cx);
+                let snapshot = app.thread_snapshots[&id].clone();
+                let failed = app.thread_failed_snapshots[&id].clone();
+                let old_shape = app.thread_list_shapes[&id];
+                let composer = app.thread_composer(id, window, cx);
+                let focus = composer.read(cx).area.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+                composer.update(cx, |composer, cx| composer.set_text("draft stays live", cx));
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == id)
+                    .unwrap()
+                    .turns
+                    .push(Turn::new("New prompt", "Now"));
+
+                let _ = app.thread_screen(id, window, cx);
+                assert!(Arc::ptr_eq(&app.thread_snapshots[&id], &snapshot));
+                assert!(Arc::ptr_eq(&app.thread_failed_snapshots[&id], &failed));
+                assert_eq!(app.thread_list_shapes[&id], old_shape);
+                assert_eq!(composer.read(cx).area.read(cx).text(), "draft stays live");
+
+                window.focus(&app.focus, cx);
+                let _ = app.thread_screen(id, window, cx);
+                assert!(!Arc::ptr_eq(&app.thread_snapshots[&id], &snapshot));
+                assert_eq!(app.thread_list_shapes[&id].0, old_shape.0 + 1);
+                assert_eq!(composer.read(cx).area.read(cx).text(), "draft stays live");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn settled_and_closing_sheets_keep_the_background_snapshot_frozen(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_store("sample@computer.local", cx);
+                let _ = app.thread_screen(id, window, cx);
+                let snapshot = app.thread_snapshots[&id].clone();
+
+                app.open_sheet(Sheet::Details(id), cx);
+                app.sheet_motion.finish();
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == id)
+                    .unwrap()
+                    .turns[0]
+                    .prompt
+                    .push_str("\nChanged behind the sheet");
+                let _ = app.thread_screen(id, window, cx);
+                assert!(Arc::ptr_eq(&app.thread_snapshots[&id], &snapshot));
+
+                app.close_sheet(cx);
+                app.sheet_motion.finish();
+                let _ = app.thread_screen(id, window, cx);
+                assert!(Arc::ptr_eq(&app.thread_snapshots[&id], &snapshot));
+
+                app.closing_sheet = None;
+                let _ = app.thread_screen(id, window, cx);
+                assert!(!Arc::ptr_eq(&app.thread_snapshots[&id], &snapshot));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn bounded_run_sheet_opens_and_closes_without_background_animation(cx: &mut TestAppContext) {
+        let id = SessionId(1);
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.open_sheet(Sheet::Run(id, 0), cx);
+                assert!(!app.sheet_motion.animating());
+                app.close_sheet(cx);
+                assert!(!app.sheet_motion.animating());
             });
         });
     }

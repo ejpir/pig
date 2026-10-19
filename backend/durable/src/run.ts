@@ -433,10 +433,16 @@ export async function run(
     host?.onReport ??
     ((error: unknown) => console.error("Durable report:", error));
   const args = host ? [] : process.argv.slice(2);
-  if (args.length === 1 && args[0] === "--list-commands") {
-    // Before a session has a folder: the user's own commands and the built-ins.
+  if (
+    (args.length === 1 && args[0] === "--list-commands") ||
+    (args.length === 3 && args[0] === "--list-commands" && args[1] === "--cwd" && args[2])
+  ) {
+    // Pathless discovery is intentionally user-only. Once the phone has chosen
+    // a project, include that project's resources through the same trust gate
+    // used by an attached session.
+    const cwd = args.length === 3 ? args[2] : undefined;
     console.log(
-      JSON.stringify({ version: 1, commands: promptCommands(resources()) }),
+      JSON.stringify({ version: 1, commands: promptCommands(resources(cwd)) }),
     );
     return;
   }

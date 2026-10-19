@@ -25,6 +25,7 @@ function host() {
   write(join(home, ".agents", "skills", "hidden", "SKILL.md"), "---\nname: hidden\ndescription: Only on request\ndisable-model-invocation: true\n---\nSecret steps.\n");
   mkdirSync(join(project, ".git"), { recursive: true });
   write(join(project, ".pi", "prompts", "deploy.md"), "---\ndescription: Project deploy\n---\nProject deploy to $1.\n");
+  write(join(project, ".pi", "skills", "android-local-install", "SKILL.md"), "---\nname: android-local-install\ndescription: Install Android locally\n---\nInstall it safely.\n");
   write(join(project, ".agents", "skills", "release", "SKILL.md"), "---\nname: release\ndescription: Cut a release\n---\nTag it.\n");
   write(join(agent, "agents", "scout.md"), "---\nname: scout\ndescription: Fast recon\nmodel: claude-haiku-4-5\ntools: read, grep, bash\n---\nBe brief.\n");
   write(join(agent, "agents", "worker.md"), "---\nname: worker\ndescription: Does the work\ntools: [read, write, edit, bash]\n---\nFinish it.\n");
@@ -60,6 +61,7 @@ describe("the host's templates and skills", () => {
     const { home, agent, project } = host();
     const found = loadResources(project, agent, home);
     expect(names(promptCommands(found))).not.toContain("skill:release");
+    expect(names(promptCommands(found))).not.toContain("skill:android-local-install");
     expect(expandPromptCommand("/deploy prod", found)).toBe("Deploy to prod.");
   });
 
@@ -68,8 +70,11 @@ describe("the host's templates and skills", () => {
     new ProjectTrustStore(agent).set(project, true);
     const found = loadResources(project, agent, home);
     expect(names(promptCommands(found))).toContain("skill:release");
+    expect(names(promptCommands(found))).toContain("skill:android-local-install");
     expect(expandPromptCommand("/deploy prod", found)).toBe("Project deploy to prod.");
+    expect(expandPromptCommand("/skill:android-local-install now", found)).toContain("Install it safely.\n</skill>\n\nnow");
     expect(found.skills.find((skill) => skill.name === "release")!.sourceInfo.scope).toBe("project");
+    expect(found.skills.find((skill) => skill.name === "android-local-install")!.sourceInfo.scope).toBe("project");
   });
 
   test("agents as stock Pi's subagent extension reads them, the project's once trusted", () => {

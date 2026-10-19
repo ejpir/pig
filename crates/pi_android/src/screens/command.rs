@@ -20,7 +20,7 @@ pub(crate) enum CommandTab {
     Output,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct CommandOutputSource {
     len: usize,
     hash: u64,
@@ -28,6 +28,17 @@ struct CommandOutputSource {
     pointer: usize,
     ends_with_newline: bool,
 }
+
+impl PartialEq for CommandOutputSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len
+            && self.hash == other.hash
+            && self.sample_hash == other.sample_hash
+            && self.ends_with_newline == other.ends_with_newline
+    }
+}
+
+impl Eq for CommandOutputSource {}
 
 #[derive(Clone, Debug)]
 pub(crate) struct CommandScreenState {
@@ -351,7 +362,11 @@ impl PhoneApp {
                 this.back(window, cx);
             },
         ));
-        let Some(tool) = self.bound_command(id, token).cloned() else {
+        let previous_output_source = self
+            .command_views
+            .get(&token)
+            .and_then(|view| view.output_source.clone());
+        let Some(tool) = self.bound_command(id, token) else {
             return div()
                 .flex_1()
                 .min_h_0()
@@ -371,11 +386,12 @@ impl PhoneApp {
                 )
                 .into_any_element();
         };
+        let output_source = command_output_source(&tool.output, previous_output_source.as_ref());
+        let tool = tool.clone();
         let wrap = self.wrap_lines(cx);
         let Some(view) = self.command_views.get_mut(&token) else {
             return div().into_any_element();
         };
-        let output_source = command_output_source(&tool.output, view.output_source.as_ref());
         if view.output_source.as_ref() != Some(&output_source) {
             let incremented = view
                 .output_source
@@ -384,8 +400,8 @@ impl PhoneApp {
             if !incremented {
                 reset_command_output(view, &tool);
             }
-            view.output_source = Some(output_source);
         }
+        view.output_source = Some(output_source);
         if view.output_wrap != wrap {
             view.output_list.remeasure();
             view.output_wrap = wrap;
@@ -614,6 +630,42 @@ mod tests {
     use crate::model::StageKind;
     use gpui::TestAppContext;
 
+    fn touch_drag(
+        cx: &mut gpui::VisualTestContext,
+        from: gpui::Point<gpui::Pixels>,
+        to: gpui::Point<gpui::Pixels>,
+    ) {
+        use gpui::InputEvent;
+        for step in 0..=12 {
+            let event = gpui::TouchEvent {
+                id: gpui::TouchId(81),
+                phase: if step == 0 {
+                    gpui::TouchPhase::Started
+                } else if step == 12 {
+                    gpui::TouchPhase::Ended
+                } else {
+                    gpui::TouchPhase::Moved
+                },
+                position: from + (to - from) * (step as f32 / 12.),
+                ..Default::default()
+            };
+            cx.update(|window, cx| window.dispatch_event(event.to_platform_input(), cx));
+            cx.run_until_parked();
+        }
+    }
+
+    #[test]
+    fn equal_output_from_a_new_allocation_has_the_same_source() {
+        let first = String::from("one\ntwo\nthree");
+        let first_source = command_output_source(&first, None);
+        let second = first.clone();
+        assert_ne!(first.as_ptr(), second.as_ptr());
+        let second_source = command_output_source(&second, Some(&first_source));
+
+        assert_eq!(first_source, second_source);
+        assert_ne!(first_source.pointer, second_source.pointer);
+    }
+
     fn running_bash(app: &PhoneApp) -> (usize, StageKind, usize, String) {
         app.session(SessionId(1))
             .unwrap()
@@ -739,6 +791,35 @@ mod tests {
             view.output_list.logical_scroll_top()
         });
 
+        let previous_allocation = cx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let tool = app
+                    .store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .flat_map(|session| &mut session.turns)
+                    .flat_map(|turn| &mut turn.stages)
+                    .flat_map(|stage| &mut stage.tools)
+                    .find(|tool| tool.id == tool_id)
+                    .unwrap();
+                let replacement = tool.output.clone();
+                let previous = std::mem::replace(&mut tool.output, replacement);
+                cx.notify();
+                previous
+            })
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            let view = &app.command_views[&token];
+            let current = view.output_list.logical_scroll_top();
+            assert_eq!(current.item_ix, away.item_ix);
+            assert_eq!(current.offset_in_item, away.offset_in_item);
+            assert!(!view.output_list.is_following_tail());
+        });
+        drop(previous_allocation);
+
         cx.update(|_, cx| {
             app.update(cx, |app, cx| {
                 let tool = app
@@ -778,6 +859,72 @@ mod tests {
             let view = &app.command_views[&token];
             assert!(view.output_list.logical_scroll_top().item_ix > 0);
             assert!(view.output_list.is_following_tail());
+        });
+    }
+
+    #[gpui::test]
+    fn unwrapped_output_scrolls_vertically_with_a_touch_drag(cx: &mut TestAppContext) {
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        cx.simulate_resize(gpui::size(px(384.), px(640.)));
+        let token = cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("verifying", window, cx);
+                app.update_prefs(cx, |prefs| prefs.wrap_lines = false);
+                let (turn, kind, tool, _) = running_bash(app);
+                app.store
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == SessionId(1))
+                    .unwrap()
+                    .turns[turn]
+                    .stages[kind.index()]
+                .tools[tool]
+                    .output = (0..120)
+                    .map(|line| format!("unwrapped line {line} {}", "wide-".repeat(40)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                app.open_call_detail(SessionId(1), turn, kind, tool, window, cx);
+                let Route::Command(_, token) = app.route() else {
+                    panic!("command route");
+                };
+                token
+            })
+        });
+        cx.run_until_parked();
+        let before = app.read_with(cx, |app, _| {
+            let view = &app.command_views[&token];
+            assert!(view.output_list.is_following_tail());
+            view.output_list.logical_scroll_top()
+        });
+        let viewport = cx.debug_bounds("command-output").unwrap();
+        touch_drag(
+            cx,
+            gpui::point(viewport.center().x, viewport.top() + px(80.)),
+            gpui::point(viewport.center().x, viewport.bottom() - px(40.)),
+        );
+        let at_top = app.read_with(cx, |app, _| {
+            let view = &app.command_views[&token];
+            let after = view.output_list.logical_scroll_top();
+            assert!(
+                after.item_ix < before.item_ix,
+                "before={before:?}, after={after:?}"
+            );
+            assert!(!view.output_list.is_following_tail());
+            after
+        });
+        touch_drag(
+            cx,
+            gpui::point(viewport.center().x, viewport.bottom() - px(40.)),
+            gpui::point(viewport.center().x, viewport.top() + px(80.)),
+        );
+        app.read_with(cx, |app, _| {
+            let after = app.command_views[&token].output_list.logical_scroll_top();
+            assert!(
+                after.item_ix > at_top.item_ix,
+                "reverse drag did not move down: before={at_top:?}, after={after:?}"
+            );
         });
     }
 

@@ -54,8 +54,8 @@ impl AssetSource for Assets {
     }
 }
 
-/// IBM Plex Sans and Commit Mono, plus the Apache-licensed Meslo Powerline
-/// fallback for terminal separators and other legacy prompt glyphs.
+/// IBM Plex Sans and Commit Mono, plus the licensed, generated Pi Terminal
+/// Symbols Mono fallback for Nerd-compatible terminal glyphs.
 pub fn load_fonts(cx: &App) -> anyhow::Result<()> {
     cx.text_system().add_fonts(vec![
         Cow::Borrowed(PLEX_SANS),
@@ -69,7 +69,7 @@ pub fn load_fonts(cx: &App) -> anyhow::Result<()> {
             "../../../assets/fonts/CommitMono-Regular.otf"
         )),
         Cow::Borrowed(include_bytes!(
-            "../../../assets/fonts/MesloLGMForPowerline-Regular.ttf"
+            "../../../assets/fonts/PiTerminalSymbolsMono-Regular.ttf"
         )),
     ])
 }

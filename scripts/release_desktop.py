@@ -20,8 +20,8 @@ from package_remote import asset_name
 
 # Built by crates/pi_android/scripts/build_apk.py in CI's Android job.
 ANDROID_APK = "pi-android-arm64.apk"
-ANDROID_FONT = ROOT / "assets/fonts/MesloLGMForPowerline-Regular.ttf"
-ANDROID_FONT_SHA256 = "be991137ccbe87765db7cbcdc034447b15913aa2fad01acebabbcb65b1d4a8a8"
+ANDROID_FONT = ROOT / "assets/fonts/PiTerminalSymbolsMono-Regular.ttf"
+ANDROID_FONT_SHA256 = "5a0737b45bb0ec5b7ce91c35749fa9142eb4a6aef2d89df0d8a88fb6b3694202"
 ANDROID_SIGNER_SHA256 = "4b1d0ec031843d23e95f0e4a2e70125241b5e80041bdb1caecceac99a9774e71"
 BUN_SOURCE_SHA256 = "2366bc56d092f8535bbe5827788e20d987fbc96798de4d683e0ca78ea286ebf4"
 JSC_SOURCE_SHA256 = "88eb566d10e541c392164f164170d1ac1e0c562f23b3bd490b4b856972079b15"
@@ -42,7 +42,7 @@ ANDROID_LICENSES = {
         for name in (
             "IBM-PLEX-OFL.txt",
             "COMMIT-MONO-OFL.txt",
-            "MESLO-POWERLINE-APACHE-2.0.txt",
+            "PI-TERMINAL-SYMBOLS-NOTICES.txt",
             "RUST-DEPENDENCY-NOTICES.html",
             "RQUICKJS-MIT.txt",
             "QUICKJS-NG-MIT.txt",

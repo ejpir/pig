@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "family": "Pi Terminal Symbols Mono",
+  "style": "Regular",
+  "postscriptName": "PiTerminalSymbolsMono-Regular",
+  "output": {
+    "path": "assets/fonts/PiTerminalSymbolsMono-Regular.ttf",
+    "sha256": "5a0737b45bb0ec5b7ce91c35749fa9142eb4a6aef2d89df0d8a88fb6b3694202",
+    "bytes": 2117752,
+    "unicodeMappings": 10258,
+    "unicodeCmapSha256": "305652a043a53545b8efa61d021831682fa181b8766a87aae1095f3a441fb1da",
+    "advanceWidth": 1233
+  },
+  "generator": {
+    "path": "scripts/generate_terminal_symbols.py",
+    "fonttools": "4.67.0"
+  },
+  "upstream": {
+    "repository": "https://github.com/ryanoasis/nerd-fonts",
+    "version": "3.5.1",
+    "revision": "b894ea7803af6aade63d60a4381e006098ec9c4d",
+    "inputs": [
+      {
+        "path": "patched-fonts/Meslo/M/MesloLGMNerdFontMono-Regular.ttf",
+        "sha256": "35c4453cc6d0861e505b62fc7039b3fb8db9966ed75fd13dda2115e2ca94c7f7"
+      },
+      {
+        "path": "src/unpatched-fonts/Meslo/M/Meslo LG M Regular for Powerline.ttf",
+        "sha256": "be991137ccbe87765db7cbcdc034447b15913aa2fad01acebabbcb65b1d4a8a8"
+      },
+      {
+        "path": "src/glyphs/font-logos.ttf",
+        "sha256": "25d0d6ba1c1ea4700c861c29f18022aa759079fc919b2baa01bd99f377712857",
+        "use": "denylist only; no Font Logos mappings are retained"
+      }
+    ],
+    "licenseInputs": [
+      {
+        "repository": "https://github.com/AndreLZGava/font-awesome-extension",
+        "revision": "09d80249058ee8018a45da30add4339289dbb466",
+        "path": "LICENCE",
+        "sha256": "b47b15d771c4507a75ff65beca3a78168d6af4cca9b45177a1aa817139c64ba5"
+      }
+    ]
+  },
+  "policy": {
+    "includedSets": [
+      "Powerline Symbols",
+      "Powerline Extra Symbols",
+      "Seti UI and Nerd Fonts original symbols",
+      "Devicons",
+      "Font Awesome",
+      "Font Awesome Extension",
+      "Octicons",
+      "Codicons",
+      "Material Design Icons",
+      "Pomicons",
+      "IEC Power Symbols"
+    ],
+    "ordinaryTextMappings": ["U+0020", "U+006D"],
+    "legacyPowerlineMappings": [
+      "U+E0A0",
+      "U+E0A1",
+      "U+E0A2",
+      "U+E0B0",
+      "U+E0B1",
+      "U+E0B2",
+      "U+E0B3"
+    ],
+    "weatherIconsMappingsExcluded": "U+E300..U+E3EB",
+    "mesloLogoMappingExcluded": "U+F6C5",
+    "fontLogosMappingsExcluded": "U+F300..U+F385",
+    "fontLogosGlyphNamesExcluded": true,
+    "maximumBytes": 3145728
+  },
+  "notices": [
+    "licenses/PI-TERMINAL-SYMBOLS-NOTICES.txt"
+  ]
+}

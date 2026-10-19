@@ -78,9 +78,20 @@ pub fn models() -> Result<()> {
     Ok(())
 }
 
-pub fn commands() -> Result<()> {
-    let status = std::process::Command::new(program()?)
-        .arg("--list-commands")
+pub fn commands(cwd: Option<PathBuf>) -> Result<()> {
+    let mut command = std::process::Command::new(program()?);
+    command.arg("--list-commands");
+    if let Some(cwd) = cwd {
+        ensure!(cwd.is_absolute(), "Project path must be absolute");
+        let cwd = std::fs::canonicalize(&cwd)
+            .with_context(|| format!("Could not open project {}", cwd.display()))?;
+        ensure!(cwd.is_dir(), "Project path is not a directory");
+        // Resource discovery and the project trust store must receive the same
+        // canonical identity. Otherwise lexical ancestors of a symlink could
+        // contribute resources that were not covered by the trust decision.
+        command.arg("--cwd").arg(cwd);
+    }
+    let status = command
         .stdin(std::process::Stdio::null())
         .status()
         .context("Could not read the computer's command catalog")?;

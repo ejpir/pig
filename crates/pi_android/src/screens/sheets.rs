@@ -750,6 +750,20 @@ fn model_matches(query: &str, name: &str, provider: &str, id: &str) -> bool {
 }
 
 impl PhoneApp {
+    fn select_prompt_image(
+        &mut self,
+        id: SessionId,
+        turn: usize,
+        image: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.sheet = Some(Sheet::PromptImage(id, turn, image));
+        self.image_zoom = 1.;
+        self.image_pan = gpui::Point::default();
+        self.sheet_scroll.set_offset(gpui::Point::default());
+        cx.notify();
+    }
+
     pub(crate) fn sheet_content(
         &mut self,
         sheet: Sheet,
@@ -830,26 +844,76 @@ impl PhoneApp {
                     )
             }
             Sheet::PromptImage(id, turn, n) => {
-                let image = self
+                let images = self
                     .session(id)
                     .and_then(|session| session.turns.get(turn))
-                    .and_then(|turn| turn.prompt_images.get(n))
-                    .cloned();
+                    .map(|turn| turn.prompt_images.clone())
+                    .unwrap_or_default();
+                let image = images.get(n).cloned();
                 if let Some(image) = &image {
                     self.demand_tool_image(id, image);
                 }
                 let shown = image.as_ref().map(|image| self.tool_image(id, image));
-                div().pb(px(8.)).child(match shown {
-                    Some(Ok(Some(shown))) => self
-                        .zoomable_image(shown.image, shown.ratio, cx)
-                        .rounded(px(12.))
-                        .bg(colors.panel)
-                        .into_any_element(),
-                    Some(Err(error)) => ui::hint(error, &colors).into_any_element(),
-                    _ => {
-                        ui::hint("Getting the image from the computer…", &colors).into_any_element()
-                    }
-                })
+                let count = images.len();
+                let previous = ui::button(
+                    "prompt-image-previous",
+                    Button::Quiet,
+                    Some("back"),
+                    "Previous",
+                    true,
+                    &colors,
+                )
+                .debug_selector(|| "prompt-image-previous".into());
+                let previous = if n > 0 {
+                    previous.on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_prompt_image(id, turn, n - 1, cx)
+                    }))
+                } else {
+                    ui::disabled(previous, &colors)
+                };
+                let next = ui::button(
+                    "prompt-image-next",
+                    Button::Quiet,
+                    Some("chev_r"),
+                    "Next",
+                    true,
+                    &colors,
+                )
+                .debug_selector(|| "prompt-image-next".into());
+                let next = if n + 1 < count {
+                    next.on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_prompt_image(id, turn, n + 1, cx)
+                    }))
+                } else {
+                    ui::disabled(next, &colors)
+                };
+                div()
+                    .pb(px(8.))
+                    .when(count > 1, |gallery| {
+                        gallery.child(
+                            div()
+                                .mb(px(12.))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(previous)
+                                .child(
+                                    ui::label(format!("{} of {count}", n + 1), &colors)
+                                        .debug_selector(|| "prompt-image-position".into()),
+                                )
+                                .child(next),
+                        )
+                    })
+                    .child(match shown {
+                        Some(Ok(Some(shown))) => self
+                            .zoomable_image(shown.image, shown.ratio, cx)
+                            .rounded(px(12.))
+                            .bg(colors.panel)
+                            .into_any_element(),
+                        Some(Err(error)) => ui::hint(error, &colors).into_any_element(),
+                        _ => ui::hint("Getting the image from the computer…", &colors)
+                            .into_any_element(),
+                    })
             }
             Sheet::ToolImage(id, turn, n) => {
                 let image = self
@@ -3847,6 +3911,75 @@ mod tests {
             before,
             activity_content_key(&stage, StageKind::Verify, false)
         );
+    }
+
+    #[gpui::test]
+    fn prompt_image_sheet_navigates_every_submitted_image(cx: &mut gpui::TestAppContext) {
+        use crate::{
+            app::{PhoneApp, Sheet},
+            model::ToolImage,
+        };
+        use gpui::{px, size};
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        let id = cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.preview("done", window, cx);
+                let session = app
+                    .store
+                    .as_mut()
+                    .and_then(|store| store.sessions.first_mut())
+                    .expect("the done preview session");
+                session.turns[0].prompt_images = ["first", "second"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| ToolImage {
+                        key: name.into(),
+                        name: format!("Image ({})", index + 1),
+                        mime: "image/png".into(),
+                        inline: Some("not-an-image".into()),
+                    })
+                    .collect();
+                let id = session.id;
+                app.open_sheet(Sheet::PromptImage(id, 0, 0), cx);
+                app.sheet_motion.finish();
+                id
+            })
+        });
+        cx.simulate_resize(size(px(384.), px(854.)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("prompt-image-position").is_some());
+        let next = cx.debug_bounds("prompt-image-next").unwrap();
+        cx.simulate_click(next.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.sheet, Some(Sheet::PromptImage(id, 0, 1)))
+        });
+        let previous = cx.debug_bounds("prompt-image-previous").unwrap();
+        cx.simulate_click(previous.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.sheet, Some(Sheet::PromptImage(id, 0, 0)))
+        });
+    }
+
+    #[gpui::test]
+    fn changing_prompt_gallery_image_resets_zoom_pan_and_scroll(cx: &mut gpui::TestAppContext) {
+        use crate::{
+            app::{PhoneApp, Sheet},
+            model::SessionId,
+        };
+        use gpui::{point, px};
+        let (app, cx) = cx.add_window_view(|window, cx| PhoneApp::new(None, window, cx));
+        app.update(cx, |app, cx| {
+            app.sheet = Some(Sheet::PromptImage(SessionId(7), 3, 0));
+            app.image_zoom = 3.;
+            app.image_pan = point(px(-12.), px(-20.));
+            app.select_prompt_image(SessionId(7), 3, 1, cx);
+            assert_eq!(app.sheet, Some(Sheet::PromptImage(SessionId(7), 3, 1)));
+            assert_eq!(app.image_zoom, 1.);
+            assert_eq!(app.image_pan, gpui::Point::default());
+            assert_eq!(app.sheet_scroll.offset(), gpui::Point::default());
+        });
     }
 
     #[gpui::test]
